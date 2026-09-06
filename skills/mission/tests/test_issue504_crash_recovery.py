@@ -500,7 +500,7 @@ def test_kill_after_head_then_same_operation_retry_returns_original_result(
     tmp_path,
     fault_point,
 ):
-    from mission_persistence.fenced_commit import CommitResult, FencedCommitError
+    from mission_persistence.fenced_commit import FencedCommitError, OperationReplay
 
     local, repository, clock, _state_path, base_bytes, _result = _commit_cli_init(tmp_path)
     clock_text = clock.current.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -538,7 +538,7 @@ def test_kill_after_head_then_same_operation_retry_returns_original_result(
     files_after_recovery = _authoritative_files(repository)
     repeated = local.begin(request)
 
-    assert isinstance(replay, CommitResult)
+    assert isinstance(replay, OperationReplay)
     assert repeated == replay
     assert local.read("test").state_bytes == target_bytes
     assert operation_path.exists()
@@ -557,7 +557,7 @@ def test_kill_after_head_then_same_operation_retry_returns_original_result(
 
 
 def test_target_recovery_recreates_missing_projection_from_exact_private_inode(tmp_path):
-    from mission_persistence.fenced_commit import CommitResult
+    from mission_persistence.fenced_commit import OperationReplay
 
     local, repository, clock, _state_path, base_bytes, _result = _commit_cli_init(tmp_path)
     clock_text = clock.current.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -607,7 +607,7 @@ def test_target_recovery_recreates_missing_projection_from_exact_private_inode(t
 
     replay = local.begin(request)
 
-    assert isinstance(replay, CommitResult)
+    assert isinstance(replay, OperationReplay)
     assert projection.read_bytes() == target_bytes
     assert _projection_identity(projection) == published_identity
     assert not list((repository / "transactions" / "prepared").glob("*.json"))

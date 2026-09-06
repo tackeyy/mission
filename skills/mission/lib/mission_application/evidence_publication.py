@@ -236,16 +236,50 @@ def _canonical_binding(
     return projected
 
 
+def _captured_binding(record: dict) -> dict:
+    """Return one captured binding in the form the semantic digest folds.
+
+    A captured blob is caller-supplied input: its identifier is the caller's
+    Token128 and its path is wherever the caller read it from, neither of
+    which derives from the other (U1 already validated both).  Only the
+    generated bindings have a path-derived identifier, so only they go
+    through the canonical check.
+    """
+    if not isinstance(record, dict):
+        raise EvidencePublicationError(
+            "blob-binding-invalid", "blob binding is not an object"
+        )
+    missing = [name for name in BINDING_FIELDS if name not in record]
+    if missing:
+        raise EvidencePublicationError(
+            "blob-binding-invalid", "binding is missing " + ", ".join(missing)
+        )
+    for name in ("blob_id", "kind", "relative_path"):
+        if not isinstance(record[name], str) or not record[name]:
+            raise EvidencePublicationError(
+                "blob-binding-invalid", "blob " + name + " is invalid"
+            )
+    if not isinstance(record["digest"], str) or not DIGEST_PATTERN.fullmatch(
+        record["digest"]
+    ):
+        raise EvidencePublicationError("blob-binding-invalid", "blob digest is invalid")
+    if type(record["size"]) is not int or record["size"] < 0:
+        raise EvidencePublicationError("blob-binding-invalid", "blob size is invalid")
+    return {name: record[name] for name in BINDING_FIELDS}
+
+
 def _partition_bindings(
     bindings, *, repository_root_name: str = REPOSITORY_ROOT_NAME
 ) -> tuple[list, list]:
     captured, generated = [], []
     for record in bindings:
         origin = blob_origin_of(record)
-        projected = _canonical_binding(
-            record, repository_root_name=repository_root_name
-        )
-        (generated if origin == "generated" else captured).append(projected)
+        if origin == "generated":
+            generated.append(
+                _canonical_binding(record, repository_root_name=repository_root_name)
+            )
+        else:
+            captured.append(_captured_binding(record))
     key = lambda item: item["blob_id"]
     return sorted(captured, key=key), sorted(generated, key=key)
 

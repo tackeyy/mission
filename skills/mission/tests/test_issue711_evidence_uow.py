@@ -577,7 +577,7 @@ def test_a_corrupted_operation_record_is_refused_when_the_replay_reads_it(tmp_pa
     """
     import json
 
-    from mission_persistence.fenced_commit import CommitResult, FencedCommitError
+    from mission_persistence.fenced_commit import FencedCommitError, OperationReplay
 
     from .test_issue503_fenced_commit import _commit_cli_init, _request
 
@@ -593,7 +593,7 @@ def test_a_corrupted_operation_record_is_refused_when_the_replay_reads_it(tmp_pa
         event_types=("mission-initialized",),
     )
 
-    assert isinstance(local.begin(same_request), CommitResult), (
+    assert isinstance(local.begin(same_request), OperationReplay), (
         "the fixture is expected to replay before the record is corrupted"
     )
 
@@ -718,7 +718,7 @@ def test_a_broken_materialization_is_refused_when_the_replay_reads_it(tmp_path):
     """
     import json
 
-    from mission_persistence.fenced_commit import CommitResult, FencedCommitError
+    from mission_persistence.fenced_commit import FencedCommitError, OperationReplay
 
     from .test_issue503_fenced_commit import _commit_cli_init, _request
 
@@ -731,7 +731,7 @@ def test_a_broken_materialization_is_refused_when_the_replay_reads_it(tmp_path):
         command_type="init",
         event_types=("mission-initialized",),
     )
-    assert isinstance(local.begin(same_request), CommitResult)
+    assert isinstance(local.begin(same_request), OperationReplay)
 
     operations = sorted((repository / "operations").glob("*.json"))
     document = json.loads(operations[0].read_text(encoding="utf-8"))
@@ -958,7 +958,7 @@ def test_the_repository_root_name_reaches_every_entry_point():
         )
     with pytest.raises(EvidencePublicationError):
         semantic_intent_digest(
-            _intent_inputs((_binding(inside, "captured"),)), repository_root_name=root
+            _intent_inputs((_binding(inside, "generated"),)), repository_root_name=root
         )
 
 
@@ -1067,9 +1067,17 @@ def test_a_claim_without_a_publication_path_still_projects(command_type):
 def test_partition_refuses_a_binding_whose_identifier_does_not_match_its_path():
     from mission_application.evidence_publication import semantic_intent_digest
 
-    forged = dict(_binding("input/source.json", "captured"), blob_id="evidence:" + "0" * 64)
+    forged = dict(_binding("build/manifest.json", "generated"), blob_id="evidence:" + "0" * 64)
     with pytest.raises(EvidencePublicationError):
         semantic_intent_digest(_intent_inputs((forged,)))
+
+
+def test_a_captured_binding_keeps_the_identifier_its_caller_gave_it():
+    """Captured input is named by the caller (U1); only generated output derives its id."""
+    from mission_application.evidence_publication import semantic_intent_digest
+
+    caller_named = dict(_binding("archive/review.json", "captured"), blob_id="review-evidence")
+    assert semantic_intent_digest(_intent_inputs((caller_named,)))
 
 
 
@@ -1264,7 +1272,9 @@ def test_one_function_decides_what_a_binding_is():
     import mission_application.evidence_publication as module
 
     source = Path(module.__file__).read_text(encoding="utf-8")
-    # Defined once, called by both the partition and the reader.
+    # Defined once, called by the partition for generated bindings; the
+    # materialization holds a digest, so the reader no longer re-parses
+    # bindings (#747 P2).
     assert source.count("def _canonical_binding(") == 1
-    assert source.count("_canonical_binding(\n") == 2
+    assert source.count("_canonical_binding(") == 2
     assert "_check_materialized_binding" not in source

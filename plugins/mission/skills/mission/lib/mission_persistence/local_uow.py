@@ -117,6 +117,12 @@ class BlobBinding:
     relative_path: str
     digest: str
     size: int
+    # #747 P2: whether the bytes were an input to the operation ("captured")
+    # or were produced by it ("generated").  Only captured bindings take part
+    # in the operation's identity; the origin is decided by whoever builds
+    # the binding and is never persisted -- the generation manifest and the
+    # effect records keep their exact key sets.
+    origin: str = "captured"
 
 
 @dataclass(frozen=True)

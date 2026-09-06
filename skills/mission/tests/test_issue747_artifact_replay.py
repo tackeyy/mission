@@ -82,7 +82,7 @@ class TestReadOperationState:
         local, root, states = _committed_repository(tmp_path)
         result, intent, _ = _operation_record(root, "test", "op-1")
         state = local.read_operation_state(
-            result, session_id="test", operation_id="op-1", intent_digest=intent
+            result, session_id="test", operation_id="op-1", intent_digest=intent, record_version=2
         )
         assert project_legacy_document(state) == project_legacy_document(states["op-1"].state)
         # op-2 moved the head since; op-1's generation is still what op-1 committed.
@@ -92,7 +92,7 @@ class TestReadOperationState:
         local, root, _states = _committed_repository(tmp_path)
         result, intent, _ = _operation_record(root, "test", "op-1")
         before = _all_bytes(root)
-        local.read_operation_state(result, session_id="test", operation_id="op-1", intent_digest=intent)
+        local.read_operation_state(result, session_id="test", operation_id="op-1", intent_digest=intent, record_version=2)
         assert _all_bytes(root) == before
 
     @pytest.mark.parametrize("field", ["operation_id", "intent_digest", "session_id"])
@@ -101,7 +101,7 @@ class TestReadOperationState:
 
         local, root, _states = _committed_repository(tmp_path)
         result, intent, _ = _operation_record(root, "test", "op-1")
-        kwargs = {"session_id": "test", "operation_id": "op-1", "intent_digest": intent}
+        kwargs = {"session_id": "test", "operation_id": "op-1", "intent_digest": intent, "record_version": 2}
         kwargs[field] = {"operation_id": "op-2", "intent_digest": "sha256:" + "1" * 64,
                          "session_id": "other"}[field]
         with pytest.raises(FencedCommitError) as excinfo:
@@ -118,7 +118,7 @@ class TestReadOperationState:
         result, intent, _ = _operation_record(root, "test", "op-1")
         broken = replace(result, **{field: 99 if field == "generation" else "sha256:" + "2" * 64})
         with pytest.raises(FencedCommitError) as excinfo:
-            local.read_operation_state(broken, session_id="test", operation_id="op-1", intent_digest=intent)
+            local.read_operation_state(broken, session_id="test", operation_id="op-1", intent_digest=intent, record_version=2)
         assert excinfo.value.code == "lineage-mismatch"
 
     def test_a_collected_generation_manifest_is_named_as_such(self, tmp_path):
@@ -130,7 +130,7 @@ class TestReadOperationState:
         commit = json.loads((root / "commits" / (result.commit_digest.removeprefix("sha256:") + ".json")).read_bytes())
         (root / commit["generation"]["path"]).unlink()
         with pytest.raises(FencedCommitError) as excinfo:
-            local.read_operation_state(result, session_id="test", operation_id="op-1", intent_digest=intent)
+            local.read_operation_state(result, session_id="test", operation_id="op-1", intent_digest=intent, record_version=2)
         assert excinfo.value.code == "operation-history-collected"
 
     @pytest.mark.parametrize("which", ["commit", "state"])
@@ -143,7 +143,7 @@ class TestReadOperationState:
         commit = json.loads(commit_path.read_bytes())
         (commit_path if which == "commit" else root / commit["state"]["path"]).unlink()
         with pytest.raises(FencedCommitError) as excinfo:
-            local.read_operation_state(result, session_id="test", operation_id="op-1", intent_digest=intent)
+            local.read_operation_state(result, session_id="test", operation_id="op-1", intent_digest=intent, record_version=2)
         assert excinfo.value.code == "record-missing"
 
 
@@ -366,15 +366,30 @@ class TestArtifactReplayPayloads:
             )
         assert excinfo.value.code == "artifact-projection-mismatch"
 
-    def test_a_record_whose_timestamp_is_not_the_commands_is_a_mismatch(self):
+    def test_a_retry_with_its_own_clock_gets_the_records_timestamp(self):
+        """#747 P2: the timestamp is store-authoritative, so a retry that arrives
+        with a later clock is still the same operation and receives what the
+        record holds, not what it sent."""
+        from mission_application.artifact import ArtifactAppendRequest, run_artifact_append
+
+        docs = _documents()
+        payload = run_artifact_append(
+            ArtifactAppendRequest(now="2030-01-01T00:00:09Z", section="plan", content="first",
+                                  source=None, label=None),
+            _ReplayingRepository(docs["current"], docs["append"]),
+        )
+        assert payload["block"]["timestamp"] == AT
+
+    def test_a_record_without_a_timestamp_is_a_mismatch(self):
         from mission_application.artifact import ArtifactAppendRequest, EvidenceFailure, run_artifact_append
 
         docs = _documents()
+        broken = json.loads(json.dumps(docs["append"]))
+        broken["artifact"]["blocks"][-1]["timestamp"] = 7
         with pytest.raises(EvidenceFailure) as excinfo:
             run_artifact_append(
-                ArtifactAppendRequest(now="2030-01-01T00:00:09Z", section="plan", content="first",
-                                      source=None, label=None),
-                _ReplayingRepository(docs["current"], docs["append"]),
+                ArtifactAppendRequest(now=AT, section="plan", content="first", source=None, label=None),
+                _ReplayingRepository(docs["current"], broken),
             )
         assert excinfo.value.code == "artifact-projection-mismatch"
 

@@ -236,16 +236,50 @@ def _canonical_binding(
     return projected
 
 
+def _captured_binding(record: dict) -> dict:
+    """Return one captured binding in the form the semantic digest folds.
+
+    A captured blob is caller-supplied input: its identifier is the caller's
+    Token128 and its path is wherever the caller read it from, neither of
+    which derives from the other (U1 already validated both).  Only the
+    generated bindings have a path-derived identifier, so only they go
+    through the canonical check.
+    """
+    if not isinstance(record, dict):
+        raise EvidencePublicationError(
+            "blob-binding-invalid", "blob binding is not an object"
+        )
+    missing = [name for name in BINDING_FIELDS if name not in record]
+    if missing:
+        raise EvidencePublicationError(
+            "blob-binding-invalid", "binding is missing " + ", ".join(missing)
+        )
+    for name in ("blob_id", "kind", "relative_path"):
+        if not isinstance(record[name], str) or not record[name]:
+            raise EvidencePublicationError(
+                "blob-binding-invalid", "blob " + name + " is invalid"
+            )
+    if not isinstance(record["digest"], str) or not DIGEST_PATTERN.fullmatch(
+        record["digest"]
+    ):
+        raise EvidencePublicationError("blob-binding-invalid", "blob digest is invalid")
+    if type(record["size"]) is not int or record["size"] < 0:
+        raise EvidencePublicationError("blob-binding-invalid", "blob size is invalid")
+    return {name: record[name] for name in BINDING_FIELDS}
+
+
 def _partition_bindings(
     bindings, *, repository_root_name: str = REPOSITORY_ROOT_NAME
 ) -> tuple[list, list]:
     captured, generated = [], []
     for record in bindings:
         origin = blob_origin_of(record)
-        projected = _canonical_binding(
-            record, repository_root_name=repository_root_name
-        )
-        (generated if origin == "generated" else captured).append(projected)
+        if origin == "generated":
+            generated.append(
+                _canonical_binding(record, repository_root_name=repository_root_name)
+            )
+        else:
+            captured.append(_captured_binding(record))
     key = lambda item: item["blob_id"]
     return sorted(captured, key=key), sorted(generated, key=key)
 
@@ -329,34 +363,82 @@ def semantic_intent_digest(
     ).hexdigest()
 
 
+def binding_records(blobs) -> list:
+    """Return the persistence-neutral records of one verified blob set.
+
+    Every place that folds bindings into a digest -- the semantic intent, the
+    materialization, the replay comparison -- reads them through this one
+    projection, so a binding cannot enter one digest with an origin and
+    another without it.  An origin outside ``BLOB_ORIGINS`` is refused rather
+    than defaulted: a binding whose origin is unknown cannot be classified,
+    and classifying it wrongly changes which operation it belongs to.
+    """
+    views = getattr(blobs, "blobs", None)
+    if not isinstance(views, tuple):
+        raise EvidencePublicationError(
+            "blob-binding-invalid", "blob set does not expose an immutable blob tuple"
+        )
+    records = []
+    for blob in views:
+        binding = getattr(blob, "binding", None)
+        if binding is None:
+            raise EvidencePublicationError(
+                "blob-binding-invalid", "verified blob carries no binding"
+            )
+        origin = getattr(binding, "origin", None)
+        if origin not in BLOB_ORIGINS:
+            raise EvidencePublicationError(
+                "blob-origin-invalid", "blob origin is not recognised"
+            )
+        record = {name: getattr(binding, name, None) for name in BINDING_FIELDS}
+        record["origin"] = origin
+        records.append(record)
+    return records
+
+
+def generated_blobs_digest(
+    bindings, *, repository_root_name: str = REPOSITORY_ROOT_NAME
+) -> Optional[str]:
+    """Return the digest of what this run generated, or ``None`` for nothing.
+
+    ``None`` is a value: an operation that generated nothing is recorded as
+    such, and a replay that prepares something against it does not agree.
+    The bindings are canonicalised and ordered before hashing so the same
+    generated set has one digest however it was assembled.
+    """
+    _captured, generated = _partition_bindings(
+        bindings, repository_root_name=repository_root_name
+    )
+    if not generated:
+        return None
+    return "sha256:" + hashlib.sha256(_canonical({"blobs": generated})).hexdigest()
+
+
 def materialization_binding(
     *,
     bindings,
     repository_root_name: str = REPOSITORY_ROOT_NAME,
-    base_head_digest: str,
-    base_generation: int,
+    base_head_digest: Optional[str],
     state_digest: str,
 ) -> dict:
     """Return what this run actually produced, against the base it saw.
 
     Kept apart from the semantic digest so a replay can check that the commit
-    it is about to return holds the same bytes this run just prepared.
+    it is about to return holds the same bytes this run just prepared.  The
+    generated bindings enter as one digest rather than a list: the operation
+    record has a byte limit, and a list of bindings has none.  The base
+    generation is not repeated here; the record's result carries the target
+    generation and a prepare is always base + 1.
     """
-    _captured, generated = _partition_bindings(
-        bindings, repository_root_name=repository_root_name
-    )
     # Nothing is checked here.  The reader below is the one place that
-    # decides what a materialization may hold; repeating any of it would put
-    # the same rule in two places, which is how the two drifted apart before.
-    # Run the reader over what was just built.  Keeping the two checks apart
-    # is how this drifted: the writer produced null digests, empty kinds,
-    # negative sizes and empty blob sets that the reader then refused, so a
-    # record could be written that nothing could read back.
+    # decides what a materialization may hold; running it over what was just
+    # built is what keeps the writer from producing a record nothing can read.
     return read_materialization(
         {
-            "base_generation": base_generation,
             "base_head_digest": base_head_digest,
-            "blobs": generated,
+            "blobs_digest": generated_blobs_digest(
+                bindings, repository_root_name=repository_root_name
+            ),
             "state_digest": state_digest,
         },
         repository_root_name=repository_root_name,
@@ -370,15 +452,22 @@ def assert_replay_materializes(*, recorded, prepared: dict) -> None:
     committed the same bytes: without this check a re-run that would have
     written different content returns success while its content never lands.
 
-    Only the blobs take part.  The base a run saw is allowed to differ,
-    because the whole point of a replay is that the base has moved on.
+    Only the generated content takes part, as one digest on each side.  A
+    recorded ``None`` is "nothing was generated", so a run that prepared
+    something against it does not agree.  The base a run saw is not compared
+    here; the caller decides whether the two runs saw the same base.
     """
-    if not isinstance(recorded, dict):
+    if not isinstance(recorded, dict) or "blobs_digest" not in recorded:
         raise EvidencePublicationError(
             "replay-materialization-mismatch",
             "the recorded operation carries no materialization to compare",
         )
-    if recorded.get("blobs") != prepared.get("blobs"):
+    if not isinstance(prepared, dict) or "blobs_digest" not in prepared:
+        raise EvidencePublicationError(
+            "replay-materialization-mismatch",
+            "the prepared run carries no materialization to compare",
+        )
+    if recorded["blobs_digest"] != prepared["blobs_digest"]:
         raise EvidencePublicationError(
             "replay-materialization-mismatch",
             "the recorded commit does not hold the prepared content",
@@ -457,47 +546,47 @@ def operation_record_keys(version: int) -> frozenset:
     return OPERATION_RECORD_KEYS[version]
 
 
-MATERIALIZATION_FIELDS = ("base_generation", "base_head_digest", "blobs", "state_digest")
+MATERIALIZATION_FIELDS = ("base_head_digest", "blobs_digest", "state_digest")
 DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
+
 
 def read_materialization(
     value, *, repository_root_name: str = REPOSITORY_ROOT_NAME
 ) -> dict:
     """Parse and check one materialization binding.
 
-    Reading the field without looking inside it leaves the replay comparison
-    with nothing to compare: a null, a string, or an empty blob list all
-    agree with whatever the current run prepared.
+    The key set is exact: a record carrying the older list-shaped form, or a
+    field this version does not know, is refused rather than read partially.
+    ``base_head_digest`` may be null only because genesis has no head;
+    ``blobs_digest`` may be null because an operation may generate nothing.
+    ``state_digest`` is never null: every commit has a state.
     """
+    del repository_root_name  # kept for signature stability with the writer
     if not isinstance(value, dict):
         raise EvidencePublicationError(
             "materialization-invalid", "materialization is not an object"
         )
-    missing = [name for name in MATERIALIZATION_FIELDS if name not in value]
-    if missing:
+    present = frozenset(value)
+    expected = frozenset(MATERIALIZATION_FIELDS)
+    if present != expected:
         raise EvidencePublicationError(
-            "materialization-invalid", "materialization is missing " + ", ".join(missing)
+            "materialization-invalid",
+            "materialization fields differ: %r" % (sorted(present ^ expected),),
         )
-    blobs = value["blobs"]
-    if not isinstance(blobs, list) or not blobs:
-        raise EvidencePublicationError(
-            "materialization-invalid", "materialization names no generated blob"
-        )
-    normalized = [
-        _canonical_binding(binding, repository_root_name=repository_root_name)
-        for binding in blobs
-    ]
-    for field in ("base_head_digest", "state_digest"):
+    for field in ("base_head_digest", "blobs_digest"):
         candidate = value[field]
-        if not isinstance(candidate, str) or not DIGEST_PATTERN.fullmatch(candidate):
+        if candidate is not None and (
+            not isinstance(candidate, str) or not DIGEST_PATTERN.fullmatch(candidate)
+        ):
             raise EvidencePublicationError(
                 "materialization-invalid", "materialization " + field + " is invalid"
             )
-    if type(value["base_generation"]) is not int:
+    state_digest = value["state_digest"]
+    if not isinstance(state_digest, str) or not DIGEST_PATTERN.fullmatch(state_digest):
         raise EvidencePublicationError(
-            "materialization-invalid", "materialization base generation is not an integer"
+            "materialization-invalid", "materialization state_digest is invalid"
         )
-    return dict(value, blobs=normalized)
+    return {name: value[name] for name in MATERIALIZATION_FIELDS}
 
 
 def read_operation_record(

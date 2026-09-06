@@ -25,13 +25,20 @@ class AuditMetadata:
 
 
 class BlobBindingView(Protocol):
-    """Persistence-neutral immutable identity used by an execution request."""
+    """Persistence-neutral immutable identity used by an execution request.
+
+    ``origin`` is one of ``mission_application.evidence_publication.BLOB_ORIGINS``
+    (``"captured"`` input or ``"generated"`` output).  The request's identity
+    digests only the captured bindings, so the classification is part of the
+    public request shape rather than a persistence detail.
+    """
 
     blob_id: str
     kind: str
     relative_path: str
     digest: str
     size: int
+    origin: str
 
 
 class VerifiedBlobView(Protocol):
@@ -67,6 +74,26 @@ class CommitResult:
     generation: int
     head_digest: str
     state_generation_digest: str
+
+
+@dataclass(frozen=True)
+class OperationReplay:
+    """A committed operation found again by its identity (#747 P2).
+
+    ``result`` is the exact ``CommitResult`` the operation recorded.
+    ``intent_digest`` and ``record_version`` are what the operation record
+    itself holds: a version-1 record carries a ``mission-intent/1`` digest,
+    a version-2 record the semantic ``mission-intent/2`` digest, and the
+    historical read has to compare the commit against the digest of the
+    record's own generation rather than the requesting run's.
+    ``materialization`` is the version-2 record's account of what the
+    original run produced (``None`` for a version-1 record).
+    """
+
+    result: CommitResult
+    intent_digest: str
+    record_version: int
+    materialization: Optional[dict]
 
 
 @dataclass(frozen=True)

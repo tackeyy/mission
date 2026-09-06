@@ -77,6 +77,26 @@ class CommitResult:
 
 
 @dataclass(frozen=True)
+class OperationReplay:
+    """A committed operation found again by its identity (#747 P2).
+
+    ``result`` is the exact ``CommitResult`` the operation recorded.
+    ``intent_digest`` and ``record_version`` are what the operation record
+    itself holds: a version-1 record carries a ``mission-intent/1`` digest,
+    a version-2 record the semantic ``mission-intent/2`` digest, and the
+    historical read has to compare the commit against the digest of the
+    record's own generation rather than the requesting run's.
+    ``materialization`` is the version-2 record's account of what the
+    original run produced (``None`` for a version-1 record).
+    """
+
+    result: CommitResult
+    intent_digest: str
+    record_version: int
+    materialization: Optional[dict]
+
+
+@dataclass(frozen=True)
 class RepositoryExecutionResult:
     accepted: bool
     commit: Optional[CommitResult]

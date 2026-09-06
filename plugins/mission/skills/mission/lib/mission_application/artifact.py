@@ -190,7 +190,12 @@ def _replayed_artifact_payload(prepared: PreparedArtifactOperation, execution: o
             if not isinstance(records, list) or not records:
                 raise EvidenceFailure("artifact-projection-mismatch")
             record = records[-1]
-            if not isinstance(record, dict) or record.get("timestamp") != command.at:
+            # #747 P2: the timestamp is store-authoritative.  A retry of the
+            # same operation arrives with its own clock, so the record's
+            # timestamp is what the caller gets back, not what it sent; the
+            # lineage the historical read verified is what ties the record to
+            # this operation.
+            if not isinstance(record, dict) or not isinstance(record.get("timestamp"), str):
                 raise EvidenceFailure("artifact-projection-mismatch")
             if isinstance(command, AppendArtifactBlock) and record.get("section") != command.section:
                 raise EvidenceFailure("artifact-projection-mismatch")
