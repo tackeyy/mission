@@ -1,0 +1,50 @@
+{
+  "blob_operation": {
+    "argv": [
+      "set",
+      "phase=reviewing"
+    ],
+    "blob": {
+      "blob_id": "compatibility-state",
+      "content_file": "blob-content.bin",
+      "digest": "sha256:73bda0dc517860d2c289a8dcc29676c421156764aa28db3a83855064026542f2",
+      "kind": "cli-output",
+      "relative_path": "compatibility/state.json",
+      "size": 2878
+    },
+    "operation_id": "operation-v1-blob",
+    "result": {
+      "commit_digest": "sha256:3657e25feb4b990b61f8ab869f03eecc6023b89a868c2ed15dabdd9d21c32b28",
+      "generation": 2,
+      "head_digest": "sha256:dd4ba868363a7da5f108e9c2af2a9b9498edb2a84f6f232cbfbafb5330f1d1e9",
+      "state_generation_digest": "sha256:2e1addbf862f76da51fc49d8b317e5164f8d5d2ad562a19d8fd4c5ef833d81a9"
+    }
+  },
+  "clock": "2026-09-06T07:54:22Z",
+  "init": {
+    "argv": [
+      "init",
+      "Issue 500 CLI corpus"
+    ],
+    "command_type": "init",
+    "event_types": [
+      "mission-initialized"
+    ],
+    "operation_id": "operation-init",
+    "result": {
+      "commit_digest": "sha256:dcae0b43578207dc1ec0de53122d305e4cea7b6a204fb4d0cb016c11afb74df6",
+      "generation": 1,
+      "head_digest": "sha256:bb1058dd6105f28f297e2bc5eb27a15ef03710f153012619da9640d0dd7486b5",
+      "state_generation_digest": "sha256:38b90c46ef56dccb5decfa91155e0a495303f29419562eb19f4c517f19eda91f"
+    }
+  },
+  "lease_id": "fixture-lease",
+  "rolled_back_operation": {
+    "argv": [
+      "set",
+      "phase=done"
+    ],
+    "operation_id": "operation-v1-rolled"
+  },
+  "session_id": "test"
+}

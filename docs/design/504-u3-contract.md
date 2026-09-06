@@ -42,7 +42,7 @@ No production module imports the repository or recovery implementation.
   transition.
 - U2 fixes the canonical head, commit, prepare, operation, generation, intent,
   lease, CAS, record limits, and immutable-publication contracts. U3 does not
-  change those records except that `mission-prepare/1.projections`, previously
+  change those records except that `mission-prepare/{1,2}.projections`, previously
   fixed to an empty array for U2, now carries the recovery bindings required by
   ADR-005.
 - U1 fixes each effect at at most 4 MiB, at most 64 effects, at most 16 MiB in
@@ -85,12 +85,17 @@ The upper design does not fix the following details. U3 fixes them here:
    `transactions/resolved/<TransactionId>.json` before the open prepare is
    removed. It records `rolled-back|finalized` plus transaction, operation,
    intent, base/target, and resulting-head identity. Its encoding reuses U2's
-   4 KiB operation-record limit because it is an operation/result-sized
-   tombstone and its maximum schema shape is smaller than `mission-operation/1`.
+   operation-record limit (`MAX_OPERATION_BYTES`, equal to `STATE_LIMIT`
+   since #747 P2). The marker's generation (`mission-recovery/{1,2}`) and
+   the index's follow the prepare's; no size ordering between marker and
+   operation record is assumed.
 6. A rolled-back marker prevents reuse of that session-local operation ID with
    another intent. The same intent may be admitted again only from the current
    head. A committed operation record remains authoritative over a prior
-   rolled-back marker for the same intent.
+   rolled-back marker for the same intent. The intent comparison is made in
+   the index's own generation, and a rolled-back index is inherited from the
+   first lineage that wrote it: a later rollback of the same operation ID in
+   another generation does not rewrite it (#747 P2).
 7. At most one open prepare is valid. Multiple entries, an unexpected entry,
    or an open prepare for a different requested recovery session is ambiguous
    and blocks without mutation.
@@ -101,7 +106,7 @@ The upper design does not fix the following details. U3 fixes them here:
 
 ## 3. Exact projection record
 
-`mission-prepare/1.projections[]` uses the U1 effect order and is bounded by the
+`mission-prepare/{1,2}.projections[]` uses the U1 effect order and is bounded by the
 same maximum count and aggregate bytes. Each record has the exact keys:
 
 ```json
@@ -165,12 +170,14 @@ residue remains unresolved.
 ### 4.2 Target head
 
 The head, commit, generation, state, effects, transaction ID, operation ID,
-intent, fence, and target generation must all equal the prepare lineage. Each
+intent, fence, target generation, and record generation (schema version) must
+all equal the prepare lineage. Each
 projection target must be the exact after inode and bytes. If it is missing,
 recovery recreates the link from the exact private after file; a different
 existing target blocks. The operation record is recreated from the verified
-head/commit result only when absent. An existing operation record must agree in
-every field.
+head/commit result only when absent, in the prepare's generation and repeating
+the prepare's materialization for generation 2. An existing operation record
+must agree in every field.
 
 ### 4.3 Finalization order
 
