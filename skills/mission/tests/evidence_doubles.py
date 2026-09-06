@@ -141,10 +141,16 @@ def _self_uses(source: str):
             and isinstance(node.args[0], ast.Name)
             and node.args[0].id == "self"
         ):
-            if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant) and isinstance(node.args[1].value, str):
+            if (
+                len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant)
+                and isinstance(node.args[1].value, str)
+                and node.args[1].value not in _REFLECTIVE
+            ):
                 derived.add(node.args[1].value)
                 handled.add(id(node.args[0]))
-            # a non-literal name is left unhandled and reported below
+            # a non-literal name, or a reflective one (`getattr(self,
+            # "__getattribute__")`), is left unhandled and reported below
     for node in ast.walk(function):
         if isinstance(node, ast.Name) and node.id == "self" and id(node) not in handled:
             unsupported.append((node.lineno, node.col_offset))

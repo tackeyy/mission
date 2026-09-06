@@ -168,10 +168,11 @@ def test_the_derivation_rejects_what_a_regex_would_accept():
         "    repo = self\n"
         "    f = self.__getattribute__('_reflected')\n"
         "    g = self.__dict__['_hidden']\n"
+        "    h = getattr(self, '__getattribute__')('_reflected_too')\n"
         "    return helper(self)\n"
     )
     assert derived == frozenset({"ok", "_literal"})
-    assert [line for line, _ in unsupported] == [4, 5, 6, 7, 8, 9, 10]
+    assert [line for line, _ in unsupported] == [4, 5, 6, 7, 8, 9, 10, 11]
 
 
 def test_no_test_module_keeps_a_private_copy_of_the_doubles():
