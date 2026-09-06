@@ -632,6 +632,8 @@ def test_a_computed_name_at_import_time_keeps_everything_in_the_budget(wiring):
         "match VALUE:\n    case _:\n        register(_renders)",
         "match VALUE:\n    case 1 if register(_renders):\n        pass",
         "def wired(argument: register(_renders)):\n    return argument",
+        "def wired(positional: register(_renders), /):\n    return positional",
+        "def wired(*, keyword: register(_renders)):\n    return keyword",
         "def wired() -> register(_renders):\n    return 1",
         "def wired(*rest: register(_renders)):\n    return rest",
         "def wired(**rest: register(_renders)):\n    return rest",
@@ -722,6 +724,58 @@ def test_a_function_defined_under_control_flow_is_still_a_module_function(shape)
         violation.function for violation in guard.scan_source(source, path="x.py")
     }
     assert "_renders" in functions, shape
+
+
+def test_every_definition_of_a_name_is_measured_not_only_the_first():
+    """Which definition survives depends on a condition this pass cannot read.
+
+    Measuring only the first would let a trivial definition placed ahead of
+    the real one decide the budget.
+    """
+    guard = _load_guard_module()
+    source = (
+        "FLAG = False\n"
+        "\n\n"
+        "if FLAG:\n"
+        "    def _renders(data):\n"
+        "        return 1\n"
+        "else:\n"
+        "    def _renders(data):\n"
+        "        return data[\"value\"] + 1\n"
+        "\n\n"
+        "SERVICES = _renders\n"
+        "\n\n"
+        "def cmd_show(args):\n"
+        "    print(args)\n"
+    )
+    violations = guard.scan_source(source, path="x.py")
+    assert {violation.function for violation in violations} == {"_renders"}
+    # The second definition's arithmetic is the part a first-only scan misses.
+    assert "logic.arithmetic" in {violation.rule_id for violation in violations}
+
+
+def test_a_lambda_handed_over_at_module_level_keeps_its_helper_in_the_budget():
+    """A lambda body has no separate measurement path, so it counts here.
+
+    A nested `def` is excluded from import-time roots because the function
+    set holds it and scans it on its own.  A lambda is not in that set, so
+    excluding its body would drop a helper that runs on every invocation --
+    the very defect this guard exists to stop.
+    """
+    guard = _load_guard_module()
+    source = (
+        "def _renders(data):\n"
+        "    return data[\"value\"] + 1\n"
+        "\n\n"
+        "SERVICES = lambda: _renders(1)\n"
+        "\n\n"
+        "def cmd_show(args):\n"
+        "    print(SERVICES())\n"
+    )
+    functions = {
+        violation.function for violation in guard.scan_source(source, path="x.py")
+    }
+    assert "_renders" in functions
 
 
 def test_a_method_defined_in_a_class_body_is_not_a_module_function():

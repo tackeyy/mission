@@ -109,23 +109,28 @@ _PARSER_METHODS = {
 }
 
 
-def _top_level_functions(tree: ast.Module) -> dict[str, ast.AST]:
+def _top_level_functions(tree: ast.Module) -> dict[str, list[ast.AST]]:
     """Return the module's own functions, including those defined under control flow.
 
     ``if TYPE_CHECKING: def f(): ...`` and its cousins define module-level
     names just as a bare ``def`` does, so leaving them out would let a
     function be defined and injected without ever entering the budget.  Class
     bodies are not included: their functions are attributes, not module names.
+
+    A name maps to *every* definition that binds it, not just the first.
+    Which one survives to run depends on a condition this pass does not
+    evaluate, so all of them are measured: otherwise a trivial definition
+    placed ahead of the real one would decide the budget.
     """
-    functions: dict[str, ast.AST] = {}
+    functions: dict[str, list[ast.AST]] = {}
     _collect_module_functions(tree.body, functions)
     return functions
 
 
-def _collect_module_functions(body, functions: dict[str, ast.AST]) -> None:
+def _collect_module_functions(body, functions: dict[str, list[ast.AST]]) -> None:
     for node in body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            functions.setdefault(node.name, node)
+            functions.setdefault(node.name, []).append(node)
         elif isinstance(node, ast.ClassDef):
             continue
         else:
@@ -192,7 +197,7 @@ def _import_time_expressions_of(node: ast.AST):
                 yield item
 
 
-def _names_run_at_import(body, functions: dict[str, ast.AST]):
+def _names_run_at_import(body, functions: dict[str, list[ast.AST]]):
     """Yield every top-level function named by code that runs at import time."""
     for expression in _import_time_expressions(body):
         for inner in ast.walk(expression):
@@ -232,7 +237,7 @@ def _import_time_lookup_is_dynamic(body) -> bool:
     return False
 
 
-def _handler_roots(tree: ast.Module, functions: dict[str, ast.AST]) -> set[str]:
+def _handler_roots(tree: ast.Module, functions: dict[str, list[ast.AST]]) -> set[str]:
     roots = {
         name
         for name in functions
@@ -255,7 +260,7 @@ def _handler_roots(tree: ast.Module, functions: dict[str, ast.AST]) -> set[str]:
         roots.update(functions)
     else:
         roots.update(_names_run_at_import(tree.body, functions))
-    for function in functions.values():
+    for function in _every_definition(functions):
         for node in ast.walk(function):
             if not isinstance(node, ast.Call):
                 continue
@@ -266,6 +271,11 @@ def _handler_roots(tree: ast.Module, functions: dict[str, ast.AST]) -> set[str]:
                 if keyword.arg == "func" and isinstance(keyword.value, ast.Name):
                     roots.add(keyword.value.id)
     return roots
+
+
+def _every_definition(functions: dict[str, list[ast.AST]]):
+    for definitions in functions.values():
+        yield from definitions
 
 
 def _reachable_functions(
@@ -281,11 +291,14 @@ def _reachable_functions(
         if name in reached or name not in functions:
             continue
         reached.add(name)
-        for node in ast.walk(functions[name]):
-            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
-                if node.id in functions and node.id not in reached:
-                    pending.append(node.id)
-    return [functions[name] for name in sorted(reached)]
+        for definition in functions[name]:
+            for node in ast.walk(definition):
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                    if node.id in functions and node.id not in reached:
+                        pending.append(node.id)
+    return [
+        definition for name in sorted(reached) for definition in functions[name]
+    ]
 
 
 def _root_name(node: ast.AST) -> str | None:
