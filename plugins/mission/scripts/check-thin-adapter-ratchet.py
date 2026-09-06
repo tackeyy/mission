@@ -123,6 +123,23 @@ def _handler_roots(tree: ast.Module, functions: dict[str, ast.AST]) -> set[str]:
         for name in functions
         if name == "main" or name.startswith(("cmd_", "_cmd_"))
     }
+    # A helper handed to a use case at module level still runs on every
+    # invocation of the commands that use it, but no handler mentions it by
+    # name any more.  Without this, injecting a helper rather than calling it
+    # takes it out of the budget: the count falls because the guard stopped
+    # looking, not because the adapter got thinner.
+    for node in tree.body:
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        if node.value is None:
+            continue
+        for inner in ast.walk(node.value):
+            if (
+                isinstance(inner, ast.Name)
+                and isinstance(inner.ctx, ast.Load)
+                and inner.id in functions
+            ):
+                roots.add(inner.id)
     for function in functions.values():
         for node in ast.walk(function):
             if not isinstance(node, ast.Call):
@@ -664,18 +681,68 @@ def _git_show(repo_root: Path, base_sha: str, relative_path: Path) -> str | None
     return result.stdout if result.returncode == 0 else None
 
 
+GUARD_PATH = Path("scripts/check-thin-adapter-ratchet.py")
+
+
+def _base_scanned_baseline(repo_root: Path, base_sha: str) -> Baseline | None:
+    """Measure the base commit's source with the rules this run uses."""
+    source = _git_show(repo_root, base_sha, SOURCE_PATH)
+    if source is None:
+        return None
+    violations = list(scan_source(source, path=SOURCE_PATH.as_posix()))
+    listed = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", base_sha, "skills/mission/lib/mission_adapter"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    for name in sorted(listed.stdout.split()) if listed.returncode == 0 else ():
+        if not name.endswith(".py"):
+            continue
+        module_source = _git_show(repo_root, base_sha, Path(name))
+        if module_source is None:
+            continue
+        violations.extend(
+            scan_source(
+                module_source,
+                path=name,
+                extra_roots=_top_level_functions(ast.parse(module_source, filename=name)),
+            )
+        )
+    return baseline_from_violations(violations)
+
+
 def load_base_baseline(repo_root: Path, base_sha: str) -> tuple[Baseline, str]:
-    """Load an established baseline, or bootstrap the first PR from base source."""
+    """Load an established baseline, or bootstrap the first PR from base source.
+
+    Both sides have to be measured with the same ruler.  When this guard's own
+    rules change -- a wider notion of which functions are reachable, say -- the
+    baseline recorded at the base was produced by the older rules, and every
+    function the new rules newly see would read as a violation someone just
+    added.  So when the guard differs from the base's copy of it, the base is
+    measured again here rather than read from its file.
+    """
     if re.fullmatch(r"[0-9a-fA-F]{7,64}", base_sha) is None:
         raise BaselineError("base SHA must be a hexadecimal git object id")
+    base_guard = _git_show(repo_root, base_sha, GUARD_PATH)
+    try:
+        current_guard = (repo_root / GUARD_PATH).read_text(encoding="utf-8")
+    except OSError:
+        # A tree without this file cannot have changed the rules; the
+        # comparison falls back to whatever the base recorded.
+        current_guard = base_guard
+    if base_guard is not None and base_guard != current_guard:
+        rescanned = _base_scanned_baseline(repo_root, base_sha)
+        if rescanned is not None:
+            return rescanned, "rescanned-base-source"
     baseline_text = _git_show(repo_root, base_sha, BASELINE_PATH)
     if baseline_text is not None:
         return load_baseline_text(baseline_text), "recorded-baseline"
-    source = _git_show(repo_root, base_sha, SOURCE_PATH)
-    if source is None:
+    rescanned = _base_scanned_baseline(repo_root, base_sha)
+    if rescanned is None:
         raise BaselineError("base contains neither the ratchet baseline nor canonical source")
-    violations = scan_source(source, path=SOURCE_PATH.as_posix())
-    return baseline_from_violations(violations), "bootstrap-source-scan"
+    return rescanned, "bootstrap-source-scan"
 
 
 def main() -> int:
