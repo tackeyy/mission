@@ -224,11 +224,16 @@ def _import_time_lookup_is_dynamic(body) -> bool:
     _wire()`` does not put ``_helper`` in the budget.  Writing a *new*
     ``globals()`` does add a ``dispatch.dynamic`` the ratchet would stop on,
     but pointing an *existing* one at a different helper leaves the count
-    unchanged, so that is not a safeguard either.  This guard exists to stop a
+    unchanged, so that is not a safeguard either.
+
+    Rooting every function unconditionally would close all of these, at the
+    cost of putting functions nobody calls in the budget for good (462 -> 480
+    in this repository), which stops the number from measuring how thin the
+    adapter is.  Picking these forms out *without* that over-count needs
+    value tracking, which an AST pass cannot do.  This guard exists to stop a
     refactor from quietly shrinking the budget, not to withstand someone
-    arranging to evade it; closing every indirection would mean tracking
-    values, which an AST pass cannot do.  A reviewer reading such code is the
-    remaining check.
+    arranging to evade it; a reviewer reading such code is the remaining
+    check.
     """
     for expression in _import_time_expressions(body):
         for inner in ast.walk(expression):
