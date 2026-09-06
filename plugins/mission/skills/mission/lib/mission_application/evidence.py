@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 
 from mission_application.cli_operation import (
     CliOperationIdentity,
+    CliOperationRejected,
     prepare_cli_operation,
 )
 from mission_application.evidence_publication import (
@@ -539,6 +540,14 @@ CONTEXT_ITERATION_INVALID = "ERROR: --iteration は 1 以上で指定してく�
 CONTEXT_OUTPUT_INVALID = "ERROR: context output filename is invalid"
 
 
+def _identity_or_refusal(services, build):
+    """An unusable caller id is refused the way the CLI refuses bad input."""
+    try:
+        return build()
+    except CliOperationRejected as exc:
+        services.fail("ERROR: %s" % (exc,), 2)
+
+
 def _evidence_state_file(cwd, services, message):
     state_file = services.resolve_state_file(cwd)
     if not state_file.exists():
@@ -619,7 +628,7 @@ def run_progress_update_cli(args, cwd, services) -> str:
     completed = getattr(args, "completed")
     if total < 0 or completed < 0 or completed > total:
         services.fail(PROGRESS_RANGE_INVALID, 2)
-    identity = prepare_progress_update_operation(
+    identity = _identity_or_refusal(services, lambda: prepare_progress_update_operation(
         total,
         completed,
         getattr(args, "batch_size"),
@@ -629,7 +638,7 @@ def run_progress_update_cli(args, cwd, services) -> str:
         session_id=state_file.stem,
         compatibility_arguments=services.compatibility_arguments,
         canonical_operation=services.canonical_operation,
-    )
+    ))
     try:
         result = run_progress_update(
             ProgressUpdateRequest(
@@ -675,12 +684,12 @@ def run_context_manifest_cli(args, cwd, services) -> str:
         )
     except EvidenceFailure as exc:
         services.fail("ERROR: %s" % (exc,), 2)
-    identity = prepare_context_manifest_operation(
+    identity = _identity_or_refusal(services, lambda: prepare_context_manifest_operation(
         plan,
         session_id=state_file.stem,
         compatibility_arguments=services.compatibility_arguments,
         canonical_operation=services.canonical_operation,
-    )
+    ))
     try:
         result = run_context_manifest(
             ContextManifestRequest(

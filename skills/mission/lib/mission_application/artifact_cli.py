@@ -34,6 +34,7 @@ from mission_application.artifact import (
     run_artifact_publish,
     run_artifact_render,
 )
+from mission_application.cli_operation import CliOperationRejected
 from mission_kernel.artifact import (
     ARTIFACT_PUBLISH_PROVIDERS,
     ARTIFACT_REDACTION_STATUSES,
@@ -89,6 +90,14 @@ def _refuse(services, code):
     services.fail("ERROR: %s" % (code,), 2)
 
 
+def _identity_or_refusal(services, build):
+    """An unusable caller id is refused the way the CLI refuses bad input."""
+    try:
+        return build()
+    except CliOperationRejected as exc:
+        services.fail("ERROR: %s" % (exc,), 2)
+
+
 def run_artifact_init_cli(args, cwd, services) -> str:
     state_file = _state_file(cwd, services)
     if getattr(args, "redaction_status") not in ARTIFACT_REDACTION_STATUSES:
@@ -96,7 +105,7 @@ def run_artifact_init_cli(args, cwd, services) -> str:
     artifact_path = services.state_relative_path(
         cwd, str(services.artifact_path(cwd, state_file.stem))
     )
-    identity = prepare_artifact_init_operation(
+    identity = _identity_or_refusal(services, lambda: prepare_artifact_init_operation(
         artifact_path,
         getattr(args, "format"),
         getattr(args, "title"),
@@ -105,7 +114,7 @@ def run_artifact_init_cli(args, cwd, services) -> str:
         session_id=state_file.stem,
         compatibility_arguments=services.compatibility_arguments,
         canonical_operation=services.canonical_operation,
-    )
+    ))
     try:
         result = run_artifact_init(
             ArtifactInitRequest(
@@ -128,7 +137,7 @@ def run_artifact_append_cli(args, cwd, services) -> str:
     state_file = _state_file(cwd, services)
     section = _section(args, services)
     content, source = services.read_input(args)
-    identity = prepare_artifact_append_operation(
+    identity = _identity_or_refusal(services, lambda: prepare_artifact_append_operation(
         section,
         content,
         source,
@@ -136,7 +145,7 @@ def run_artifact_append_cli(args, cwd, services) -> str:
         session_id=state_file.stem,
         compatibility_arguments=services.compatibility_arguments,
         canonical_operation=services.canonical_operation,
-    )
+    ))
     try:
         result = run_artifact_append(
             ArtifactAppendRequest(
@@ -158,12 +167,12 @@ def _section(args, services):
 
 def run_artifact_render_cli(args, cwd, services) -> str:
     state_file = _state_file(cwd, services)
-    identity = prepare_artifact_render_operation(
+    identity = _identity_or_refusal(services, lambda: prepare_artifact_render_operation(
         getattr(args, "redaction_status"),
         session_id=state_file.stem,
         compatibility_arguments=services.compatibility_arguments,
         canonical_operation=services.canonical_operation,
-    )
+    ))
     try:
         result = run_artifact_render(
             ArtifactRenderRequest(services.now(), getattr(args, "redaction_status")),
@@ -182,13 +191,13 @@ def run_artifact_export_cli(args, cwd, services) -> str:
     destination = services.state_relative_path(
         cwd, str(services.resolve_output_path(cwd, getattr(args, "to")))
     )
-    identity = prepare_artifact_export_operation(
+    identity = _identity_or_refusal(services, lambda: prepare_artifact_export_operation(
         destination,
         getattr(args, "redaction_status"),
         session_id=state_file.stem,
         compatibility_arguments=services.compatibility_arguments,
         canonical_operation=services.canonical_operation,
-    )
+    ))
     try:
         result = run_artifact_export(
             ArtifactExportRequest(
@@ -208,14 +217,14 @@ def run_artifact_publish_cli(args, cwd, services) -> str:
         services.fail(PUBLISH_PROVIDER_UNSUPPORTED, 2)
     if not getattr(args, "require_confirm") or not getattr(args, "approval_text"):
         services.fail(PUBLISH_CONSENT_REQUIRED, 2)
-    identity = prepare_artifact_publish_operation(
+    identity = _identity_or_refusal(services, lambda: prepare_artifact_publish_operation(
         getattr(args, "provider"),
         getattr(args, "destination"),
         getattr(args, "approval_text"),
         session_id=state_file.stem,
         compatibility_arguments=services.compatibility_arguments,
         canonical_operation=services.canonical_operation,
-    )
+    ))
     try:
         result = run_artifact_publish(
             ArtifactPublishRequest(

@@ -22,6 +22,15 @@ from dataclasses import dataclass
 from typing import Optional
 
 
+class CliOperationRejected(ValueError):
+    """The caller named an operation id the repository cannot use.
+
+    It reaches the CLI as an input refusal.  Letting the underlying
+    ``ValueError`` escape instead turned a typo in the environment into an
+    internal error.
+    """
+
+
 @dataclass(frozen=True)
 class CliOperationIdentity:
     """What the repository needs to recognise a retry as the same operation.
@@ -64,9 +73,12 @@ def prepare_cli_operation(
     the caller ran the command: a retry runs with a new clock, and including
     it would make every retry a different intent.
     """
-    caller_operation_id, resolved = compatibility_arguments(
-        arguments, target_digest="", require_caller=False
-    )
+    try:
+        caller_operation_id, resolved = compatibility_arguments(
+            arguments, target_digest="", require_caller=False
+        )
+    except ValueError as exc:
+        raise CliOperationRejected(str(exc)) from exc
     if caller_operation_id is None:
         return ABSENT_IDENTITY
     operation_id, operation_command = canonical_operation(

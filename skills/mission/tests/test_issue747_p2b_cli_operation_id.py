@@ -14,6 +14,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -179,19 +180,37 @@ class TestSemanticArguments:
         assert "optional_artifact_text(" in source
         assert ".rstrip()" not in source, "the rule belongs to the kernel, not here"
 
-    def test_the_context_identity_reads_the_plans_normalised_fields(self, tmp_path):
+    def test_the_context_identity_reads_the_plans_normalised_fields(self, tmp_path, monkeypatch):
         from mission_application.evidence import prepare_context_manifest_operation
         from mission_application.retry_plan import ContextManifestRetryPlan
 
-        plan = ContextManifestRetryPlan.for_request(
-            now="2030-01-01T00:00:00Z",
-            iteration=2,
-            publication_path="build//manifest.json",
-            project_root=tmp_path,
-        )
+        monkeypatch.setenv("MISSION_OPERATION_ID", "context-1")
+
+        def plan_for(path):
+            return ContextManifestRetryPlan.for_request(
+                now="2030-01-01T00:00:00Z", iteration=2, publication_path=path, project_root=tmp_path
+            )
+
+        plan = plan_for("build//manifest.json")
         assert plan.publication_path == "build/manifest.json"
         identity = _identity(prepare_context_manifest_operation, plan)
-        assert identity is not None
+        assert identity.opted_in
+        assert _arguments_of(identity) == {"iteration": 2, "publication_path": "build/manifest.json"}
+        # The path the caller typed does not decide the operation; the plan's
+        # canonical form does, so two spellings are one operation.
+        assert _arguments_of(_identity(prepare_context_manifest_operation, plan_for("build/manifest.json"))) == (
+            _arguments_of(identity)
+        )
+
+    def test_an_unusable_caller_id_is_refused_rather_than_raised(self, monkeypatch):
+        """A typo in the environment is bad input, not an internal error."""
+        from mission_application.artifact import prepare_artifact_append_operation
+        from mission_application.cli_operation import CliOperationRejected
+
+        monkeypatch.setenv("MISSION_OPERATION_ID", "not a token")
+        with pytest.raises(CliOperationRejected) as excinfo:
+            _identity(prepare_artifact_append_operation, "plan", "x", None, None)
+        assert "MISSION_OPERATION_ID" in str(excinfo.value)
 
 
 # --------------------------------------------------------------------------
@@ -292,7 +311,8 @@ class TestRealCli:
         assert "operation ID has a different intent" in second.stderr
         assert _artifact_blocks(run_cli, tmp_path) == before
 
-    def test_an_export_repeats_without_recording_twice(self, run_cli, tmp_path):
+    def test_an_export_repeats_across_a_second_boundary(self, run_cli, tmp_path):
+        """The clock moves between the two runs; the recorded export does not."""
         _init_mission(run_cli, tmp_path)
         run_cli("artifact", "append", "--section", "plan", "--text", "one", cwd=tmp_path)
         env = {"MISSION_OPERATION_ID": "export-once"}
@@ -302,23 +322,50 @@ class TestRealCli:
         first = run_cli(*arguments, cwd=tmp_path, env_extra=env)
         assert first.returncode == 0, first.stderr
         exports = _artifact(run_cli, tmp_path)["exports"]
+        time.sleep(1.1)
 
         second = run_cli(*arguments, cwd=tmp_path, env_extra=env)
 
         assert second.returncode == 0, second.stderr
         assert len(exports) == 1
         assert _artifact(run_cli, tmp_path)["exports"] == exports
+        # The reply carries the first run's timestamp, so this is the recorded
+        # export and not a second one that happens to look alike.
+        assert json.loads(second.stdout)["export"] == json.loads(first.stdout)["export"]
 
-    def test_a_progress_update_repeats_without_counting_twice(self, run_cli, tmp_path):
+    def test_a_progress_update_repeats_across_a_second_boundary(self, run_cli, tmp_path):
+        """``updated_at`` separates a replay from a fresh run that writes the same counts."""
         _init_mission(run_cli, tmp_path)
         env = {"MISSION_OPERATION_ID": "progress-once"}
         arguments = ("progress", "update", "--total", "5", "--completed", "2", "--iteration", "1")
         first = run_cli(*arguments, cwd=tmp_path, env_extra=env)
         assert first.returncode == 0, first.stderr
         progress = _projected_state(run_cli, tmp_path).get("progress")
+        assert progress is not None
+        time.sleep(1.1)
 
         second = run_cli(*arguments, cwd=tmp_path, env_extra=env)
 
         assert second.returncode == 0, second.stderr
-        assert progress is not None
         assert _projected_state(run_cli, tmp_path).get("progress") == progress
+
+        # Without the identity the same counts are written again, and the
+        # timestamp moves: that is what distinguishes the two.
+        time.sleep(1.1)
+        third = run_cli(*arguments, cwd=tmp_path)
+        assert third.returncode == 0, third.stderr
+        rewritten = _projected_state(run_cli, tmp_path).get("progress")
+        assert rewritten["updated_at"] != progress["updated_at"]
+
+    def test_an_unusable_identity_is_reported_as_input_and_changes_nothing(self, run_cli, tmp_path):
+        _init_mission(run_cli, tmp_path)
+        before = _artifact_blocks(run_cli, tmp_path)
+
+        result = run_cli(
+            "artifact", "append", "--section", "plan", "--text", "one",
+            cwd=tmp_path, env_extra={"MISSION_OPERATION_ID": "not a token"},
+        )
+
+        assert result.returncode == 2
+        assert "MISSION_OPERATION_ID" in result.stderr
+        assert _artifact_blocks(run_cli, tmp_path) == before
