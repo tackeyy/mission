@@ -73,8 +73,10 @@ class GuardBudgetLost(GuardTimeout, Exception):
     """A continuation arrived without a usable deadline (#742 D3').
 
     Still a ``GuardTimeout`` for callers that check the family, and still an
-    ``Exception`` so the existing fail-closed handling of a lost budget -- the
-    command's own ``guard-decision-unavailable`` path -- keeps applying.
+    ``Exception`` so its handling does not change with #754: it is raised by
+    the decorator before the command body runs, reaches ``main()``'s generic
+    handler, and is reported as a typed ``internal-error`` with exit 1 -- not
+    as the terminal exhaustion verdict, which would misname a lost budget.
     """
 
 
@@ -249,24 +251,27 @@ def bounded_by_guard_timeout(func: Callable[..., _T]) -> Callable[..., _T]:
 
     @functools.wraps(func)
     def _wrapper(*args: object, **kwargs: object) -> _T:
+        # A lost budget (continuation without a usable deadline) is not exhaustion;
+        # it is raised here, before anything is retained, and keeps its own path.
+        deadline = resolve_deadline()
+        # Retained for the whole call *including* the exhaustion report, so the
+        # `guard_deadline` written into a terminal verdict is the enforced one.
+        _ACTIVE_DEADLINE.append(deadline)
         try:
-            deadline = resolve_deadline()
             # The reserve is subtracted here, not only checked: with the full
             # remainder as the limit a body that started with 2.1 s left could run
             # into the reserve, and the tail the reserve exists for would not fit.
             left = remaining_budget(deadline) - RESERVE_SECONDS
             if left <= 0:
                 raise GuardTimeout(EXHAUSTED_REASON + ": the execution budget is spent")
-            _ACTIVE_DEADLINE.append(deadline)
-            try:
-                with guard_time_limit(left):
-                    return func(*args, **kwargs)
-            finally:
-                _ACTIVE_DEADLINE.pop()
+            with guard_time_limit(left):
+                return func(*args, **kwargs)
         except GuardBudgetLost:
-            raise  # not exhaustion: the command's own fail-closed path handles it
+            raise
         except GuardTimeout as error:
             return _report_exhaustion(func.__name__, error)  # type: ignore[return-value]
+        finally:
+            _ACTIVE_DEADLINE.pop()
 
     return _wrapper
 

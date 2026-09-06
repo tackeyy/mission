@@ -200,6 +200,20 @@ class TestReserveIsSubtracted:
         assert len(out) == 1
         _assert_terminal(json.loads(out[0]))
 
+    def test_the_terminal_verdict_carries_the_enforced_deadline(self, monkeypatch, capsys):
+        """Exhaustion while the body runs must not re-issue `guard_deadline`."""
+        carried = time.time() + RESERVE_SECONDS + 0.3  # 0.3 s of execution budget
+        monkeypatch.setenv(DEADLINE_ENV_VAR, "{:.3f}".format(carried))
+        monkeypatch.setenv(CONTINUATION_ENV_VAR, "1")
+
+        @bounded_by_guard_timeout
+        def cmd_stop_verdict():
+            time.sleep(5)
+
+        assert cmd_stop_verdict() is None
+        payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert payload["guard_deadline"] == "{:.3f}".format(carried)
+
     def test_a_lost_budget_is_not_reported_as_exhaustion(self, monkeypatch):
         """The continuation fail-closed path (#742) keeps its own handling."""
         from mission_application.guard_timeout import GuardBudgetLost
@@ -288,6 +302,8 @@ class TestTerminalVerdict:
     @pytest.mark.parametrize("command", [
         ["cleanup-stale", "--root", ".", "--execute"],
         ["mark-halt", "--reason", "x", "--category", "user"],
+        ["stop-guard-observe", "--session-id", "s754", "--digest", "sha256:" + "0" * 64,
+         "--now-epoch", "1", "--ttl-seconds", "1"],
     ])
     def test_the_other_commands_name_the_reason_on_stderr(self, tmp_path, command):
         env = _clean_env(
@@ -316,17 +332,44 @@ class TestNormalVerdictCarriesTheClamp:
         assert result.returncode == 0, result.stderr
         return json.loads(result.stdout.strip().splitlines()[-1])
 
-    def test_clamped_from_appears_top_level_and_in_shell_text(self, tmp_path):
+    def test_clamped_from_appears_top_level(self, tmp_path):
         payload = self._verdict(tmp_path, "1")
         assert payload["budget_clamped_from"] == 1
-        if payload["shell_text"]:
-            assert json.loads(payload["shell_text"])["budget_clamped_from"] == 1
 
     def test_no_clamp_no_field(self, tmp_path):
         payload = self._verdict(tmp_path, "8")
         assert "budget_clamped_from" not in payload
-        if payload["shell_text"]:
-            assert "budget_clamped_from" not in json.loads(payload["shell_text"])
+        assert "budget_clamped_from" not in payload["shell_text"]
+
+    def test_finish_guard_verdict_puts_the_clamp_into_a_non_empty_shell_text(self, monkeypatch):
+        """The hook forwards only `shell_text`; a top-level field alone is invisible there.
+
+        Driven directly: a verdict whose `reply.emit` is true is what carries a
+        non-empty `shell_text`, and the CLI scenario above happens to emit none.
+        """
+        from mission_application.guard_timeout import finish_guard_verdict
+
+        monkeypatch.setenv(RAW_ENV_VAR, "2")
+        monkeypatch.delenv(DEADLINE_ENV_VAR, raising=False)
+        monkeypatch.delenv(CONTINUATION_ENV_VAR, raising=False)
+        reply = {"decision": "block", "reason": "x", "outcome_kind": "expected-gate"}
+        payload = finish_guard_verdict({"shell_text": json.dumps(reply) + "\n"})
+        assert payload["budget_clamped_from"] == 2
+        inner = json.loads(payload["shell_text"])
+        assert inner["budget_clamped_from"] == 2
+        assert inner["decision"] == "block" and inner["reason"] == "x"
+        assert payload["shell_text"].endswith("\n") and payload["shell_text"].count("\n") == 1
+        assert re.fullmatch(r"\d+\.\d{3}", payload["guard_deadline"])
+
+    def test_finish_guard_verdict_leaves_an_unclamped_verdict_alone(self, monkeypatch):
+        from mission_application.guard_timeout import finish_guard_verdict
+
+        monkeypatch.setenv(RAW_ENV_VAR, "8")
+        reply = {"decision": "block", "reason": "x", "outcome_kind": "expected-gate"}
+        text = json.dumps(reply) + "\n"
+        payload = finish_guard_verdict({"shell_text": text})
+        assert "budget_clamped_from" not in payload
+        assert payload["shell_text"] == text
 
 
 # ---------------------------------------------------------------- 7. shell 側

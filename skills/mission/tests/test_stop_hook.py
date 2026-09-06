@@ -679,7 +679,8 @@ def test_hook_bounds_a_hung_state_call_and_blocks(tmp_path):
         {
             "CLAUDE_CODE_SESSION_ID": "hung",
             "MISSION_STATE_PY": str(hung),
-            "MISSION_STATE_TIMEOUT": "1",
+            # #754: the smallest value the hook still honours (1 and 2 are clamped to 8).
+            "MISSION_STATE_TIMEOUT": "3",
         },
         timeout=STOP_HOOK_BLOCK_WATCHDOG_SECONDS,
     )
