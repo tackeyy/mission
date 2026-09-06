@@ -246,6 +246,10 @@ class ArtifactCliServices:
     render_markdown: object
     compatibility_arguments: object
     canonical_operation: object
+    read_input: object
+    unknown_section_message: object
+    now: object
+    fail: object
 
 
 def _artifact_identity(
@@ -301,6 +305,106 @@ def prepare_artifact_append_operation(
             "label": optional_artifact_text(label),
             "section": normalized_artifact_section(section),
             "source": optional_artifact_text(source),
+        },
+        session_id=session_id,
+        compatibility_arguments=compatibility_arguments,
+        canonical_operation=canonical_operation,
+    )
+
+
+def prepare_artifact_init_operation(
+    artifact_path: object,
+    format: object,
+    title: object,
+    redaction_status: object,
+    required_for_pass: object,
+    *,
+    session_id: str,
+    compatibility_arguments,
+    canonical_operation,
+) -> CliOperationIdentity:
+    """Identify one initialisation.
+
+    An absent title and an empty one produce the same artifact (the mission
+    name is used), so they describe one operation.
+    """
+    return prepare_cli_operation(
+        "initialize-artifact",
+        {
+            "artifact_path": artifact_path,
+            "format": format,
+            "redaction_status": redaction_status,
+            "required_for_pass": required_for_pass,
+            "title": optional_artifact_text(title),
+        },
+        session_id=session_id,
+        compatibility_arguments=compatibility_arguments,
+        canonical_operation=canonical_operation,
+    )
+
+
+def prepare_artifact_render_operation(
+    redaction_status: object,
+    *,
+    session_id: str,
+    compatibility_arguments,
+    canonical_operation,
+) -> CliOperationIdentity:
+    """Identify one render.  A render appends no history; only the status decides it."""
+    return prepare_cli_operation(
+        "render-artifact",
+        {"redaction_status": redaction_status},
+        session_id=session_id,
+        compatibility_arguments=compatibility_arguments,
+        canonical_operation=canonical_operation,
+    )
+
+
+def prepare_artifact_export_operation(
+    destination: object,
+    redaction_status: object,
+    *,
+    session_id: str,
+    compatibility_arguments,
+    canonical_operation,
+) -> CliOperationIdentity:
+    """Identify one export by where it writes and under which status.
+
+    The destination is already project-relative here: the adapter resolves it
+    the same way for the export itself, so the same file named two ways is
+    one operation.
+    """
+    return prepare_cli_operation(
+        "export-artifact",
+        {"destination": destination, "redaction_status": redaction_status},
+        session_id=session_id,
+        compatibility_arguments=compatibility_arguments,
+        canonical_operation=canonical_operation,
+    )
+
+
+def prepare_artifact_publish_operation(
+    provider: object,
+    destination: object,
+    approval_text: object,
+    *,
+    session_id: str,
+    compatibility_arguments,
+    canonical_operation,
+) -> CliOperationIdentity:
+    """Identify one recorded publication.
+
+    The destination is **not** resolved as a path here: a publication may name
+    a URL or nothing at all, and the rules store whatever was given.  Only the
+    empty/absent equivalence is applied, because the rules treat those alike.
+    The approval text enters as a digest, like any other body.
+    """
+    return prepare_cli_operation(
+        "record-artifact-publication",
+        {
+            "approval_digest": text_digest(approval_text),
+            "destination": optional_artifact_text(destination),
+            "provider": provider,
         },
         session_id=session_id,
         compatibility_arguments=compatibility_arguments,
