@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import copy
 import json
-import re
 import types
 from contextlib import contextmanager
 
@@ -89,28 +88,76 @@ V5_EXECUTOR_INSTANCE_STATE = (
 )
 
 
-# Two spellings reach an attribute of ``self``: ``self.name`` and
-# ``getattr(self, "name", ...)``.  The executor uses the second for
-# ``_repository`` (read defensively, with a default), so a derivation that
-# only saw the first left that attribute out of the surface.  An alias
-# (``repo = self; repo.x``) would still escape; the executor has none, and
-# the contract test says so rather than claiming more than it checks.
-_SELF_ATTRIBUTE = re.compile(r"\bself\.([A-Za-z_]\w*)")
-_SELF_GETATTR = re.compile(r"\bgetattr\(\s*self\s*,\s*[\"']([A-Za-z_]\w*)[\"']")
-
-
-def executor_surface_from_source() -> frozenset:
-    """Return every attribute of ``self`` the V5 executor's entry method touches."""
+def _executor_source():
     import inspect
+    import textwrap
 
     from mission_persistence.legacy_v4 import V5CompatibilityRepository
 
-    source = inspect.getsource(
-        V5CompatibilityRepository.execute_evidence_transition_effects
+    return textwrap.dedent(
+        inspect.getsource(V5CompatibilityRepository.execute_evidence_transition_effects)
     )
-    return frozenset(_SELF_ATTRIBUTE.findall(source)) | frozenset(
-        _SELF_GETATTR.findall(source)
-    )
+
+
+def _self_uses(source: str):
+    """Classify every use of ``self`` in one method body, by syntax not by regex.
+
+    Returns ``(derived, unsupported)``: ``derived`` is the set of attribute
+    names reached through ``self.<name>`` or ``getattr(self, "<literal>", ...)``,
+    and ``unsupported`` is every other appearance of ``self`` -- an alias, a
+    hand-off to a function, ``getattr(self, expr)`` with a non-literal first
+    argument, ``hasattr`` / ``setattr`` -- as ``(lineno, text)`` pairs.  A
+    regex cannot tell ``getattr(self, "_x")`` from ``getattr(self, "_x" + y)``;
+    the parser can, which is why this is not a regex.
+    """
+    import ast
+
+    tree = ast.parse(source)
+    function = tree.body[0]
+    derived: set = set()
+    unsupported: list = []
+    handled: set = set()  # ids of Name nodes already accounted for
+    for node in ast.walk(function):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "self":
+            derived.add(node.attr)
+            handled.add(id(node.value))
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and node.args
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id == "self"
+        ):
+            if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant) and isinstance(node.args[1].value, str):
+                derived.add(node.args[1].value)
+                handled.add(id(node.args[0]))
+            # a non-literal name is left unhandled and reported below
+    for node in ast.walk(function):
+        if isinstance(node, ast.Name) and node.id == "self" and id(node) not in handled:
+            unsupported.append((node.lineno, node.col_offset))
+    # The parameter `self` itself is an ast.arg, not an ast.Name, so it never
+    # appears here.  Sorted by position: ast.walk is breadth-first.
+    return frozenset(derived), tuple(sorted(unsupported))
+
+
+def executor_surface_from_source() -> frozenset:
+    """Return every attribute of ``self`` the V5 executor's entry method touches.
+
+    Derived by parsing the method, so the two supported spellings are exact:
+    ``self.<name>`` and ``getattr(self, "<literal>", ...)``.  Any other use of
+    ``self`` is reported by :func:`executor_unsupported_self_uses`, and the
+    contract test requires that list to be empty -- otherwise this set could
+    be complete for the spellings it understands and still miss an access.
+    """
+    derived, _unsupported = _self_uses(_executor_source())
+    return derived
+
+
+def executor_unsupported_self_uses() -> tuple:
+    """Return every use of ``self`` the derivation does not understand."""
+    _derived, unsupported = _self_uses(_executor_source())
+    return unsupported
 
 
 class FakeFencedRepository:

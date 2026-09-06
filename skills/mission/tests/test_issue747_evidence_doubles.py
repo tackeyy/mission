@@ -95,8 +95,8 @@ def test_the_surface_list_equals_what_the_executor_reads():
 
     Both spellings count: ``self.name`` and ``getattr(self, "name", ...)``.
     The executor reads ``_repository`` only through the second, which a
-    ``self.``-only derivation missed.  An alias of ``self`` is not derived;
-    the executor has none (asserted below), so the claim stays honest.
+    ``self.``-only derivation missed.  Any other use of ``self`` is reported
+    by the next test, which requires none, so the claim stays honest.
 
     Hard-coding a handful of names let ``_effect_transaction`` go missing
     from both the list and the double: the executor reads it on the
@@ -108,56 +108,36 @@ def test_the_surface_list_equals_what_the_executor_reads():
     assert executor_surface_from_source() == frozenset(V5_EXECUTOR_SURFACE)
 
 
-def test_the_executor_does_not_alias_self():
-    """The derivation reads ``self.`` and ``getattr(self, ...)`` only.
+def test_the_executor_has_no_use_of_self_the_derivation_cannot_see():
+    """Everything ``self`` does in the executor is one of the two derived spellings.
 
-    An alias such as ``repo = self`` would let reads escape both patterns.
-    Pinning its absence keeps the equality above meaning what it says.
+    Parsed, not matched: ``getattr(self, "_x" + suffix)`` looks like a literal
+    to a regex and is not one to the parser.  An alias (``repo = self``), a
+    hand-off (``f(self)``), ``hasattr`` / ``setattr``, or a computed attribute
+    name would all appear here, and the equality test above would then be
+    complete only for what it can see.  Empty is the only acceptable answer.
     """
-    from mission_persistence.legacy_v4 import V5CompatibilityRepository
+    from .evidence_doubles import executor_unsupported_self_uses
 
-    source = inspect.getsource(V5CompatibilityRepository.execute_evidence_transition_effects)
-    body = source.split(")", 1)[1]  # drop the signature, whose first parameter is `self`
-    # Only the spellings the derivation understands are removed: `self.` with
-    # no space, and `getattr(self, "<literal>"`.  Anything else that names
-    # `self` -- an alias, a hand-off, `getattr(self, variable)`, `hasattr`,
-    # `setattr`, or `self . x` with whitespace -- stays behind as a stray, so
-    # a spelling the derivation cannot see surfaces here instead of hiding.
-    body = re.sub(r"\bgetattr\(\s*self\s*,\s*[\"'][A-Za-z_]\w*[\"']", "", body)
-    stray = [m.group(0) for m in re.finditer(r"\bself\b(?!\.)", body)]
-    assert stray == [], stray
+    assert executor_unsupported_self_uses() == ()
 
 
-def test_the_in_memory_double_defines_every_instance_attribute_the_executor_reads():
-    """Methods come with the class; instance state does not, so the double sets it.
+def test_the_derivation_rejects_what_a_regex_would_accept():
+    """Pin the parser's edge over the regex it replaced, on synthetic input."""
+    from .evidence_doubles import _self_uses
 
-    Every non-callable name in the surface has to be instance state the
-    double assigns, and every assigned name has to exist on production.
-    """
-    from mission_persistence.legacy_v4 import V5CompatibilityRepository
-
-    double = evidence_doubles.in_memory_v5_repository({"phase": "executing"})
-    for name in V5_EXECUTOR_SURFACE:
-        assert hasattr(double, name), f"double lacks {name}"
-    # Resolve through the class so descriptors (staticmethod, property) are
-    # seen as what they produce; the raw entry in ``vars`` is not callable for
-    # a staticmethod before Python 3.10, and the project still declares 3.9.
-    raw = vars(V5CompatibilityRepository)
-    non_callable = [
-        name for name in V5_EXECUTOR_SURFACE
-        if not isinstance(raw.get(name), property)
-        and not callable(getattr(V5CompatibilityRepository, name, None))
-    ]
-    for name in non_callable:
-        assert name in V5_EXECUTOR_INSTANCE_STATE, (
-            f"{name} is instance state the executor reads; the double must set it"
-        )
-    init_source = inspect.getsource(V5CompatibilityRepository.__init__)
-    for name in V5_EXECUTOR_INSTANCE_STATE:
-        assert re.search(rf"\bself\.{re.escape(name)}\b", init_source), (
-            f"production __init__ no longer sets {name}; drop it from the double too"
-        )
-        assert hasattr(double, name), f"double lacks instance state {name}"
+    derived, unsupported = _self_uses(
+        "def f(self, other):\n"
+        "    a = self.ok\n"
+        "    b = getattr(self, '_literal', None)\n"
+        "    c = getattr(self, '_repository' + other)\n"
+        "    d = hasattr(self, '_x')\n"
+        "    e = getattr(self, other)\n"
+        "    repo = self\n"
+        "    return helper(self)\n"
+    )
+    assert derived == frozenset({"ok", "_literal"})
+    assert [line for line, _ in unsupported] == [4, 5, 6, 7, 8]
 
 
 def test_no_test_module_keeps_a_private_copy_of_the_doubles():
