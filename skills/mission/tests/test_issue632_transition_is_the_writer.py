@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from .mission_state_fixture_corpus import canonical_json_bytes, generate_cli_state_corpus
+from .evidence_doubles import FakeFencedRepository
 
 
 _REVIEW_STATE = None
@@ -726,57 +727,9 @@ def test_saved_document_matches_decided_projection_for_every_transition_path(tmp
 # --- V5 経路: commit された head が claims と一致し aggregate は 1 回だけ ---
 
 
-class _FakeFencedRepository:
-    """Minimal fenced backend for the V5 compatibility seam.
-
-    実 ``LocalFencedRepository`` は lease/generation の実ファイルを要求するため、
-    本テストでは commit 契約（stage → commit → aggregate）だけを観測できる薄い
-    fake を使う。検証対象は ``V5CompatibilityRepository`` の execute/save 側で
-    あり、fenced backend 自体は #542 系のテストが担保している。
-    """
-
-    def __init__(self, state):
-        self._state = state
-        self.commits = []
-
-    def read(self, _session_id):
-        # #711: the compatibility seam reads before it admits, so the fake
-        # answers the same state it would admit.
-        import types
-
-        return types.SimpleNamespace(
-            state=self._state,
-            head_digest="sha256:" + "0" * 64,
-            head=types.SimpleNamespace(generation=0),
-        )
-
-    def begin(self, _request):
-        import types
-
-        from mission_persistence.local_uow import VerifiedBlobSet
-
-        return types.SimpleNamespace(
-            base=types.SimpleNamespace(state=self._state),
-            pending_lease=types.SimpleNamespace(target=self._state.lease),
-            # #711: the stage takes its effects from the admission, so the
-            # fake has to carry the request the real snapshot holds.
-            request=types.SimpleNamespace(blobs=VerifiedBlobSet(())),
-            # #711: the executor compares the base it read against the one it
-            # admitted, so the fake carries the same precondition shape.
-            precondition=types.SimpleNamespace(
-                base_head_digest="sha256:" + "0" * 64, base_generation=0
-            ),
-        )
-
-    def _stage_persistence(self, _admitted, *, state_bytes, effects):
-        import types
-
-        assert effects == ()
-        return types.SimpleNamespace(precondition=object(), state_bytes=state_bytes)
-
-    def commit(self, prepared, precondition):
-        assert precondition is prepared.precondition
-        self.commits.append(__import__("json").loads(prepared.state_bytes))
+# #747 item 7: the fenced fake lives in evidence_doubles; this alias keeps
+# the local name the tests below already use.
+_FakeFencedRepository = FakeFencedRepository
 
 
 def _v5_repository(tmp_path, *, calls, metadata=None, document=None):
