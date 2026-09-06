@@ -25,13 +25,20 @@ class AuditMetadata:
 
 
 class BlobBindingView(Protocol):
-    """Persistence-neutral immutable identity used by an execution request."""
+    """Persistence-neutral immutable identity used by an execution request.
+
+    ``origin`` is one of ``mission_application.evidence_publication.BLOB_ORIGINS``
+    (``"captured"`` input or ``"generated"`` output).  The request's identity
+    digests only the captured bindings, so the classification is part of the
+    public request shape rather than a persistence detail.
+    """
 
     blob_id: str
     kind: str
     relative_path: str
     digest: str
     size: int
+    origin: str
 
 
 class VerifiedBlobView(Protocol):

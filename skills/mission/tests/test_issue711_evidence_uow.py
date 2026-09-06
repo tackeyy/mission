@@ -265,37 +265,37 @@ def test_semantic_intent_changes_when_the_command_changes():
     assert semantic_intent_digest(_intent_inputs()) != semantic_intent_digest(other)
 
 
-def test_materialization_binding_holds_only_generated_bindings():
-    from mission_application.evidence_publication import materialization_binding
 
+def test_materialization_binding_holds_only_generated_bindings():
+    from mission_application.evidence_publication import (
+        generated_blobs_digest,
+        materialization_binding,
+    )
+
+    generated = _binding("build/manifest.json", "generated")
     bound = materialization_binding(
-        bindings=(
-            _binding("build/manifest.json", "generated"),
-            _binding("input/source.json", "captured"),
-        ),
+        bindings=(generated, _binding("input/source.json", "captured")),
         base_head_digest="sha256:" + "a" * 64,
-        base_generation=7,
         state_digest="sha256:" + "b" * 64,
     )
-    assert [item["relative_path"] for item in bound["blobs"]] == ["build/manifest.json"]
-    assert bound["base_generation"] == 7
+    assert bound["blobs_digest"] == generated_blobs_digest((generated,))
+    assert set(bound) == {"base_head_digest", "blobs_digest", "state_digest"}
+
 
 
 def test_materialization_binding_orders_blobs_by_identifier():
+    """The same generated set has one digest however it was assembled."""
     from mission_application.evidence_publication import materialization_binding
 
-    bindings = (
-        _binding("build/zzz.json", "generated"),
-        _binding("build/aaa.json", "generated"),
-    )
+    forward = (_binding("build/zzz.json", "generated"), _binding("build/aaa.json", "generated"))
     bound = materialization_binding(
-        bindings=bindings,
-        base_head_digest="sha256:" + "a" * 64,
-        base_generation=1,
-        state_digest="sha256:" + "b" * 64,
+        bindings=forward, base_head_digest="sha256:" + "a" * 64, state_digest="sha256:" + "b" * 64
     )
-    identifiers = [item["blob_id"] for item in bound["blobs"]]
-    assert identifiers == sorted(identifiers)
+    reversed_bound = materialization_binding(
+        bindings=tuple(reversed(forward)), base_head_digest="sha256:" + "a" * 64, state_digest="sha256:" + "b" * 64
+    )
+    assert bound["blobs_digest"] == reversed_bound["blobs_digest"]
+
 
 
 def test_materialization_binding_refuses_an_unknown_origin():
@@ -305,18 +305,17 @@ def test_materialization_binding_refuses_an_unknown_origin():
         materialization_binding(
             bindings=(_binding("build/manifest.json", "derived"),),
             base_head_digest="sha256:" + "a" * 64,
-            base_generation=1,
             state_digest="sha256:" + "b" * 64,
         )
 
 
-def _materialization(paths, digest_byte="0", generation=1):
+
+def _materialization(paths, digest_byte="0", head_byte="a"):
     from mission_application.evidence_publication import materialization_binding
 
     return materialization_binding(
         bindings=tuple(_binding(path, "generated", digest_byte) for path in paths),
-        base_head_digest="sha256:" + "a" * 64,
-        base_generation=generation,
+        base_head_digest="sha256:" + head_byte * 64,
         state_digest="sha256:" + "b" * 64,
     )
 
@@ -361,13 +360,38 @@ def test_replay_refuses_a_commit_that_wrote_a_different_number_of_blobs():
         )
 
 
+
 def test_replay_compares_content_and_not_the_base_it_ran_against():
+    """Whether two runs saw the same base is the caller's decision, not this check's."""
     from mission_application.evidence_publication import assert_replay_materializes
 
     assert_replay_materializes(
-        recorded=_materialization(["build/manifest.json"], generation=3),
-        prepared=_materialization(["build/manifest.json"], generation=9),
+        recorded=_materialization(["build/manifest.json"], head_byte="3"),
+        prepared=_materialization(["build/manifest.json"], head_byte="9"),
     )
+
+
+def test_replay_treats_nothing_generated_as_a_value():
+    """A recorded null is "nothing was generated", not "nothing to compare"."""
+    from mission_application.evidence_publication import (
+        assert_replay_materializes,
+        materialization_binding,
+    )
+
+    nothing = materialization_binding(
+        bindings=(), base_head_digest="sha256:" + "a" * 64, state_digest="sha256:" + "b" * 64
+    )
+    assert nothing["blobs_digest"] is None
+    assert_replay_materializes(recorded=nothing, prepared=nothing)
+    with pytest.raises(EvidencePublicationError) as excinfo:
+        assert_replay_materializes(
+            recorded=nothing, prepared=_materialization(["build/manifest.json"])
+        )
+    assert excinfo.value.code == "replay-materialization-mismatch"
+    with pytest.raises(EvidencePublicationError):
+        assert_replay_materializes(
+            recorded=_materialization(["build/manifest.json"]), prepared=nothing
+        )
 
 
 def test_replay_refuses_a_record_without_a_materialization():
@@ -643,7 +667,7 @@ def test_operation_reader_refuses_a_materialization_that_is_not_a_binding():
     """
     from mission_application.evidence_publication import read_operation_record
 
-    for broken in (None, "materialized", [], {}, {"blobs": []}, {"blobs": "x"}):
+    for broken in (None, "materialized", [], {}, {"blobs": []}, {"blobs": "x"}, {"blobs_digest": None}):
         document = _operation_document(2)
         document["materialization"] = broken
         with pytest.raises(EvidencePublicationError):
@@ -654,26 +678,36 @@ def test_operation_reader_accepts_a_well_formed_materialization():
     from mission_application.evidence_publication import read_operation_record
 
     parsed = read_operation_record(_operation_document(2))
-    assert parsed["materialization"]["blobs"]
+    assert parsed["materialization"]["blobs_digest"]
 
 
 def test_materialization_must_name_every_part():
     from mission_application.evidence_publication import read_materialization
 
     complete = _materialization(["build/x.json"])
-    for absent in ("base_generation", "base_head_digest", "blobs", "state_digest"):
+    for absent in ("base_head_digest", "blobs_digest", "state_digest"):
         partial = {k: v for k, v in complete.items() if k != absent}
         with pytest.raises(EvidencePublicationError):
             read_materialization(partial)
 
 
-def test_materialization_requires_at_least_one_generated_blob():
-    """An empty blob list would make every replay comparison trivially agree."""
+
+def test_materialization_refuses_the_list_shaped_form():
+    """The older list-shaped materialization is not read as a partial match."""
     from mission_application.evidence_publication import read_materialization
 
     with pytest.raises(EvidencePublicationError) as excinfo:
-        read_materialization(dict(_materialization(["build/x.json"]), blobs=[]))
+        read_materialization(
+            {
+                "base_generation": 1,
+                "base_head_digest": "sha256:" + "a" * 64,
+                "blobs": [],
+                "state_digest": "sha256:" + "b" * 64,
+            }
+        )
     assert excinfo.value.code == "materialization-invalid"
+    with pytest.raises(EvidencePublicationError):
+        read_materialization(dict(_materialization(["build/x.json"]), extra=1))
 
 
 def test_a_broken_materialization_is_refused_when_the_replay_reads_it(tmp_path):
@@ -882,32 +916,18 @@ def test_semantic_command_projects_both_effects_of_an_export():
         assert "digest" not in projected["value"][field]
 
 
-def test_materialization_checks_the_value_of_each_binding_field():
-    """Present-but-null fields used to satisfy the shape check."""
+
+def test_materialization_checks_the_value_of_each_digest_field():
+    """Present-but-wrong fields must not satisfy the shape check."""
     from mission_application.evidence_publication import read_materialization
 
     complete = _materialization(["build/x.json"])
-    for field in ("blob_id", "digest", "kind", "relative_path", "size"):
-        broken = json.loads(json.dumps(complete))
-        broken["blobs"][0][field] = None
-        with pytest.raises(EvidencePublicationError):
-            read_materialization(broken)
+    for field in ("base_head_digest", "blobs_digest", "state_digest"):
+        for bad in ("sha256:short", 12, "", "SHA256:" + "0" * 64):
+            with pytest.raises(EvidencePublicationError):
+                read_materialization(dict(complete, **{field: bad}))
 
 
-def test_materialization_checks_the_binding_container_type():
-    from mission_application.evidence_publication import read_materialization
-
-    broken = _materialization(["build/x.json"])
-    with pytest.raises(EvidencePublicationError):
-        read_materialization(dict(broken, blobs=[["not", "a", "mapping"]]))
-
-
-def test_materialization_checks_the_base_generation_type():
-    from mission_application.evidence_publication import read_materialization
-
-    broken = _materialization(["build/x.json"])
-    with pytest.raises(EvidencePublicationError):
-        read_materialization(dict(broken, base_generation="1"))
 
 
 def test_the_repository_root_name_reaches_every_entry_point():
@@ -1052,14 +1072,16 @@ def test_partition_refuses_a_binding_whose_identifier_does_not_match_its_path():
         semantic_intent_digest(_intent_inputs((forged,)))
 
 
-def test_materialization_refuses_null_base_and_state_digests():
+
+def test_materialization_allows_null_only_where_a_value_can_be_absent():
+    """Genesis has no head and an operation may generate nothing; a state always exists."""
     from mission_application.evidence_publication import read_materialization
 
     complete = _materialization(["build/x.json"])
-    for field in ("base_head_digest", "state_digest"):
-        with pytest.raises(EvidencePublicationError):
-            read_materialization(dict(complete, **{field: None}))
-
+    assert read_materialization(dict(complete, base_head_digest=None))["base_head_digest"] is None
+    assert read_materialization(dict(complete, blobs_digest=None))["blobs_digest"] is None
+    with pytest.raises(EvidencePublicationError):
+        read_materialization(dict(complete, state_digest=None))
 
 
 @pytest.mark.parametrize("command_type", PATH_BEARING_COMMAND_TYPES)
@@ -1097,6 +1119,7 @@ def test_a_command_that_never_names_a_path_is_refused_with_one(command_type):
         assert "must not name" in excinfo.value.detail
 
 
+
 def test_the_writer_cannot_produce_what_the_reader_refuses():
     """A round trip has to hold, or a record is written that cannot be read."""
     from mission_application.evidence_publication import (
@@ -1104,30 +1127,31 @@ def test_the_writer_cannot_produce_what_the_reader_refuses():
         read_materialization,
     )
 
-    for absent in ("base_head_digest", "state_digest"):
-        with pytest.raises(EvidencePublicationError):
-            materialization_binding(
-                bindings=(_binding("build/x.json", "generated"),),
-                base_head_digest=None if absent == "base_head_digest" else "sha256:" + "a" * 64,
-                base_generation=1,
-                state_digest=None if absent == "state_digest" else "sha256:" + "b" * 64,
-            )
+    with pytest.raises(EvidencePublicationError):
+        materialization_binding(
+            bindings=(_binding("build/x.json", "generated"),),
+            base_head_digest="sha256:" + "a" * 64,
+            state_digest=None,
+        )
 
     written = materialization_binding(
         bindings=(_binding("build/x.json", "generated"),),
         base_head_digest="sha256:" + "a" * 64,
-        base_generation=1,
         state_digest="sha256:" + "b" * 64,
     )
     assert read_materialization(written) == written
+    genesis = materialization_binding(
+        bindings=(), base_head_digest=None, state_digest="sha256:" + "b" * 64
+    )
+    assert read_materialization(genesis) == genesis
+
 
 
 def test_a_non_canonical_path_does_not_survive_the_round_trip():
-    """`build//x.json` used to be accepted going out and coming back in."""
+    """`build//x.json` used to be accepted going out; it now digests as its canonical form."""
     from mission_application.evidence_publication import (
         derive_blob_id,
-        materialization_binding,
-        read_materialization,
+        generated_blobs_digest,
     )
 
     binding = {
@@ -1138,14 +1162,8 @@ def test_a_non_canonical_path_does_not_survive_the_round_trip():
         "relative_path": "build//x.json",
         "size": 12,
     }
-    written = materialization_binding(
-        bindings=(binding,),
-        base_head_digest="sha256:" + "a" * 64,
-        base_generation=1,
-        state_digest="sha256:" + "b" * 64,
-    )
-    assert written["blobs"][0]["relative_path"] == "build/x.json"
-    assert read_materialization(written) == written
+    canonical = dict(binding, relative_path="build/x.json")
+    assert generated_blobs_digest((binding,)) == generated_blobs_digest((canonical,))
 
 
 def test_the_repository_passes_its_own_root_name_to_the_reader():
@@ -1166,7 +1184,7 @@ def test_the_repository_passes_its_own_root_name_to_the_reader():
     ],
 )
 def test_the_writer_refuses_each_binding_the_reader_refuses(broken):
-    """Whatever the reader rejects, the writer must reject first."""
+    """A binding the canonical form rejects cannot enter the digest."""
     from mission_application.evidence_publication import materialization_binding
 
     binding = dict(_binding("build/x.json", "generated"), **broken)
@@ -1174,50 +1192,60 @@ def test_the_writer_refuses_each_binding_the_reader_refuses(broken):
         materialization_binding(
             bindings=(binding,),
             base_head_digest="sha256:" + "a" * 64,
-            base_generation=1,
             state_digest="sha256:" + "b" * 64,
         )
 
 
-def test_the_writer_refuses_a_binding_set_with_nothing_generated():
+
+def test_a_binding_set_with_nothing_generated_records_null():
+    """Nothing generated is a recorded value, not a refused record."""
     from mission_application.evidence_publication import materialization_binding
 
-    with pytest.raises(EvidencePublicationError):
-        materialization_binding(
-            bindings=(_binding("input/source.json", "captured"),),
-            base_head_digest="sha256:" + "a" * 64,
-            base_generation=1,
-            state_digest="sha256:" + "b" * 64,
-        )
-
-
-def test_the_reader_normalizes_a_path_the_writer_never_produced():
-    """Records are not always written by this writer.
-
-    The round-trip test cannot reach this: the writer normalizes first, so
-    the reader is only ever handed canonical paths there.  A record edited on
-    disk, or written by an older build, arrives without that guarantee.
-    """
-    from mission_application.evidence_publication import (
-        derive_blob_id,
-        read_materialization,
+    bound = materialization_binding(
+        bindings=(_binding("input/source.json", "captured"),),
+        base_head_digest="sha256:" + "a" * 64,
+        state_digest="sha256:" + "b" * 64,
     )
+    assert bound["blobs_digest"] is None
 
-    record = {
-        "base_generation": 1,
-        "base_head_digest": "sha256:" + "a" * 64,
-        "blobs": [
-            {
-                "blob_id": derive_blob_id("build/x.json"),
-                "digest": "sha256:" + "0" * 64,
-                "kind": "context-manifest",
-                "relative_path": "build//x.json",
-                "size": 12,
-            }
-        ],
-        "state_digest": "sha256:" + "b" * 64,
-    }
-    assert read_materialization(record)["blobs"][0]["relative_path"] == "build/x.json"
+
+
+def test_binding_records_project_every_field_and_the_origin():
+    """One projection feeds every digest, so a binding cannot enter two of them differently."""
+    from mission_application.evidence_publication import binding_records
+    from mission_persistence.local_uow import BlobBinding, VerifiedBlob, VerifiedBlobSet
+
+    captured = VerifiedBlob(
+        BlobBinding("input", "review-input", "input/source.json", "sha256:" + "0" * 64, 1),
+        b"x",
+    )
+    records = binding_records(VerifiedBlobSet((captured,)))
+    assert records == [
+        {
+            "blob_id": "input",
+            "digest": "sha256:" + "0" * 64,
+            "kind": "review-input",
+            "origin": "captured",
+            "relative_path": "input/source.json",
+            "size": 1,
+        }
+    ]
+    assert binding_records(VerifiedBlobSet(())) == []
+
+
+def test_binding_records_refuse_an_origin_outside_the_closed_set():
+    import types
+
+    from mission_application.evidence_publication import binding_records
+
+    binding = types.SimpleNamespace(
+        blob_id="b", kind="k", relative_path="p", digest="sha256:" + "0" * 64, size=1, origin="derived"
+    )
+    with pytest.raises(EvidencePublicationError) as excinfo:
+        binding_records(types.SimpleNamespace(blobs=(types.SimpleNamespace(binding=binding),)))
+    assert excinfo.value.code == "blob-origin-invalid"
+    with pytest.raises(EvidencePublicationError):
+        binding_records(types.SimpleNamespace(blobs=[]))
 
 
 def test_derive_blob_id_refuses_a_non_canonical_path_directly():
