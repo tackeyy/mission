@@ -41,8 +41,15 @@ def _stop_at(point_name):
 def _v1_repository(tmp_path, kind):
     from mission_persistence.fenced_commit import LocalFencedRepository
 
+    source = FIXTURES / kind
+    assert (source / "mission-state" / "operations").is_dir(), (
+        "the v1 fixture repository is missing; the dual-read contracts would pass vacuously"
+    )
     dest = tmp_path / kind
-    shutil.copytree(FIXTURES / kind, dest, symlinks=False)
+    shutil.copytree(source, dest, symlinks=False)
+    # The fixture keeps the repository as ``mission-state``: the real name is
+    # gitignored (``.mission-state/``), so a dotted copy would never reach CI.
+    (dest / "mission-state").rename(dest / ".mission-state")
     for path in dest.rglob("*"):
         os.chmod(path, 0o700 if path.is_dir() else 0o600)
     meta = json.loads((dest / "fixture.json").read_text(encoding="utf-8"))
@@ -397,6 +404,15 @@ class TestLookupBeforePrepare:
             _request(operation_id="never-seen", lease_id=meta["lease_id"], argv=("set", "phase=done"))
         ) is None
 
+    def test_the_lookup_does_not_lay_out_a_repository_that_does_not_exist(self, tmp_path):
+        from mission_persistence.fenced_commit import LocalFencedRepository
+
+        root = tmp_path / "never-created" / ".mission-state"
+        local = LocalFencedRepository(root, clock=_Clock(datetime.now(timezone.utc)), fault_injector=None)
+        request = _request(operation_id="operation-none", lease_id="fixture-lease", argv=("set", "phase=done"))
+        assert local.lookup_operation(request) is None
+        assert not root.exists() and not root.parent.exists()
+
     def test_the_lookup_writes_nothing(self, tmp_path):
         local, repository, meta, _clock = _v1_repository(tmp_path, "committed")
         local.begin(_init_request(meta))  # a normal begin has already laid the directories out
@@ -480,6 +496,17 @@ class TestVersionTwoRecords:
         with pytest.raises(FencedCommitError) as excinfo:
             local.recover("test")
         assert excinfo.value.code == "recovery-ambiguous"
+
+    def test_a_damaged_rolled_back_index_does_not_stand_between_a_record_and_its_replay(self, tmp_path):
+        """The committed record is authoritative; the replay branch does not open the rolled-back index."""
+        from mission_persistence.fenced_commit import OperationReplay
+
+        local, repository, meta, _clock = _v1_repository(tmp_path, "committed")
+        rolled_dir = repository / "transactions" / "resolved-operations" / "rolled-back"
+        path, _record = _operation_record(repository, "test", "operation-init")
+        (rolled_dir / path.name).write_bytes(b"{not json")
+        replay = local.begin(_init_request(meta))
+        assert isinstance(replay, OperationReplay) and replay.record_version == 1
 
     def test_a_finalized_index_of_another_generation_than_the_record_is_a_lineage_mismatch(self, tmp_path):
         """Contract 18: v1 finalized index + v2 operation record."""
@@ -874,8 +901,25 @@ class TestRecordByteLimit:
             largest = int("9" * digits)
         head, operation, limit = self._sizes(largest, null_digests=False)
         assert head <= limit and operation < MAX_OPERATION_BYTES
-        head_at_limit, operation_at_limit, _ = self._sizes(largest, null_digests=False)
-        assert head_at_limit <= limit  # `== MAX_HEAD_BYTES` is accepted too (Low, round 16)
+
+    def test_a_head_exactly_at_its_limit_is_accepted(self):
+        """`len == limit` is accepted (U2 section 3.3); one byte more is not."""
+        from mission_persistence.fenced_commit import (
+            FencedCommitError,
+            HeadRecord,
+            RecordRef,
+            _canonical_bytes,
+            _head_document,
+        )
+
+        digest = "sha256:" + "f" * 64
+        ref = RecordRef(digest, "commits/" + "f" * 64 + ".json", 4096)
+        head = HeadRecord(commit=ref, generation=7, session_id="test", state_generation=ref)
+        encoded = _canonical_bytes(_head_document(head), limit=10**6)
+        assert _canonical_bytes(_head_document(head), limit=len(encoded)) == encoded
+        with pytest.raises(FencedCommitError) as excinfo:
+            _canonical_bytes(_head_document(head), limit=len(encoded) - 1)
+        assert excinfo.value.code == "record-too-large"
 
     def test_a_head_beyond_its_limit_stops_before_the_operation_record(self):
         from mission_persistence.fenced_commit import (

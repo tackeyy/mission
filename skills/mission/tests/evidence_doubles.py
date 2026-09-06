@@ -262,7 +262,8 @@ def in_memory_v5_repository(current, *, replayed=False, replayed_document=None, 
                 commit_digest=ZERO_DIGEST, generation=1,
                 head_digest=ZERO_DIGEST, state_generation_digest=ZERO_DIGEST,
             ),
-            intent_digest=ZERO_DIGEST, record_version=2, materialization=None,
+            intent_digest=ZERO_DIGEST, record_version=2,
+            materialization={"base_head_digest": ZERO_DIGEST, "blobs_digest": None, "state_digest": ZERO_DIGEST},
         )
         if replayed else None
     )

@@ -2004,15 +2004,27 @@ class LocalFencedRepository:
         authority for that).
         """
         validate_execution_request(request)
+        # A repository that has never been laid out holds no operation, and
+        # taking the lock would lay it out.  Answer without touching it.
+        if not (self.root / "operations").is_dir():
+            return None
         with self._lock():
             return self._lookup_operation(request, blobs_final=False)
 
     def _read_resolution_index_unlocked(
-        self, session_id: str, operation_id: str
+        self,
+        session_id: str,
+        operation_id: str,
+        dispositions: tuple[str, ...] = ("rolled-back", "finalized"),
     ) -> dict[str, tuple[int, str]]:
-        """Return ``{disposition: (version, intent_digest)}`` without writing."""
+        """Return ``{disposition: (version, intent_digest)}`` without writing.
+
+        Only the named dispositions are opened: the replay branch reads the
+        finalized index alone, so a damaged rolled-back index cannot stand
+        between a valid operation record and the caller.
+        """
         found: dict[str, tuple[int, str]] = {}
-        for disposition in ("rolled-back", "finalized"):
+        for disposition in dispositions:
             path = self._resolved_operation_path(session_id, operation_id, disposition)
             with self._pinned_directory(
                 "transactions", "resolved-operations", disposition
@@ -2053,7 +2065,9 @@ class LocalFencedRepository:
         trace: the committed record is authoritative over it (U3 section 6),
         so it is not consulted here.
         """
-        found = self._read_resolution_index_unlocked(request.session_id, request.operation_id)
+        found = self._read_resolution_index_unlocked(
+            request.session_id, request.operation_id, dispositions=("finalized",)
+        )
         finalized = found.get("finalized")
         if finalized is not None and finalized != (replay.record_version, replay.intent_digest):
             raise FencedCommitError(
