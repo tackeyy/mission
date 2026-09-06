@@ -31,11 +31,18 @@ INPUT=$(cat)
 #
 # 上限が 8 なのはホスト側の hook timeout が 10 秒だからで、それを超える値を受けると
 # ホストが先に切って guard の block が出ない。
+# #754: 呼び出し側が渡した元の値を、正規化する前にそのまま退避する。Python 側が
+# 「1 や 2 を頼まれて 8 に倒した」ことを出力に載せるための材料で、hook はここでも
+# 値を読まず判断もしない（文字列を運ぶだけ）。外部から同名の変数が来ていても上書きする。
+MISSION_STATE_TIMEOUT_RAW="${MISSION_STATE_TIMEOUT-}"
 MISSION_STATE_TIMEOUT="${MISSION_STATE_TIMEOUT:-8}"
+# 1 と 2 は受理しない（#754）。総予算から予約 2 秒を引いた実行枠が 0 以下になり、
+# 常に block を生むため。既定の 8 へ倒し、退避した元の値で観測可能にする。
 case "$MISSION_STATE_TIMEOUT" in
-  1|2|3|4|5|6|7|8) ;;
+  3|4|5|6|7|8) ;;
   *) MISSION_STATE_TIMEOUT=8 ;;
 esac
+export MISSION_STATE_TIMEOUT_RAW
 # 内側の上限が同じ値を見られるようにする。
 export MISSION_STATE_TIMEOUT
 
