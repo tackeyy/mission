@@ -106,7 +106,7 @@ def _self_uses(source: str):
     names reached through ``self.<name>`` or ``getattr(self, "<literal>", ...)``,
     and ``unsupported`` is every other appearance of ``self`` -- an alias, a
     hand-off to a function, ``getattr(self, expr)`` with a non-literal first
-    argument, ``hasattr`` / ``setattr`` -- as ``(lineno, text)`` pairs.  A
+    argument, ``hasattr`` / ``setattr`` -- as ``(lineno, col_offset)`` pairs.  A
     regex cannot tell ``getattr(self, "_x")`` from ``getattr(self, "_x" + y)``;
     the parser can, which is why this is not a regex.
     """

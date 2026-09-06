@@ -108,6 +108,52 @@ def test_the_surface_list_equals_what_the_executor_reads():
     assert executor_surface_from_source() == frozenset(V5_EXECUTOR_SURFACE)
 
 
+def test_the_in_memory_double_defines_every_instance_attribute_the_executor_reads():
+    """Methods come with the class; instance state does not, so the double sets it.
+
+    Every non-callable name in the surface has to be instance state the
+    double assigns, and every assigned name has to exist on production.
+    """
+    from mission_persistence.legacy_v4 import V5CompatibilityRepository
+
+    double = evidence_doubles.in_memory_v5_repository({"phase": "executing"})
+    for name in V5_EXECUTOR_SURFACE:
+        assert hasattr(double, name), f"double lacks {name}"
+    # Resolve through the class so descriptors (staticmethod, property) are
+    # seen as what they produce; the raw entry in ``vars`` is not callable for
+    # a staticmethod before Python 3.10, and the project still declares 3.9.
+    raw = vars(V5CompatibilityRepository)
+    non_callable = [
+        name for name in V5_EXECUTOR_SURFACE
+        if not isinstance(raw.get(name), property)
+        and not callable(getattr(V5CompatibilityRepository, name, None))
+    ]
+    for name in non_callable:
+        assert name in V5_EXECUTOR_INSTANCE_STATE, (
+            f"{name} is instance state the executor reads; the double must set it"
+        )
+    init_source = inspect.getsource(V5CompatibilityRepository.__init__)
+    for name in V5_EXECUTOR_INSTANCE_STATE:
+        assert re.search(rf"\bself\.{re.escape(name)}\b", init_source), (
+            f"production __init__ no longer sets {name}; drop it from the double too"
+        )
+        assert hasattr(double, name), f"double lacks instance state {name}"
+
+
+def test_no_test_module_keeps_a_private_copy_of_the_doubles():
+    """The copies are what drifted; the shared module is the only definition."""
+    from pathlib import Path
+
+    tests = Path(__file__).resolve().parent
+    offenders = []
+    for path in sorted(tests.glob("test_*.py")):
+        if path.name == Path(__file__).name:
+            continue  # this file names the patterns it looks for
+        text = path.read_text(encoding="utf-8")
+        if "class _FakeFencedRepository" in text or "def _in_memory_v5_repository" in text:
+            offenders.append(path.name)
+
+
 def test_the_executor_has_no_use_of_self_the_derivation_cannot_see():
     """Everything ``self`` does in the executor is one of the two derived spellings.
 
