@@ -227,9 +227,12 @@ def _import_time_lookup_is_dynamic(body) -> bool:
     unchanged, so that is not a safeguard either.
 
     Rooting every function unconditionally would close all of these, at the
-    cost of putting functions nobody calls in the budget for good (462 -> 480
-    in this repository), which stops the number from measuring how thin the
-    adapter is.  Picking these forms out *without* that over-count needs
+    cost of admitting whatever the reachability pass cannot follow (462 ->
+    480 here).  Of those 18, 8 are in fact called -- through class methods,
+    which this pass does not follow -- and 10 have no reference outside
+    their own definition in ``skills/mission/bin`` and ``skills/mission/lib``
+    (which is not proof that nothing calls them).  For the latter the count
+    drifts away from measuring how thin the adapter is.  Picking these forms out *without* that over-count needs
     value tracking, which this name-based pass does not do.  A narrower AST
     pass that follows aliases, constants and class methods could resolve
     them; where to stop following is a separate design question, which is
