@@ -128,12 +128,18 @@ def _handler_roots(tree: ast.Module, functions: dict[str, ast.AST]) -> set[str]:
     # name any more.  Without this, injecting a helper rather than calling it
     # takes it out of the budget: the count falls because the guard stopped
     # looking, not because the adapter got thinner.
+    #
+    # Every module-level statement counts, not only an assignment: a bare
+    # ``register(_helper)`` hands the helper over just as effectively, and so
+    # does one inside a module-level ``if`` or ``for``.  Definitions and
+    # imports are skipped because they introduce names rather than run them.
     for node in tree.body:
-        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+        if isinstance(
+            node,
+            (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Import, ast.ImportFrom),
+        ):
             continue
-        if node.value is None:
-            continue
-        for inner in ast.walk(node.value):
+        for inner in ast.walk(node):
             if (
                 isinstance(inner, ast.Name)
                 and isinstance(inner.ctx, ast.Load)

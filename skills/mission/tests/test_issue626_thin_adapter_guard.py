@@ -538,6 +538,55 @@ def cmd_show(args):
     assert "_renders" in functions
 
 
+@pytest.mark.parametrize(
+    "wiring",
+    [
+        "SERVICES = _services(_renders)",
+        "register(_renders)",
+        "if True:\n    register(_renders)",
+        "for _ in (1,):\n    register(_renders)",
+    ],
+)
+def test_every_module_level_handover_keeps_the_helper_in_the_budget(wiring):
+    """An assignment is not the only way to hand a helper over."""
+    guard = _load_guard_module()
+    source = (
+        "def _renders(data):\n"
+        "    return data[\"value\"] + 1\n"
+        "\n\n"
+        "def _services(render):\n"
+        "    return render\n"
+        "\n\n"
+        "def register(render):\n"
+        "    return render\n"
+        "\n\n"
+        + wiring
+        + "\n\n\n"
+        "def cmd_show(args):\n"
+        "    print(args)\n"
+    )
+    functions = {
+        violation.function for violation in guard.scan_source(source, path="x.py")
+    }
+    assert "_renders" in functions, wiring
+
+
+def test_a_definition_alone_does_not_make_a_function_reachable():
+    """Only running code counts; a definition introduces a name."""
+    guard = _load_guard_module()
+    source = (
+        "def _never_used(data):\n"
+        "    return data[\"value\"] + 1\n"
+        "\n\n"
+        "def cmd_show(args):\n"
+        "    print(args)\n"
+    )
+    functions = {
+        violation.function for violation in guard.scan_source(source, path="x.py")
+    }
+    assert "_never_used" not in functions
+
+
 def test_the_base_is_measured_with_the_rules_of_this_run(tmp_path, monkeypatch):
     """A widened rule must not read as violations somebody just added.
 
