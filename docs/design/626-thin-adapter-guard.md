@@ -199,9 +199,16 @@ generic error-to-output mapping だけを許す。
 | import 時の式から呼ばれた関数の**中**での動的 lookup（`def _wire(): return globals()["_helper"]` を `SERVICES = _wire()` で呼ぶ） | 入らない | **`dispatch.dynamic` として違反になる。** `_wire` は import 時の式が名前で参照するので root になり、その本体が走査される |
 | class の method 経由の受け渡し（`class Wiring: @staticmethod def render(...): return _helper(...)` を注入） | 入らない | **違反にならない。** class body の**式**は import 時として拾うが、method の**本体**は関数集合にも入らず辿られない |
 
-したがって 2 行目は、helper の計上こそ落ちるものの、**予算が黙って縮むことはない**
-（`dispatch.dynamic` が 1 件増えるため、ratchet が気づく）。1 行目と 3 行目には
-その歯止めが無い。
+**3 形とも、予算を黙って縮められる。** 2 行目の `dispatch.dynamic` は歯止めにならない。
+新しく `globals()` を書けば違反が 1 件増えて ratchet が止まるが、**既にある動的 lookup の
+対象を差し替えるだけなら件数は変わらない**。実測: base で `_helper` を直接参照し、
+`_wire` が別の対象へ `globals()` を 1 件持つ状態から、`_wire` の対象を `_helper` へ替えると、
+`_helper` は予算から消えるのに `dispatch.dynamic` は 1 件のままで、`compare_baselines()`
+は差分なしを返す。
+
+この 3 形を塞ぐには値の追跡が要り、AST の走査では届かない。**guard の目的は refactor が
+黙って予算を縮めるのを止めることで、回避を試みる相手への防壁ではない**——その限界が
+最も明確に出るのがここである。
 
 逆向きの誤差（数え過ぎ）も残る。未使用の lambda と generator 式の本体、`if False:` の
 下の module 直下文、注釈を遅延する module の注釈は、実行されなくても到達扱いになる。

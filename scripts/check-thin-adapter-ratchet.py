@@ -221,10 +221,10 @@ def _import_time_lookup_is_dynamic(body) -> bool:
     route through ``sys.modules`` is not caught.  Neither is a lookup one
     frame deeper -- only import-time expressions are scanned, so
     ``def _wire(): return globals()["_helper"]`` called as ``SERVICES =
-    _wire()`` does not put ``_helper`` in the budget.  That last one still
-    leaves a mark: ``_wire`` is named at import time, so it is scanned and
-    its ``globals()`` is reported as ``dispatch.dynamic``.  The budget does
-    not shrink silently.  An alias or a class method leaves no such mark.  This guard exists to stop a
+    _wire()`` does not put ``_helper`` in the budget.  Writing a *new*
+    ``globals()`` does add a ``dispatch.dynamic`` the ratchet would stop on,
+    but pointing an *existing* one at a different helper leaves the count
+    unchanged, so that is not a safeguard either.  This guard exists to stop a
     refactor from quietly shrinking the budget, not to withstand someone
     arranging to evade it; closing every indirection would mean tracking
     values, which an AST pass cannot do.  A reviewer reading such code is the
