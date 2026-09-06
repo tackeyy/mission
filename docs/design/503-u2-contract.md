@@ -616,13 +616,14 @@ The normalized intent is the exact closed object:
 ```
 
 Only bindings whose `origin` is `captured` appear in `blobs`; `origin` itself
-is not in the envelope. `command` is the semantic projection: effect claims
-lose their generated `digest` / `size`, and a **typed kernel command**
-(`mission-kernel-command/1`) additionally loses `at`, because a crash retry
-runs with a new clock and the committed record is what answers with the time
-(#747 P2, decision D3). Any other document is opaque to the projection and
-keeps every field: a name it happens to share with a kernel field may be
-exactly what distinguishes two requests.
+is not in the envelope. `command` is the semantic projection, and the
+projection applies **only to a typed kernel command**
+(`mission-kernel-command/1`): its effect claims lose their generated `digest` /
+`size`, and its `at` is dropped, because a crash retry runs with a new clock
+and the committed record is what answers with the time (#747 P2, decision D3).
+Every other document is opaque and keeps every field, whatever its `type`
+says: a field it happens to name like a kernel field may be exactly what
+distinguishes two requests, and dropping it would let one replay the other.
 
 `command` is the thawed value of the exact K1 canonical command and is encoded
 again only as part of the complete canonical envelope. Each blob entry is

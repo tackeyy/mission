@@ -260,6 +260,27 @@ class TestSemanticIdentity:
             semantic_intent_digest(dict(inputs, command=compat("2030-01-01T00:00:09Z")))
         )
 
+        # An opaque document is opaque whatever it calls itself: borrowing a
+        # kernel command's type name must not hand its fields to the claim
+        # projection, which would drop the very bytes that tell two requests
+        # apart.
+        def borrowed(digest_byte):
+            claim = {
+                "kind": "artifact", "target": "artifact.md",
+                "publication_path": "artifacts/artifact.md",
+                "digest": "sha256:" + digest_byte * 64, "size": 12,
+            }
+            return {
+                "schema": "mission-command-intent/1",
+                "type": "export-artifact",
+                "value": {"artifact_effect": dict(claim), "export_effect": dict(claim)},
+            }
+
+        assert project_semantic_command(borrowed("0")) == borrowed("0")
+        assert semantic_intent_digest(dict(inputs, command=borrowed("0"))) != (
+            semantic_intent_digest(dict(inputs, command=borrowed("1")))
+        )
+
     def test_a_captured_blob_is_part_of_the_identity(self):
         from mission_persistence.local_uow import BlobBinding, VerifiedBlob, VerifiedBlobSet
 

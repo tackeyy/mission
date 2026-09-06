@@ -322,22 +322,25 @@ def project_semantic_command(
         raise EvidencePublicationError(
             "command-invalid", "encoded command must be an object"
         )
+    if command.get("schema") != TYPED_COMMAND_SCHEMA:
+        # Only a typed kernel command has a known shape.  Any other document
+        # is opaque: its ``type`` may name anything, and a field of its own
+        # that resembles an effect claim or a timestamp may be exactly what
+        # distinguishes two requests.  Projecting by name alone would drop it
+        # and let one replay the other.
+        return command
     effect_fields = EFFECT_FIELDS_BY_COMMAND_TYPE.get(command.get("type"))
     value = command.get("value")
     if not isinstance(value, dict):
         if not effect_fields:
-            # A command with no value has nothing to project; compat
-            # documents reach this branch.
+            # A typed command with no object value has nothing to project.
             return command
         raise EvidencePublicationError(
             "command-invalid", "encoded command value must be an object"
         )
-    if command.get("schema") == TYPED_COMMAND_SCHEMA:
-        projected_value = {
-            name: item for name, item in value.items() if name != SEMANTIC_TIME_FIELD
-        }
-    else:
-        projected_value = dict(value)
+    projected_value = {
+        name: item for name, item in value.items() if name != SEMANTIC_TIME_FIELD
+    }
     if not effect_fields:
         return dict(command, value=projected_value)
     for field in effect_fields:
