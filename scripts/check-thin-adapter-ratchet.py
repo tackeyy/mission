@@ -117,34 +117,77 @@ def _top_level_functions(tree: ast.Module) -> dict[str, ast.AST]:
     }
 
 
-def _names_run_at_import(body, functions: dict[str, ast.AST]):
-    """Yield every top-level function named by code that runs at import time.
+_DYNAMIC_LOOKUP_NAMES = {"globals", "locals", "vars"}
+
+
+def _import_time_expressions(body):
+    """Yield the expressions that run when the module is imported.
 
     A definition introduces a name rather than running it, so its body is not
     import-time code -- but its decorators and default arguments are, and so
-    is a class body.  Missing those would leave a way to hand a helper over
-    without the guard noticing.
+    is a class body.  A nested definition inside a module-level ``if`` is
+    skipped for the same reason a top-level one is: nothing has called it.
     """
     for node in body:
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            continue
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            executed = list(node.decorator_list)
-            executed.extend(item for item in node.args.defaults)
-            executed.extend(item for item in node.args.kw_defaults if item is not None)
-        elif isinstance(node, ast.ClassDef):
-            executed = [*node.decorator_list, *node.bases, *node.keywords]
-            yield from _names_run_at_import(node.body, functions)
-        else:
-            executed = [node]
-        for statement in executed:
-            for inner in ast.walk(statement):
-                if (
-                    isinstance(inner, ast.Name)
-                    and isinstance(inner.ctx, ast.Load)
-                    and inner.id in functions
-                ):
-                    yield inner.id
+        yield from _import_time_expressions_of(node)
+
+
+def _import_time_expressions_of(node: ast.AST):
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        return
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        yield from node.decorator_list
+        yield from node.args.defaults
+        yield from (default for default in node.args.kw_defaults if default is not None)
+        return
+    if isinstance(node, ast.ClassDef):
+        yield from node.decorator_list
+        yield from node.bases
+        yield from (keyword.value for keyword in node.keywords)
+        yield from _import_time_expressions(node.body)
+        return
+    for _field, value in ast.iter_fields(node):
+        for item in value if isinstance(value, list) else [value]:
+            if isinstance(item, ast.stmt):
+                yield from _import_time_expressions_of(item)
+            elif isinstance(item, ast.ExceptHandler):
+                yield from _import_time_expressions(item.body)
+                if item.type is not None:
+                    yield item.type
+            elif isinstance(item, ast.AST):
+                yield item
+
+
+def _names_run_at_import(body, functions: dict[str, ast.AST]):
+    """Yield every top-level function named by code that runs at import time."""
+    for expression in _import_time_expressions(body):
+        for inner in ast.walk(expression):
+            if (
+                isinstance(inner, ast.Name)
+                and isinstance(inner.ctx, ast.Load)
+                and inner.id in functions
+            ):
+                yield inner.id
+
+
+def _import_time_lookup_is_dynamic(body) -> bool:
+    """Say whether import-time code reaches a function by a computed name.
+
+    ``Services(globals()["_helper"])`` hands the helper over without naming
+    it, so no name-based search can find it.  Rather than let that take the
+    helper out of the budget, every function is treated as reachable.
+    """
+    for expression in _import_time_expressions(body):
+        for inner in ast.walk(expression):
+            if not isinstance(inner, ast.Call) or not isinstance(inner.func, ast.Name):
+                continue
+            if inner.func.id in _DYNAMIC_LOOKUP_NAMES:
+                return True
+            if inner.func.id == "getattr" and (
+                len(inner.args) < 2 or not isinstance(inner.args[1], ast.Constant)
+            ):
+                return True
+    return False
 
 
 def _handler_roots(tree: ast.Module, functions: dict[str, ast.AST]) -> set[str]:
@@ -164,8 +207,12 @@ def _handler_roots(tree: ast.Module, functions: dict[str, ast.AST]) -> set[str]:
     # does one inside a module-level ``if`` or ``for``, a decorator, a default
     # argument, or a class body.  What is skipped is a *function body*, which
     # runs only when called and is scanned as its own function.
-    for name in _names_run_at_import(tree.body, functions):
-        roots.add(name)
+    if _import_time_lookup_is_dynamic(tree.body):
+        # A computed name cannot be searched for; keeping everything in the
+        # budget is the fail-closed answer.
+        roots.update(functions)
+    else:
+        roots.update(_names_run_at_import(tree.body, functions))
     for function in functions.values():
         for node in ast.walk(function):
             if not isinstance(node, ast.Call):

@@ -574,6 +574,58 @@ def test_every_module_level_handover_keeps_the_helper_in_the_budget(wiring):
     assert "_renders" in functions, wiring
 
 
+def test_a_definition_nested_in_import_time_code_is_still_only_a_definition():
+    """`if True: def _unused(): ...` defines; it does not call."""
+    guard = _load_guard_module()
+    source = (
+        "def _helper(data):\n"
+        "    return data[\"value\"] + 1\n"
+        "\n\n"
+        "if True:\n"
+        "    def _unused():\n"
+        "        return _helper\n"
+        "\n\n"
+        "def cmd_show(args):\n"
+        "    print(args)\n"
+    )
+    functions = {
+        violation.function for violation in guard.scan_source(source, path="x.py")
+    }
+    assert "_helper" not in functions
+
+
+@pytest.mark.parametrize(
+    "wiring",
+    [
+        'SERVICES = _services(globals()["_renders"])',
+        "SERVICES = _services(getattr(SOME, name))",
+        "SERVICES = _services(vars()[name])",
+    ],
+)
+def test_a_computed_name_at_import_time_keeps_everything_in_the_budget(wiring):
+    """A name that is not written down cannot be searched for; fail closed."""
+    guard = _load_guard_module()
+    source = (
+        "SOME = None\n"
+        "name = \"_renders\"\n"
+        "\n\n"
+        "def _renders(data):\n"
+        "    return data[\"value\"] + 1\n"
+        "\n\n"
+        "def _services(render):\n"
+        "    return render\n"
+        "\n\n"
+        + wiring
+        + "\n\n\n"
+        "def cmd_show(args):\n"
+        "    print(args)\n"
+    )
+    functions = {
+        violation.function for violation in guard.scan_source(source, path="x.py")
+    }
+    assert "_renders" in functions, wiring
+
+
 def test_a_definition_alone_does_not_make_a_function_reachable():
     """Only running code counts; a definition introduces a name."""
     guard = _load_guard_module()
