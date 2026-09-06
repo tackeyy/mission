@@ -287,7 +287,13 @@ def _partition_bindings(
 # The moment the caller asked is not what makes an operation the operation
 # it is: a crash retry runs in a new process with a new clock, and the
 # committed record is what answers with the time (#747 P2, decision D3).
+#
+# Only a typed kernel command is known to carry the operation's own
+# timestamp under this name.  Any other document is opaque here, and a
+# field that merely shares the name may be what distinguishes two
+# requests; dropping it there would let one replay the other.
 SEMANTIC_TIME_FIELD = "at"
+TYPED_COMMAND_SCHEMA = "mission-kernel-command/1"
 PATH_BEARING_COMMAND_TYPES = frozenset(
     {"generate-claims-ledger", "generate-context-manifest"}
 )
@@ -320,15 +326,18 @@ def project_semantic_command(
     value = command.get("value")
     if not isinstance(value, dict):
         if not effect_fields:
-            # A command with no value carries no time either; compat
+            # A command with no value has nothing to project; compat
             # documents reach this branch.
             return command
         raise EvidencePublicationError(
             "command-invalid", "encoded command value must be an object"
         )
-    projected_value = {
-        name: item for name, item in value.items() if name != SEMANTIC_TIME_FIELD
-    }
+    if command.get("schema") == TYPED_COMMAND_SCHEMA:
+        projected_value = {
+            name: item for name, item in value.items() if name != SEMANTIC_TIME_FIELD
+        }
+    else:
+        projected_value = dict(value)
     if not effect_fields:
         return dict(command, value=projected_value)
     for field in effect_fields:
@@ -466,6 +475,12 @@ def assert_replay_materializes(*, recorded, prepared: dict) -> None:
     recorded ``None`` is "nothing was generated", so a run that prepared
     something against it does not agree.  The base a run saw is not compared
     here; the caller decides whether the two runs saw the same base.
+
+    "Generated" means what the request carries as a generated binding.  A
+    route whose effects are not bindings yet -- artifact and progress,
+    until #747 items 3a and 3b -- records ``None`` on both sides, so this
+    comparison says nothing about its produced content.  It does not
+    weaken those routes either: they had no such comparison before.
     """
     if not isinstance(recorded, dict) or "blobs_digest" not in recorded:
         raise EvidencePublicationError(

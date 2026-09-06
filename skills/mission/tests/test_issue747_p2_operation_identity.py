@@ -23,6 +23,7 @@ from mission_kernel.json_codec import decode_json_object
 
 from .test_issue503_fenced_commit import _Clock, _commit_cli_init, _parse_time, _request
 
+AT = "2030-01-01T00:00:00Z"
 FIXTURES = Path(__file__).parent / "fixtures" / "issue747_p2_v1_records"
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -236,6 +237,28 @@ class TestSemanticIdentity:
         projected = project_semantic_command(exported)
         assert "at" not in projected["value"]
         assert "digest" not in projected["value"]["artifact_effect"]
+
+    def test_only_a_typed_kernel_command_loses_its_timestamp(self):
+        """An opaque document may use the same name for something that decides identity."""
+        from mission_application.evidence_publication import project_semantic_command, semantic_intent_digest
+
+        inputs = {
+            "session_id": "s", "lease_owner_session_id": "s", "operation_id": "op", "bindings": (),
+        }
+
+        def compat(at):
+            return {
+                "arguments": {"at": at},
+                "schema": "mission-command-intent/1",
+                "type": "compatibility-mutation",
+                "value": {"at": at},
+            }
+
+        projected = project_semantic_command(compat("2030-01-01T00:00:00Z"))
+        assert projected["value"]["at"] == "2030-01-01T00:00:00Z"
+        assert semantic_intent_digest(dict(inputs, command=compat("2030-01-01T00:00:00Z"))) != (
+            semantic_intent_digest(dict(inputs, command=compat("2030-01-01T00:00:09Z")))
+        )
 
     def test_a_captured_blob_is_part_of_the_identity(self):
         from mission_persistence.local_uow import BlobBinding, VerifiedBlob, VerifiedBlobSet
@@ -492,6 +515,19 @@ class TestLookupBeforePrepare:
         assert partial_local.lookup_operation(request) is None
         assert sorted(p.name for p in partial.iterdir()) == ["operations"]
 
+    def test_a_damaged_layout_entry_is_not_reported_as_empty(self, tmp_path):
+        """A lock that is a directory is damage, not an absent repository."""
+        from mission_persistence.fenced_commit import FencedCommitError, LocalFencedRepository
+
+        root = tmp_path / "damaged" / ".mission-state"
+        (root / "operations").mkdir(parents=True)
+        (root / ".state.lock").mkdir()
+        local = LocalFencedRepository(root, clock=_Clock(datetime.now(timezone.utc)), fault_injector=None)
+        request = _request(operation_id="operation-none", lease_id="fixture-lease", argv=("set", "phase=done"))
+        with pytest.raises(FencedCommitError) as excinfo:
+            local.lookup_operation(request)
+        assert excinfo.value.code == "repository-invalid"
+
     def test_a_root_that_cannot_be_inspected_is_not_reported_as_empty(self, tmp_path):
         """Answering "no operation" on an I/O failure would hide that it ran."""
         from mission_persistence.fenced_commit import FencedCommitError, LocalFencedRepository
@@ -542,6 +578,44 @@ class TestLookupBeforePrepare:
 # --------------------------------------------------------------------------
 # Contract 3 / 10: version-two records and their recovery
 # --------------------------------------------------------------------------
+
+
+class TestGeneratedContentCoverage:
+    """What ``blobs_digest`` does and does not cover, on the production path."""
+
+    def _artifact_state(self):
+        from mission_application.artifact import prepare_artifact_init, prepare_artifact_append
+
+        render = lambda _state, _artifact: b"# report\n"
+        initialised = prepare_artifact_init(
+            {"mission": "m", "phase": "executing", "session_id": "test", "loop_active": True},
+            now=AT, artifact_path="artifact.md", format="markdown", title="t",
+            redaction_status="unchecked", required_for_pass=False, render=render,
+        )
+        return initialised
+
+    def test_an_artifact_operation_carries_no_generated_binding_yet(self):
+        """Items 3a / 3b move these onto the blob route; until then the digest is null.
+
+        Pinning it here keeps the boundary visible: a replay of an artifact
+        operation is not asked to prove its produced bytes, which is the
+        same coverage the route had before the materialization existed.
+        """
+        from mission_application.evidence_publication import binding_records, generated_blobs_digest
+        from mission_persistence.evidence_order import blob_set_from_effects
+
+        prepared = self._artifact_state()
+        blobs = blob_set_from_effects(prepared.effects, prepared.command)
+        assert prepared.effects, "the artifact operation does produce an effect"
+        assert blobs.blobs == (), "but it is not a binding the request carries yet"
+        assert generated_blobs_digest(binding_records(blobs)) is None
+
+    def test_a_route_that_does_carry_bindings_is_compared(self):
+        from mission_application.evidence_publication import binding_records, generated_blobs_digest
+
+        one = generated_blobs_digest(binding_records(_generated_blob_set(b"one\n")))
+        other = generated_blobs_digest(binding_records(_generated_blob_set(b"other\n")))
+        assert one is not None and one != other
 
 
 class TestVersionTwoRecords:

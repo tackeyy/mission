@@ -1501,7 +1501,12 @@ class LocalFencedRepository:
                     "repository-invalid", "repository cannot be inspected safely"
                 ) from exc
             if not is_expected_kind(metadata.st_mode):
-                return False
+                # Present but not what it must be: that is a damaged
+                # repository, and answering "no operation" would report
+                # damage as an operation that never ran.
+                raise FencedCommitError(
+                    "repository-invalid", "repository layout entry is not the expected kind"
+                )
         return True
 
     def _ensure_layout(self) -> None:

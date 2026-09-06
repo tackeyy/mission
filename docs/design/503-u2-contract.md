@@ -516,6 +516,13 @@ operation generated nothing (a value, compared as an empty set). The base
 generation is not repeated; it is `result.generation - 1`. Generation 1
 carries no materialization and its replay is never asked to prove its bytes.
 
+`blobs_digest` covers exactly what the request carries as generated
+bindings. Routes whose effects do not yet become bindings -- artifact and
+progress, until #747 items 3a and 3b move them onto the blob route --
+record `null` and their produced content is therefore **not** compared on
+replay. That is the same coverage those routes had before generation 2;
+the materialization neither adds nor removes protection there.
+
 Exact required keys:
 
 ```json
@@ -609,8 +616,13 @@ The normalized intent is the exact closed object:
 ```
 
 Only bindings whose `origin` is `captured` appear in `blobs`; `origin` itself
-is not in the envelope. `command` is the semantic projection (effect claims
-without their generated `digest` / `size`).
+is not in the envelope. `command` is the semantic projection: effect claims
+lose their generated `digest` / `size`, and a **typed kernel command**
+(`mission-kernel-command/1`) additionally loses `at`, because a crash retry
+runs with a new clock and the committed record is what answers with the time
+(#747 P2, decision D3). Any other document is opaque to the projection and
+keeps every field: a name it happens to share with a kernel field may be
+exactly what distinguishes two requests.
 
 `command` is the thawed value of the exact K1 canonical command and is encoded
 again only as part of the complete canonical envelope. Each blob entry is
