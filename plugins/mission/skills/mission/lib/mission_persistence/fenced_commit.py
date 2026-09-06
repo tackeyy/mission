@@ -286,6 +286,11 @@ class _PinnedProjectionTarget:
         return self.identities[-1]
 
 
+# #747 item 6: a replay whose committed generation GC has already removed.  Not a
+# concurrency outcome and not corruption: the operation completed, its result can
+# no longer be reconstructed.  Reported as an expected gate by the CLI.
+OPERATION_HISTORY_COLLECTED = "operation-history-collected"
+
 PRECONDITION_CAS_CODE = "head-cas-mismatch"
 FINAL_AUTHORITY_CAS_CODE = "final-authority-cas-mismatch"
 RETRYABLE_CAS_CODES = frozenset({PRECONDITION_CAS_CODE})
@@ -1646,20 +1651,9 @@ class LocalFencedRepository:
         ):
             raise FencedCommitError("lineage-mismatch", "head and commit lineage differ")
         manifest_bytes = self._read_exact(head.state_generation, limit=STATE_LIMIT)
-        state_ref, effects = self._manifest_records(manifest_bytes)
-        if state_ref != commit.state or effects != commit.effects:
-            raise FencedCommitError("lineage-mismatch", "commit and generation manifest differ")
-        state_bytes = self._read_exact(state_ref, limit=STATE_LIMIT)
-        try:
-            state = decode_mission_state(state_bytes)
-        except Exception as exc:
-            raise FencedCommitError(getattr(exc, "code", "record-invalid"), "state generation is invalid") from exc
-        if state.identity.session_id is not None and state.identity.session_id != session_id:
-            raise FencedCommitError("lineage-mismatch", "state session identity differs")
-        if not isinstance(state.lease, FencedLease) or state.lease.fencing_epoch != commit.fencing_epoch:
-            raise FencedCommitError("lineage-mismatch", "state lease fence differs from commit")
-        for effect in effects:
-            self._read_exact(RecordRef(effect.digest, effect.object, effect.size), limit=STATE_LIMIT)
+        state, state_bytes = self._verify_generation_lineage_unlocked(
+            session_id, commit, manifest_bytes
+        )
         result = CommitResult(
             commit_digest=head.commit.digest,
             generation=head.generation,
@@ -1676,6 +1670,93 @@ class LocalFencedRepository:
             head_digest=head_digest,
             result=result,
         )
+
+    def _verify_generation_lineage_unlocked(
+        self, session_id: str, commit: CommitRecord, manifest_bytes: bytes
+    ) -> tuple[MissionState, bytes]:
+        """Check commit -> manifest -> state -> effects and return the state.
+
+        Shared by the head reader and the commit reader (#747 item 6) so both
+        apply the same checks in the same order; a reader that started from a
+        commit must not be weaker than the one that starts from the head.
+        """
+        state_ref, effects = self._manifest_records(manifest_bytes)
+        if state_ref != commit.state or effects != commit.effects:
+            raise FencedCommitError("lineage-mismatch", "commit and generation manifest differ")
+        state_bytes = self._read_exact(state_ref, limit=STATE_LIMIT)
+        try:
+            state = decode_mission_state(state_bytes)
+        except Exception as exc:
+            raise FencedCommitError(getattr(exc, "code", "record-invalid"), "state generation is invalid") from exc
+        if state.identity.session_id is not None and state.identity.session_id != session_id:
+            raise FencedCommitError("lineage-mismatch", "state session identity differs")
+        if not isinstance(state.lease, FencedLease) or state.lease.fencing_epoch != commit.fencing_epoch:
+            raise FencedCommitError("lineage-mismatch", "state lease fence differs from commit")
+        for effect in effects:
+            self._read_exact(RecordRef(effect.digest, effect.object, effect.size), limit=STATE_LIMIT)
+        return state, state_bytes
+
+    def read_operation_state(
+        self,
+        result: CommitResult,
+        *,
+        session_id: str,
+        operation_id: str,
+        intent_digest: str,
+    ) -> MissionState:
+        """Return the state the operation behind ``result`` committed (#747 item 6).
+
+        A replay returns the ``CommitResult`` recorded for the operation; this
+        reads that commit back so the caller can reconstruct the result of the
+        *original* run rather than of whatever the head holds now.  The commit
+        is verified against the recorded result, the request identity, and the
+        head it produced (rebuilt from the commit, exactly as GC does), then
+        the same commit -> manifest -> state -> effects checks as the head
+        reader apply.
+
+        Retention is not promised.  GC removes generation manifests; when the
+        manifest is gone the failure is ``operation-history-collected`` so the
+        caller can tell "kept no longer" from corruption.  A missing commit,
+        state, or effect object is corruption and stays ``record-missing``.
+        Read-only: nothing is written, no identifier is minted.
+        """
+        session_id = _session_id(session_id)
+        _token(operation_id, "operation_id")
+        _digest(intent_digest, "intent_digest")
+        with self._lock():
+            name = result.commit_digest.removeprefix("sha256:") + ".json"
+            commit, prior_head_digest = self._gc_commit_fact_unlocked(name)
+            if (
+                commit.session_id != session_id
+                or commit.operation_id != operation_id
+                or commit.intent_digest != intent_digest
+                or commit.target_generation != result.generation
+                or commit.generation.digest != result.state_generation_digest
+            ):
+                raise FencedCommitError("lineage-mismatch", "operation result and commit lineage differ")
+            if prior_head_digest != result.head_digest:
+                raise FencedCommitError("lineage-mismatch", "operation result head differs from commit")
+            parts = PurePosixPath(commit.generation.path).parts
+            if len(parts) != 2:
+                raise FencedCommitError("lineage-mismatch", "generation manifest path is invalid")
+            with self._pinned_directory(parts[0]) as pinned:
+                manifest_bytes = self._read_pinned_file(
+                    pinned, parts[1], limit=STATE_LIMIT, allow_missing=True
+                )
+            if manifest_bytes is None:
+                raise FencedCommitError(
+                    OPERATION_HISTORY_COLLECTED,
+                    "the generation this operation committed is no longer retained",
+                )
+            if (
+                len(manifest_bytes) != commit.generation.size
+                or _sha256(manifest_bytes) != commit.generation.digest
+            ):
+                raise FencedCommitError("lineage-mismatch", "referenced record digest or size differs")
+            state, _state_bytes = self._verify_generation_lineage_unlocked(
+                session_id, commit, manifest_bytes
+            )
+            return state
 
     def read(self, session_id: str) -> RepositorySnapshot:
         session_id = _session_id(session_id)

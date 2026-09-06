@@ -298,6 +298,64 @@ def prepare_executor_handoff_rejection(
     )
 
 
+class TransitionRejected(Exception):
+    """One typed transition could not be executed; the message names why."""
+
+
+class ExecutorHandoffRejected(TransitionRejected):
+    """One executor handoff could not be executed; the message names why."""
+
+
+def run_transition_effects(
+    repository: object,
+    prepare,
+    *,
+    passthrough: tuple,
+    rejected: tuple = (OSError, ValueError),
+    rejection: type = TransitionRejected,
+) -> tuple:
+    """Execute one typed transition through its repository port.
+
+    Failures the adapter reports as a plain rejection are collapsed into
+    ``rejection``.  ``passthrough`` names the exception types that must *not*
+    be collapsed even when they are subclasses of a rejected type -- the
+    fenced persistence error is a ``ValueError`` whose code the CLI
+    classifies (lease codes, CAS codes, ``operation-history-collected``), so
+    it has to reach that classifier rather than end as a generic rejection
+    (#747 item 6).  ``passthrough`` is checked first for that reason, and it
+    has no default: a caller that forgets it would rebuild the very trap this
+    helper exists to remove, so an empty tuple is refused as well.
+    """
+    if not passthrough:
+        raise ValueError("run_transition_effects requires a non-empty passthrough")
+    try:
+        return repository.execute_transition_effects(prepare)
+    except passthrough:
+        raise
+    except rejected as exc:
+        raise rejection(str(exc)) from exc
+
+
+def run_executor_handoff(
+    repository: object,
+    prepare,
+    *,
+    passthrough: tuple,
+    rejected: tuple = (OSError, ValueError),
+) -> dict:
+    """Execute one handoff and close it into the stable CLI response."""
+    prepared, execution = run_transition_effects(
+        repository, prepare, passthrough=passthrough, rejected=rejected,
+        rejection=ExecutorHandoffRejected,
+    )
+    try:
+        return executor_handoff_response(prepared, execution)
+    except passthrough:
+        raise
+    except rejected as exc:
+        raise ExecutorHandoffRejected(str(exc)) from exc
+
+
 def executor_handoff_response(
     prepared: object,
     execution: object,

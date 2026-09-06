@@ -65,6 +65,7 @@ V5_EXECUTOR_SURFACE = (
     "_effect_transaction",
     "_guarded_context",
     "_reject_reentrant_entry",
+    "_replayed_state_document",
     "_repository",
     "execute",
     "load",
@@ -226,7 +227,7 @@ class FakeFencedRepository:
         self.commits.append(json.loads(prepared.state_bytes))
 
 
-def in_memory_v5_repository(current, *, replayed=False):
+def in_memory_v5_repository(current, *, replayed=False, replayed_document=None, read_calls=None):
     """Return a ``V5CompatibilityRepository`` that never reaches a backend.
 
     It is built without ``__init__`` and given just the private state the
@@ -234,6 +235,12 @@ def in_memory_v5_repository(current, *, replayed=False):
     these doubles exist for tests of what happens *before* a commit --
     rejection, replay, claim validation -- so reaching ``execute`` is itself
     the failure.
+
+    On a replay the executor reads the state the replayed operation committed
+    (#747 item 6) through ``self._repository.read_operation_state`` with the
+    admitted request's identity, so a replaying double carries a stub backend
+    that answers ``replayed_document`` (``current`` by default) and a
+    ``_replay_request``.  ``read_calls``, when given, records each read.
     """
     from mission_persistence.legacy_v4 import V5CompatibilityRepository
 
@@ -247,19 +254,41 @@ def in_memory_v5_repository(current, *, replayed=False):
         "base_generation": 0,
     }
     repository._replayed = object() if replayed else None
+    repository._replay_request = (
+        types.SimpleNamespace(session_id="portable", operation_id="op", intent_digest=ZERO_DIGEST)
+        if replayed else None
+    )
+    repository._session_id = "portable"
+    repository._transaction_active = False
+
+    def _read_operation_state(result, *, session_id, operation_id, intent_digest):
+        if read_calls is not None:
+            read_calls.append({
+                "result": result, "session_id": session_id, "operation_id": operation_id,
+                "intent_digest": intent_digest,
+                "inside_transaction": repository._transaction_active,
+            })
+        return decoded_state(current if replayed_document is None else replayed_document)
     # Read on the legacy-publisher branch (effects without blobs).  The double
     # never reaches a publish, so ``None`` is the honest value: reaching that
     # branch then fails as ``evidence-effect-transaction-missing``, a refusal
     # the tests can name, rather than an AttributeError deep in the executor.
     repository._effect_transaction = None
-    # Read through ``getattr(self, "_repository", None)`` for the root name.
-    # ``None`` takes the executor down the default-name path, which is what a
-    # double with no backend should mean.
-    repository._repository = None
+    # Read through ``getattr(self, "_repository", None)`` for the root name,
+    # and on a replay for ``read_operation_state``.  A non-replaying double has
+    # no backend (``None`` takes the executor down the default-name path).
+    repository._repository = (
+        types.SimpleNamespace(root=None, read_operation_state=_read_operation_state)
+        if replayed else None
+    )
 
     @contextmanager
     def transaction():
-        yield
+        repository._transaction_active = True
+        try:
+            yield
+        finally:
+            repository._transaction_active = False
 
     repository.transaction = transaction
     # #711: the executor admits with the blobs prepare produced, so ``load``

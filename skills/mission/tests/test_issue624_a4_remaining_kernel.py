@@ -991,33 +991,12 @@ def test_v5_transition_executor_returns_committed_projection_on_replay():
         ExecutorHandoffRequest,
         prepare_executor_handoff,
     )
-    from mission_persistence.legacy_v4 import V5CompatibilityRepository
+    # #747 item 7/6: the replaying executor double lives in evidence_doubles;
+    # on a replay it also answers the historical state the executor now reads.
+    from .evidence_doubles import in_memory_v5_repository
 
-    repository = object.__new__(V5CompatibilityRepository)
-    repository._callback_depth = 0
-    # #711: the executor reads the base before it admits, so the double has to
-    # carry what that read observed.
-    repository._admitted = None
-    repository._observed_base = {
-        "base_head_digest": "sha256:" + "0" * 64,
-        "base_generation": 0,
-    }
-    repository._replayed = object()
     current = _handoff_document(status="consuming")
-
-    @contextmanager
-    def transaction():
-        yield
-
-    repository.transaction = transaction
-    # #711: the executor now admits with the blobs prepare produced.
-    repository.load = lambda **_kwargs: current
-    # #711: the executor reads before it admits, so the double has to model
-    # both.  Returning the same document keeps what these tests observe.
-    repository.read_snapshot = lambda: current
-    repository.execute = lambda _command: (_ for _ in ()).throw(
-        AssertionError("replay must not decide or commit again")
-    )
+    repository = in_memory_v5_repository(current, replayed=True)
     facts = ExecutorHandoffFacts(
         plan_path=".mission-state/plans/plan.json",
         plan_digest=_digest(),
@@ -1062,7 +1041,9 @@ def test_handoff_application_maps_executor_result_to_cli_response():
         result={"operation": "begin"},
     )
     projection = freeze_json_value(_handoff_document(status="consuming"))
-    execution = LegacyCommandExecutionResult(None, projection, replayed=True)
+    execution = LegacyCommandExecutionResult(
+        None, projection, replayed=True, replayed_state=projection  # #747 item 6
+    )
 
     assert executor_handoff_response(prepared, execution) == {
         "ok": True,

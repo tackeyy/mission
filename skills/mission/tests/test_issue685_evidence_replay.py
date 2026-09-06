@@ -99,11 +99,20 @@ def test_verification_record_without_operation_id_appends_each_call(tmp_path, ru
     assert len(_authoritative_state(tmp_path)["verification_history"]) == 2
 
 
-def _closed_result(projection, *, decision=None, replayed=True):
+def _closed_result(projection, *, decision=None, replayed=True, replayed_state=None):
     from mission_application.ports import LegacyCommandExecutionResult
     from mission_kernel.json_codec import freeze_json_value
 
-    return LegacyCommandExecutionResult(decision, freeze_json_value(projection), replayed)
+    # #747 item 6: a replay carries the state the replayed operation committed.
+    # These tests look only at the current projection, so the historical state
+    # defaults to the projection itself.
+    frozen_history = (
+        freeze_json_value(projection if replayed_state is None else replayed_state)
+        if replayed else None
+    )
+    return LegacyCommandExecutionResult(
+        decision, freeze_json_value(projection), replayed, replayed_state=frozen_history
+    )
 
 
 def _request():

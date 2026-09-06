@@ -132,6 +132,12 @@ def execute_artifact_operation(
         raise EvidenceFailure("artifact-repository-invalid")
     prepared, execution = execute(prepare)
     decision = getattr(execution, "decision", None)
+    if decision is None and getattr(execution, "replayed", False) is True:
+        # #747 item 6: the unit of work found this operation already committed.
+        # Nothing was published; the result is rebuilt from the state that
+        # operation committed (carried on the execution result), so a replay
+        # after intervening operations still answers with *its* record.
+        return _replayed_artifact_payload(prepared, execution)
     if decision is None or decision.accepted is not True:
         rejection = getattr(decision, "rejection", None)
         raise EvidenceFailure(
@@ -141,6 +147,58 @@ def execute_artifact_operation(
     payload = copy.deepcopy(prepared.result)
     if "artifact" in payload and payload["artifact"] != projection.get("artifact"):
         raise EvidenceFailure("artifact-projection-mismatch")
+    return payload
+
+
+# Which history array each command appends to, and therefore which array the
+# replayed state has to carry a last element in.  Init and render append to
+# none; init created all three, so they have to exist for it.
+_REPLAY_RECORD_FIELD = {
+    AppendArtifactBlock: ("blocks", "block"),
+    ExportArtifact: ("exports", "export"),
+    RecordArtifactPublication: ("publish_events", "publish_event"),
+}
+_ARTIFACT_HISTORY_ARRAYS = ("blocks", "exports", "publish_events")
+
+
+def _replayed_artifact_payload(prepared: PreparedArtifactOperation, execution: object) -> dict:
+    """Rebuild the original result of a replayed artifact operation.
+
+    ``artifact`` is always the *current* projection: the prepared result holds
+    a provisional artifact -- the current one with the operation applied once
+    more -- which is not what the original run returned.  The per-operation
+    record (block / export / publish_event) is the last element of the array
+    the command appends to, in the state the operation committed; one
+    operation is one commit is one appended element, so no search by
+    timestamp or identity is needed.  Key sets match the non-replay result.
+    """
+    command = prepared.command
+    historical = execution.replayed_document
+    artifact = historical.get("artifact")
+    if not isinstance(artifact, dict):
+        raise EvidenceFailure("artifact-projection-mismatch")
+    current = execution.projection.get("artifact")
+    payload = copy.deepcopy(prepared.result)
+    if isinstance(command, InitializeArtifact):
+        if any(not isinstance(artifact.get(name), list) for name in _ARTIFACT_HISTORY_ARRAYS):
+            raise EvidenceFailure("artifact-projection-mismatch")
+    else:
+        fields = _REPLAY_RECORD_FIELD.get(type(command))
+        if fields is not None:
+            array_name, payload_key = fields
+            records = artifact.get(array_name)
+            if not isinstance(records, list) or not records:
+                raise EvidenceFailure("artifact-projection-mismatch")
+            record = records[-1]
+            if not isinstance(record, dict) or record.get("timestamp") != command.at:
+                raise EvidenceFailure("artifact-projection-mismatch")
+            if isinstance(command, AppendArtifactBlock) and record.get("section") != command.section:
+                raise EvidenceFailure("artifact-projection-mismatch")
+            payload[payload_key] = copy.deepcopy(record)
+    if "artifact" in payload:
+        if not isinstance(current, dict):
+            raise EvidenceFailure("artifact-projection-mismatch")
+        payload["artifact"] = copy.deepcopy(current)
     return payload
 
 
