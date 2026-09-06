@@ -64,7 +64,9 @@ def _operation_record(root, session_id, operation_id):
         document = json.loads(path.read_bytes())
         if document["operation_id"] == operation_id and document["session_id"] == session_id:
             result = CommitResult(**document["result"])
-            return result, document["intent_digest"], path
+            # #747 P2: the historical read binds the record's materialization
+            # to the commit it opens, so the caller passes what the record holds.
+            return result, document["intent_digest"], path, document.get("materialization")
     raise AssertionError("operation record not found: " + operation_id)
 
 
@@ -80,9 +82,9 @@ class TestReadOperationState:
         from mission_kernel import project_legacy_document
 
         local, root, states = _committed_repository(tmp_path)
-        result, intent, _ = _operation_record(root, "test", "op-1")
+        result, intent, _, materialization = _operation_record(root, "test", "op-1")
         state = local.read_operation_state(
-            result, session_id="test", operation_id="op-1", intent_digest=intent, record_version=2
+            result, session_id="test", operation_id="op-1", intent_digest=intent, record_version=2, materialization=materialization
         )
         assert project_legacy_document(state) == project_legacy_document(states["op-1"].state)
         # op-2 moved the head since; op-1's generation is still what op-1 committed.
@@ -90,9 +92,9 @@ class TestReadOperationState:
 
     def test_reading_is_read_only(self, tmp_path):
         local, root, _states = _committed_repository(tmp_path)
-        result, intent, _ = _operation_record(root, "test", "op-1")
+        result, intent, _, materialization = _operation_record(root, "test", "op-1")
         before = _all_bytes(root)
-        local.read_operation_state(result, session_id="test", operation_id="op-1", intent_digest=intent, record_version=2)
+        local.read_operation_state(result, session_id="test", operation_id="op-1", intent_digest=intent, record_version=2, materialization=materialization)
         assert _all_bytes(root) == before
 
     @pytest.mark.parametrize("field", ["operation_id", "intent_digest", "session_id"])
@@ -100,8 +102,8 @@ class TestReadOperationState:
         from mission_persistence.fenced_commit import FencedCommitError
 
         local, root, _states = _committed_repository(tmp_path)
-        result, intent, _ = _operation_record(root, "test", "op-1")
-        kwargs = {"session_id": "test", "operation_id": "op-1", "intent_digest": intent, "record_version": 2}
+        result, intent, _, materialization = _operation_record(root, "test", "op-1")
+        kwargs = {"session_id": "test", "operation_id": "op-1", "intent_digest": intent, "record_version": 2, "materialization": materialization}
         kwargs[field] = {"operation_id": "op-2", "intent_digest": "sha256:" + "1" * 64,
                          "session_id": "other"}[field]
         with pytest.raises(FencedCommitError) as excinfo:
@@ -115,10 +117,10 @@ class TestReadOperationState:
         from mission_persistence.fenced_commit import FencedCommitError
 
         local, root, _states = _committed_repository(tmp_path)
-        result, intent, _ = _operation_record(root, "test", "op-1")
+        result, intent, _, materialization = _operation_record(root, "test", "op-1")
         broken = replace(result, **{field: 99 if field == "generation" else "sha256:" + "2" * 64})
         with pytest.raises(FencedCommitError) as excinfo:
-            local.read_operation_state(broken, session_id="test", operation_id="op-1", intent_digest=intent, record_version=2)
+            local.read_operation_state(broken, session_id="test", operation_id="op-1", intent_digest=intent, record_version=2, materialization=materialization)
         assert excinfo.value.code == "lineage-mismatch"
 
     def test_a_collected_generation_manifest_is_named_as_such(self, tmp_path):
@@ -126,11 +128,11 @@ class TestReadOperationState:
         from mission_persistence.fenced_commit import FencedCommitError
 
         local, root, _states = _committed_repository(tmp_path)
-        result, intent, _ = _operation_record(root, "test", "op-1")
+        result, intent, _, materialization = _operation_record(root, "test", "op-1")
         commit = json.loads((root / "commits" / (result.commit_digest.removeprefix("sha256:") + ".json")).read_bytes())
         (root / commit["generation"]["path"]).unlink()
         with pytest.raises(FencedCommitError) as excinfo:
-            local.read_operation_state(result, session_id="test", operation_id="op-1", intent_digest=intent, record_version=2)
+            local.read_operation_state(result, session_id="test", operation_id="op-1", intent_digest=intent, record_version=2, materialization=materialization)
         assert excinfo.value.code == "operation-history-collected"
 
     @pytest.mark.parametrize("which", ["commit", "state"])
@@ -138,12 +140,12 @@ class TestReadOperationState:
         from mission_persistence.fenced_commit import FencedCommitError
 
         local, root, _states = _committed_repository(tmp_path)
-        result, intent, _ = _operation_record(root, "test", "op-1")
+        result, intent, _, materialization = _operation_record(root, "test", "op-1")
         commit_path = root / "commits" / (result.commit_digest.removeprefix("sha256:") + ".json")
         commit = json.loads(commit_path.read_bytes())
         (commit_path if which == "commit" else root / commit["state"]["path"]).unlink()
         with pytest.raises(FencedCommitError) as excinfo:
-            local.read_operation_state(result, session_id="test", operation_id="op-1", intent_digest=intent, record_version=2)
+            local.read_operation_state(result, session_id="test", operation_id="op-1", intent_digest=intent, record_version=2, materialization=materialization)
         assert excinfo.value.code == "record-missing"
 
 

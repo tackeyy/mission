@@ -1455,10 +1455,9 @@ class LocalFencedRepository:
                 "repository-invalid", "repository directory cannot be created safely"
             ) from exc
 
-    def _ensure_layout(self) -> None:
-        self._ensure_directory(self.root)
-        root_dev = self.root.lstat().st_dev
-        for path in (
+    def _layout_paths(self) -> tuple[Path, ...]:
+        """Every directory the repository layout consists of."""
+        return (
             self.root / "sessions",
             self.root / "transactions",
             self.root / "transactions" / "prepared",
@@ -1472,7 +1471,31 @@ class LocalFencedRepository:
             self.root / "generations",
             self.root / "commits",
             self.root / "operations",
-        ):
+        )
+
+    def _is_readable_repository(self) -> bool:
+        """Say whether this root can be locked without creating anything.
+
+        The repository root, its lock file and the operation directory are
+        what a read-only lookup needs.  Empty directories elsewhere in the
+        layout are created on demand by writers, so their absence does not
+        mean an operation cannot be found here.
+        """
+        lock = self.root / ".state.lock"
+        try:
+            return (
+                self.root.is_dir()
+                and lock.is_file()
+                and not lock.is_symlink()
+                and (self.root / "operations").is_dir()
+            )
+        except OSError:
+            return False
+
+    def _ensure_layout(self) -> None:
+        self._ensure_directory(self.root)
+        root_dev = self.root.lstat().st_dev
+        for path in self._layout_paths():
             self._ensure_directory(path)
             if path.lstat().st_dev != root_dev:
                 raise FencedCommitError("repository-invalid", "repository layout crosses filesystems")
@@ -1634,8 +1657,16 @@ class LocalFencedRepository:
                 os.close(descriptor)
 
     @contextmanager
-    def _lock(self):
-        self._ensure_layout()
+    def _lock(self, *, create: bool = True):
+        """Hold the repository lock.
+
+        ``create=False`` neither lays the repository out nor creates the lock
+        file: a caller that promises to write nothing must not bring a
+        repository into existence by reading it.  The open then fails if the
+        lock file is absent, which is fail-closed.
+        """
+        if create:
+            self._ensure_layout()
         if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
             raise FencedCommitError("repository-invalid", "platform cannot pin repository safely")
         root_descriptor = None
@@ -1662,9 +1693,12 @@ class LocalFencedRepository:
                     if time.monotonic() >= deadline:
                         raise FencedCommitError("lock-timeout", "repository lock timed out")
                     time.sleep(0.05)
+            lock_flags = os.O_RDWR | os.O_NONBLOCK | os.O_NOFOLLOW
+            if create:
+                lock_flags |= os.O_CREAT
             descriptor = os.open(
                 ".state.lock",
-                os.O_RDWR | os.O_CREAT | os.O_NONBLOCK | os.O_NOFOLLOW,
+                lock_flags,
                 0o600,
                 dir_fd=root_descriptor,
             )
@@ -1877,7 +1911,7 @@ class LocalFencedRepository:
         operation_id: str,
         intent_digest: str,
         record_version: int,
-        materialization: Optional[dict] = None,
+        materialization: Optional[dict],
     ) -> MissionState:
         """Return the state the operation behind ``result`` committed (#747 item 6).
 
@@ -1900,6 +1934,19 @@ class LocalFencedRepository:
         _digest(intent_digest, "intent_digest")
         if record_version not in _RECORD_VERSIONS:
             raise FencedCommitError("record-invalid", "record version is not recognised")
+        # The generation decides whether a materialization exists, so it also
+        # decides whether one is required here.  Accepting ``None`` for a
+        # version-2 record would let a caller skip the lineage comparison
+        # below by omitting an argument.
+        if record_version >= MATERIALIZATION_RECORD_VERSION:
+            try:
+                materialization = read_materialization(materialization)
+            except EvidencePublicationError as exc:
+                raise FencedCommitError("record-invalid", exc.detail) from exc
+        elif materialization is not None:
+            raise FencedCommitError(
+                "record-invalid", "a version-1 operation record carries no materialization"
+            )
         with self._lock():
             name = result.commit_digest.removeprefix("sha256:") + ".json"
             commit, prior_head_digest = self._gc_commit_fact_unlocked(name)
@@ -2019,11 +2066,13 @@ class LocalFencedRepository:
         authority for that).
         """
         validate_execution_request(request)
-        # A repository that has never been laid out holds no operation, and
-        # taking the lock would lay it out.  Answer without touching it.
-        if not (self.root / "operations").is_dir():
+        # Taking the lock the usual way lays the repository out and creates
+        # its lock file.  Neither may happen here: writing nothing is the
+        # point of this entry point.  A root without a lock file or an
+        # operation directory holds no operation to find.
+        if not self._is_readable_repository():
             return None
-        with self._lock():
+        with self._lock(create=False):
             return self._lookup_operation(request, blobs_final=False)
 
     def _read_resolution_index_unlocked(

@@ -284,16 +284,33 @@ class TestVersionOneDualRead:
         state = local.read_operation_state(
             replay.result, session_id="test", operation_id="operation-init",
             intent_digest=replay.intent_digest, record_version=replay.record_version,
+            materialization=replay.materialization,
         )
+        assert replay.materialization is None
         assert state.identity.session_id in (None, "test")
         # Contract 17: the generation is compared before the digest.
         with pytest.raises(FencedCommitError) as excinfo:
             local.read_operation_state(
                 replay.result, session_id="test", operation_id="operation-init",
                 intent_digest=replay.intent_digest, record_version=2,
+                materialization={
+                    "base_head_digest": None,
+                    "blobs_digest": None,
+                    "state_digest": "sha256:" + "0" * 64,
+                },
             )
         assert excinfo.value.code == "lineage-mismatch"
         assert "generation" in str(excinfo.value)
+        # The generation also decides whether a materialization may be given
+        # at all: omitting one for a version-2 record would skip the lineage
+        # comparison, and supplying one for a version-1 record is not its shape.
+        for version, value in ((2, None), (1, {"base_head_digest": None, "blobs_digest": None, "state_digest": "sha256:" + "0" * 64})):
+            with pytest.raises(FencedCommitError) as excinfo:
+                local.read_operation_state(
+                    replay.result, session_id="test", operation_id="operation-init",
+                    intent_digest=replay.intent_digest, record_version=version, materialization=value,
+                )
+            assert excinfo.value.code == "record-invalid"
 
     def test_the_executor_replays_a_version_one_operation_end_to_end(self, tmp_path):
         from mission_persistence.legacy_v4 import V5CompatibilityRepository
@@ -412,6 +429,14 @@ class TestLookupBeforePrepare:
         request = _request(operation_id="operation-none", lease_id="fixture-lease", argv=("set", "phase=done"))
         assert local.lookup_operation(request) is None
         assert not root.exists() and not root.parent.exists()
+
+        # A partially laid out root is not completed either: the lock file is
+        # what taking the lock would create.
+        partial = tmp_path / "partial" / ".mission-state"
+        (partial / "operations").mkdir(parents=True)
+        partial_local = LocalFencedRepository(partial, clock=_Clock(datetime.now(timezone.utc)), fault_injector=None)
+        assert partial_local.lookup_operation(request) is None
+        assert sorted(p.name for p in partial.iterdir()) == ["operations"]
 
     def test_the_lookup_writes_nothing(self, tmp_path):
         local, repository, meta, _clock = _v1_repository(tmp_path, "committed")
