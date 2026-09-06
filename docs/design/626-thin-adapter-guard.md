@@ -190,11 +190,18 @@ generic error-to-output mapping だけを許す。
 **guard の目的は refactor が黙って予算を縮めるのを止めることで、回避を試みる相手への
 防壁ではない。** 残る検査は、そのコードを読むレビュアーである。
 
-| 形 | 状態 |
-|---|---|
-| 別名経由の動的 lookup（`lookup = globals` として `lookup()[name]`、`sys.modules` 経由） | 未検出。`globals()` 等を名前で認識するため、別名にすると外れる |
-| import 時の式から呼ばれた関数の**中**での動的 lookup（`def _wire(): return globals()["_helper"]` を `SERVICES = _wire()` で呼ぶ） | 未検出。fail-closed の判定は import 時の式しか走査しない |
-| class の method 経由の受け渡し（`class Wiring: @staticmethod def render(...): return _helper(...)` を注入） | 未検出。class body の**式**は import 時として拾うが、method の**本体**は関数集合にも入らず辿られない |
+**3 形とも、渡された helper は予算に入らない**（実測）。ただし lookup そのものが
+違反として残るかは分かれる。
+
+| 形 | helper が予算に入るか | lookup 自体 |
+|---|---|---|
+| 別名経由の動的 lookup（`lookup = globals` として `lookup()[name]`、`sys.modules` 経由） | 入らない | **違反にならない。** fail-closed の判定は `globals` 等を名前で認識するため、別名にすると外れる |
+| import 時の式から呼ばれた関数の**中**での動的 lookup（`def _wire(): return globals()["_helper"]` を `SERVICES = _wire()` で呼ぶ） | 入らない | **`dispatch.dynamic` として違反になる。** `_wire` は import 時の式が名前で参照するので root になり、その本体が走査される |
+| class の method 経由の受け渡し（`class Wiring: @staticmethod def render(...): return _helper(...)` を注入） | 入らない | **違反にならない。** class body の**式**は import 時として拾うが、method の**本体**は関数集合にも入らず辿られない |
+
+したがって 2 行目は、helper の計上こそ落ちるものの、**予算が黙って縮むことはない**
+（`dispatch.dynamic` が 1 件増えるため、ratchet が気づく）。1 行目と 3 行目には
+その歯止めが無い。
 
 逆向きの誤差（数え過ぎ）も残る。未使用の lambda と generator 式の本体、`if False:` の
 下の module 直下文、注釈を遅延する module の注釈は、実行されなくても到達扱いになる。
