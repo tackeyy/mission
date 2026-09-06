@@ -281,6 +281,32 @@ class TestSemanticIdentity:
             semantic_intent_digest(dict(inputs, command=borrowed("1")))
         )
 
+        # Nor may a document claim the kernel schema with a type the kernel
+        # cannot encode: the schema string is writable by any caller, so the
+        # type has to be one the decision table names.
+        def spoofed(at):
+            return {
+                "schema": "mission-kernel-command/1",
+                "type": "not-a-kernel-command",
+                "value": {"at": at, "payload": "p"},
+            }
+
+        assert project_semantic_command(spoofed(AT)) == spoofed(AT)
+        assert semantic_intent_digest(dict(inputs, command=spoofed(AT))) != (
+            semantic_intent_digest(dict(inputs, command=spoofed("2030-01-01T00:00:09Z")))
+        )
+
+    def test_the_projected_vocabulary_is_the_kernels_own(self):
+        """A command type added to the kernel is recognised without a second list."""
+        from mission_application.evidence_publication import EFFECT_FIELDS_BY_COMMAND_TYPE
+        from mission_kernel.commands import kernel_command_type_names
+
+        names = kernel_command_type_names()
+        assert "append-artifact-block" in names and "advance-phase" in names
+        assert set(EFFECT_FIELDS_BY_COMMAND_TYPE) <= names, (
+            "an effect-bearing type the kernel does not name would never be projected"
+        )
+
     def test_a_captured_blob_is_part_of_the_identity(self):
         from mission_persistence.local_uow import BlobBinding, VerifiedBlob, VerifiedBlobSet
 

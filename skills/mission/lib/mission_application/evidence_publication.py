@@ -308,6 +308,16 @@ EFFECT_FIELDS_BY_COMMAND_TYPE = {
 }
 
 
+def _is_typed_kernel_command(command: dict) -> bool:
+    """Say whether this document is one the kernel's encoder could have produced."""
+    from mission_kernel.commands import kernel_command_type_names
+
+    return (
+        command.get("schema") == TYPED_COMMAND_SCHEMA
+        and command.get("type") in kernel_command_type_names()
+    )
+
+
 def project_semantic_command(
     command, *, repository_root_name: str = REPOSITORY_ROOT_NAME
 ):
@@ -322,12 +332,14 @@ def project_semantic_command(
         raise EvidencePublicationError(
             "command-invalid", "encoded command must be an object"
         )
-    if command.get("schema") != TYPED_COMMAND_SCHEMA:
+    if not _is_typed_kernel_command(command):
         # Only a typed kernel command has a known shape.  Any other document
         # is opaque: its ``type`` may name anything, and a field of its own
         # that resembles an effect claim or a timestamp may be exactly what
         # distinguishes two requests.  Projecting by name alone would drop it
-        # and let one replay the other.
+        # and let one replay the other.  The schema string alone does not
+        # settle this -- a caller may write it into a document by hand -- so
+        # the type has to be one the kernel could have encoded.
         return command
     effect_fields = EFFECT_FIELDS_BY_COMMAND_TYPE.get(command.get("type"))
     value = command.get("value")

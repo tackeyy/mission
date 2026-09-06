@@ -617,8 +617,10 @@ The normalized intent is the exact closed object:
 
 Only bindings whose `origin` is `captured` appear in `blobs`; `origin` itself
 is not in the envelope. `command` is the semantic projection, and the
-projection applies **only to a typed kernel command**
-(`mission-kernel-command/1`): its effect claims lose their generated `digest` /
+projection applies **only to a typed kernel command**: one whose schema is
+`mission-kernel-command/1` *and* whose `type` is a name the kernel's decision
+table can encode. The schema string alone does not settle it, because any
+caller may write that string into a document of its own. For such a command: its effect claims lose their generated `digest` /
 `size`, and its `at` is dropped, because a crash retry runs with a new clock
 and the committed record is what answers with the time (#747 P2, decision D3).
 Every other document is opaque and keeps every field, whatever its `type`
