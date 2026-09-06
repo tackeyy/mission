@@ -504,3 +504,392 @@ def test_load_base_baseline_uses_recorded_or_bootstrap_source_commit(tmp_path):
     assert recorded == baseline
     with pytest.raises(guard.BaselineError, match="base SHA"):
         guard.load_base_baseline(repo, "not-a-sha")
+
+
+def test_a_helper_injected_at_module_level_stays_in_the_budget():
+    """Injecting a helper instead of calling it must not take it out of the scan.
+
+    A use case that receives the helper still runs it on every invocation, so
+    a count that falls only because no handler names it any more is the guard
+    looking away, not the adapter getting thinner (#747 P2-b).
+    """
+    guard = _load_guard_module()
+    source = """
+import json
+
+
+def _renders(data):
+    return data["value"] + 1
+
+
+def _services(render):
+    return render
+
+
+SERVICES = _services(_renders)
+
+
+def cmd_show(args):
+    print(SERVICES(args))
+"""
+    functions = {
+        violation.function for violation in guard.scan_source(source, path="x.py")
+    }
+    assert "_renders" in functions
+
+
+@pytest.mark.parametrize(
+    "wiring",
+    [
+        "SERVICES = _services(_renders)",
+        "register(_renders)",
+        "if True:\n    register(_renders)",
+        "for _ in (1,):\n    register(_renders)",
+        "@register(_renders)\ndef _decorated():\n    return 1",
+        "class Wiring:\n    service = _services(_renders)",
+        "def _defaulted(render=_renders):\n    return render",
+    ],
+)
+def test_every_module_level_handover_keeps_the_helper_in_the_budget(wiring):
+    """An assignment is not the only way to hand a helper over."""
+    guard = _load_guard_module()
+    source = (
+        "def _renders(data):\n"
+        "    return data[\"value\"] + 1\n"
+        "\n\n"
+        "def _services(render):\n"
+        "    return render\n"
+        "\n\n"
+        "def register(render):\n"
+        "    return render\n"
+        "\n\n"
+        + wiring
+        + "\n\n\n"
+        "def cmd_show(args):\n"
+        "    print(args)\n"
+    )
+    functions = {
+        violation.function for violation in guard.scan_source(source, path="x.py")
+    }
+    assert "_renders" in functions, wiring
+
+
+def test_a_definition_nested_in_import_time_code_is_still_only_a_definition():
+    """`if True: def _unused(): ...` defines; it does not call."""
+    guard = _load_guard_module()
+    source = (
+        "def _helper(data):\n"
+        "    return data[\"value\"] + 1\n"
+        "\n\n"
+        "if True:\n"
+        "    def _unused():\n"
+        "        return _helper\n"
+        "\n\n"
+        "def cmd_show(args):\n"
+        "    print(args)\n"
+    )
+    functions = {
+        violation.function for violation in guard.scan_source(source, path="x.py")
+    }
+    assert "_helper" not in functions
+
+
+@pytest.mark.parametrize(
+    "wiring",
+    [
+        'SERVICES = _services(globals()["_renders"])',
+        "SERVICES = _services(getattr(SOME, name))",
+        "SERVICES = _services(vars()[name])",
+    ],
+)
+def test_a_computed_name_at_import_time_keeps_everything_in_the_budget(wiring):
+    """A name that is not written down cannot be searched for; fail closed."""
+    guard = _load_guard_module()
+    source = (
+        "SOME = None\n"
+        "name = \"_renders\"\n"
+        "\n\n"
+        "def _renders(data):\n"
+        "    return data[\"value\"] + 1\n"
+        "\n\n"
+        "def _services(render):\n"
+        "    return render\n"
+        "\n\n"
+        + wiring
+        + "\n\n\n"
+        "def cmd_show(args):\n"
+        "    print(args)\n"
+    )
+    functions = {
+        violation.function for violation in guard.scan_source(source, path="x.py")
+    }
+    assert "_renders" in functions, wiring
+
+
+@pytest.mark.parametrize(
+    "wiring",
+    [
+        "match VALUE:\n    case _:\n        register(_renders)",
+        "match VALUE:\n    case 1 if register(_renders):\n        pass",
+        "def wired(argument: register(_renders)):\n    return argument",
+        "def wired(positional: register(_renders), /):\n    return positional",
+        "def wired(*, keyword: register(_renders)):\n    return keyword",
+        "def wired() -> register(_renders):\n    return 1",
+        "def wired(*rest: register(_renders)):\n    return rest",
+        "def wired(**rest: register(_renders)):\n    return rest",
+    ],
+)
+def test_a_match_case_or_an_annotation_also_hands_the_helper_over(wiring):
+    """Both run at import time, so both keep the helper in the budget.
+
+    Annotations are evaluated on the ``def`` in Python 3.12.  Counting them
+    even where a module defers them costs an over-count, which is the safe
+    direction; missing them would let an injection shrink the budget.
+    """
+    guard = _load_guard_module()
+    source = (
+        "VALUE = 1\n"
+        "\n\n"
+        "def _renders(data):\n"
+        "    return data[\"value\"] + 1\n"
+        "\n\n"
+        "def register(render):\n"
+        "    return render\n"
+        "\n\n"
+        + wiring
+        + "\n\n\n"
+        "def cmd_show(args):\n"
+        "    print(args)\n"
+    )
+    functions = {
+        violation.function for violation in guard.scan_source(source, path="x.py")
+    }
+    assert "_renders" in functions, wiring
+
+
+def test_a_definition_nested_in_a_match_case_is_still_only_a_definition():
+    """The body of an unused `def` under `match` must not count as a call."""
+    guard = _load_guard_module()
+    source = (
+        "VALUE = 1\n"
+        "\n\n"
+        "def _helper(data):\n"
+        "    return data[\"value\"] + 1\n"
+        "\n\n"
+        "match VALUE:\n"
+        "    case _:\n"
+        "        def _unused():\n"
+        "            return _helper\n"
+        "\n\n"
+        "def cmd_show(args):\n"
+        "    print(args)\n"
+    )
+    functions = {
+        violation.function for violation in guard.scan_source(source, path="x.py")
+    }
+    assert "_helper" not in functions
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "if True:\n    def _renders(data):\n        return data[\"value\"] + 1",
+        "try:\n    def _renders(data):\n        return data[\"value\"] + 1\n"
+        "except ImportError:\n    _renders = None",
+        "for _ in (1,):\n    def _renders(data):\n        return data[\"value\"] + 1",
+        "with open(__file__) as _handle:\n"
+        "    def _renders(data):\n        return data[\"value\"] + 1",
+        "match VALUE:\n    case _:\n"
+        "        def _renders(data):\n            return data[\"value\"] + 1",
+    ],
+)
+def test_a_function_defined_under_control_flow_is_still_a_module_function(shape):
+    """`if TYPE_CHECKING: def f(): ...` defines a module name like any `def`.
+
+    Leaving these out of the function set would let a helper be defined and
+    injected without ever entering the budget.
+    """
+    guard = _load_guard_module()
+    source = (
+        "VALUE = 1\n"
+        "\n\n"
+        + shape
+        + "\n\n\n"
+        "SERVICES = _renders\n"
+        "\n\n"
+        "def cmd_show(args):\n"
+        "    print(args)\n"
+    )
+    functions = {
+        violation.function for violation in guard.scan_source(source, path="x.py")
+    }
+    assert "_renders" in functions, shape
+
+
+def test_every_definition_of_a_name_is_measured_not_only_the_first():
+    """Which definition survives depends on a condition this pass cannot read.
+
+    Measuring only the first would let a trivial definition placed ahead of
+    the real one decide the budget.
+    """
+    guard = _load_guard_module()
+    source = (
+        "FLAG = False\n"
+        "\n\n"
+        "if FLAG:\n"
+        "    def _renders(data):\n"
+        "        return 1\n"
+        "else:\n"
+        "    def _renders(data):\n"
+        "        return data[\"value\"] + 1\n"
+        "\n\n"
+        "SERVICES = _renders\n"
+        "\n\n"
+        "def cmd_show(args):\n"
+        "    print(args)\n"
+    )
+    violations = guard.scan_source(source, path="x.py")
+    assert {violation.function for violation in violations} == {"_renders"}
+    # The second definition's arithmetic is the part a first-only scan misses.
+    assert "logic.arithmetic" in {violation.rule_id for violation in violations}
+
+
+def test_a_later_definition_of_a_name_also_pulls_in_what_it_calls():
+    """Reachability follows every definition, not only the first.
+
+    Measuring the second definition is not enough on its own: the helpers it
+    names have to enter the budget too, or a refactor could park them behind
+    a second definition and lose them.
+    """
+    guard = _load_guard_module()
+    source = (
+        "FLAG = False\n"
+        "\n\n"
+        "def _deep(data):\n"
+        "    return data[\"value\"] + 1\n"
+        "\n\n"
+        "if FLAG:\n"
+        "    def _renders(data):\n"
+        "        return data\n"
+        "else:\n"
+        "    def _renders(data):\n"
+        "        return _deep(data)\n"
+        "\n\n"
+        "SERVICES = _renders\n"
+        "\n\n"
+        "def cmd_show(args):\n"
+        "    print(args)\n"
+    )
+    functions = {
+        violation.function for violation in guard.scan_source(source, path="x.py")
+    }
+    assert "_deep" in functions
+
+
+def test_a_lambda_handed_over_at_module_level_keeps_its_helper_in_the_budget():
+    """A lambda body has no separate measurement path, so it counts here.
+
+    A nested `def` is excluded from import-time roots because the function
+    set holds it and scans it on its own.  A lambda is not in that set, so
+    excluding its body would drop a helper that runs on every invocation --
+    the very defect this guard exists to stop.
+    """
+    guard = _load_guard_module()
+    source = (
+        "def _renders(data):\n"
+        "    return data[\"value\"] + 1\n"
+        "\n\n"
+        "SERVICES = lambda: _renders(1)\n"
+        "\n\n"
+        "def cmd_show(args):\n"
+        "    print(SERVICES())\n"
+    )
+    functions = {
+        violation.function for violation in guard.scan_source(source, path="x.py")
+    }
+    assert "_renders" in functions
+
+
+def test_a_method_defined_in_a_class_body_is_not_a_module_function():
+    """A class body binds attributes, not module names."""
+    guard = _load_guard_module()
+    source = (
+        "class Holder:\n"
+        "    def _renders(self, data):\n"
+        "        return data[\"value\"] + 1\n"
+        "\n\n"
+        "def cmd_show(args):\n"
+        "    print(args)\n"
+    )
+    functions = {
+        violation.function for violation in guard.scan_source(source, path="x.py")
+    }
+    assert "_renders" not in functions
+
+
+def test_a_definition_alone_does_not_make_a_function_reachable():
+    """Only running code counts; a definition introduces a name."""
+    guard = _load_guard_module()
+    source = (
+        "def _never_used(data):\n"
+        "    return data[\"value\"] + 1\n"
+        "\n\n"
+        "def cmd_show(args):\n"
+        "    print(args)\n"
+    )
+    functions = {
+        violation.function for violation in guard.scan_source(source, path="x.py")
+    }
+    assert "_never_used" not in functions
+
+
+def test_the_base_is_measured_with_the_rules_of_this_run(tmp_path, monkeypatch):
+    """A widened rule must not read as violations somebody just added.
+
+    The baseline recorded at the base was produced by the older rules, so it
+    cannot see what the new rules see.  Comparing against it would report
+    every newly visible function as new.
+    """
+    guard = _load_guard_module()
+    base_source = "def cmd_run(args):\n    return _helper(args)\n\n\ndef _helper(args):\n    return args or 1\n"
+    calls = {}
+
+    def fake_git_show(repo_root, base_sha, relative_path):
+        name = relative_path.as_posix()
+        calls[name] = calls.get(name, 0) + 1
+        if name.endswith("check-thin-adapter-ratchet.py"):
+            return "# an older ruler\n"
+        if name.endswith("thin-adapter-baseline.jsonl"):
+            return ""
+        if name == guard.SOURCE_PATH.as_posix():
+            return base_source
+        return None
+
+    monkeypatch.setattr(guard, "_git_show", fake_git_show)
+    monkeypatch.setattr(
+        guard, "subprocess", type("_S", (), {"run": staticmethod(lambda *a, **k: type("_R", (), {"returncode": 1, "stdout": ""})())})
+    )
+    baseline, source_name = guard.load_base_baseline(REPO_ROOT, "0" * 40)
+
+    assert source_name == "rescanned-base-source"
+    assert ("skills/mission/bin/mission-state.py", "_helper") in baseline
+
+
+def test_an_unchanged_guard_still_reads_the_recorded_baseline(tmp_path, monkeypatch):
+    """Re-measuring costs time and is only needed when the ruler changed."""
+    guard = _load_guard_module()
+    current = SCRIPT_PATH.read_text(encoding="utf-8")
+
+    def fake_git_show(repo_root, base_sha, relative_path):
+        name = relative_path.as_posix()
+        if name.endswith("check-thin-adapter-ratchet.py"):
+            return current
+        if name.endswith("thin-adapter-baseline.jsonl"):
+            return '{"path":"a.py","function":"f","rules":{"io.direct":1}}\n'
+        return None
+
+    monkeypatch.setattr(guard, "_git_show", fake_git_show)
+    baseline, source_name = guard.load_base_baseline(REPO_ROOT, "0" * 40)
+
+    assert source_name == "recorded-baseline"
+    assert baseline == {("a.py", "f"): {"io.direct": 1}}

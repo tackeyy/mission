@@ -162,16 +162,78 @@ canonical source だけを分析し、plugin mirror は既存 byte equality gate
 1. `skills/mission/bin/mission-state.py`
 2. 抽出後の `skills/mission/lib/mission_adapter/**/*.py`
 3. root は parser の `set_defaults(func=<Name>)` から解決した handler、命名上の
-   `cmd_*` / `_cmd_*`、および `main`
+   `cmd_*` / `_cmd_*`、`main`、および **module の import 時に実行される式が名前で
+   参照する top-level function**（#759 で追加）
 4. 各 root から、同じ adapter scope 内の top-level function を `ast.Name` の load で
    参照する edge を再帰探索する。直接 call だけでなく、service callback として渡す
    function object も edge に含める。
 5. dynamic attribute call、文字列からの handler lookup、`getattr(module, name)` は解決不能
    call として違反にする。新しいロジックを helper 名変更や callback 化で隠せないようにする。
 
+3 の root 種別は #747 P2-b が要求した。adapter を use case へ委譲すると helper は
+`_SERVICES = Services(_helper, ...)` の形で渡され、どの handler も名前を出さなくなる。
+helper は毎回走るのに、**呼び出しを注入へ切り替えるだけで違反数が下がる**——薄くなった
+のではなく guard が見なくなった状態を、3 が塞ぐ。
+
+import 時に走る式には、代入・bare call・decorator・既定引数・class body・関数注釈・
+`match` の case と guard を含める。関数の**本体**は含めない（呼ばれたときに走るもので、
+それ自体が 1 関数として走査される）。module 直下の `if` / `try` / `for` / `with` /
+`match` の中で定義した関数も関数集合に入れ、同名の定義はすべて計測する。
+
 現 `main` は dispatch 後にも outcome tracking と typed error envelope を構築している
 （`skills/mission/bin/mission-state.py:19286-19383`）。ここも adapter root として走査し、
 generic error-to-output mapping だけを許す。
+
+#### 4.1.1 この走査が届かない範囲
+
+計測から外れる書き方が残っている。いずれも値の追跡を要し、AST の走査では判定できない。
+**guard の目的は refactor が黙って予算を縮めるのを止めることで、回避を試みる相手への
+防壁ではない。** 残る検査は、そのコードを読むレビュアーである。
+
+**3 形とも、渡された helper は予算に入らない**（実測）。ただし lookup そのものが
+違反として残るかは分かれる。
+
+| 形 | helper が予算に入るか | lookup 自体 |
+|---|---|---|
+| 別名経由の動的 lookup（`lookup = globals` として `lookup()[name]`、`sys.modules` 経由） | 入らない | **違反にならない。** fail-closed の判定は `globals` 等を名前で認識するため、別名にすると外れる |
+| import 時の式から呼ばれた関数の**中**での動的 lookup（`def _wire(): return globals()["_helper"]` を `SERVICES = _wire()` で呼ぶ） | 入らない | **`dispatch.dynamic` として違反になる。** `_wire` は import 時の式が名前で参照するので root になり、その本体が走査される |
+| class の method 経由の受け渡し（`class Wiring: @staticmethod def render(...): return _helper(...)` を注入） | 入らない | **違反にならない。** class body の**式**は import 時として拾うが、method の**本体**は関数集合にも入らず辿られない |
+
+**3 形とも、予算を黙って縮められる。** 2 行目の `dispatch.dynamic` は歯止めにならない。
+新しく `globals()` を書けば違反が 1 件増えて ratchet が止まるが、**既にある動的 lookup の
+対象を差し替えるだけなら件数は変わらない**。実測: base で `_helper` を直接参照し、
+`_wire` が別の対象へ `globals()` を 1 件持つ状態から、`_wire` の対象を `_helper` へ替えると、
+`_helper` は予算から消えるのに `dispatch.dynamic` は 1 件のままで、`compare_baselines()`
+は差分なしを返す。
+
+**塞ぐ手段はある。到達性の判定をやめ、すべての top-level function を無条件に root に
+すればよい。** 実測では 3 形とも helper が予算に残る。採らないのは代償のほうで、
+本 repo では計測対象が 462 から 480 関数へ増える。**増える 18 件は、到達性の判定が
+届かないという理由だけで入る。** 内訳は実測で 2 通りに分かれる。
+
+- **8 件は実際に呼ばれている。** class の method 経由（`_ParallelGroupStore.__enter__` と
+  `_LegacyStopObservationRepository.load` / `.save` の配下）なので、走査が辿れないだけ。
+  この 8 件については、無条件 root 化のほうが計測として忠実になる
+- **10 件は `skills/mission/bin` と `skills/mission/lib` に定義以外の参照が無い。**
+  ただしこれは「呼ばれない」の証明ではない（テストからの呼び出しや文字列経由の dispatch は
+  この走査の外にある）
+
+**代償が効くのは後者に対してで、18 件すべてではない。** それでも、到達性を捨てると
+「adapter が薄いか」ではなく「関数がいくつあるか」を測る数になる方向へ寄る。
+
+**過計上せずにこの 3 形だけを拾うには値の追跡が要る。現在の名前参照の走査では届かない。**
+（AST 上で別名・定数・class の method を追う限定的な追跡なら、未使用関数を root 化せずに
+この 3 形を解決できる。実装していないのは、追跡の対象をどこで打ち切るかが別の設計判断に
+なるためで、原理的に不可能だからではない。）
+現在の設計は、到達性を保った上で拾える範囲を広げるという中間を取っている。
+**guard の目的は refactor が黙って予算を縮めるのを止めることで、回避を試みる相手への
+防壁ではない**——その限界が最も明確に出るのがここである。
+
+逆向きの誤差（数え過ぎ）も残る。未使用の lambda と generator 式の本体、`if False:` の
+下の module 直下文、注釈を遅延する module の注釈は、実行されなくても到達扱いになる。
+**予算が膨らむ側なので、そちらを取る。** とくに lambda の本体を刈ると、
+`SERVICES = lambda: _helper(1)` のように毎回走るものまで計上から消え、3 が塞いだ欠陥が
+戻る（入れ子の `def` を刈ってよいのは、その関数が関数集合に入り単体で走査されるため）。
 
 ### 4.2 正の allowlist
 

@@ -109,21 +109,175 @@ _PARSER_METHODS = {
 }
 
 
-def _top_level_functions(tree: ast.Module) -> dict[str, ast.AST]:
-    return {
-        node.name: node
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
+def _top_level_functions(tree: ast.Module) -> dict[str, list[ast.AST]]:
+    """Return the module's own functions, including those defined under control flow.
+
+    ``if TYPE_CHECKING: def f(): ...`` and its cousins define module-level
+    names just as a bare ``def`` does, so leaving them out would let a
+    function be defined and injected without ever entering the budget.  Class
+    bodies are not included: their functions are attributes, not module names.
+
+    A name maps to *every* definition that binds it, not just the first.
+    Which one survives to run depends on a condition this pass does not
+    evaluate, so all of them are measured: otherwise a trivial definition
+    placed ahead of the real one would decide the budget.
+    """
+    functions: dict[str, list[ast.AST]] = {}
+    _collect_module_functions(tree.body, functions)
+    return functions
 
 
-def _handler_roots(tree: ast.Module, functions: dict[str, ast.AST]) -> set[str]:
+def _collect_module_functions(body, functions: dict[str, list[ast.AST]]) -> None:
+    for node in body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            functions.setdefault(node.name, []).append(node)
+        elif isinstance(node, ast.ClassDef):
+            continue
+        else:
+            for _field, value in ast.iter_fields(node):
+                for item in value if isinstance(value, list) else [value]:
+                    if isinstance(item, ast.stmt):
+                        _collect_module_functions([item], functions)
+                    elif isinstance(item, ast.ExceptHandler):
+                        _collect_module_functions(item.body, functions)
+                    elif hasattr(ast, "match_case") and isinstance(item, ast.match_case):
+                        _collect_module_functions(item.body, functions)
+
+
+_DYNAMIC_LOOKUP_NAMES = {"globals", "locals", "vars"}
+
+
+def _import_time_expressions(body):
+    """Yield the expressions that run when the module is imported.
+
+    A definition introduces a name rather than running it, so its body is not
+    import-time code -- but its decorators and default arguments are, and so
+    is a class body.  A nested definition inside a module-level ``if`` is
+    skipped for the same reason a top-level one is: nothing has called it.
+    """
+    for node in body:
+        yield from _import_time_expressions_of(node)
+
+
+def _import_time_expressions_of(node: ast.AST):
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        return
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        yield from node.decorator_list
+        yield from node.args.defaults
+        yield from (default for default in node.args.kw_defaults if default is not None)
+        if node.returns is not None:
+            yield node.returns
+        for argument in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
+            if argument.annotation is not None:
+                yield argument.annotation
+        for argument in (node.args.vararg, node.args.kwarg):
+            if argument is not None and argument.annotation is not None:
+                yield argument.annotation
+        return
+    if isinstance(node, ast.ClassDef):
+        yield from node.decorator_list
+        yield from node.bases
+        yield from (keyword.value for keyword in node.keywords)
+        yield from _import_time_expressions(node.body)
+        return
+    for _field, value in ast.iter_fields(node):
+        for item in value if isinstance(value, list) else [value]:
+            if isinstance(item, ast.stmt):
+                yield from _import_time_expressions_of(item)
+            elif isinstance(item, ast.ExceptHandler):
+                yield from _import_time_expressions(item.body)
+                if item.type is not None:
+                    yield item.type
+            elif hasattr(ast, "match_case") and isinstance(item, ast.match_case):
+                yield from _import_time_expressions(item.body)
+                if item.guard is not None:
+                    yield item.guard
+            elif isinstance(item, ast.AST):
+                yield item
+
+
+def _names_run_at_import(body, functions: dict[str, list[ast.AST]]):
+    """Yield every top-level function named by code that runs at import time."""
+    for expression in _import_time_expressions(body):
+        for inner in ast.walk(expression):
+            if (
+                isinstance(inner, ast.Name)
+                and isinstance(inner.ctx, ast.Load)
+                and inner.id in functions
+            ):
+                yield inner.id
+
+
+def _import_time_lookup_is_dynamic(body) -> bool:
+    """Say whether import-time code reaches a function by a computed name.
+
+    ``Services(globals()["_helper"])`` hands the helper over without naming
+    it, so no name-based search can find it.  Rather than let that take the
+    helper out of the budget, every function is treated as reachable.
+
+    **What this does not see.**  The detection recognises the builtins by
+    name, so an alias (``lookup = globals`` then ``lookup()[name]``) or a
+    route through ``sys.modules`` is not caught.  Neither is a lookup one
+    frame deeper -- only import-time expressions are scanned, so
+    ``def _wire(): return globals()["_helper"]`` called as ``SERVICES =
+    _wire()`` does not put ``_helper`` in the budget.  Writing a *new*
+    ``globals()`` does add a ``dispatch.dynamic`` the ratchet would stop on,
+    but pointing an *existing* one at a different helper leaves the count
+    unchanged, so that is not a safeguard either.
+
+    Rooting every function unconditionally would close all of these, at the
+    cost of admitting whatever the reachability pass cannot follow (462 ->
+    480 here).  Of those 18, 8 are in fact called -- through class methods,
+    which this pass does not follow -- and 10 have no reference outside
+    their own definition in ``skills/mission/bin`` and ``skills/mission/lib``
+    (which is not proof that nothing calls them).  For the latter the count
+    drifts away from measuring how thin the adapter is.  Picking these forms out *without* that over-count needs
+    value tracking, which this name-based pass does not do.  A narrower AST
+    pass that follows aliases, constants and class methods could resolve
+    them; where to stop following is a separate design question, which is
+    why it is not here.  This guard exists to stop a
+    refactor from quietly shrinking the budget, not to withstand someone
+    arranging to evade it; a reviewer reading such code is the remaining
+    check.
+    """
+    for expression in _import_time_expressions(body):
+        for inner in ast.walk(expression):
+            if not isinstance(inner, ast.Call) or not isinstance(inner.func, ast.Name):
+                continue
+            if inner.func.id in _DYNAMIC_LOOKUP_NAMES:
+                return True
+            if inner.func.id == "getattr" and (
+                len(inner.args) < 2 or not isinstance(inner.args[1], ast.Constant)
+            ):
+                return True
+    return False
+
+
+def _handler_roots(tree: ast.Module, functions: dict[str, list[ast.AST]]) -> set[str]:
     roots = {
         name
         for name in functions
         if name == "main" or name.startswith(("cmd_", "_cmd_"))
     }
-    for function in functions.values():
+    # A helper handed to a use case at module level still runs on every
+    # invocation of the commands that use it, but no handler mentions it by
+    # name any more.  Without this, injecting a helper rather than calling it
+    # takes it out of the budget: the count falls because the guard stopped
+    # looking, not because the adapter got thinner.
+    #
+    # Every module-level statement counts, not only an assignment: a bare
+    # ``register(_helper)`` hands the helper over just as effectively, and so
+    # does one inside a module-level ``if`` or ``for``, a decorator, a default
+    # argument, or a class body.  What is skipped is a *function body*, which
+    # runs only when called and is scanned as its own function.
+    if _import_time_lookup_is_dynamic(tree.body):
+        # A computed name cannot be searched for; keeping everything in the
+        # budget is the fail-closed answer.
+        roots.update(functions)
+    else:
+        roots.update(_names_run_at_import(tree.body, functions))
+    for function in _every_definition(functions):
         for node in ast.walk(function):
             if not isinstance(node, ast.Call):
                 continue
@@ -134,6 +288,11 @@ def _handler_roots(tree: ast.Module, functions: dict[str, ast.AST]) -> set[str]:
                 if keyword.arg == "func" and isinstance(keyword.value, ast.Name):
                     roots.add(keyword.value.id)
     return roots
+
+
+def _every_definition(functions: dict[str, list[ast.AST]]):
+    for definitions in functions.values():
+        yield from definitions
 
 
 def _reachable_functions(
@@ -149,11 +308,14 @@ def _reachable_functions(
         if name in reached or name not in functions:
             continue
         reached.add(name)
-        for node in ast.walk(functions[name]):
-            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
-                if node.id in functions and node.id not in reached:
-                    pending.append(node.id)
-    return [functions[name] for name in sorted(reached)]
+        for definition in functions[name]:
+            for node in ast.walk(definition):
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                    if node.id in functions and node.id not in reached:
+                        pending.append(node.id)
+    return [
+        definition for name in sorted(reached) for definition in functions[name]
+    ]
 
 
 def _root_name(node: ast.AST) -> str | None:
@@ -664,18 +826,78 @@ def _git_show(repo_root: Path, base_sha: str, relative_path: Path) -> str | None
     return result.stdout if result.returncode == 0 else None
 
 
+GUARD_PATH = Path("scripts/check-thin-adapter-ratchet.py")
+
+
+def _base_scanned_baseline(repo_root: Path, base_sha: str) -> Baseline | None:
+    """Measure the base commit's source with the rules this run uses."""
+    source = _git_show(repo_root, base_sha, SOURCE_PATH)
+    if source is None:
+        return None
+    violations = list(scan_source(source, path=SOURCE_PATH.as_posix()))
+    listed = subprocess.run(
+        [
+            "git",
+            "ls-tree",
+            "-r",
+            "-z",
+            "--name-only",
+            base_sha,
+            "skills/mission/lib/mission_adapter",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    # NUL-separated, so a path containing a space stays one path.
+    names = (name for name in listed.stdout.split("\0") if name)
+    for name in sorted(names) if listed.returncode == 0 else ():
+        if not name.endswith(".py"):
+            continue
+        module_source = _git_show(repo_root, base_sha, Path(name))
+        if module_source is None:
+            continue
+        violations.extend(
+            scan_source(
+                module_source,
+                path=name,
+                extra_roots=_top_level_functions(ast.parse(module_source, filename=name)),
+            )
+        )
+    return baseline_from_violations(violations)
+
+
 def load_base_baseline(repo_root: Path, base_sha: str) -> tuple[Baseline, str]:
-    """Load an established baseline, or bootstrap the first PR from base source."""
+    """Load an established baseline, or bootstrap the first PR from base source.
+
+    Both sides have to be measured with the same ruler.  When this guard's own
+    rules change -- a wider notion of which functions are reachable, say -- the
+    baseline recorded at the base was produced by the older rules, and every
+    function the new rules newly see would read as a violation someone just
+    added.  So when the guard differs from the base's copy of it, the base is
+    measured again here rather than read from its file.
+    """
     if re.fullmatch(r"[0-9a-fA-F]{7,64}", base_sha) is None:
         raise BaselineError("base SHA must be a hexadecimal git object id")
+    base_guard = _git_show(repo_root, base_sha, GUARD_PATH)
+    try:
+        current_guard = (repo_root / GUARD_PATH).read_text(encoding="utf-8")
+    except OSError:
+        # A tree without this file cannot have changed the rules; the
+        # comparison falls back to whatever the base recorded.
+        current_guard = base_guard
+    if base_guard is not None and base_guard != current_guard:
+        rescanned = _base_scanned_baseline(repo_root, base_sha)
+        if rescanned is not None:
+            return rescanned, "rescanned-base-source"
     baseline_text = _git_show(repo_root, base_sha, BASELINE_PATH)
     if baseline_text is not None:
         return load_baseline_text(baseline_text), "recorded-baseline"
-    source = _git_show(repo_root, base_sha, SOURCE_PATH)
-    if source is None:
+    rescanned = _base_scanned_baseline(repo_root, base_sha)
+    if rescanned is None:
         raise BaselineError("base contains neither the ratchet baseline nor canonical source")
-    violations = scan_source(source, path=SOURCE_PATH.as_posix())
-    return baseline_from_violations(violations), "bootstrap-source-scan"
+    return rescanned, "bootstrap-source-scan"
 
 
 def main() -> int:
