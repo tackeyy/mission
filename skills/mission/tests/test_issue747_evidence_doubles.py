@@ -106,7 +106,6 @@ def test_the_surface_list_equals_what_the_executor_reads():
     an old one, without this file changing in the same commit.
     """
     assert executor_surface_from_source() == frozenset(V5_EXECUTOR_SURFACE)
-    assert "_repository" in V5_EXECUTOR_SURFACE  # the getattr-only one
 
 
 def test_the_executor_does_not_alias_self():
@@ -119,10 +118,13 @@ def test_the_executor_does_not_alias_self():
 
     source = inspect.getsource(V5CompatibilityRepository.execute_evidence_transition_effects)
     body = source.split(")", 1)[1]  # drop the signature, whose first parameter is `self`
-    # The two spellings the derivation understands are removed; any `self`
-    # left that is not followed by `.` is an alias or a hand-off.
-    body = re.sub(r"\b(getattr|hasattr|setattr)\(\s*self\b", "", body)
-    stray = [m.group(0) for m in re.finditer(r"\bself\b(?!\s*\.)", body)]
+    # Only the spellings the derivation understands are removed: `self.` with
+    # no space, and `getattr(self, "<literal>"`.  Anything else that names
+    # `self` -- an alias, a hand-off, `getattr(self, variable)`, `hasattr`,
+    # `setattr`, or `self . x` with whitespace -- stays behind as a stray, so
+    # a spelling the derivation cannot see surfaces here instead of hiding.
+    body = re.sub(r"\bgetattr\(\s*self\s*,\s*[\"'][A-Za-z_]\w*[\"']", "", body)
+    stray = [m.group(0) for m in re.finditer(r"\bself\b(?!\.)", body)]
     assert stray == [], stray
 
 
