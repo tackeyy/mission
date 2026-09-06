@@ -626,6 +626,121 @@ def test_a_computed_name_at_import_time_keeps_everything_in_the_budget(wiring):
     assert "_renders" in functions, wiring
 
 
+@pytest.mark.parametrize(
+    "wiring",
+    [
+        "match VALUE:\n    case _:\n        register(_renders)",
+        "match VALUE:\n    case 1 if register(_renders):\n        pass",
+        "def wired(argument: register(_renders)):\n    return argument",
+        "def wired() -> register(_renders):\n    return 1",
+        "def wired(*rest: register(_renders)):\n    return rest",
+        "def wired(**rest: register(_renders)):\n    return rest",
+    ],
+)
+def test_a_match_case_or_an_annotation_also_hands_the_helper_over(wiring):
+    """Both run at import time, so both keep the helper in the budget.
+
+    Annotations are evaluated on the ``def`` in Python 3.12.  Counting them
+    even where a module defers them costs an over-count, which is the safe
+    direction; missing them would let an injection shrink the budget.
+    """
+    guard = _load_guard_module()
+    source = (
+        "VALUE = 1\n"
+        "\n\n"
+        "def _renders(data):\n"
+        "    return data[\"value\"] + 1\n"
+        "\n\n"
+        "def register(render):\n"
+        "    return render\n"
+        "\n\n"
+        + wiring
+        + "\n\n\n"
+        "def cmd_show(args):\n"
+        "    print(args)\n"
+    )
+    functions = {
+        violation.function for violation in guard.scan_source(source, path="x.py")
+    }
+    assert "_renders" in functions, wiring
+
+
+def test_a_definition_nested_in_a_match_case_is_still_only_a_definition():
+    """The body of an unused `def` under `match` must not count as a call."""
+    guard = _load_guard_module()
+    source = (
+        "VALUE = 1\n"
+        "\n\n"
+        "def _helper(data):\n"
+        "    return data[\"value\"] + 1\n"
+        "\n\n"
+        "match VALUE:\n"
+        "    case _:\n"
+        "        def _unused():\n"
+        "            return _helper\n"
+        "\n\n"
+        "def cmd_show(args):\n"
+        "    print(args)\n"
+    )
+    functions = {
+        violation.function for violation in guard.scan_source(source, path="x.py")
+    }
+    assert "_helper" not in functions
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "if True:\n    def _renders(data):\n        return data[\"value\"] + 1",
+        "try:\n    def _renders(data):\n        return data[\"value\"] + 1\n"
+        "except ImportError:\n    _renders = None",
+        "for _ in (1,):\n    def _renders(data):\n        return data[\"value\"] + 1",
+        "with open(__file__) as _handle:\n"
+        "    def _renders(data):\n        return data[\"value\"] + 1",
+        "match VALUE:\n    case _:\n"
+        "        def _renders(data):\n            return data[\"value\"] + 1",
+    ],
+)
+def test_a_function_defined_under_control_flow_is_still_a_module_function(shape):
+    """`if TYPE_CHECKING: def f(): ...` defines a module name like any `def`.
+
+    Leaving these out of the function set would let a helper be defined and
+    injected without ever entering the budget.
+    """
+    guard = _load_guard_module()
+    source = (
+        "VALUE = 1\n"
+        "\n\n"
+        + shape
+        + "\n\n\n"
+        "SERVICES = _renders\n"
+        "\n\n"
+        "def cmd_show(args):\n"
+        "    print(args)\n"
+    )
+    functions = {
+        violation.function for violation in guard.scan_source(source, path="x.py")
+    }
+    assert "_renders" in functions, shape
+
+
+def test_a_method_defined_in_a_class_body_is_not_a_module_function():
+    """A class body binds attributes, not module names."""
+    guard = _load_guard_module()
+    source = (
+        "class Holder:\n"
+        "    def _renders(self, data):\n"
+        "        return data[\"value\"] + 1\n"
+        "\n\n"
+        "def cmd_show(args):\n"
+        "    print(args)\n"
+    )
+    functions = {
+        violation.function for violation in guard.scan_source(source, path="x.py")
+    }
+    assert "_renders" not in functions
+
+
 def test_a_definition_alone_does_not_make_a_function_reachable():
     """Only running code counts; a definition introduces a name."""
     guard = _load_guard_module()

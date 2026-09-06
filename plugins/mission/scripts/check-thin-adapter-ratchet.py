@@ -110,11 +110,33 @@ _PARSER_METHODS = {
 
 
 def _top_level_functions(tree: ast.Module) -> dict[str, ast.AST]:
-    return {
-        node.name: node
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
+    """Return the module's own functions, including those defined under control flow.
+
+    ``if TYPE_CHECKING: def f(): ...`` and its cousins define module-level
+    names just as a bare ``def`` does, so leaving them out would let a
+    function be defined and injected without ever entering the budget.  Class
+    bodies are not included: their functions are attributes, not module names.
+    """
+    functions: dict[str, ast.AST] = {}
+    _collect_module_functions(tree.body, functions)
+    return functions
+
+
+def _collect_module_functions(body, functions: dict[str, ast.AST]) -> None:
+    for node in body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            functions.setdefault(node.name, node)
+        elif isinstance(node, ast.ClassDef):
+            continue
+        else:
+            for _field, value in ast.iter_fields(node):
+                for item in value if isinstance(value, list) else [value]:
+                    if isinstance(item, ast.stmt):
+                        _collect_module_functions([item], functions)
+                    elif isinstance(item, ast.ExceptHandler):
+                        _collect_module_functions(item.body, functions)
+                    elif hasattr(ast, "match_case") and isinstance(item, ast.match_case):
+                        _collect_module_functions(item.body, functions)
 
 
 _DYNAMIC_LOOKUP_NAMES = {"globals", "locals", "vars"}
@@ -139,6 +161,14 @@ def _import_time_expressions_of(node: ast.AST):
         yield from node.decorator_list
         yield from node.args.defaults
         yield from (default for default in node.args.kw_defaults if default is not None)
+        if node.returns is not None:
+            yield node.returns
+        for argument in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
+            if argument.annotation is not None:
+                yield argument.annotation
+        for argument in (node.args.vararg, node.args.kwarg):
+            if argument is not None and argument.annotation is not None:
+                yield argument.annotation
         return
     if isinstance(node, ast.ClassDef):
         yield from node.decorator_list
@@ -154,6 +184,10 @@ def _import_time_expressions_of(node: ast.AST):
                 yield from _import_time_expressions(item.body)
                 if item.type is not None:
                     yield item.type
+            elif hasattr(ast, "match_case") and isinstance(item, ast.match_case):
+                yield from _import_time_expressions(item.body)
+                if item.guard is not None:
+                    yield item.guard
             elif isinstance(item, ast.AST):
                 yield item
 
@@ -176,6 +210,14 @@ def _import_time_lookup_is_dynamic(body) -> bool:
     ``Services(globals()["_helper"])`` hands the helper over without naming
     it, so no name-based search can find it.  Rather than let that take the
     helper out of the budget, every function is treated as reachable.
+
+    **What this does not see.**  The detection recognises the builtins by
+    name, so an alias (``lookup = globals`` then ``lookup()[name]``) or a
+    route through ``sys.modules`` is not caught.  This guard exists to stop a
+    refactor from quietly shrinking the budget, not to withstand someone
+    arranging to evade it; closing every indirection would mean tracking
+    values, which an AST pass cannot do.  A reviewer reading such code is the
+    remaining check.
     """
     for expression in _import_time_expressions(body):
         for inner in ast.walk(expression):
