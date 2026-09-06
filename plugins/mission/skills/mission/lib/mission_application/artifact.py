@@ -173,7 +173,12 @@ def _replayed_artifact_payload(prepared: PreparedArtifactOperation, execution: o
     timestamp or identity is needed.  Key sets match the non-replay result.
     """
     command = prepared.command
-    historical = execution.replayed_document
+    historical = getattr(execution, "replayed_document", None)
+    if not isinstance(historical, dict):
+        # A replay result that carries no historical document is not something
+        # to reconstruct a payload from; refusing is the caller's contract,
+        # an AttributeError is not.
+        raise EvidenceFailure("artifact-projection-mismatch")
     artifact = historical.get("artifact")
     if not isinstance(artifact, dict):
         raise EvidenceFailure("artifact-projection-mismatch")

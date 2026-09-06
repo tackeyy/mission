@@ -1710,9 +1710,12 @@ class LocalFencedRepository:
                     if time.monotonic() >= deadline:
                         raise FencedCommitError("lock-timeout", "repository lock timed out")
                     time.sleep(0.05)
-            lock_flags = os.O_RDWR | os.O_NONBLOCK | os.O_NOFOLLOW
-            if create:
-                lock_flags |= os.O_CREAT
+            # A read-only holder opens the lock read-only as well: asking for
+            # write access fails on a read-only filesystem or ACL, which would
+            # turn a lookup that writes nothing into an error.  ``flock`` needs
+            # only the descriptor, not write access.
+            lock_flags = os.O_NONBLOCK | os.O_NOFOLLOW
+            lock_flags |= (os.O_RDWR | os.O_CREAT) if create else os.O_RDONLY
             descriptor = os.open(
                 ".state.lock",
                 lock_flags,

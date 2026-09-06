@@ -74,6 +74,25 @@ def _all_bytes(root):
     return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
 
 
+def _all_metadata(root):
+    """Mode, inode and change time of every entry, directories included.
+
+    Content alone does not show a repaired mode, a replaced inode or a
+    directory brought into existence, and each of those is a write.
+    """
+    import stat as stat_module
+
+    entries = {}
+    for path in sorted(root.rglob("*")):
+        metadata = path.lstat()
+        entries[str(path.relative_to(root))] = (
+            stat_module.S_IMODE(metadata.st_mode),
+            metadata.st_ino,
+            metadata.st_ctime_ns,
+        )
+    return entries
+
+
 # ----------------------------------------------------------------- persistence
 
 
@@ -93,9 +112,10 @@ class TestReadOperationState:
     def test_reading_is_read_only(self, tmp_path):
         local, root, _states = _committed_repository(tmp_path)
         result, intent, _, materialization = _operation_record(root, "test", "op-1")
-        before = _all_bytes(root)
+        before, before_metadata = _all_bytes(root), _all_metadata(root)
         local.read_operation_state(result, session_id="test", operation_id="op-1", intent_digest=intent, record_version=2, materialization=materialization)
         assert _all_bytes(root) == before
+        assert _all_metadata(root) == before_metadata
 
     @pytest.mark.parametrize("field", ["operation_id", "intent_digest", "session_id"])
     def test_a_foreign_identity_is_a_lineage_mismatch(self, tmp_path, field):
