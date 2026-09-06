@@ -504,3 +504,87 @@ def test_load_base_baseline_uses_recorded_or_bootstrap_source_commit(tmp_path):
     assert recorded == baseline
     with pytest.raises(guard.BaselineError, match="base SHA"):
         guard.load_base_baseline(repo, "not-a-sha")
+
+
+def test_a_helper_injected_at_module_level_stays_in_the_budget():
+    """Injecting a helper instead of calling it must not take it out of the scan.
+
+    A use case that receives the helper still runs it on every invocation, so
+    a count that falls only because no handler names it any more is the guard
+    looking away, not the adapter getting thinner (#747 P2-b).
+    """
+    guard = _load_guard_module()
+    source = """
+import json
+
+
+def _renders(data):
+    return data["value"] + 1
+
+
+def _services(render):
+    return render
+
+
+SERVICES = _services(_renders)
+
+
+def cmd_show(args):
+    print(SERVICES(args))
+"""
+    functions = {
+        violation.function for violation in guard.scan_source(source, path="x.py")
+    }
+    assert "_renders" in functions
+
+
+def test_the_base_is_measured_with_the_rules_of_this_run(tmp_path, monkeypatch):
+    """A widened rule must not read as violations somebody just added.
+
+    The baseline recorded at the base was produced by the older rules, so it
+    cannot see what the new rules see.  Comparing against it would report
+    every newly visible function as new.
+    """
+    guard = _load_guard_module()
+    base_source = "def cmd_run(args):\n    return _helper(args)\n\n\ndef _helper(args):\n    return args or 1\n"
+    calls = {}
+
+    def fake_git_show(repo_root, base_sha, relative_path):
+        name = relative_path.as_posix()
+        calls[name] = calls.get(name, 0) + 1
+        if name.endswith("check-thin-adapter-ratchet.py"):
+            return "# an older ruler\n"
+        if name.endswith("thin-adapter-baseline.jsonl"):
+            return ""
+        if name == guard.SOURCE_PATH.as_posix():
+            return base_source
+        return None
+
+    monkeypatch.setattr(guard, "_git_show", fake_git_show)
+    monkeypatch.setattr(
+        guard, "subprocess", type("_S", (), {"run": staticmethod(lambda *a, **k: type("_R", (), {"returncode": 1, "stdout": ""})())})
+    )
+    baseline, source_name = guard.load_base_baseline(REPO_ROOT, "0" * 40)
+
+    assert source_name == "rescanned-base-source"
+    assert ("skills/mission/bin/mission-state.py", "_helper") in baseline
+
+
+def test_an_unchanged_guard_still_reads_the_recorded_baseline(tmp_path, monkeypatch):
+    """Re-measuring costs time and is only needed when the ruler changed."""
+    guard = _load_guard_module()
+    current = SCRIPT_PATH.read_text(encoding="utf-8")
+
+    def fake_git_show(repo_root, base_sha, relative_path):
+        name = relative_path.as_posix()
+        if name.endswith("check-thin-adapter-ratchet.py"):
+            return current
+        if name.endswith("thin-adapter-baseline.jsonl"):
+            return '{"path":"a.py","function":"f","rules":{"io.direct":1}}\n'
+        return None
+
+    monkeypatch.setattr(guard, "_git_show", fake_git_show)
+    baseline, source_name = guard.load_base_baseline(REPO_ROOT, "0" * 40)
+
+    assert source_name == "recorded-baseline"
+    assert baseline == {("a.py", "f"): {"io.direct": 1}}
