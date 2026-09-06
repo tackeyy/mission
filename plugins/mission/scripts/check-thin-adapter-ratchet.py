@@ -230,7 +230,10 @@ def _import_time_lookup_is_dynamic(body) -> bool:
     cost of putting functions nobody calls in the budget for good (462 -> 480
     in this repository), which stops the number from measuring how thin the
     adapter is.  Picking these forms out *without* that over-count needs
-    value tracking, which an AST pass cannot do.  This guard exists to stop a
+    value tracking, which this name-based pass does not do.  A narrower AST
+    pass that follows aliases, constants and class methods could resolve
+    them; where to stop following is a separate design question, which is
+    why it is not here.  This guard exists to stop a
     refactor from quietly shrinking the budget, not to withstand someone
     arranging to evade it; a reviewer reading such code is the remaining
     check.
