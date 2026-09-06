@@ -32,8 +32,11 @@ from contextlib import contextmanager
 ZERO_DIGEST = "sha256:" + "0" * 64
 
 # (double, attribute path on the double) -> (production class, field names)
-# The contract test resolves each production class and asserts the fields
-# exist, so the double cannot drift from what the executor really reads.
+# The contract test checks both sides against this one declaration: every
+# name has to be a ``dataclasses.fields`` entry of the production class, and
+# the object the double really returns has to expose exactly these names.
+# Deleting a name here therefore fails (the double still answers it), and
+# so does a rename in production.
 PRODUCTION_SHAPES = (
     ("FakeFencedRepository.read()", "mission_persistence.fenced_commit:RepositorySnapshot",
      ("state", "head_digest", "head")),
@@ -63,6 +66,7 @@ V5_EXECUTOR_SURFACE = (
     "_effect_transaction",
     "_guarded_context",
     "_reject_reentrant_entry",
+    "_repository",
     "execute",
     "load",
     "observed_base",
@@ -81,11 +85,22 @@ V5_EXECUTOR_INSTANCE_STATE = (
     "_effect_transaction",
     "_observed_base",
     "_replayed",
+    "_repository",
 )
 
 
+# Two spellings reach an attribute of ``self``: ``self.name`` and
+# ``getattr(self, "name", ...)``.  The executor uses the second for
+# ``_repository`` (read defensively, with a default), so a derivation that
+# only saw the first left that attribute out of the surface.  An alias
+# (``repo = self; repo.x``) would still escape; the executor has none, and
+# the contract test says so rather than claiming more than it checks.
+_SELF_ATTRIBUTE = re.compile(r"\bself\.([A-Za-z_]\w*)")
+_SELF_GETATTR = re.compile(r"\bgetattr\(\s*self\s*,\s*[\"']([A-Za-z_]\w*)[\"']")
+
+
 def executor_surface_from_source() -> frozenset:
-    """Return every ``self.<name>`` the V5 executor's entry method touches."""
+    """Return every attribute of ``self`` the V5 executor's entry method touches."""
     import inspect
 
     from mission_persistence.legacy_v4 import V5CompatibilityRepository
@@ -93,7 +108,9 @@ def executor_surface_from_source() -> frozenset:
     source = inspect.getsource(
         V5CompatibilityRepository.execute_evidence_transition_effects
     )
-    return frozenset(re.findall(r"\bself\.([A-Za-z_]\w*)", source))
+    return frozenset(_SELF_ATTRIBUTE.findall(source)) | frozenset(
+        _SELF_GETATTR.findall(source)
+    )
 
 
 class FakeFencedRepository:
@@ -170,6 +187,10 @@ def in_memory_v5_repository(current, *, replayed=False):
     # branch then fails as ``evidence-effect-transaction-missing``, a refusal
     # the tests can name, rather than an AttributeError deep in the executor.
     repository._effect_transaction = None
+    # Read through ``getattr(self, "_repository", None)`` for the root name.
+    # ``None`` takes the executor down the default-name path, which is what a
+    # double with no backend should mean.
+    repository._repository = None
 
     @contextmanager
     def transaction():

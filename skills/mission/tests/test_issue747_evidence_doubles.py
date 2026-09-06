@@ -3,6 +3,7 @@
 第 1 段で 5 回、第 2 段でも起きた「production は正しいがダブルが契約に追いついて
 いない」を、次の経路追加で 3 倍にしないための固定。
 """
+import dataclasses
 import importlib
 import inspect
 import re
@@ -51,26 +52,32 @@ def _fake():
 def test_every_field_a_double_answers_exists_in_production(double_path, production, fields):
     """A double may answer less than production, never something it does not have.
 
-    When a production field is renamed, this fails before any test that
-    trusted the double starts passing for the wrong reason.
+    ``dataclasses.fields`` is the authority: a constructor parameter that is
+    not stored, a method, or a property is not a field, and a field with
+    ``init=False`` still is.  When a production field is renamed, this fails
+    before any test that trusted the double starts passing for the wrong
+    reason.
     """
     cls = _resolve(production)
-    names = set(inspect.signature(cls).parameters) | set(vars(cls))
+    assert dataclasses.is_dataclass(cls), f"{production} is not a dataclass"
+    names = {field.name for field in dataclasses.fields(cls)}
     for field in fields:
         assert field in names, f"{double_path} answers {field!r}, but {production} has no such field"
 
 
 @pytest.mark.parametrize("double_path,production,fields", PRODUCTION_SHAPES,
                          ids=[shape[0] for shape in PRODUCTION_SHAPES])
-def test_the_fenced_fake_really_answers_each_declared_shape(double_path, production, fields):
-    """The declaration is only worth checking if the fake honours it.
+def test_the_fenced_fake_answers_exactly_the_declared_shape(double_path, production, fields):
+    """The object the fake returns exposes the declared names -- no more, no fewer.
 
-    Derived from ``PRODUCTION_SHAPES`` rather than restated, so a shape added
-    to the declaration is exercised here without a second edit.
+    Equality, not subset: with ``hasattr`` alone, deleting a name from the
+    declaration still passed, because the fake kept answering it.  The other
+    direction (a name declared but not answered) is caught here too.
     """
     value = _walk(_fake(), double_path)
-    for field in fields:
-        assert hasattr(value, field), f"{double_path} does not answer {field!r}"
+    assert set(vars(value)) == set(fields), (
+        f"{double_path} answers {sorted(vars(value))}, declared {sorted(fields)}"
+    )
 
 
 def test_the_fenced_fake_answers_the_types_the_executor_relies_on():
@@ -86,6 +93,11 @@ def test_the_fenced_fake_answers_the_types_the_executor_relies_on():
 def test_the_surface_list_equals_what_the_executor_reads():
     """The list is derived from the executor's source, not remembered.
 
+    Both spellings count: ``self.name`` and ``getattr(self, "name", ...)``.
+    The executor reads ``_repository`` only through the second, which a
+    ``self.``-only derivation missed.  An alias of ``self`` is not derived;
+    the executor has none (asserted below), so the claim stays honest.
+
     Hard-coding a handful of names let ``_effect_transaction`` go missing
     from both the list and the double: the executor reads it on the
     legacy-publisher branch, ``__init__`` sets it, and a double built without
@@ -94,6 +106,24 @@ def test_the_surface_list_equals_what_the_executor_reads():
     an old one, without this file changing in the same commit.
     """
     assert executor_surface_from_source() == frozenset(V5_EXECUTOR_SURFACE)
+    assert "_repository" in V5_EXECUTOR_SURFACE  # the getattr-only one
+
+
+def test_the_executor_does_not_alias_self():
+    """The derivation reads ``self.`` and ``getattr(self, ...)`` only.
+
+    An alias such as ``repo = self`` would let reads escape both patterns.
+    Pinning its absence keeps the equality above meaning what it says.
+    """
+    from mission_persistence.legacy_v4 import V5CompatibilityRepository
+
+    source = inspect.getsource(V5CompatibilityRepository.execute_evidence_transition_effects)
+    body = source.split(")", 1)[1]  # drop the signature, whose first parameter is `self`
+    # The two spellings the derivation understands are removed; any `self`
+    # left that is not followed by `.` is an alias or a hand-off.
+    body = re.sub(r"\b(getattr|hasattr|setattr)\(\s*self\b", "", body)
+    stray = [m.group(0) for m in re.finditer(r"\bself\b(?!\s*\.)", body)]
+    assert stray == [], stray
 
 
 def test_the_in_memory_double_defines_every_instance_attribute_the_executor_reads():
