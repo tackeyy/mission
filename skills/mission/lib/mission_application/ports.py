@@ -83,14 +83,27 @@ class LegacyCommandExecutionResult:
     decision: Optional[Decision]
     _projection: FrozenJsonObject
     replayed: bool = False
+    # #747 item 6: the state the replayed operation committed, read back from
+    # its commit inside the transaction.  Required on a replay -- the caller
+    # reconstructs the original result from it -- and forbidden otherwise.
+    replayed_state: Optional[FrozenJsonObject] = None
 
     def __post_init__(self) -> None:
         if self.replayed != (self.decision is None):
+            raise ValueError("legacy-command-replay-result-invalid")
+        if self.replayed != (self.replayed_state is not None):
             raise ValueError("legacy-command-replay-result-invalid")
 
     @property
     def projection(self) -> dict:
         return self._projection.thaw()
+
+    @property
+    def replayed_document(self) -> dict:
+        """The replayed operation's committed state, thawed for callers."""
+        if self.replayed_state is None:
+            raise ValueError("legacy-command-replay-result-invalid")
+        return self.replayed_state.thaw()
 
 
 @dataclass(frozen=True)

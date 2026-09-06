@@ -1696,6 +1696,9 @@ _FENCED_CLI_EXPECTED_GATE_CODES = frozenset({
     # error.
     "final-authority-cas-mismatch",
     "head-cas-mismatch",
+    # #747 item 6: a replay whose committed generation GC already removed. The
+    # operation completed; its result can no longer be reconstructed.
+    "operation-history-collected",
     "lease-precondition-changed",
     "lease-rejected",
     "lease-token-required",

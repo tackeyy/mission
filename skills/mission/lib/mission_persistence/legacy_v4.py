@@ -844,6 +844,9 @@ class V5CompatibilityRepository:
         self._admitted: AdmittedSnapshot | None = None
         self._observed_base: dict | None = None
         self._replayed: CommitResult | None = None
+        # #747 item 6: the request the replay was admitted under, kept for the
+        # historical read that follows inside the same transaction.
+        self._replay_request: ExecutionRequest | None = None
         self._transaction_active = False
         self._callback_depth = 0
         self._loaded_document: dict | None = None
@@ -858,6 +861,7 @@ class V5CompatibilityRepository:
         finally:
             self._admitted = None
             self._replayed = None
+            self._replay_request = None
             self._loaded_document = None
             self._transaction_active = False
 
@@ -973,6 +977,20 @@ class V5CompatibilityRepository:
     def operation_replayed(self) -> bool:
         return self._replayed is not None
 
+    def _replayed_state_document(self) -> FrozenJsonObject:
+        """The committed state of the replayed operation, as a frozen document."""
+        replayed = self._replayed
+        request = self._replay_request
+        if replayed is None or request is None:
+            raise FencedCommitError("request-invalid", "no replay is admitted in this transaction")
+        historical = self._repository.read_operation_state(
+            replayed,
+            session_id=request.session_id,
+            operation_id=request.operation_id,
+            intent_digest=request.intent_digest,
+        )
+        return decode_json_object(project_legacy_document(historical))
+
     def read_snapshot(self) -> dict:
         """Return the current document without admitting the transaction.
 
@@ -1015,10 +1033,12 @@ class V5CompatibilityRepository:
             raise FencedCommitError("request-invalid", "v5 transaction already loaded")
         if self._format_guard is not None:
             self._guarded_call(self._format_guard)
-        admitted = self._repository.begin(self._request(blobs=blobs))
+        request = self._request(blobs=blobs)
+        admitted = self._repository.begin(request)
         if isinstance(admitted, CommitResult):
             snapshot = self._repository.read(self._session_id)
             self._replayed = admitted
+            self._replay_request = request
             document = json.loads(project_legacy_document(snapshot.state))
             self._loaded_document = copy.deepcopy(document)
             return copy.deepcopy(document)
@@ -1312,8 +1332,14 @@ class V5CompatibilityRepository:
             if self.operation_replayed:
                 frozen = freeze_json_value(current)
                 assert isinstance(frozen, FrozenJsonObject)
+                # #747 item 6: read the state the replayed operation committed
+                # while the transaction still holds the replay identity; the
+                # transaction's exit clears it, so a later read is impossible.
+                # Done for every replay: the lineage check it performs is a
+                # fail-closed property, not an artifact-only convenience.
                 return prepared, LegacyCommandExecutionResult(
-                    None, frozen, replayed=True
+                    None, frozen, replayed=True,
+                    replayed_state=self._replayed_state_document(),
                 )
             # A replay commits nothing, so the effect claim is only worth
             # checking on the path that is about to publish a generation.
