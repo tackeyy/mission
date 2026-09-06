@@ -10,6 +10,10 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from datetime import datetime, timezone
 
+from mission_application.cli_operation import (
+    CliOperationIdentity,
+    prepare_cli_operation,
+)
 from mission_application.evidence_publication import (
     EvidencePublicationError,
     canonical_publication_path,
@@ -494,6 +498,188 @@ def render_claims_ledger_cli(args: object, services: ClaimsLedgerCliServices) ->
         services,
     )
     return json.dumps({"ok": True, **result}, ensure_ascii=False, indent=2)
+
+
+@dataclass(frozen=True)
+class EvidenceCliServices:
+    """Adapter-owned capabilities the progress and context CLI use cases need (#747 P2-b)."""
+
+    resolve_state_file: object
+    resolve_output_path: object
+    repository: object
+    progress_archive_path: object
+    compatibility_arguments: object
+    canonical_operation: object
+    now: object
+    fail: object
+
+
+PROGRESS_STATE_FILE_MISSING = "ERROR: state.json が見つかりません。先に `init` してください。"
+CONTEXT_STATE_FILE_MISSING = "ERROR: state.json が見つかりません。"
+PROGRESS_RANGE_INVALID = (
+    "ERROR: --total/--completed must satisfy 0 <= completed <= total"
+)
+CONTEXT_ITERATION_INVALID = "ERROR: --iteration は 1 以上で指定してください"
+CONTEXT_OUTPUT_INVALID = "ERROR: context output filename is invalid"
+
+
+def _evidence_state_file(cwd, services, message):
+    state_file = services.resolve_state_file(cwd)
+    if not state_file.exists():
+        services.fail(message, 1)
+    return state_file
+
+
+def _evidence_repository(services, cwd, state_file, identity, *, stamp):
+    return services.repository(
+        cwd,
+        state_file,
+        stamp=stamp,
+        pre_admit_lease=True,
+        session_id=state_file.stem,
+        operation_id=identity.operation_id,
+        operation_command=identity.operation_command,
+        operation_command_type=identity.command_type,
+    )
+
+
+def prepare_progress_update_operation(
+    total: object,
+    completed: object,
+    batch_size: object,
+    last_unit: object,
+    artifact_path: object,
+    iteration: object,
+    *,
+    session_id: str,
+    compatibility_arguments,
+    canonical_operation,
+) -> CliOperationIdentity:
+    """Identify one progress update by the counts it records, not by when."""
+    return prepare_cli_operation(
+        "update-progress",
+        {
+            "artifact_path": artifact_path,
+            "batch_size": batch_size,
+            "completed": completed,
+            "iteration": iteration,
+            "last_unit": last_unit,
+            "total": total,
+        },
+        session_id=session_id,
+        compatibility_arguments=compatibility_arguments,
+        canonical_operation=canonical_operation,
+    )
+
+
+def prepare_context_manifest_operation(
+    plan: object,
+    *,
+    session_id: str,
+    compatibility_arguments,
+    canonical_operation,
+) -> CliOperationIdentity:
+    """Identify one context manifest by the plan's own normalised fields.
+
+    The plan is what the retry loop keeps identical across attempts, and it
+    has already canonicalised the publication path, so reading the values off
+    it is what keeps the identity and the operation in step.
+    """
+    return prepare_cli_operation(
+        "generate-context-manifest",
+        {
+            "iteration": getattr(plan, "iteration"),
+            "publication_path": getattr(plan, "publication_path"),
+        },
+        session_id=session_id,
+        compatibility_arguments=compatibility_arguments,
+        canonical_operation=canonical_operation,
+    )
+
+
+def run_progress_update_cli(args, cwd, services) -> str:
+    state_file = _evidence_state_file(cwd, services, PROGRESS_STATE_FILE_MISSING)
+    total = getattr(args, "total")
+    completed = getattr(args, "completed")
+    if total < 0 or completed < 0 or completed > total:
+        services.fail(PROGRESS_RANGE_INVALID, 2)
+    identity = prepare_progress_update_operation(
+        total,
+        completed,
+        getattr(args, "batch_size"),
+        getattr(args, "last_unit"),
+        getattr(args, "artifact"),
+        getattr(args, "iteration"),
+        session_id=state_file.stem,
+        compatibility_arguments=services.compatibility_arguments,
+        canonical_operation=services.canonical_operation,
+    )
+    try:
+        result = run_progress_update(
+            ProgressUpdateRequest(
+                now=services.now(),
+                total=total,
+                completed=completed,
+                batch_size=getattr(args, "batch_size"),
+                last_unit=getattr(args, "last_unit"),
+                artifact_path=getattr(args, "artifact"),
+                iteration=getattr(args, "iteration"),
+                evidence_path=lambda data, iteration: services.progress_archive_path(
+                    cwd, data, iteration
+                ),
+            ),
+            _evidence_repository(services, cwd, state_file, identity, stamp=True),
+        )
+    except EvidenceFailure as exc:
+        services.fail("ERROR: %s" % (exc.code,), 2)
+    return json.dumps(
+        {"ok": True, **result},
+        indent=2 if getattr(args, "json", False) else None,
+        ensure_ascii=False,
+    )
+
+
+def run_context_manifest_cli(args, cwd, services) -> str:
+    from mission_application.retry_plan import ContextManifestRetryPlan
+
+    state_file = _evidence_state_file(cwd, services, CONTEXT_STATE_FILE_MISSING)
+    output = Path(str(getattr(args, "out")))
+    try:
+        validate_context_iteration_override(getattr(args, "iteration"))
+    except EvidenceFailure:
+        services.fail(CONTEXT_ITERATION_INVALID, 2)
+    if not output.name or output.name in {".", ".."}:
+        services.fail(CONTEXT_OUTPUT_INVALID, 2)
+    services.resolve_output_path(cwd, str(output))
+    now = services.now()
+    try:
+        plan = ContextManifestRetryPlan.for_request(
+            now=now,
+            iteration=getattr(args, "iteration"),
+            publication_path=str(output),
+            project_root=cwd,
+        )
+    except EvidencePublicationError as exc:
+        services.fail("ERROR: %s" % (exc.code,), 2)
+    identity = prepare_context_manifest_operation(
+        plan,
+        session_id=state_file.stem,
+        compatibility_arguments=services.compatibility_arguments,
+        canonical_operation=services.canonical_operation,
+    )
+    try:
+        result = run_context_manifest(
+            ContextManifestRequest(
+                now=now,
+                iteration=getattr(args, "iteration"),
+                publication_path=str(output),
+                project_root=cwd,
+            ),
+            _evidence_repository(services, cwd, state_file, identity, stamp=False),
+        )
+    except EvidenceFailure as exc:
+        services.fail("ERROR: %s" % (exc,), 2)
+    return json.dumps({"ok": True, **result}, ensure_ascii=False)
 
 
 def _translate(call):
