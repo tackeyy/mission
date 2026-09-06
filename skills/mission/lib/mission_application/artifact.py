@@ -173,7 +173,12 @@ def _replayed_artifact_payload(prepared: PreparedArtifactOperation, execution: o
     timestamp or identity is needed.  Key sets match the non-replay result.
     """
     command = prepared.command
-    historical = execution.replayed_document
+    historical = getattr(execution, "replayed_document", None)
+    if not isinstance(historical, dict):
+        # A replay result that carries no historical document is not something
+        # to reconstruct a payload from; refusing is the caller's contract,
+        # an AttributeError is not.
+        raise EvidenceFailure("artifact-projection-mismatch")
     artifact = historical.get("artifact")
     if not isinstance(artifact, dict):
         raise EvidenceFailure("artifact-projection-mismatch")
@@ -190,7 +195,12 @@ def _replayed_artifact_payload(prepared: PreparedArtifactOperation, execution: o
             if not isinstance(records, list) or not records:
                 raise EvidenceFailure("artifact-projection-mismatch")
             record = records[-1]
-            if not isinstance(record, dict) or record.get("timestamp") != command.at:
+            # #747 P2: the timestamp is store-authoritative.  A retry of the
+            # same operation arrives with its own clock, so the record's
+            # timestamp is what the caller gets back, not what it sent; the
+            # lineage the historical read verified is what ties the record to
+            # this operation.
+            if not isinstance(record, dict) or not isinstance(record.get("timestamp"), str):
                 raise EvidenceFailure("artifact-projection-mismatch")
             if isinstance(command, AppendArtifactBlock) and record.get("section") != command.section:
                 raise EvidenceFailure("artifact-projection-mismatch")

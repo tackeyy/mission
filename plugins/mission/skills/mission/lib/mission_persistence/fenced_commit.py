@@ -43,13 +43,21 @@ from mission_kernel.transitions import (
     is_transition_bound_to,
 )
 from mission_application.evidence_publication import (
+    MATERIALIZATION_RECORD_VERSION,
     EvidencePublicationError,
+    assert_replay_materializes,
+    binding_records,
+    generated_blobs_digest,
+    materialization_binding,
+    read_materialization,
     read_operation_record,
+    semantic_intent_digest,
 )
 from mission_application.ports import (
     AuditMetadata,
     CommitResult,
     ExecutionRequest,
+    OperationReplay,
     RepositoryExecutionResult,
     VerifiedBlobSetView,
 )
@@ -79,7 +87,10 @@ MAX_HEAD_BYTES = 4 * 1024
 MAX_AUDIT_BYTES = 8 * 1024
 MAX_COMMIT_BYTES = STATE_LIMIT
 MAX_PREPARE_BYTES = STATE_LIMIT
-MAX_OPERATION_BYTES = 4 * 1024
+# #747 P2: the operation record carries a materialization, so it is bounded
+# like the commit and prepare records rather than like the head.  Reading with
+# a larger limit accepts every record written under the old 4 KiB bound.
+MAX_OPERATION_BYTES = STATE_LIMIT
 MAX_AUDIT_EVENT_TYPES = MAX_BLOB_COUNT
 DEFAULT_LEASE_TTL_SECONDS = 15 * 60
 
@@ -149,7 +160,11 @@ class CommitRecord:
     state: RecordRef
     target_generation: int
     transaction_id: str
-    schema: str = "mission-commit/1"
+    schema: str = "mission-commit/2"
+    # #747 P2: which generation of the record this is.  It decides what the
+    # ``intent_digest`` means (version 1: ``mission-intent/1`` over every
+    # blob; version 2: the semantic ``mission-intent/2`` over captured input).
+    version: int = 2
 
 
 @dataclass(frozen=True)
@@ -193,7 +208,12 @@ class PrepareRecord:
     state: RecordRef
     target_generation: int
     transaction_id: str
-    schema: str = "mission-prepare/1"
+    schema: str = "mission-prepare/2"
+    # #747 P2: the prepare decides the generation of every record derived
+    # from it (marker, index, operation record), and a version-2 prepare
+    # carries the materialization the operation record will repeat.
+    version: int = 2
+    materialization: Optional[dict] = None
 
 
 @dataclass(frozen=True)
@@ -206,6 +226,7 @@ class _RecoveryResolution:
     session_id: str
     target_generation: int
     transaction_id: str
+    version: int = 2
 
 
 @dataclass(frozen=True)
@@ -293,6 +314,44 @@ OPERATION_HISTORY_COLLECTED = "operation-history-collected"
 
 PRECONDITION_CAS_CODE = "head-cas-mismatch"
 FINAL_AUTHORITY_CAS_CODE = "final-authority-cas-mismatch"
+# #747 P2: the same identity committed different bytes from the same base.
+REPLAY_MATERIALIZATION_MISMATCH = "replay-materialization-mismatch"
+_RECORD_VERSIONS = (1, MATERIALIZATION_RECORD_VERSION)
+# Every generation of every versioned record, as literals: the persisted
+# schema inventory is scanned from this source.
+_COMMIT_SCHEMAS = {1: "mission-commit/1", 2: "mission-commit/2"}
+_PREPARE_SCHEMAS = {1: "mission-prepare/1", 2: "mission-prepare/2"}
+_OPERATION_SCHEMAS = {1: "mission-operation/1", 2: "mission-operation/2"}
+_RECOVERY_SCHEMAS = {1: "mission-recovery/1", 2: "mission-recovery/2"}
+_RECOVERY_OPERATION_SCHEMAS = {
+    1: "mission-recovery-operation/1",
+    2: "mission-recovery-operation/2",
+}
+
+
+class _LegacyUndetermined:
+    """A version-1 record could not be matched before prepare (#747 P2).
+
+    Its digest folds every blob, and before prepare the generated blobs do
+    not exist yet, so neither a match nor a collision can be concluded.  The
+    caller proceeds to prepare; ``begin`` decides with the full blob set.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "LEGACY_UNDETERMINED"
+
+
+LEGACY_UNDETERMINED = _LegacyUndetermined()
+
+
+def _schema_version(document: dict, schemas: dict, *, name: str) -> int:
+    schema = document.get("schema")
+    for version, expected in schemas.items():
+        if schema == expected:
+            return version
+    raise FencedCommitError("record-invalid", name + " schema is invalid")
 RETRYABLE_CAS_CODES = frozenset({PRECONDITION_CAS_CODE})
 
 
@@ -320,7 +379,39 @@ def compute_intent_digest(
     command: FrozenJsonObject,
     blobs: VerifiedBlobSetView,
 ) -> str:
-    """Return the canonical digest of command meaning and captured evidence."""
+    """Return the semantic identity of one request (``mission-intent/2``).
+
+    #747 P2: the digest folds the command's meaning and the *captured* blobs
+    only.  Generated blobs are what prepare produces, so folding them made
+    the same request a different operation before and after prepare, and
+    left nothing to look an operation up by before its output existed.  The
+    produced bytes are bound separately, by the materialization.
+    """
+    session_id, lease_owner_session_id, operation_id = _intent_inputs(
+        session_id, lease_owner_session_id, operation_id, command, blobs
+    )
+    try:
+        records = binding_records(blobs)
+        return semantic_intent_digest(
+            {
+                "bindings": records,
+                "command": thaw_json_object(command),
+                "lease_owner_session_id": lease_owner_session_id,
+                "operation_id": operation_id,
+                "session_id": session_id,
+            }
+        )
+    except EvidencePublicationError as exc:
+        raise FencedCommitError("request-invalid", exc.detail) from exc
+
+
+def _intent_inputs(
+    session_id: str,
+    lease_owner_session_id: str,
+    operation_id: str,
+    command: FrozenJsonObject,
+    blobs: VerifiedBlobSetView,
+) -> tuple[str, str, str]:
     session_id = _session_id(session_id)
     lease_owner_session_id = _session_id(lease_owner_session_id)
     operation_id = _token(operation_id, "operation_id")
@@ -341,6 +432,26 @@ def compute_intent_digest(
         raise FencedCommitError(
             "request-invalid", "blobs are not immutable and verified"
         ) from exc
+    return session_id, lease_owner_session_id, operation_id
+
+
+def compute_legacy_intent_digest(
+    *,
+    session_id: str,
+    lease_owner_session_id: str,
+    operation_id: str,
+    command: FrozenJsonObject,
+    blobs: VerifiedBlobSetView,
+) -> str:
+    """Return the ``mission-intent/1`` digest a version-1 record was written with.
+
+    Kept only to compare a request against records that predate #747 P2.
+    Those records folded every blob, so this can be computed only once the
+    blobs are final.
+    """
+    session_id, lease_owner_session_id, operation_id = _intent_inputs(
+        session_id, lease_owner_session_id, operation_id, command, blobs
+    )
     bindings = sorted(
         (
             {
@@ -367,6 +478,52 @@ def compute_intent_digest(
             limit=STATE_LIMIT,
         )
     )
+
+
+def intent_digest_for_version(request: ExecutionRequest, version: int) -> str:
+    """Return the digest of ``request`` in the scheme one record generation uses."""
+    if version == 1:
+        return compute_legacy_intent_digest(
+            session_id=request.session_id,
+            lease_owner_session_id=request.lease_owner_session_id,
+            operation_id=request.operation_id,
+            command=request.command,
+            blobs=request.blobs,
+        )
+    if version == MATERIALIZATION_RECORD_VERSION:
+        return request.intent_digest
+    raise FencedCommitError("record-invalid", "record version is not recognised")
+
+
+def _operation_document(
+    *,
+    session_id: str,
+    operation_id: str,
+    intent_digest: str,
+    result: CommitResult,
+    version: int,
+    materialization: Optional[dict],
+) -> dict:
+    """Return the operation record in the generation the prepare decided."""
+    document = {
+        "commit_digest": result.commit_digest,
+        "intent_digest": intent_digest,
+        "operation_id": operation_id,
+        "result": _result_document(result),
+        "schema": _OPERATION_SCHEMAS[version],
+        "session_id": session_id,
+    }
+    if version >= MATERIALIZATION_RECORD_VERSION:
+        if materialization is None:
+            raise FencedCommitError(
+                "record-invalid", "a version-2 operation record requires a materialization"
+            )
+        document["materialization"] = dict(materialization)
+    elif materialization is not None:
+        raise FencedCommitError(
+            "record-invalid", "a version-1 operation record cannot carry a materialization"
+        )
+    return document
 
 
 def _canonical_bytes(value: dict, *, limit: int, code: str = "record-too-large") -> bytes:
@@ -651,8 +808,7 @@ def _parse_commit(content: bytes) -> CommitRecord:
         "target_generation", "transaction_id",
     }
     _exact(document, keys, "commit")
-    if document["schema"] != "mission-commit/1":
-        raise FencedCommitError("record-invalid", "commit schema is invalid")
+    version = _schema_version(document, _COMMIT_SCHEMAS, name="commit")
     effects_value = document["effects"]
     if not isinstance(effects_value, list) or len(effects_value) > MAX_BLOB_COUNT:
         raise FencedCommitError("record-invalid", "commit effects are invalid")
@@ -680,6 +836,8 @@ def _parse_commit(content: bytes) -> CommitRecord:
         state=_parse_ref(document["state"], directory="objects", suffix=".blob", name="commit.state"),
         target_generation=target,
         transaction_id=transaction_id,
+        schema=document["schema"],
+        version=version,
     )
 
 
@@ -766,9 +924,16 @@ def _parse_prepare(content: bytes, filename: str) -> PrepareRecord:
         "intent_digest", "operation_id", "prepared_at", "projections",
         "schema", "session_id", "state", "target_generation", "transaction_id",
     }
+    version = _schema_version(document, _PREPARE_SCHEMAS, name="prepare")
+    materialization = None
+    if version >= MATERIALIZATION_RECORD_VERSION:
+        keys = keys | {"materialization"}
     _exact(document, keys, "prepare")
-    if document["schema"] != "mission-prepare/1":
-        raise FencedCommitError("record-invalid", "prepare schema is invalid")
+    if version >= MATERIALIZATION_RECORD_VERSION:
+        try:
+            materialization = read_materialization(document["materialization"])
+        except EvidencePublicationError as exc:
+            raise FencedCommitError("record-invalid", exc.detail) from exc
     audit = _parse_audit(document["audit"])
     base = _parse_base(document["base"])
     effects_value = document["effects"]
@@ -831,6 +996,13 @@ def _parse_prepare(content: bytes, filename: str) -> PrepareRecord:
             raise FencedCommitError(
                 "record-invalid", "prepare projection differs from its effect"
             )
+    if materialization is not None and (
+        materialization["base_head_digest"] != base.head_digest
+        or materialization["state_digest"] != state.digest
+    ):
+        raise FencedCommitError(
+            "record-invalid", "prepare materialization disagrees with its base or state"
+        )
     return PrepareRecord(
         audit=audit,
         base=base,
@@ -845,6 +1017,9 @@ def _parse_prepare(content: bytes, filename: str) -> PrepareRecord:
         state=state,
         target_generation=target_generation,
         transaction_id=transaction_id,
+        schema=document["schema"],
+        version=version,
+        materialization=materialization,
     )
 
 
@@ -869,10 +1044,7 @@ def _parse_recovery_resolution(
         },
         "recovery resolution",
     )
-    if document["schema"] != "mission-recovery/1":
-        raise FencedCommitError(
-            "record-invalid", "recovery resolution schema differs"
-        )
+    version = _schema_version(document, _RECOVERY_SCHEMAS, name="recovery resolution")
     transaction_id = document["transaction_id"]
     if (
         not isinstance(transaction_id, str)
@@ -922,6 +1094,7 @@ def _parse_recovery_resolution(
         session_id=_session_id(document["session_id"]),
         target_generation=target_generation,
         transaction_id=transaction_id,
+        version=version,
     )
 
 
@@ -1282,10 +1455,9 @@ class LocalFencedRepository:
                 "repository-invalid", "repository directory cannot be created safely"
             ) from exc
 
-    def _ensure_layout(self) -> None:
-        self._ensure_directory(self.root)
-        root_dev = self.root.lstat().st_dev
-        for path in (
+    def _layout_paths(self) -> tuple[Path, ...]:
+        """Every directory the repository layout consists of."""
+        return (
             self.root / "sessions",
             self.root / "transactions",
             self.root / "transactions" / "prepared",
@@ -1299,7 +1471,48 @@ class LocalFencedRepository:
             self.root / "generations",
             self.root / "commits",
             self.root / "operations",
-        ):
+        )
+
+    def _is_readable_repository(self) -> bool:
+        """Say whether this root can be locked without creating anything.
+
+        The repository root, its lock file and the operation directory are
+        what a read-only lookup needs.  Empty directories elsewhere in the
+        layout are created on demand by writers, so their absence does not
+        mean an operation cannot be found here.
+
+        Only absence answers ``False``.  A root that cannot be inspected
+        is not a root that holds nothing, so any other error is raised:
+        answering "no operation" on a permission or I/O failure would let
+        a caller conclude the operation never ran.
+        """
+        expected = (
+            (self.root, stat.S_ISDIR),
+            (self.root / ".state.lock", stat.S_ISREG),
+            (self.root / "operations", stat.S_ISDIR),
+        )
+        for path, is_expected_kind in expected:
+            try:
+                metadata = os.stat(os.fspath(path), follow_symlinks=False)
+            except (FileNotFoundError, NotADirectoryError):
+                return False
+            except OSError as exc:
+                raise FencedCommitError(
+                    "repository-invalid", "repository cannot be inspected safely"
+                ) from exc
+            if not is_expected_kind(metadata.st_mode):
+                # Present but not what it must be: that is a damaged
+                # repository, and answering "no operation" would report
+                # damage as an operation that never ran.
+                raise FencedCommitError(
+                    "repository-invalid", "repository layout entry is not the expected kind"
+                )
+        return True
+
+    def _ensure_layout(self) -> None:
+        self._ensure_directory(self.root)
+        root_dev = self.root.lstat().st_dev
+        for path in self._layout_paths():
             self._ensure_directory(path)
             if path.lstat().st_dev != root_dev:
                 raise FencedCommitError("repository-invalid", "repository layout crosses filesystems")
@@ -1461,8 +1674,16 @@ class LocalFencedRepository:
                 os.close(descriptor)
 
     @contextmanager
-    def _lock(self):
-        self._ensure_layout()
+    def _lock(self, *, create: bool = True):
+        """Hold the repository lock.
+
+        ``create=False`` neither lays the repository out nor creates the lock
+        file: a caller that promises to write nothing must not bring a
+        repository into existence by reading it.  The open then fails if the
+        lock file is absent, which is fail-closed.
+        """
+        if create:
+            self._ensure_layout()
         if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
             raise FencedCommitError("repository-invalid", "platform cannot pin repository safely")
         root_descriptor = None
@@ -1489,9 +1710,15 @@ class LocalFencedRepository:
                     if time.monotonic() >= deadline:
                         raise FencedCommitError("lock-timeout", "repository lock timed out")
                     time.sleep(0.05)
+            # A read-only holder opens the lock read-only as well: asking for
+            # write access fails on a read-only filesystem or ACL, which would
+            # turn a lookup that writes nothing into an error.  ``flock`` needs
+            # only the descriptor, not write access.
+            lock_flags = os.O_NONBLOCK | os.O_NOFOLLOW
+            lock_flags |= (os.O_RDWR | os.O_CREAT) if create else os.O_RDONLY
             descriptor = os.open(
                 ".state.lock",
-                os.O_RDWR | os.O_CREAT | os.O_NONBLOCK | os.O_NOFOLLOW,
+                lock_flags,
                 0o600,
                 dir_fd=root_descriptor,
             )
@@ -1504,6 +1731,13 @@ class LocalFencedRepository:
             ):
                 raise FencedCommitError("repository-invalid", "repository lock identity is invalid")
             if stat.S_IMODE(lock_metadata.st_mode) != 0o600:
+                if not create:
+                    # Repairing the mode is a write.  A read-only holder
+                    # refuses instead, so "changes nothing" holds even
+                    # against a repository someone else left open.
+                    raise FencedCommitError(
+                        "repository-invalid", "repository lock permissions are not private"
+                    )
                 os.fchmod(descriptor, 0o600)
             deadline = time.monotonic() + 5.0
             while True:
@@ -1703,6 +1937,8 @@ class LocalFencedRepository:
         session_id: str,
         operation_id: str,
         intent_digest: str,
+        record_version: int,
+        materialization: Optional[dict],
     ) -> MissionState:
         """Return the state the operation behind ``result`` committed (#747 item 6).
 
@@ -1723,9 +1959,28 @@ class LocalFencedRepository:
         session_id = _session_id(session_id)
         _token(operation_id, "operation_id")
         _digest(intent_digest, "intent_digest")
+        if record_version not in _RECORD_VERSIONS:
+            raise FencedCommitError("record-invalid", "record version is not recognised")
+        # The generation decides whether a materialization exists, so it also
+        # decides whether one is required here.  Accepting ``None`` for a
+        # version-2 record would let a caller skip the lineage comparison
+        # below by omitting an argument.
+        if record_version >= MATERIALIZATION_RECORD_VERSION:
+            try:
+                materialization = read_materialization(materialization)
+            except EvidencePublicationError as exc:
+                raise FencedCommitError("record-invalid", exc.detail) from exc
+        elif materialization is not None:
+            raise FencedCommitError(
+                "record-invalid", "a version-1 operation record carries no materialization"
+            )
         with self._lock():
             name = result.commit_digest.removeprefix("sha256:") + ".json"
             commit, prior_head_digest = self._gc_commit_fact_unlocked(name)
+            # #747 P2: the generation decides what the digest means, so it is
+            # compared before the digest is.
+            if commit.version != record_version:
+                raise FencedCommitError("lineage-mismatch", "operation record and commit generations differ")
             if (
                 commit.session_id != session_id
                 or commit.operation_id != operation_id
@@ -1736,6 +1991,13 @@ class LocalFencedRepository:
                 raise FencedCommitError("lineage-mismatch", "operation result and commit lineage differ")
             if prior_head_digest != result.head_digest:
                 raise FencedCommitError("lineage-mismatch", "operation result head differs from commit")
+            if materialization is not None and (
+                commit.base.head_digest != materialization["base_head_digest"]
+                or commit.state.digest != materialization["state_digest"]
+            ):
+                raise FencedCommitError(
+                    "lineage-mismatch", "operation record materialization and commit disagree"
+                )
             parts = PurePosixPath(commit.generation.path).parts
             if len(parts) != 2:
                 raise FencedCommitError("lineage-mismatch", "generation manifest path is invalid")
@@ -1775,7 +2037,9 @@ class LocalFencedRepository:
         name = hashlib.sha256(key).hexdigest() + ".json"
         return self.root / "operations" / name
 
-    def _lookup_operation(self, request: ExecutionRequest) -> Optional[CommitResult]:
+    def _lookup_operation(
+        self, request: ExecutionRequest, *, blobs_final: bool = True
+    ) -> Union[OperationReplay, _LegacyUndetermined, None]:
         name = self._operation_path(request.session_id, request.operation_id).name
         with self._pinned_directory("operations") as pinned:
             content = self._read_pinned_file(
@@ -1788,14 +2052,10 @@ class LocalFencedRepository:
             return None
         document = _decode_record(content, limit=MAX_OPERATION_BYTES)
         try:
-            # The parsed generation is not compared against a prepared
-            # materialization yet: nothing prepares before ``begin`` until the
-            # execution order changes.  The call still has to happen here,
-            # because it is what refuses a record whose shape and generation
-            # disagree before the replay returns it.
-            read_operation_record(document, repository_root_name=self.root.name)
+            parsed = read_operation_record(document, repository_root_name=self.root.name)
         except EvidencePublicationError as exc:
             raise FencedCommitError("record-invalid", exc.detail) from exc
+        version = parsed["version"]
         operation_id = _token(document["operation_id"], "operation.operation_id")
         intent_digest = _digest(document["intent_digest"], "operation.intent_digest")
         session_id = _session_id(document["session_id"])
@@ -1803,11 +2063,115 @@ class LocalFencedRepository:
         result = _parse_result(document["result"])
         if operation_id != request.operation_id or session_id != request.session_id:
             raise FencedCommitError("lineage-mismatch", "operation record identity differs")
-        if intent_digest != request.intent_digest:
-            raise FencedCommitError("operation-intent-collision", "operation ID has a different intent")
         if commit_digest != result.commit_digest:
             raise FencedCommitError("lineage-mismatch", "operation result commit differs")
-        return result
+        if intent_digest != intent_digest_for_version(request, version):
+            # #747 P2: a version-1 digest folds every blob.  Before prepare the
+            # generated blobs do not exist, so a mismatch there is not yet a
+            # collision; ``begin`` decides once the blobs are final.
+            if version == 1 and not blobs_final:
+                return LEGACY_UNDETERMINED
+            raise FencedCommitError("operation-intent-collision", "operation ID has a different intent")
+        return OperationReplay(
+            result=result,
+            intent_digest=intent_digest,
+            record_version=version,
+            materialization=parsed["materialization"],
+        )
+
+    def lookup_operation(
+        self, request: ExecutionRequest
+    ) -> Union[OperationReplay, _LegacyUndetermined, None]:
+        """Find the committed operation ``request`` names, before prepare (#747 P2).
+
+        The request may carry no generated blobs yet: its semantic digest is
+        the same before and after prepare, so a version-2 record is matched
+        or refused exactly as ``begin`` would.  A version-1 record whose
+        digest differs is ``LEGACY_UNDETERMINED`` rather than a collision.
+        Read-only: no record is written, no identifier is minted, and the
+        resolved-operation index is not consulted (``begin`` remains the
+        authority for that).
+        """
+        validate_execution_request(request)
+        # Taking the lock the usual way lays the repository out and creates
+        # its lock file.  Neither may happen here: writing nothing is the
+        # point of this entry point.  A root without a lock file or an
+        # operation directory holds no operation to find.
+        if not self._is_readable_repository():
+            return None
+        with self._lock(create=False):
+            return self._lookup_operation(request, blobs_final=False)
+
+    def _read_resolution_index_unlocked(
+        self,
+        session_id: str,
+        operation_id: str,
+        dispositions: tuple[str, ...] = ("rolled-back", "finalized"),
+    ) -> dict[str, tuple[int, str]]:
+        """Return ``{disposition: (version, intent_digest)}`` without writing.
+
+        Only the named dispositions are opened: the replay branch reads the
+        finalized index alone, so a damaged rolled-back index cannot stand
+        between a valid operation record and the caller.
+        """
+        found: dict[str, tuple[int, str]] = {}
+        for disposition in dispositions:
+            path = self._resolved_operation_path(session_id, operation_id, disposition)
+            with self._pinned_directory(
+                "transactions", "resolved-operations", disposition
+            ) as pinned:
+                content = self._read_pinned_file(
+                    pinned,
+                    path.name,
+                    limit=MAX_OPERATION_BYTES,
+                    allow_missing=True,
+                )
+            if content is None:
+                continue
+            try:
+                index_session, index_operation, intent_digest, version = (
+                    self._parse_resolution_index(
+                        content, disposition=disposition, filename=path.name
+                    )
+                )
+            except FencedCommitError as exc:
+                raise FencedCommitError(
+                    "recovery-ambiguous", "recovery operation index is malformed"
+                ) from exc
+            if index_session != session_id or index_operation != operation_id:
+                raise FencedCommitError(
+                    "recovery-ambiguous", "recovery operation index identity differs"
+                )
+            found[disposition] = (version, intent_digest)
+        return found
+
+    def _replay_from_record_unlocked(
+        self, request: ExecutionRequest, replay: OperationReplay
+    ) -> OperationReplay:
+        """Check a found operation record against its finalized index (#747 P2).
+
+        The finalized index is written by the same finalize as the operation
+        record, from the same prepare, so its generation and digest have to
+        agree with the record.  A rolled-back index is an earlier lineage's
+        trace: the committed record is authoritative over it (U3 section 6),
+        so it is not consulted here.
+        """
+        found = self._read_resolution_index_unlocked(
+            request.session_id, request.operation_id, dispositions=("finalized",)
+        )
+        finalized = found.get("finalized")
+        if finalized is not None and finalized != (replay.record_version, replay.intent_digest):
+            raise FencedCommitError(
+                "lineage-mismatch", "finalized index and operation record disagree"
+            )
+        # The materialization is not compared here: a replay validates the
+        # tombstone itself and does not dereference the commit or the state
+        # generation (U2 section 6.6), which is what lets a replay outlive a
+        # collected generation.  The binding is made where the commit is
+        # already in hand -- when the record is written or rebuilt
+        # (``_verify_or_publish_operation_unlocked``) and when the historical
+        # state is read (``read_operation_state``).
+        return replay
 
     def _resolved_operation_path(
         self,
@@ -1835,7 +2199,7 @@ class LocalFencedRepository:
             "disposition": resolution.disposition,
             "intent_digest": resolution.intent_digest,
             "operation_id": resolution.operation_id,
-            "schema": "mission-recovery-operation/1",
+            "schema": _RECOVERY_OPERATION_SCHEMAS[resolution.version],
             "session_id": resolution.session_id,
         }
 
@@ -1845,7 +2209,7 @@ class LocalFencedRepository:
         *,
         disposition: str,
         filename: str,
-    ) -> tuple[str, str, str]:
+    ) -> tuple[str, str, str, int]:
         document = _decode_record(content, limit=MAX_OPERATION_BYTES)
         _exact(
             document,
@@ -1858,10 +2222,9 @@ class LocalFencedRepository:
             },
             "recovery operation index",
         )
-        if document["schema"] != "mission-recovery-operation/1":
-            raise FencedCommitError(
-                "record-invalid", "recovery operation index schema differs"
-            )
+        version = _schema_version(
+            document, _RECOVERY_OPERATION_SCHEMAS, name="recovery operation index"
+        )
         if document["disposition"] != disposition:
             raise FencedCommitError(
                 "record-invalid", "recovery operation index disposition differs"
@@ -1884,7 +2247,7 @@ class LocalFencedRepository:
             raise FencedCommitError(
                 "record-invalid", "recovery operation index filename differs"
             )
-        return session_id, operation_id, intent_digest
+        return session_id, operation_id, intent_digest, version
 
     def _publish_resolution_index_unlocked(
         self,
@@ -1894,12 +2257,32 @@ class LocalFencedRepository:
             self._resolution_index_document(resolution),
             limit=MAX_OPERATION_BYTES,
         )
+        path = self._resolved_operation_path(
+            resolution.session_id,
+            resolution.operation_id,
+            resolution.disposition,
+        )
+        if resolution.disposition == "rolled-back":
+            # #747 P2: the rolled-back index is inherited by the first lineage
+            # that wrote it.  A later admission of the same operation ID was
+            # already compared against that index (at admission and again
+            # under the commit lock, both before the durable prepare), so a
+            # record of another generation is not rewritten -- its bytes
+            # differ only because its digest scheme does.
+            with self._pinned_directory(
+                "transactions", "resolved-operations", "rolled-back"
+            ) as pinned:
+                existing = self._read_pinned_file(
+                    pinned, path.name, limit=MAX_OPERATION_BYTES, allow_missing=True
+                )
+            if existing is not None and existing != content:
+                _session, _operation, _digest_value, version = self._parse_resolution_index(
+                    existing, disposition="rolled-back", filename=path.name
+                )
+                if version != resolution.version:
+                    return
         self._publish_named_immutable(
-            self._resolved_operation_path(
-                resolution.session_id,
-                resolution.operation_id,
-                resolution.disposition,
-            ),
+            path,
             content,
             limit=MAX_OPERATION_BYTES,
             collision_code="recovery-ambiguous",
@@ -2021,45 +2404,12 @@ class LocalFencedRepository:
 
     def _check_resolved_operation(self, request: ExecutionRequest) -> None:
         self._ensure_resolution_index_unlocked()
-        found = {}
-        for disposition in ("rolled-back", "finalized"):
-            path = self._resolved_operation_path(
-                request.session_id,
-                request.operation_id,
-                disposition,
-            )
-            with self._pinned_directory(
-                "transactions", "resolved-operations", disposition
-            ) as pinned:
-                content = self._read_pinned_file(
-                    pinned,
-                    path.name,
-                    limit=MAX_OPERATION_BYTES,
-                    allow_missing=True,
-                )
-            if content is None:
-                continue
-            try:
-                session_id, operation_id, intent_digest = self._parse_resolution_index(
-                    content,
-                    disposition=disposition,
-                    filename=path.name,
-                )
-            except FencedCommitError as exc:
-                raise FencedCommitError(
-                    "recovery-ambiguous", "recovery operation index is malformed"
-                ) from exc
-            if (
-                session_id != request.session_id
-                or operation_id != request.operation_id
-            ):
-                raise FencedCommitError(
-                    "recovery-ambiguous", "recovery operation index identity differs"
-                )
-            found[disposition] = intent_digest
+        found = self._read_resolution_index_unlocked(request.session_id, request.operation_id)
+        # #747 P2: each index is compared in the digest scheme of its own
+        # generation; the request is expressed in that scheme on demand.
         if any(
-            intent_digest != request.intent_digest
-            for intent_digest in found.values()
+            intent_digest != intent_digest_for_version(request, version)
+            for version, intent_digest in found.values()
         ):
             raise FencedCommitError(
                 "operation-intent-collision",
@@ -2086,20 +2436,20 @@ class LocalFencedRepository:
                     "the repository has an unexpected durable prepare",
                 )
 
-    def begin(self, request: ExecutionRequest) -> Union[AdmittedSnapshot, CommitResult]:
+    def begin(self, request: ExecutionRequest) -> Union[AdmittedSnapshot, OperationReplay]:
         validate_execution_request(request)
         with self._lock():
             prepared_entries = self._prepared_entries_unlocked()
             if not prepared_entries:
                 recorded = self._lookup_operation(request)
                 if recorded is not None:
-                    return recorded
+                    return self._replay_from_record_unlocked(request, recorded)
                 self._recover_orphan_stages_unlocked()
             else:
                 self._recover_unlocked(request.session_id)
             recorded = self._lookup_operation(request)
             if recorded is not None:
-                return recorded
+                return self._replay_from_record_unlocked(request, recorded)
             self._check_resolved_operation(request)
             head, _head_bytes, head_digest = self._read_head_unlocked(request.session_id)
             if head is None:
@@ -2134,8 +2484,8 @@ class LocalFencedRepository:
         transitions retain the existing canonical encoding rules.
         """
         admitted = self.begin(request)
-        if isinstance(admitted, CommitResult):
-            return admitted
+        if isinstance(admitted, OperationReplay):
+            return admitted.result
         if admitted.base is not None:
             if terminal_reinitialization_head_digest is None:
                 raise FencedCommitError(
@@ -2278,8 +2628,8 @@ class LocalFencedRepository:
         if request.typed_command is None:
             raise FencedCommitError("request-invalid", "typed command is required")
         admitted = self.begin(request)
-        if isinstance(admitted, CommitResult):
-            return RepositoryExecutionResult(True, admitted, None)
+        if isinstance(admitted, OperationReplay):
+            return RepositoryExecutionResult(True, admitted.result, None)
         if admitted.base is None:
             return RepositoryExecutionResult(False, None, "initial-state-required")
         admitted_state = replace(
@@ -3033,7 +3383,7 @@ class LocalFencedRepository:
             "head_digest": report.head_digest,
             "intent_digest": prepare.intent_digest,
             "operation_id": prepare.operation_id,
-            "schema": "mission-recovery/1",
+            "schema": _RECOVERY_SCHEMAS[prepare.version],
             "session_id": prepare.session_id,
             "target_generation": prepare.target_generation,
             "transaction_id": prepare.transaction_id,
@@ -3171,7 +3521,8 @@ class LocalFencedRepository:
         )
         commit = snapshot.commit
         if (
-            commit.audit != prepare.audit
+            commit.version != prepare.version
+            or commit.audit != prepare.audit
             or commit.base != prepare.base
             or commit.committed_at != prepare.prepared_at
             or commit.effects != prepare.effects
@@ -3194,14 +3545,21 @@ class LocalFencedRepository:
         prepare: PrepareRecord,
         snapshot: RepositorySnapshot,
     ) -> None:
-        expected_document = {
-            "commit_digest": snapshot.result.commit_digest,
-            "intent_digest": prepare.intent_digest,
-            "operation_id": prepare.operation_id,
-            "result": _result_document(snapshot.result),
-            "schema": "mission-operation/1",
-            "session_id": prepare.session_id,
-        }
+        if prepare.materialization is not None and (
+            snapshot.commit.base.head_digest != prepare.materialization["base_head_digest"]
+            or snapshot.commit.state.digest != prepare.materialization["state_digest"]
+        ):
+            raise FencedCommitError(
+                "recovery-ambiguous", "durable prepare materialization and target commit disagree"
+            )
+        expected_document = _operation_document(
+            session_id=prepare.session_id,
+            operation_id=prepare.operation_id,
+            intent_digest=prepare.intent_digest,
+            result=snapshot.result,
+            version=prepare.version,
+            materialization=prepare.materialization,
+        )
         expected = _canonical_bytes(expected_document, limit=MAX_OPERATION_BYTES)
         path = self._operation_path(prepare.session_id, prepare.operation_id)
         with self._pinned_directory("operations") as pinned:
@@ -4141,9 +4499,20 @@ class LocalFencedRepository:
         if precondition.pending_lease_digest != prepared.admitted.pending_lease.digest:
             raise FencedCommitError("precondition-mismatch", "pending lease digest differs")
         self._reject_open_prepare()
-        existing = self._lookup_operation(prepared.admitted.request)
+        request = prepared.admitted.request
+        existing = self._lookup_operation(request)
         if existing is not None:
-            return existing
+            replay = self._replay_from_record_unlocked(request, existing)
+            if self._assert_commit_replay_materializes(prepared, replay):
+                return replay.result
+            # The record was prepared from another base than this run was
+            # admitted on: the head has moved since admission, and the CAS
+            # below is what reports that (``head-cas-mismatch``).
+        else:
+            # #747 P2: the index is checked again under the commit lock.  Another
+            # execution may have rolled back or finalized this operation ID
+            # between admission and commit, and admission alone cannot see that.
+            self._check_resolved_operation(request)
         current, _digest_value = self._current_cas(prepared)
         base_lease: Union[LegacyAbsentLease, FencedLease]
         if current is None:
@@ -4175,6 +4544,59 @@ class LocalFencedRepository:
             raise FencedCommitError(getattr(exc, "code", "stage-invalid"), "staged generation changed") from exc
         return None
 
+    def _materialization(self, prepared: PreparedCommit, state_ref: RecordRef) -> dict:
+        """Return what this run produced, against the base it was admitted on."""
+        try:
+            return materialization_binding(
+                bindings=binding_records(prepared.admitted.request.blobs),
+                repository_root_name=self.root.name,
+                base_head_digest=prepared.precondition.base_head_digest,
+                state_digest=state_ref.digest,
+            )
+        except EvidencePublicationError as exc:
+            raise FencedCommitError("request-invalid", exc.detail) from exc
+
+    def _generated_digest(self, request: ExecutionRequest) -> Optional[str]:
+        try:
+            return generated_blobs_digest(
+                binding_records(request.blobs), repository_root_name=self.root.name
+            )
+        except EvidencePublicationError as exc:
+            raise FencedCommitError("request-invalid", exc.detail) from exc
+
+    def _assert_commit_replay_materializes(
+        self, prepared: PreparedCommit, replay: OperationReplay
+    ) -> bool:
+        """Commit-time D4 (#747 P2): same base, same identity, same bytes.
+
+        The record's materialization names the base its run prepared from.
+        When this run was admitted on that same base, the two runs saw the
+        same world and must have produced the same generated bytes; a
+        difference is non-determinism, not a moved base.  Returns ``True``
+        when the recorded result may stand in for this run (same base and
+        same bytes, or a version-1 record that carries nothing to compare)
+        and ``False`` when the record comes from another base, which the CAS
+        that follows reports.
+        """
+        materialization = replay.materialization
+        if replay.record_version < MATERIALIZATION_RECORD_VERSION or materialization is None:
+            return True
+        precondition = prepared.precondition
+        same_base = (
+            materialization["base_head_digest"] == precondition.base_head_digest
+            and replay.result.generation - 1 == precondition.base_generation
+        )
+        if not same_base:
+            return False
+        try:
+            assert_replay_materializes(
+                recorded=materialization,
+                prepared={"blobs_digest": self._generated_digest(prepared.admitted.request)},
+            )
+        except EvidencePublicationError as exc:
+            raise FencedCommitError(REPLAY_MATERIALIZATION_MISMATCH, exc.detail) from exc
+        return True
+
     def _prepare_document(
         self,
         prepared: PreparedCommit,
@@ -4192,13 +4614,14 @@ class LocalFencedRepository:
             "fencing_epoch": prepared.admitted.pending_lease.target.fencing_epoch,
             "generation": _ref_document(generation_ref),
             "intent_digest": prepared.admitted.request.intent_digest,
+            "materialization": self._materialization(prepared, state_ref),
             "operation_id": prepared.admitted.request.operation_id,
             "prepared_at": prepared_at,
             "projections": [
                 _projection_document(projection)
                 for projection in prepared.projections
             ],
-            "schema": "mission-prepare/1",
+            "schema": _PREPARE_SCHEMAS[MATERIALIZATION_RECORD_VERSION],
             "session_id": prepared.admitted.request.session_id,
             "state": _ref_document(state_ref),
             "target_generation": prepared.admitted.target_generation,
@@ -4435,14 +4858,14 @@ class LocalFencedRepository:
                 head_digest=_sha256(head_bytes),
                 state_generation_digest=generation_ref.digest,
             )
-            operation_document = {
-                "commit_digest": commit_digest,
-                "intent_digest": prepared.admitted.request.intent_digest,
-                "operation_id": prepared.admitted.request.operation_id,
-                "result": _result_document(result),
-                "schema": "mission-operation/1",
-                "session_id": prepared.admitted.request.session_id,
-            }
+            operation_document = _operation_document(
+                session_id=prepared.admitted.request.session_id,
+                operation_id=prepared.admitted.request.operation_id,
+                intent_digest=prepared.admitted.request.intent_digest,
+                result=result,
+                version=MATERIALIZATION_RECORD_VERSION,
+                materialization=prepare_document["materialization"],
+            )
             operation_bytes = _canonical_bytes(operation_document, limit=MAX_OPERATION_BYTES)
             self._publish_named_immutable(
                 self._operation_path(

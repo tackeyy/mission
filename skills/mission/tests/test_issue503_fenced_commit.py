@@ -206,7 +206,7 @@ def test_v5_repository_commits_and_reads_exact_cli_state_generation(tmp_path):
     assert snapshot.commit.generation.digest == snapshot.head.state_generation.digest
     assert snapshot.result == result
     assert json.loads(snapshot.head_bytes)["schema"] == "mission-head/1"
-    assert json.loads(snapshot.commit_bytes)["schema"] == "mission-commit/1"
+    assert json.loads(snapshot.commit_bytes)["schema"] == "mission-commit/2"
     assert len(list((repository / "generations").glob("*.json"))) == 1
 
 
@@ -701,7 +701,7 @@ def test_stage_rejects_strict_state_attacks_derived_from_cli_bytes(tmp_path, att
 
 
 def test_same_operation_and_intent_returns_one_result_and_different_intent_rejects(tmp_path):
-    from mission_persistence.fenced_commit import CommitResult, FencedCommitError
+    from mission_persistence.fenced_commit import FencedCommitError, OperationReplay
 
     local, _repository, _clock, _state_path, _state_bytes, result = _commit_cli_init(tmp_path)
     same = _request(
@@ -713,8 +713,8 @@ def test_same_operation_and_intent_returns_one_result_and_different_intent_rejec
     )
     replay = local.begin(same)
 
-    assert isinstance(replay, CommitResult)
-    assert replay == result
+    assert isinstance(replay, OperationReplay)
+    assert replay.result == result
     with pytest.raises(FencedCommitError) as collision:
         local.begin(
             _request(
@@ -729,7 +729,7 @@ def test_same_operation_and_intent_returns_one_result_and_different_intent_rejec
 
 
 def test_operation_tombstone_replay_does_not_require_or_root_commit_record(tmp_path):
-    from mission_persistence.fenced_commit import CommitResult
+    from mission_persistence.fenced_commit import OperationReplay
 
     local, repository, _clock, _state_path, _state_bytes, result = _commit_cli_init(tmp_path)
     snapshot = local.read("test")
@@ -744,8 +744,8 @@ def test_operation_tombstone_replay_does_not_require_or_root_commit_record(tmp_p
 
     replay = local.begin(same)
 
-    assert isinstance(replay, CommitResult)
-    assert replay == result
+    assert isinstance(replay, OperationReplay)
+    assert replay.result == result
 
 
 def test_commit_audit_contains_no_lease_token_or_raw_provider_secret(tmp_path):
@@ -1588,7 +1588,7 @@ def test_operation_replay_intentionally_excludes_audit_and_lease_token(tmp_path)
     )
 
     assert replay_request.intent_digest == first_request.intent_digest
-    assert local.begin(replay_request) == winner
+    assert local.begin(replay_request).result == winner
 
 
 def test_expired_takeover_history_never_persists_raw_audit_token(tmp_path):

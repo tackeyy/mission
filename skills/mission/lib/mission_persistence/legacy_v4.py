@@ -11,7 +11,12 @@ from datetime import datetime, timezone
 from typing import Callable, ContextManager, Iterable
 
 from mission_application.artifact import EvidenceFailure
-from mission_application.evidence_publication import EvidencePublicationError
+from mission_application.evidence_publication import (
+    EvidencePublicationError,
+    assert_replay_materializes,
+    binding_records,
+    generated_blobs_digest,
+)
 from mission_persistence.evidence_order import (
     BASE_MOVED_DETAIL,
     EvidenceOrderError,
@@ -29,6 +34,7 @@ from mission_application.ports import (
     AggregateIndexError,
     AuditMetadata,
     LegacyCommandExecutionResult,
+    OperationReplay,
     PreparedTransitionOperation,
 )
 from mission_kernel.commands import (
@@ -843,10 +849,14 @@ class V5CompatibilityRepository:
         self._operation_command_type = operation_command_type
         self._admitted: AdmittedSnapshot | None = None
         self._observed_base: dict | None = None
-        self._replayed: CommitResult | None = None
+        self._replayed: OperationReplay | None = None
         # #747 item 6: the request the replay was admitted under, kept for the
         # historical read that follows inside the same transaction.
         self._replay_request: ExecutionRequest | None = None
+        # #747 P2: the operation identity is fixed once per transaction, so a
+        # lookup before prepare and the admission after it name the same
+        # operation.  Minted here at most once per transaction.
+        self._transaction_operation_id: str | None = None
         self._transaction_active = False
         self._callback_depth = 0
         self._loaded_document: dict | None = None
@@ -856,6 +866,13 @@ class V5CompatibilityRepository:
         if self._transaction_active:
             raise FencedCommitError("request-invalid", "nested v5 transaction")
         self._transaction_active = True
+        # #747 P2: a configured id wins; otherwise one id for the whole
+        # transaction.  ``_observed_base`` is per transaction as well: a base
+        # read in an earlier transaction must not decide this one's replay.
+        self._observed_base = None
+        self._transaction_operation_id = (
+            self._operation_id or "compat:" + secrets.token_hex(16)
+        )
         try:
             yield
         finally:
@@ -863,6 +880,8 @@ class V5CompatibilityRepository:
             self._replayed = None
             self._replay_request = None
             self._loaded_document = None
+            self._observed_base = None
+            self._transaction_operation_id = None
             self._transaction_active = False
 
 
@@ -940,7 +959,11 @@ class V5CompatibilityRepository:
         the evidence path had nothing to admit its output with.  It stays
         optional because every other path genuinely has nothing to give.
         """
-        operation_id = self._operation_id or "compat:" + secrets.token_hex(16)
+        operation_id = (
+            self._operation_id
+            or self._transaction_operation_id
+            or "compat:" + secrets.token_hex(16)
+        )
         command = self._operation_command
         if command is None:
             command = decode_json_object(
@@ -983,11 +1006,16 @@ class V5CompatibilityRepository:
         request = self._replay_request
         if replayed is None or request is None:
             raise FencedCommitError("request-invalid", "no replay is admitted in this transaction")
+        # #747 P2: the commit is compared against the digest the operation
+        # record itself holds, in that record's generation, not against the
+        # requesting run's digest.
         historical = self._repository.read_operation_state(
-            replayed,
+            replayed.result,
             session_id=request.session_id,
             operation_id=request.operation_id,
-            intent_digest=request.intent_digest,
+            intent_digest=replayed.intent_digest,
+            record_version=replayed.record_version,
+            materialization=replayed.materialization,
         )
         return decode_json_object(project_legacy_document(historical))
 
@@ -1035,7 +1063,8 @@ class V5CompatibilityRepository:
             self._guarded_call(self._format_guard)
         request = self._request(blobs=blobs)
         admitted = self._repository.begin(request)
-        if isinstance(admitted, CommitResult):
+        if isinstance(admitted, OperationReplay):
+            self._assert_replay_materializes(request, admitted)
             snapshot = self._repository.read(self._session_id)
             self._replayed = admitted
             self._replay_request = request
@@ -1053,6 +1082,44 @@ class V5CompatibilityRepository:
         document = json.loads(project_legacy_document(admitted_state))
         self._loaded_document = copy.deepcopy(document)
         return copy.deepcopy(document)
+
+    def _assert_replay_materializes(
+        self, request: ExecutionRequest, replay: OperationReplay
+    ) -> None:
+        """D4 at admission (#747 P2): an immediate retry must produce the same bytes.
+
+        "Immediate" is decided by the base this transaction read: when it is
+        exactly the head the recorded operation produced, nothing intervened
+        and the generated bytes must agree; a difference is non-determinism
+        of prepare, not a moved base.  When the head has moved on, the record
+        stands as the answer (item 6) and nothing is compared.  A version-1
+        record carries nothing to compare, and a transaction that never read
+        a snapshot has no base to decide with.
+        """
+        observed = self._observed_base
+        materialization = replay.materialization
+        if (
+            observed is None
+            or replay.record_version < 2
+            or materialization is None
+        ):
+            return
+        if (
+            observed.get("base_head_digest") != replay.result.head_digest
+            or observed.get("base_generation") != replay.result.generation
+        ):
+            return
+        root = getattr(getattr(self._repository, "root", None), "name", None)
+        try:
+            prepared = {
+                "blobs_digest": generated_blobs_digest(
+                    binding_records(request.blobs),
+                    **({} if root is None else {"repository_root_name": root}),
+                )
+            }
+            assert_replay_materializes(recorded=materialization, prepared=prepared)
+        except EvidencePublicationError as exc:
+            raise FencedCommitError("replay-materialization-mismatch", exc.detail) from exc
 
     def read(self, session_id: str):
         return self._repository.read(session_id)

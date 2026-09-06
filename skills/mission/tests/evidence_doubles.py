@@ -253,7 +253,20 @@ def in_memory_v5_repository(current, *, replayed=False, replayed_document=None, 
         "base_head_digest": ZERO_DIGEST,
         "base_generation": 0,
     }
-    repository._replayed = object() if replayed else None
+    # #747 P2: the executor reads ``.result`` / ``.intent_digest`` /
+    # ``.record_version`` off the replay it holds, so the double carries the
+    # production shape (a version-2 record, nothing generated).
+    repository._replayed = (
+        types.SimpleNamespace(
+            result=types.SimpleNamespace(
+                commit_digest=ZERO_DIGEST, generation=1,
+                head_digest=ZERO_DIGEST, state_generation_digest=ZERO_DIGEST,
+            ),
+            intent_digest=ZERO_DIGEST, record_version=2,
+            materialization={"base_head_digest": ZERO_DIGEST, "blobs_digest": None, "state_digest": ZERO_DIGEST},
+        )
+        if replayed else None
+    )
     repository._replay_request = (
         types.SimpleNamespace(session_id="portable", operation_id="op", intent_digest=ZERO_DIGEST)
         if replayed else None
@@ -261,11 +274,14 @@ def in_memory_v5_repository(current, *, replayed=False, replayed_document=None, 
     repository._session_id = "portable"
     repository._transaction_active = False
 
-    def _read_operation_state(result, *, session_id, operation_id, intent_digest):
+    def _read_operation_state(
+        result, *, session_id, operation_id, intent_digest, record_version, materialization=None
+    ):
         if read_calls is not None:
             read_calls.append({
                 "result": result, "session_id": session_id, "operation_id": operation_id,
-                "intent_digest": intent_digest,
+                "intent_digest": intent_digest, "record_version": record_version,
+                "materialization": materialization,
                 "inside_transaction": repository._transaction_active,
             })
         return decoded_state(current if replayed_document is None else replayed_document)

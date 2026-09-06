@@ -90,13 +90,16 @@ The following are not new U2 choices.
 
 These choices are new and require owner review.
 
-1. exact `mission-head/1`, `mission-commit/1`, `mission-prepare/1`, and
-   `mission-operation/1` field names and nesting;
+1. exact `mission-head/1`, `mission-commit/{1,2}`, `mission-prepare/{1,2}`, and
+   `mission-operation/{1,2}` field names and nesting (generation 2 is what
+   #747 P2 writes; generation 1 is read, never rewritten);
 2. the additional `commits/`, `operations/`, and
    `transactions/prepared/` directories and their filename rules;
 3. `null` as the exact absent-head digest for generation zero;
-4. a 4 KiB head limit, 4 MiB prepare/commit limits, 4 KiB operation-record
-   limit, and 8 KiB encoded audit-record limit;
+4. a 4 KiB head limit, 4 MiB prepare/commit limits, an operation-record limit
+   equal to the prepare/commit limit (`STATE_LIMIT`; #747 P2 raised it from
+   4 KiB because the generation-2 record carries a materialization), and an
+   8 KiB encoded audit-record limit;
 5. accepting bounded command/event category tokens in in-memory
    `AuditMetadata`, but persisting only one command-category digest plus at most
    64 event-category digests so raw lease/provider values cannot cross through
@@ -124,11 +127,15 @@ These choices are new and require owner review.
     admission distinguishes the target session from the acting owner while the
     upper protocol only fixed that both identities be explicit;
 13. defining the upper protocol's otherwise-unspecified “normalized intent
-    digest” as SHA-256 of a versioned canonical `mission-intent/1` envelope. The
-    envelope binds `session_id`, `lease_owner_session_id`, `operation_id`, the
-    exact canonical command, and every blob's ID, kind, relative path, digest,
-    and size in canonical order. Only `audit` and the presented lease token are
-    outside the intent;
+    digest” as SHA-256 of a versioned canonical `mission-intent/2` envelope
+    (#747 P2). The envelope binds `session_id`, `lease_owner_session_id`,
+    `operation_id`, the semantic projection of the canonical command (effect
+    claims reduced to their meaning), and every *captured* blob's ID, kind,
+    relative path, digest, and size in canonical order. Generated blobs are
+    bound by the materialization instead, so the identity is the same before
+    and after prepare. `audit` and the presented lease token are outside the
+    intent. `mission-intent/1` (generation 1, read only) folded every blob; it
+    is computed only to compare a request against a generation-1 record;
 14. binding the exact canonical request, admission/precondition, and private U1
     stage through an instance-private capability registry owned by the same
     `LocalFencedRepository` that performed `_stage_persistence`. Commit requires
@@ -228,8 +235,8 @@ and fixed SHA-256 references produced:
 | record | encoded bytes |
 | --- | ---: |
 | maximum-shaped persisted audit record | 4,856 |
-| maximum-shaped head | 601 |
-| maximum-shaped operation record | 815 |
+| head at a short generation (measured example; `Generation` is unbounded, so this is not a maximum) | 601 |
+| generation-1 operation record at a short generation (measured example) | 815 |
 | commit with 64 maximum U1 effect descriptors, including 4,096 NUL characters per path | 1,613,675 |
 
 The NUL case is intentional: U1's current relative-path validator permits it,
@@ -241,11 +248,11 @@ uses the same conservative worst case as
 
 | constant | exact value | derivation |
 | --- | ---: | --- |
-| `MAX_HEAD_BYTES` | 4,096 B | 601 B maximum-shaped candidate, rounded to the next existing binary page-sized boundary; over 6.8x measured shape |
+| `MAX_HEAD_BYTES` | 4,096 B | 601 B measured example at a short generation, rounded to the next binary page-sized boundary. `Generation` has no bound of its own; this limit is the effective one, because a head that cannot be encoded is refused before any operation record is written |
 | `MAX_AUDIT_BYTES` | 8,192 B | 4,856 B exact maximum-shaped persisted audit, rounded to the next binary boundary |
 | `MAX_COMMIT_BYTES` | 4,194,304 B | K1/U1 `STATE_LIMIT`; 1,613,675 B conservative maximum-shaped candidate leaves 2,580,629 B |
 | `MAX_PREPARE_BYTES` | 4,194,304 B | prepare duplicates the bounded commit references and adds no unbounded payload |
-| `MAX_OPERATION_BYTES` | 4,096 B | 815 B maximum-shaped candidate, under the same small-record boundary as head |
+| `MAX_OPERATION_BYTES` | 4,194,304 B | `STATE_LIMIT`, the same bound as prepare and commit (#747 P2). The generation-2 record carries a materialization (three digest slots) and one generation integer shared with the head, so it fits whenever the head fits; it is not placed on the head's small-record boundary. Reading with the larger limit accepts every record written under the old 4 KiB bound |
 | `MAX_AUDIT_EVENT_TYPES` | 64 | U1 maximum effect/binding cardinality; no second unbounded per-commit collection |
 | identifier / audit token length | 1-128 ASCII characters | K1 session-ID maximum and U1 blob ID/kind maximum |
 | SHA-256 digest | exactly `sha256:` plus 64 lowercase hex characters | K1/U1 digest contract |
@@ -277,7 +284,9 @@ All four record types use the following rules.
 - `Timestamp` is exact UTC seconds precision: `YYYY-MM-DDTHH:MM:SSZ`.
 - `Generation` and `Size` are exact Python integers (`bool` is rejected);
   generation is non-negative and size is non-negative. Target generation and
-  committed/head generation are positive.
+  committed/head generation are positive. `Generation` has no upper bound of
+  its own; `MAX_HEAD_BYTES` is the effective bound, since a lineage whose head
+  cannot be encoded cannot be committed.
 - Every path is an exact normalized relative POSIX path. It is compared to the
   digest-derived expected path; it is not accepted merely because it is
   traversal-free.
@@ -396,7 +405,13 @@ Invariants:
   this head;
 - encoded length is at most `MAX_HEAD_BYTES`.
 
-### 6.3 `mission-commit/1`
+### 6.3 `mission-commit/2` (generation 1 read only)
+
+Generation 2 (#747 P2) has the same field set as generation 1; only the
+meaning of `intent_digest` differs (`mission-intent/2` in generation 2,
+`mission-intent/1` in generation 1). Readers accept both and never rewrite a
+generation-1 record. A prepare, its commit, its operation record and its
+recovery marker/index are all of one generation; a mixed lineage is refused.
 
 Exact required keys:
 
@@ -410,7 +425,7 @@ Exact required keys:
   "generation":{"digest":"sha256:<64hex>","path":"generations/<64hex>.json","size":456},
   "intent_digest":"sha256:<64hex>",
   "operation_id":"operation-2",
-  "schema":"mission-commit/1",
+  "schema":"mission-commit/2",
   "session_id":"test",
   "state":{"digest":"sha256:<64hex>","path":"objects/<64hex>.blob","size":3468},
   "target_generation":2,
@@ -466,7 +481,7 @@ The persisted audit object has these exact required keys:
   copies `AuditMetadata.command_type`, an event category, a command value, or a
   presented/generated lease token into `LeaseHistoryEntry.reason`.
 
-### 6.5 `mission-prepare/1`
+### 6.5 `mission-prepare/2` (generation 1 read only)
 
 The prepare record has the exact same `audit`, `base`, `effects`,
 `fencing_epoch`, `generation`, `intent_digest`, `operation_id`, `session_id`,
@@ -475,9 +490,10 @@ plus:
 
 ```json
 {
+  "materialization":{"base_head_digest":"sha256:<64hex>","blobs_digest":null,"state_digest":"sha256:<64hex>"},
   "prepared_at":"2026-08-15T00:00:00Z",
   "projections":[],
-  "schema":"mission-prepare/1"
+  "schema":"mission-prepare/2"
 }
 ```
 
@@ -491,7 +507,21 @@ write. The current `begin()` delegates a retained entry to U3, which validates
 the complete transaction before rollback or finalization; admission cannot
 continue while that recovery is ambiguous or blocked.
 
-### 6.6 `mission-operation/1`
+### 6.6 `mission-operation/2` (generation 1 read only)
+
+Generation 2 adds exactly one key, `materialization`, repeated from the
+prepare: `base_head_digest` (null only at genesis), `state_digest`, and
+`blobs_digest` -- the digest of the generated bindings, or null when the
+operation generated nothing (a value, compared as an empty set). The base
+generation is not repeated; it is `result.generation - 1`. Generation 1
+carries no materialization and its replay is never asked to prove its bytes.
+
+`blobs_digest` covers exactly what the request carries as generated
+bindings. Routes whose effects do not yet become bindings -- artifact and
+progress, until #747 items 3a and 3b move them onto the blob route --
+record `null` and their produced content is therefore **not** compared on
+replay. That is the same coverage those routes had before generation 2;
+the materialization neither adds nor removes protection there.
 
 Exact required keys:
 
@@ -506,7 +536,8 @@ Exact required keys:
     "head_digest":"sha256:<64hex>",
     "state_generation_digest":"sha256:<64hex>"
   },
-  "schema":"mission-operation/1",
+  "materialization":{"base_head_digest":"sha256:<64hex>","blobs_digest":null,"state_digest":"sha256:<64hex>"},
+  "schema":"mission-operation/2",
   "session_id":"test"
 }
 ```
@@ -529,6 +560,25 @@ does not root a commit or state generation for U4 purposes.
 
 ## 7. In-memory request and protocol contract
 
+### 7.0 Read-only operation lookup
+
+`lookup_operation(request)` answers what `begin()` would find for the
+same identity, before the caller has prepared anything (#747 P2,
+decision D7). It is the only entry point that promises to write
+nothing: it neither lays the repository out nor creates the lock file,
+and it does not consult or create the resolved-operation index.
+
+- a root without a lock file or an `operations/` directory answers
+  `None`; a root that cannot be inspected raises `repository-invalid`
+  rather than answering `None`;
+- a generation-2 record answers an `OperationReplay`, or
+  `operation-intent-collision` when the semantic intent differs;
+- a generation-1 record answers `LEGACY_UNDETERMINED` when its digest
+  differs, because that digest folds every blob and the generated
+  blobs do not exist before prepare. `begin()` decides it once they do;
+- `begin()` remains the authority: passing this lookup is not
+  admission, and the index and lease checks still happen there.
+
 ### 7.1 `ExecutionRequest`
 
 The frozen request has these exact fields:
@@ -538,9 +588,9 @@ The frozen request has these exact fields:
 | `session_id` | `SessionId` | explicit, never ambient |
 | `lease_owner_session_id` | `SessionId` | actor/lease owner used by #475/#498 admission; explicit and may differ from the repository session |
 | `command` | K1 `FrozenJsonObject` | canonical immutable normalized command; never persisted by U2 |
-| `blobs` | U1 `VerifiedBlobSet` | immutable captured bytes |
+| `blobs` | U1 `VerifiedBlobSet` | immutable captured or generated bytes; `BlobBindingView.origin` says which, and only captured bindings enter the intent |
 | `operation_id` | `Token128` | caller-stable within `session_id`; no automatic retry ID generation |
-| `intent_digest` | `Digest` | must equal SHA-256 of the canonical `mission-intent/1` envelope below |
+| `intent_digest` | `Digest` | must equal SHA-256 of the canonical `mission-intent/2` envelope below |
 | `presented_lease_id` | `Token128 \| None` | explicit token; `None` permits genesis acquisition or expired self-recovery/takeover, but never a live-lease mutation |
 | `audit` | `AuditMetadata` | exact bounded schema above |
 
@@ -560,10 +610,22 @@ The normalized intent is the exact closed object:
   "command":{"name":"review-import"},
   "lease_owner_session_id":"worker-1",
   "operation_id":"operation-2",
-  "schema":"mission-intent/1",
+  "schema":"mission-intent/2",
   "session_id":"test"
 }
 ```
+
+Only bindings whose `origin` is `captured` appear in `blobs`; `origin` itself
+is not in the envelope. `command` is the semantic projection, and the
+projection applies **only to a typed kernel command**: one whose schema is
+`mission-kernel-command/1` *and* whose `type` is a name the kernel's decision
+table can encode. The schema string alone does not settle it, because any
+caller may write that string into a document of its own. For such a command: its effect claims lose their generated `digest` /
+`size`, and its `at` is dropped, because a crash retry runs with a new clock
+and the committed record is what answers with the time (#747 P2, decision D3).
+Every other document is opaque and keeps every field, whatever its `type`
+says: a field it happens to name like a kernel field may be exactly what
+distinguishes two requests, and dropping it would let one replay the other.
 
 `command` is the thawed value of the exact K1 canonical command and is encoded
 again only as part of the complete canonical envelope. Each blob entry is
@@ -591,11 +653,15 @@ Under the state lock:
    an operation replay and recover any verifiable orphan private stages;
 2. after recovery, strictly lookup the operation record again by the canonical
    session-local `mission-operation-key/1` filename;
-3. return its exact `CommitResult` when operation ID and intent both match, or
-   reject operation-ID reuse when intent differs;
-4. check the resolved-operation index so a rolled-back intent may retry, while
-   an intent collision or finalized transaction missing its operation record
-   fails closed;
+3. return an `OperationReplay` -- the exact `CommitResult`, the recorded
+   `intent_digest`, the record generation and the materialization -- when
+   operation ID and intent match in the record's own generation, or reject
+   operation-ID reuse when intent differs; a finalized index, if present,
+   must agree with the record in generation and digest;
+4. only when no operation record exists, check the resolved-operation index so
+   a rolled-back intent may retry (compared in the index's own generation),
+   while an intent collision or finalized transaction missing its operation
+   record fails closed; the same check runs again under the commit lock;
 5. strictly read the current head/commit/generation/state, or model exact genesis
    as generation 0 with absent head digest;
 6. calculate one pending acquire/renew/takeover decision using the injected UTC
@@ -650,7 +716,7 @@ carries the same digest for comparison, but that caller-visible unkeyed digest
 is not authority by itself. The binding covers:
 
 - the exact canonical request binding: session and lease-owner IDs, command
-  bytes, canonical `mission-intent/1` bytes and digest, operation ID, presented
+  bytes, canonical `mission-intent/2` digest, operation ID, presented
   lease-token digest, persisted audit digests, and the complete verified blob
   bindings plus captured-byte digests and sizes;
 - the exact admission binding: admitted base snapshot identity, pending lease
@@ -725,7 +791,7 @@ the method must not return the original rejection or an idempotent replay
 result. Only after all pass does commit:
 
 1. consume/invalidate the exact one-shot entry in `_stage_binding_registry`;
-2. atomically publish/fsync `mission-prepare/1`;
+2. atomically publish/fsync `mission-prepare/2`;
 3. call U1 immutable generation publication;
 4. publish/fsync the content-addressed immutable commit record;
 5. construct the canonical head and write/fsync its same-directory private
@@ -763,7 +829,7 @@ restoration failures use `recovery-blocked`.
 | rejection | layer | stable code family |
 | --- | --- | --- |
 | mutable/wrong request type, token/path/digest/timestamp/type bounds | request/record validator | `request-invalid`, `record-invalid`, `record-too-large` |
-| canonical `mission-intent/1` envelope disagrees with intent digest | request validator | `intent-digest-mismatch` |
+| canonical `mission-intent/2` envelope disagrees with intent digest | request validator | `intent-digest-mismatch` |
 | duplicate audit event or audit count/bytes overflow | audit validator | `audit-metadata-invalid`, `record-too-large` |
 | missing token for live same-session lease | admission | `lease-token-required` |
 | live foreign/mismatched lease | admission | `lease-rejected` |
@@ -920,10 +986,12 @@ This document corrects the contract itself:
    capability. Commit requires registry, carried, and recomputed digests to
    match, closing post-stage replacement, cross-instance use, and recomputed
    unkeyed-digest forgery;
-4. normalized intent is the versioned `mission-intent/1` envelope, including
-   operation ID, command, and canonical blob bindings. Only audit and the
-   presented lease token are excluded, so changed evidence cannot replay an old
-   result;
+4. normalized intent is the versioned `mission-intent/2` envelope, including
+   operation ID, the semantic command, and the captured blob bindings. Audit
+   and the presented lease token are excluded; generated bindings are bound by
+   the materialization, so changed generated bytes from the same base cannot
+   replay an old result while a retry after a moved base still finds its own
+   operation;
 5. expired takeover history uses fixed `lease-expired-takeover`, preventing
    caller-controlled audit text from crossing into immutable state;
 6. one commit-start sample drives initial expiry and both record timestamps. The

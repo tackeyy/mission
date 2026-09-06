@@ -1,0 +1,29 @@
+{
+  "clock": "2026-09-06T07:54:23Z",
+  "init": {
+    "argv": [
+      "init",
+      "Issue 500 CLI corpus"
+    ],
+    "command_type": "init",
+    "event_types": [
+      "mission-initialized"
+    ],
+    "operation_id": "operation-init",
+    "result": {
+      "commit_digest": "sha256:a75ed2ba3e4a3ae0c8bf32b0a1bdb54b8abe87e9698c9ebddae18c4c7ccdf7e6",
+      "generation": 1,
+      "head_digest": "sha256:76c20f8df8e7ceeae740b19d84017d63163f5992ff4bab6b6cc13509284c22a1",
+      "state_generation_digest": "sha256:2a99d06c661c5c65fca53258c90909816a1fec334ce395b3edaf552b81c4bd2d"
+    }
+  },
+  "lease_id": "fixture-lease",
+  "pending_operation": {
+    "argv": [
+      "set",
+      "phase=reviewing"
+    ],
+    "operation_id": "operation-v1-pending"
+  },
+  "session_id": "test"
+}

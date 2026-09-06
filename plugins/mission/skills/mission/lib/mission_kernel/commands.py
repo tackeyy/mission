@@ -467,6 +467,17 @@ def _command_value(value: object) -> object:
     raise TypeError("kernel-command-value-invalid")
 
 
+def kernel_command_type_names() -> frozenset:
+    """Return every type name a typed kernel command can carry.
+
+    The names are the closed vocabulary of the decision table.  A document
+    that claims the kernel command schema but names something outside this
+    set was not produced by ``encode_kernel_command``, so nothing may be
+    inferred about the shape of its fields.
+    """
+    return frozenset(_COMMAND_TYPES.values())
+
+
 def kernel_command_type(command: object) -> str:
     for command_class, name in _COMMAND_TYPES.items():
         if type(command) is command_class:

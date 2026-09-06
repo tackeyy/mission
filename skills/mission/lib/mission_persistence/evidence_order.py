@@ -137,6 +137,9 @@ def blob_set_from_effects(effects, command, *, repository_root_name=None):
                     relative_path=canonical,
                     digest=effect.digest,
                     size=effect.size,
+                    # The bytes come out of prepare, so they are not part of
+                    # what identifies the operation (#747 P2).
+                    origin="generated",
                     target=effect.target,
                 ),
                 effect.content,

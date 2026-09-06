@@ -425,7 +425,7 @@ def test_c1_d1_d3_aged_unreferenced_generation_requires_destructive_mode(tmp_pat
 
 
 def test_c2_c3_old_operation_replays_after_generation_quarantine_and_collision_rejects(tmp_path):
-    from mission_persistence.fenced_commit import CommitResult, FencedCommitError
+    from mission_persistence.fenced_commit import FencedCommitError, OperationReplay
 
     fixture = _three_commits(tmp_path)
     local = fixture["local"]
@@ -453,8 +453,8 @@ def test_c2_c3_old_operation_replays_after_generation_quarantine_and_collision_r
             )
         )
 
-    assert isinstance(replay, CommitResult)
-    assert replay == first
+    assert isinstance(replay, OperationReplay)
+    assert replay.result == first
     assert collision.value.code == "operation-intent-collision"
 
 
