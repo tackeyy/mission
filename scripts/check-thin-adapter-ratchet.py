@@ -218,7 +218,10 @@ def _import_time_lookup_is_dynamic(body) -> bool:
 
     **What this does not see.**  The detection recognises the builtins by
     name, so an alias (``lookup = globals`` then ``lookup()[name]``) or a
-    route through ``sys.modules`` is not caught.  This guard exists to stop a
+    route through ``sys.modules`` is not caught.  Neither is a lookup one
+    frame deeper: only import-time expressions are scanned, so
+    ``def _wire(): return globals()["_helper"]`` called as ``SERVICES =
+    _wire()`` passes through.  This guard exists to stop a
     refactor from quietly shrinking the budget, not to withstand someone
     arranging to evade it; closing every indirection would mean tracking
     values, which an AST pass cannot do.  A reviewer reading such code is the
@@ -819,13 +822,23 @@ def _base_scanned_baseline(repo_root: Path, base_sha: str) -> Baseline | None:
         return None
     violations = list(scan_source(source, path=SOURCE_PATH.as_posix()))
     listed = subprocess.run(
-        ["git", "ls-tree", "-r", "--name-only", base_sha, "skills/mission/lib/mission_adapter"],
+        [
+            "git",
+            "ls-tree",
+            "-r",
+            "-z",
+            "--name-only",
+            base_sha,
+            "skills/mission/lib/mission_adapter",
+        ],
         cwd=repo_root,
         capture_output=True,
         text=True,
         check=False,
     )
-    for name in sorted(listed.stdout.split()) if listed.returncode == 0 else ():
+    # NUL-separated, so a path containing a space stays one path.
+    names = (name for name in listed.stdout.split("\0") if name)
+    for name in sorted(names) if listed.returncode == 0 else ():
         if not name.endswith(".py"):
             continue
         module_source = _git_show(repo_root, base_sha, Path(name))

@@ -754,6 +754,38 @@ def test_every_definition_of_a_name_is_measured_not_only_the_first():
     assert "logic.arithmetic" in {violation.rule_id for violation in violations}
 
 
+def test_a_later_definition_of_a_name_also_pulls_in_what_it_calls():
+    """Reachability follows every definition, not only the first.
+
+    Measuring the second definition is not enough on its own: the helpers it
+    names have to enter the budget too, or a refactor could park them behind
+    a second definition and lose them.
+    """
+    guard = _load_guard_module()
+    source = (
+        "FLAG = False\n"
+        "\n\n"
+        "def _deep(data):\n"
+        "    return data[\"value\"] + 1\n"
+        "\n\n"
+        "if FLAG:\n"
+        "    def _renders(data):\n"
+        "        return data\n"
+        "else:\n"
+        "    def _renders(data):\n"
+        "        return _deep(data)\n"
+        "\n\n"
+        "SERVICES = _renders\n"
+        "\n\n"
+        "def cmd_show(args):\n"
+        "    print(args)\n"
+    )
+    functions = {
+        violation.function for violation in guard.scan_source(source, path="x.py")
+    }
+    assert "_deep" in functions
+
+
 def test_a_lambda_handed_over_at_module_level_keeps_its_helper_in_the_budget():
     """A lambda body has no separate measurement path, so it counts here.
 

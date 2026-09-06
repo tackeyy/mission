@@ -162,16 +162,45 @@ canonical source だけを分析し、plugin mirror は既存 byte equality gate
 1. `skills/mission/bin/mission-state.py`
 2. 抽出後の `skills/mission/lib/mission_adapter/**/*.py`
 3. root は parser の `set_defaults(func=<Name>)` から解決した handler、命名上の
-   `cmd_*` / `_cmd_*`、および `main`
+   `cmd_*` / `_cmd_*`、`main`、および **module の import 時に実行される式が名前で
+   参照する top-level function**（#759 で追加）
 4. 各 root から、同じ adapter scope 内の top-level function を `ast.Name` の load で
    参照する edge を再帰探索する。直接 call だけでなく、service callback として渡す
    function object も edge に含める。
 5. dynamic attribute call、文字列からの handler lookup、`getattr(module, name)` は解決不能
    call として違反にする。新しいロジックを helper 名変更や callback 化で隠せないようにする。
 
+3 の root 種別は #747 P2-b が要求した。adapter を use case へ委譲すると helper は
+`_SERVICES = Services(_helper, ...)` の形で渡され、どの handler も名前を出さなくなる。
+helper は毎回走るのに、**呼び出しを注入へ切り替えるだけで違反数が下がる**——薄くなった
+のではなく guard が見なくなった状態を、3 が塞ぐ。
+
+import 時に走る式には、代入・bare call・decorator・既定引数・class body・関数注釈・
+`match` の case と guard を含める。関数の**本体**は含めない（呼ばれたときに走るもので、
+それ自体が 1 関数として走査される）。module 直下の `if` / `try` / `for` / `with` /
+`match` の中で定義した関数も関数集合に入れ、同名の定義はすべて計測する。
+
 現 `main` は dispatch 後にも outcome tracking と typed error envelope を構築している
 （`skills/mission/bin/mission-state.py:19286-19383`）。ここも adapter root として走査し、
 generic error-to-output mapping だけを許す。
+
+#### 4.1.1 この走査が届かない範囲
+
+計測から外れる書き方が残っている。いずれも値の追跡を要し、AST の走査では判定できない。
+**guard の目的は refactor が黙って予算を縮めるのを止めることで、回避を試みる相手への
+防壁ではない。** 残る検査は、そのコードを読むレビュアーである。
+
+| 形 | 状態 |
+|---|---|
+| 別名経由の動的 lookup（`lookup = globals` として `lookup()[name]`、`sys.modules` 経由） | 未検出。`globals()` 等を名前で認識するため、別名にすると外れる |
+| import 時の式から呼ばれた関数の**中**での動的 lookup（`def _wire(): return globals()["_helper"]` を `SERVICES = _wire()` で呼ぶ） | 未検出。fail-closed の判定は import 時の式しか走査しない |
+| class の method 経由の受け渡し（`class Wiring: @staticmethod def render(...): return _helper(...)` を注入） | 未検出。class body の**式**は import 時として拾うが、method の**本体**は関数集合にも入らず辿られない |
+
+逆向きの誤差（数え過ぎ）も残る。未使用の lambda と generator 式の本体、`if False:` の
+下の module 直下文、注釈を遅延する module の注釈は、実行されなくても到達扱いになる。
+**予算が膨らむ側なので、そちらを取る。** とくに lambda の本体を刈ると、
+`SERVICES = lambda: _helper(1)` のように毎回走るものまで計上から消え、3 が塞いだ欠陥が
+戻る（入れ子の `def` を刈ってよいのは、その関数が関数集合に入り単体で走査されるため）。
 
 ### 4.2 正の allowlist
 
