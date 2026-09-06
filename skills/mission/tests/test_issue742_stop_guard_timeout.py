@@ -55,7 +55,7 @@ class TestResolveGuardTimeout:
     def test_default_is_eight_seconds(self):
         assert DEFAULT_GUARD_TIMEOUT_SECONDS == 8
 
-    @pytest.mark.parametrize("raw", ["1", "2", "5", "8"])
+    @pytest.mark.parametrize("raw", ["3", "5", "8"])
     def test_the_accepted_values_are_honoured(self, raw):
         assert resolve_guard_timeout(raw) == int(raw)
 
@@ -229,7 +229,10 @@ class TestStopVerdictAppliesTheLimit:
     def test_a_slow_decision_blocks_instead_of_hanging(self, monkeypatch, tmp_path, capsys):
         """Fail closed when the verdict exceeds the limit."""
         module = _load_state_module()
-        monkeypatch.setenv("MISSION_STATE_TIMEOUT", "1")
+        # #754: the smallest accepted total is 3, of which 2 is reserve.
+        monkeypatch.setenv("MISSION_STATE_TIMEOUT", "3")
+        monkeypatch.delenv(DEADLINE_ENV_VAR, raising=False)
+        monkeypatch.delenv(CONTINUATION_ENV_VAR, raising=False)
 
         def _slow(_request):
             time.sleep(10)
@@ -244,14 +247,13 @@ class TestStopVerdictAppliesTheLimit:
         )()
 
         started = time.monotonic()
-        with pytest.raises(SystemExit) as excinfo:
-            module.cmd_stop_verdict(args)
+        module.cmd_stop_verdict(args)  # #754: exhaustion is a verdict, exit 0
         elapsed = time.monotonic() - started
 
         assert elapsed < 5, "the command must be bounded by the limit, not by the slow body"
-        assert excinfo.value.code == 2
-        payload = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+        payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
         assert payload["decision"] == "block"
+        assert payload["reason"] == "guard-budget-exhausted"
         assert payload["schema"] == "mission-stop-verdict/1"
 
 
@@ -303,7 +305,7 @@ class TestTheLimitIsAppliedTwice:
         script = GUARD_SH.read_text(encoding="utf-8")
         block = script.split('MISSION_STATE_TIMEOUT="${MISSION_STATE_TIMEOUT:-8}"', 1)[1]
         block = block.split("export MISSION_STATE_TIMEOUT", 1)[0]
-        for value in ("1", "5", "8"):
+        for value in ("3", "5", "8"):  # #754: 1 and 2 are clamped now
             probe = (
                 'MISSION_STATE_TIMEOUT="{}"\n'.format(value)
                 + 'MISSION_STATE_TIMEOUT="${MISSION_STATE_TIMEOUT:-8}"\n'
@@ -500,7 +502,7 @@ class TestAContinuationCannotReissueTheBudget:
         with pytest.raises(GuardTimeout):
             resolve_deadline(env, now=self.NOW)
 
-    @pytest.mark.parametrize("configured,carried", [("1", 7), ("2", 7), ("3", 5)])
+    @pytest.mark.parametrize("configured,carried", [("3", 5), ("4", 7), ("6", 7)])
     def test_the_clamp_uses_the_configured_budget_not_the_default(
         self, configured, carried
     ):
