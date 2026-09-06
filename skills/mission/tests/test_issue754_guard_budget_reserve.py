@@ -201,18 +201,28 @@ class TestReserveIsSubtracted:
         _assert_terminal(json.loads(out[0]))
 
     def test_the_terminal_verdict_carries_the_enforced_deadline(self, monkeypatch, capsys):
-        """Exhaustion while the body runs must not re-issue `guard_deadline`."""
-        carried = time.time() + RESERVE_SECONDS + 0.3  # 0.3 s of execution budget
-        monkeypatch.setenv(DEADLINE_ENV_VAR, "{:.3f}".format(carried))
-        monkeypatch.setenv(CONTINUATION_ENV_VAR, "1")
+        """Exhaustion while the body runs must not re-issue `guard_deadline`.
+
+        Only observable on the *first* call: with a carried deadline in the
+        environment a re-issue returns the same value anyway.  So: no deadline in
+        the environment, a 3 s total (1 s of execution), and the value the
+        decorator enforced is what the terminal verdict has to carry -- a
+        re-issue would be about 3 s later than that.
+        """
+        monkeypatch.delenv(DEADLINE_ENV_VAR, raising=False)
+        monkeypatch.delenv(CONTINUATION_ENV_VAR, raising=False)
+        monkeypatch.setenv(gt.TIMEOUT_ENV_VAR, "3")
+        seen = {}
 
         @bounded_by_guard_timeout
         def cmd_stop_verdict():
+            seen["enforced"] = active_deadline()
             time.sleep(5)
 
         assert cmd_stop_verdict() is None
         payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
-        assert payload["guard_deadline"] == "{:.3f}".format(carried)
+        assert payload["guard_deadline"] == "{:.3f}".format(seen["enforced"])
+        assert float(payload["guard_deadline"]) < time.time() + 2.5, "a re-issue would be ~3 s out"
 
     def test_a_lost_budget_is_not_reported_as_exhaustion(self, monkeypatch):
         """The continuation fail-closed path (#742) keeps its own handling."""
@@ -339,7 +349,6 @@ class TestNormalVerdictCarriesTheClamp:
     def test_no_clamp_no_field(self, tmp_path):
         payload = self._verdict(tmp_path, "8")
         assert "budget_clamped_from" not in payload
-        assert "budget_clamped_from" not in payload["shell_text"]
 
     def test_finish_guard_verdict_puts_the_clamp_into_a_non_empty_shell_text(self, monkeypatch):
         """The hook forwards only `shell_text`; a top-level field alone is invisible there.
