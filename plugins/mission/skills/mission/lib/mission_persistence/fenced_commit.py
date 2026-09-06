@@ -996,6 +996,13 @@ def _parse_prepare(content: bytes, filename: str) -> PrepareRecord:
             raise FencedCommitError(
                 "record-invalid", "prepare projection differs from its effect"
             )
+    if materialization is not None and (
+        materialization["base_head_digest"] != base.head_digest
+        or materialization["state_digest"] != state.digest
+    ):
+        raise FencedCommitError(
+            "record-invalid", "prepare materialization disagrees with its base or state"
+        )
     return PrepareRecord(
         audit=audit,
         base=base,
@@ -1870,6 +1877,7 @@ class LocalFencedRepository:
         operation_id: str,
         intent_digest: str,
         record_version: int,
+        materialization: Optional[dict] = None,
     ) -> MissionState:
         """Return the state the operation behind ``result`` committed (#747 item 6).
 
@@ -1909,6 +1917,13 @@ class LocalFencedRepository:
                 raise FencedCommitError("lineage-mismatch", "operation result and commit lineage differ")
             if prior_head_digest != result.head_digest:
                 raise FencedCommitError("lineage-mismatch", "operation result head differs from commit")
+            if materialization is not None and (
+                commit.base.head_digest != materialization["base_head_digest"]
+                or commit.state.digest != materialization["state_digest"]
+            ):
+                raise FencedCommitError(
+                    "lineage-mismatch", "operation record materialization and commit disagree"
+                )
             parts = PurePosixPath(commit.generation.path).parts
             if len(parts) != 2:
                 raise FencedCommitError("lineage-mismatch", "generation manifest path is invalid")
@@ -2073,6 +2088,13 @@ class LocalFencedRepository:
             raise FencedCommitError(
                 "lineage-mismatch", "finalized index and operation record disagree"
             )
+        # The materialization is not compared here: a replay validates the
+        # tombstone itself and does not dereference the commit or the state
+        # generation (U2 section 6.6), which is what lets a replay outlive a
+        # collected generation.  The binding is made where the commit is
+        # already in hand -- when the record is written or rebuilt
+        # (``_verify_or_publish_operation_unlocked``) and when the historical
+        # state is read (``read_operation_state``).
         return replay
 
     def _resolved_operation_path(
@@ -3447,6 +3469,13 @@ class LocalFencedRepository:
         prepare: PrepareRecord,
         snapshot: RepositorySnapshot,
     ) -> None:
+        if prepare.materialization is not None and (
+            snapshot.commit.base.head_digest != prepare.materialization["base_head_digest"]
+            or snapshot.commit.state.digest != prepare.materialization["state_digest"]
+        ):
+            raise FencedCommitError(
+                "recovery-ambiguous", "durable prepare materialization and target commit disagree"
+            )
         expected_document = _operation_document(
             session_id=prepare.session_id,
             operation_id=prepare.operation_id,
@@ -4398,12 +4427,16 @@ class LocalFencedRepository:
         existing = self._lookup_operation(request)
         if existing is not None:
             replay = self._replay_from_record_unlocked(request, existing)
-            self._assert_commit_replay_materializes(prepared, replay)
-            return replay.result
-        # #747 P2: the index is checked again under the commit lock.  Another
-        # execution may have rolled back or finalized this operation ID
-        # between admission and commit, and admission alone cannot see that.
-        self._check_resolved_operation(request)
+            if self._assert_commit_replay_materializes(prepared, replay):
+                return replay.result
+            # The record was prepared from another base than this run was
+            # admitted on: the head has moved since admission, and the CAS
+            # below is what reports that (``head-cas-mismatch``).
+        else:
+            # #747 P2: the index is checked again under the commit lock.  Another
+            # execution may have rolled back or finalized this operation ID
+            # between admission and commit, and admission alone cannot see that.
+            self._check_resolved_operation(request)
         current, _digest_value = self._current_cas(prepared)
         base_lease: Union[LegacyAbsentLease, FencedLease]
         if current is None:
@@ -4457,26 +4490,28 @@ class LocalFencedRepository:
 
     def _assert_commit_replay_materializes(
         self, prepared: PreparedCommit, replay: OperationReplay
-    ) -> None:
+    ) -> bool:
         """Commit-time D4 (#747 P2): same base, same identity, same bytes.
 
         The record's materialization names the base its run prepared from.
         When this run was admitted on that same base, the two runs saw the
         same world and must have produced the same generated bytes; a
-        difference is non-determinism, not a moved base.  A different base
-        is left to the CAS that follows.  Version-1 records carry nothing to
-        compare.
+        difference is non-determinism, not a moved base.  Returns ``True``
+        when the recorded result may stand in for this run (same base and
+        same bytes, or a version-1 record that carries nothing to compare)
+        and ``False`` when the record comes from another base, which the CAS
+        that follows reports.
         """
         materialization = replay.materialization
         if replay.record_version < MATERIALIZATION_RECORD_VERSION or materialization is None:
-            return
+            return True
         precondition = prepared.precondition
         same_base = (
             materialization["base_head_digest"] == precondition.base_head_digest
             and replay.result.generation - 1 == precondition.base_generation
         )
         if not same_base:
-            return
+            return False
         try:
             assert_replay_materializes(
                 recorded=materialization,
@@ -4484,6 +4519,7 @@ class LocalFencedRepository:
             )
         except EvidencePublicationError as exc:
             raise FencedCommitError(REPLAY_MATERIALIZATION_MISMATCH, exc.detail) from exc
+        return True
 
     def _prepare_document(
         self,

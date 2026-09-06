@@ -739,6 +739,70 @@ class TestReplayMaterialization:
             local.commit(prepared, prepared.precondition)
         assert excinfo.value.code == "replay-materialization-mismatch"
 
+    def test_a_commit_time_replay_from_another_base_is_reported_by_the_cas(self, tmp_path):
+        """The recorded result does not stand in for a run admitted on an older base."""
+        from mission_persistence.fenced_commit import FencedCommitError, LocalFencedRepository
+
+        local, repository, clock, _state_path, base_bytes, _init = _commit_cli_init(tmp_path)
+        target = _mutated_state(tmp_path, base_bytes, clock, phase="executing")
+        request = _request(operation_id="operation-raced", lease_id="fixture-lease", argv=("set", "phase=executing"))
+        first = local.begin(request)  # admitted on the genesis base
+        other = LocalFencedRepository(repository, clock=clock, fault_injector=None)
+        between = _mutated_state(tmp_path, base_bytes, clock, phase="reviewing", name="between")
+        _commit_operation(other, _request(operation_id="operation-between", lease_id="fixture-lease", argv=("set", "phase=reviewing")), between)
+        later_target = _mutated_state(tmp_path, other.read("test").state_bytes, clock, phase="executing", name="later")
+        _commit_operation(other, request, later_target)  # the same operation, from the moved base
+        prepared = local._stage_persistence(first, state_bytes=target, effects=())
+
+        with pytest.raises(FencedCommitError) as excinfo:
+            local.commit(prepared, prepared.precondition)
+        assert excinfo.value.code == "head-cas-mismatch"
+
+    def test_a_materialization_that_disagrees_with_its_own_lineage_is_refused(self, tmp_path):
+        """Well-formed is not enough: the digests must be the prepare's / commit's own."""
+        from mission_persistence.fenced_commit import FencedCommitError
+
+        local, repository, clock, _state_path, base_bytes, _init = _commit_cli_init(tmp_path)
+        target = _mutated_state(tmp_path, base_bytes, clock, phase="executing")
+        request = _request(operation_id="operation-tampered", lease_id="fixture-lease", argv=("set", "phase=executing"))
+        local.fault_injector = _stop_at("after-head-replace")
+        admitted = local.begin(request)
+        prepared = local._stage_persistence(admitted, state_bytes=target, effects=())
+        with pytest.raises(_Stop):
+            local.commit(prepared, prepared.precondition)
+        local.fault_injector = None
+        prepare_path = next((repository / "transactions" / "prepared").glob("*.json"))
+        document = json.loads(prepare_path.read_text())
+        document["materialization"]["state_digest"] = "sha256:" + "e" * 64
+        prepare_path.write_bytes(json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode())
+        with pytest.raises(FencedCommitError) as excinfo:
+            local.recover("test")
+        assert excinfo.value.code == "recovery-ambiguous"
+
+        # And on the operation record side, when the historical state is read.
+        # The replay itself does not dereference the commit (U2 section 6.6),
+        # so the binding is made where the commit is already in hand.
+        local2, repository2, _clock2, _sp, _bb, _init2 = _commit_cli_init(tmp_path / "second")
+        init_request = _request(
+            operation_id="operation-init", lease_id="fixture-lease", argv=("init", "Issue 500 CLI corpus"),
+            command_type="init", event_types=("mission-initialized",),
+        )
+        replay = local2.begin(init_request)
+        tampered = dict(replay.materialization, base_head_digest="sha256:" + "d" * 64)
+        with pytest.raises(FencedCommitError) as excinfo:
+            local2.read_operation_state(
+                replay.result, session_id="test", operation_id="operation-init",
+                intent_digest=replay.intent_digest, record_version=replay.record_version,
+                materialization=tampered,
+            )
+        assert excinfo.value.code == "lineage-mismatch"
+        # The honest materialization passes.
+        local2.read_operation_state(
+            replay.result, session_id="test", operation_id="operation-init",
+            intent_digest=replay.intent_digest, record_version=replay.record_version,
+            materialization=replay.materialization,
+        )
+
     def test_the_commit_lock_rechecks_the_resolved_index(self, tmp_path):
         """Contract 22: a rolled-back other intent that appeared after admission collides at commit."""
         from mission_persistence.fenced_commit import FencedCommitError, LocalFencedRepository
@@ -902,9 +966,10 @@ class TestRecordByteLimit:
         head, operation, limit = self._sizes(largest, null_digests=False)
         assert head <= limit and operation < MAX_OPERATION_BYTES
 
-    def test_a_head_exactly_at_its_limit_is_accepted(self):
-        """`len == limit` is accepted (U2 section 3.3); one byte more is not."""
+    def test_a_head_exactly_at_max_head_bytes_is_accepted(self):
+        """`len == MAX_HEAD_BYTES` is accepted (U2 section 3.3); one digit more is not."""
         from mission_persistence.fenced_commit import (
+            MAX_HEAD_BYTES,
             FencedCommitError,
             HeadRecord,
             RecordRef,
@@ -914,11 +979,19 @@ class TestRecordByteLimit:
 
         digest = "sha256:" + "f" * 64
         ref = RecordRef(digest, "commits/" + "f" * 64 + ".json", 4096)
-        head = HeadRecord(commit=ref, generation=7, session_id="test", state_generation=ref)
-        encoded = _canonical_bytes(_head_document(head), limit=10**6)
-        assert _canonical_bytes(_head_document(head), limit=len(encoded)) == encoded
+
+        def encoded(generation):
+            head = HeadRecord(commit=ref, generation=generation, session_id="test", state_generation=ref)
+            return _head_document(head)
+
+        # One digit of the generation is one byte; pad the generation until the
+        # head is exactly at the limit.
+        short = len(_canonical_bytes(encoded(1), limit=10**6))
+        digits = MAX_HEAD_BYTES - short + 1
+        at_limit = _canonical_bytes(encoded(int("9" * digits)), limit=MAX_HEAD_BYTES)
+        assert len(at_limit) == MAX_HEAD_BYTES
         with pytest.raises(FencedCommitError) as excinfo:
-            _canonical_bytes(_head_document(head), limit=len(encoded) - 1)
+            _canonical_bytes(encoded(int("9" * (digits + 1))), limit=MAX_HEAD_BYTES)
         assert excinfo.value.code == "record-too-large"
 
     def test_a_head_beyond_its_limit_stops_before_the_operation_record(self):

@@ -275,12 +275,13 @@ def in_memory_v5_repository(current, *, replayed=False, replayed_document=None, 
     repository._transaction_active = False
 
     def _read_operation_state(
-        result, *, session_id, operation_id, intent_digest, record_version
+        result, *, session_id, operation_id, intent_digest, record_version, materialization=None
     ):
         if read_calls is not None:
             read_calls.append({
                 "result": result, "session_id": session_id, "operation_id": operation_id,
                 "intent_digest": intent_digest, "record_version": record_version,
+                "materialization": materialization,
                 "inside_transaction": repository._transaction_active,
             })
         return decoded_state(current if replayed_document is None else replayed_document)

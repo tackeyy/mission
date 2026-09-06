@@ -1015,6 +1015,7 @@ class V5CompatibilityRepository:
             operation_id=request.operation_id,
             intent_digest=replayed.intent_digest,
             record_version=replayed.record_version,
+            materialization=replayed.materialization,
         )
         return decode_json_object(project_legacy_document(historical))
 
