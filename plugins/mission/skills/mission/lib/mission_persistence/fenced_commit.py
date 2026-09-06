@@ -1480,17 +1480,29 @@ class LocalFencedRepository:
         what a read-only lookup needs.  Empty directories elsewhere in the
         layout are created on demand by writers, so their absence does not
         mean an operation cannot be found here.
+
+        Only absence answers ``False``.  A root that cannot be inspected
+        is not a root that holds nothing, so any other error is raised:
+        answering "no operation" on a permission or I/O failure would let
+        a caller conclude the operation never ran.
         """
-        lock = self.root / ".state.lock"
-        try:
-            return (
-                self.root.is_dir()
-                and lock.is_file()
-                and not lock.is_symlink()
-                and (self.root / "operations").is_dir()
-            )
-        except OSError:
-            return False
+        expected = (
+            (self.root, stat.S_ISDIR),
+            (self.root / ".state.lock", stat.S_ISREG),
+            (self.root / "operations", stat.S_ISDIR),
+        )
+        for path, is_expected_kind in expected:
+            try:
+                metadata = os.stat(os.fspath(path), follow_symlinks=False)
+            except (FileNotFoundError, NotADirectoryError):
+                return False
+            except OSError as exc:
+                raise FencedCommitError(
+                    "repository-invalid", "repository cannot be inspected safely"
+                ) from exc
+            if not is_expected_kind(metadata.st_mode):
+                return False
+        return True
 
     def _ensure_layout(self) -> None:
         self._ensure_directory(self.root)
@@ -1711,6 +1723,13 @@ class LocalFencedRepository:
             ):
                 raise FencedCommitError("repository-invalid", "repository lock identity is invalid")
             if stat.S_IMODE(lock_metadata.st_mode) != 0o600:
+                if not create:
+                    # Repairing the mode is a write.  A read-only holder
+                    # refuses instead, so "changes nothing" holds even
+                    # against a repository someone else left open.
+                    raise FencedCommitError(
+                        "repository-invalid", "repository lock permissions are not private"
+                    )
                 os.fchmod(descriptor, 0o600)
             deadline = time.monotonic() + 5.0
             while True:

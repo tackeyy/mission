@@ -553,6 +553,25 @@ does not root a commit or state generation for U4 purposes.
 
 ## 7. In-memory request and protocol contract
 
+### 7.0 Read-only operation lookup
+
+`lookup_operation(request)` answers what `begin()` would find for the
+same identity, before the caller has prepared anything (#747 P2,
+decision D7). It is the only entry point that promises to write
+nothing: it neither lays the repository out nor creates the lock file,
+and it does not consult or create the resolved-operation index.
+
+- a root without a lock file or an `operations/` directory answers
+  `None`; a root that cannot be inspected raises `repository-invalid`
+  rather than answering `None`;
+- a generation-2 record answers an `OperationReplay`, or
+  `operation-intent-collision` when the semantic intent differs;
+- a generation-1 record answers `LEGACY_UNDETERMINED` when its digest
+  differs, because that digest folds every blob and the generated
+  blobs do not exist before prepare. `begin()` decides it once they do;
+- `begin()` remains the authority: passing this lookup is not
+  admission, and the index and lease checks still happen there.
+
 ### 7.1 `ExecutionRequest`
 
 The frozen request has these exact fields:

@@ -284,6 +284,10 @@ def _partition_bindings(
     return sorted(captured, key=key), sorted(generated, key=key)
 
 
+# The moment the caller asked is not what makes an operation the operation
+# it is: a crash retry runs in a new process with a new clock, and the
+# committed record is what answers with the time (#747 P2, decision D3).
+SEMANTIC_TIME_FIELD = "at"
 PATH_BEARING_COMMAND_TYPES = frozenset(
     {"generate-claims-ledger", "generate-context-manifest"}
 )
@@ -313,14 +317,20 @@ def project_semantic_command(
             "command-invalid", "encoded command must be an object"
         )
     effect_fields = EFFECT_FIELDS_BY_COMMAND_TYPE.get(command.get("type"))
-    if not effect_fields:
-        return command
     value = command.get("value")
     if not isinstance(value, dict):
+        if not effect_fields:
+            # A command with no value carries no time either; compat
+            # documents reach this branch.
+            return command
         raise EvidencePublicationError(
             "command-invalid", "encoded command value must be an object"
         )
-    projected_value = dict(value)
+    projected_value = {
+        name: item for name, item in value.items() if name != SEMANTIC_TIME_FIELD
+    }
+    if not effect_fields:
+        return dict(command, value=projected_value)
     for field in effect_fields:
         if field not in value:
             raise EvidencePublicationError(

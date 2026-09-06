@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -69,6 +70,19 @@ def _all_files(root: Path) -> dict:
 
 def _all_dirs(root: Path) -> set:
     return {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_dir()}
+
+
+def _all_metadata(root: Path) -> dict:
+    """Mode, inode and change time of everything under one root."""
+    entries = {}
+    for path in sorted(root.rglob("*")):
+        metadata = path.lstat()
+        entries[path.relative_to(root).as_posix()] = (
+            stat.S_IMODE(metadata.st_mode),
+            metadata.st_ino,
+            metadata.st_ctime_ns,
+        )
+    return entries
 
 
 def _init_request(meta):
@@ -182,6 +196,46 @@ class TestSemanticIdentity:
             command=before.command,
             blobs=before.blobs,
         ) == before.intent_digest
+
+    def test_the_moment_the_caller_asked_is_not_part_of_the_identity(self):
+        """D3: the timestamp is store-authoritative, so a retry with a new clock is one operation."""
+        from mission_application.evidence_publication import project_semantic_command, semantic_intent_digest
+
+        def typed(at):
+            return {
+                "schema": "mission-kernel-command/1",
+                "type": "append-artifact-block",
+                "value": {"at": at, "section": "plan", "content": "first", "source": None, "label": None},
+            }
+
+        assert "at" not in project_semantic_command(typed("2030-01-01T00:00:00Z"))["value"]
+        inputs = {
+            "session_id": "s", "lease_owner_session_id": "s", "operation_id": "op", "bindings": (),
+        }
+        first = semantic_intent_digest(dict(inputs, command=typed("2030-01-01T00:00:00Z")))
+        second = semantic_intent_digest(dict(inputs, command=typed("2030-01-01T00:00:09Z")))
+        assert first == second
+        # Everything else about the command still decides the identity.
+        other = typed("2030-01-01T00:00:00Z")
+        other["value"]["section"] = "risks"
+        assert semantic_intent_digest(dict(inputs, command=other)) != first
+        # A command carrying an effect claim keeps the claim projection.
+        exported = {
+            "schema": "mission-kernel-command/1",
+            "type": "export-artifact",
+            "value": {
+                "at": "2030-01-01T00:00:00Z",
+                "destination": "out/report.md",
+                "redaction_status": "checked",
+                "artifact_effect": {"kind": "artifact", "target": "artifact.md",
+                                    "digest": "sha256:" + "0" * 64, "size": 3},
+                "export_effect": {"kind": "artifact", "target": "report.md",
+                                  "digest": "sha256:" + "1" * 64, "size": 3},
+            },
+        }
+        projected = project_semantic_command(exported)
+        assert "at" not in projected["value"]
+        assert "digest" not in projected["value"]["artifact_effect"]
 
     def test_a_captured_blob_is_part_of_the_identity(self):
         from mission_persistence.local_uow import BlobBinding, VerifiedBlob, VerifiedBlobSet
@@ -438,14 +492,51 @@ class TestLookupBeforePrepare:
         assert partial_local.lookup_operation(request) is None
         assert sorted(p.name for p in partial.iterdir()) == ["operations"]
 
+    def test_a_root_that_cannot_be_inspected_is_not_reported_as_empty(self, tmp_path):
+        """Answering "no operation" on an I/O failure would hide that it ran."""
+        from mission_persistence.fenced_commit import FencedCommitError, LocalFencedRepository
+
+        parent = tmp_path / "sealed"
+        root = parent / ".mission-state"
+        root.mkdir(parents=True)
+        (root / "operations").mkdir()
+        (root / ".state.lock").touch()
+        local = LocalFencedRepository(root, clock=_Clock(datetime.now(timezone.utc)), fault_injector=None)
+        request = _request(operation_id="operation-none", lease_id="fixture-lease", argv=("set", "phase=done"))
+        os.chmod(parent, 0o000)
+        try:
+            if os.geteuid() == 0:
+                pytest.skip("root bypasses directory permissions")
+            with pytest.raises(FencedCommitError) as excinfo:
+                local.lookup_operation(request)
+        finally:
+            os.chmod(parent, 0o700)
+        assert excinfo.value.code == "repository-invalid"
+
     def test_the_lookup_writes_nothing(self, tmp_path):
         local, repository, meta, _clock = _v1_repository(tmp_path, "committed")
         local.begin(_init_request(meta))  # a normal begin has already laid the directories out
         files_before, dirs_before = _all_files(repository), _all_dirs(repository)
+        metadata_before = _all_metadata(repository)
         local.lookup_operation(_init_request(meta))
         local.lookup_operation(_request(operation_id="never-seen", lease_id=meta["lease_id"], argv=("set", "phase=done")))
         assert _all_files(repository) == files_before
         assert _all_dirs(repository) == dirs_before
+        # Content is not the whole of writing nothing: repairing a mode
+        # or touching an inode is a write the byte comparison cannot see.
+        assert _all_metadata(repository) == metadata_before
+
+    def test_the_lookup_refuses_a_lock_it_would_have_to_repair(self, tmp_path):
+        from mission_persistence.fenced_commit import FencedCommitError
+
+        local, repository, meta, _clock = _v1_repository(tmp_path, "committed")
+        local.begin(_init_request(meta))
+        lock = repository / ".state.lock"
+        os.chmod(lock, 0o644)
+        with pytest.raises(FencedCommitError) as excinfo:
+            local.lookup_operation(_init_request(meta))
+        assert excinfo.value.code == "repository-invalid"
+        assert stat.S_IMODE(lock.stat().st_mode) == 0o644
 
 
 # --------------------------------------------------------------------------
@@ -918,6 +1009,8 @@ class TestContractDocuments:
             "`mission-intent/2`", "### 6.3 `mission-commit/2`", "### 6.5 `mission-prepare/2`",
             "### 6.6 `mission-operation/2`", "`OperationReplay`", "`materialization`",
             "| `MAX_OPERATION_BYTES` | 4,194,304 B |",
+            "### 7.0 Read-only operation lookup", "`lookup_operation(request)`",
+            "`LEGACY_UNDETERMINED`",
         ):
             assert needle in text, needle
         for stale in ("815 B maximum-shaped candidate", "4 KiB operation-record limit",
