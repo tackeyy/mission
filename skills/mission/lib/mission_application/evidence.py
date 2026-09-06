@@ -394,6 +394,33 @@ class _PlanRouteAdapter:
         return self._plan_route(self._plan)
 
 
+def context_manifest_plan(*, now, iteration, publication_path, project_root):
+    """Build the retry plan, naming a refusal the way every caller expects.
+
+    Building the plan normalises the path, so a refusal happens here rather
+    than inside prepare.  It has to reach the caller as the same failure it
+    always was -- callers branch on ``code``, and reporting a bad timestamp
+    as a bad path sends them to the wrong place -- so the translation lives
+    here and not at each call site.
+    """
+    from mission_application.retry_plan import ContextManifestRetryPlan
+
+    try:
+        return ContextManifestRetryPlan.for_request(
+            now=now,
+            iteration=iteration,
+            publication_path=publication_path,
+            project_root=project_root,
+        )
+    except EvidencePublicationError as exc:
+        raise EvidenceFailure(
+            "context-publication-path-invalid"
+            if exc.code == "publication-path-invalid"
+            else exc.code,
+            exc.detail,
+        ) from exc
+
+
 def run_context_manifest(
     request: ContextManifestRequest, repository: object
 ) -> dict:
@@ -412,23 +439,12 @@ def run_context_manifest(
         # rather than inside prepare.  It has to reach the caller as the same
         # failure it always was, in the same order the callback route would
         # have found it, or the CLI stops reporting it as a rejection.
-        try:
-            plan = ContextManifestRetryPlan.for_request(
-                now=request.now,
-                iteration=request.iteration,
-                publication_path=request.publication_path,
-                project_root=request.project_root,
-            )
-        except EvidencePublicationError as exc:
-            # Keep the refusal's name, not only its type: callers branch on
-            # `code`, and reporting a bad timestamp as a bad path sends them
-            # to the wrong place.
-            raise EvidenceFailure(
-                "context-publication-path-invalid"
-                if exc.code == "publication-path-invalid"
-                else exc.code,
-                exc.detail,
-            ) from exc
+        plan = context_manifest_plan(
+            now=request.now,
+            iteration=request.iteration,
+            publication_path=request.publication_path,
+            project_root=request.project_root,
+        )
         # The plan route returns what the executor returns, so the same
         # post-processing has to run: the caller expects the projected result,
         # not the raw (prepared, execution) pair.
@@ -640,8 +656,6 @@ def run_progress_update_cli(args, cwd, services) -> str:
 
 
 def run_context_manifest_cli(args, cwd, services) -> str:
-    from mission_application.retry_plan import ContextManifestRetryPlan
-
     state_file = _evidence_state_file(cwd, services, CONTEXT_STATE_FILE_MISSING)
     output = Path(str(getattr(args, "out")))
     try:
@@ -653,14 +667,14 @@ def run_context_manifest_cli(args, cwd, services) -> str:
     services.resolve_output_path(cwd, str(output))
     now = services.now()
     try:
-        plan = ContextManifestRetryPlan.for_request(
+        plan = context_manifest_plan(
             now=now,
             iteration=getattr(args, "iteration"),
             publication_path=str(output),
             project_root=cwd,
         )
-    except EvidencePublicationError as exc:
-        services.fail("ERROR: %s" % (exc.code,), 2)
+    except EvidenceFailure as exc:
+        services.fail("ERROR: %s" % (exc,), 2)
     identity = prepare_context_manifest_operation(
         plan,
         session_id=state_file.stem,
