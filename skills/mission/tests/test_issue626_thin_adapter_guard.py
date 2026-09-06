@@ -545,6 +545,9 @@ def cmd_show(args):
         "register(_renders)",
         "if True:\n    register(_renders)",
         "for _ in (1,):\n    register(_renders)",
+        "@register(_renders)\ndef _decorated():\n    return 1",
+        "class Wiring:\n    service = _services(_renders)",
+        "def _defaulted(render=_renders):\n    return render",
     ],
 )
 def test_every_module_level_handover_keeps_the_helper_in_the_budget(wiring):

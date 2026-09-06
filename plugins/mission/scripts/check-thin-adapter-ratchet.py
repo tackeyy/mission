@@ -117,6 +117,36 @@ def _top_level_functions(tree: ast.Module) -> dict[str, ast.AST]:
     }
 
 
+def _names_run_at_import(body, functions: dict[str, ast.AST]):
+    """Yield every top-level function named by code that runs at import time.
+
+    A definition introduces a name rather than running it, so its body is not
+    import-time code -- but its decorators and default arguments are, and so
+    is a class body.  Missing those would leave a way to hand a helper over
+    without the guard noticing.
+    """
+    for node in body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            executed = list(node.decorator_list)
+            executed.extend(item for item in node.args.defaults)
+            executed.extend(item for item in node.args.kw_defaults if item is not None)
+        elif isinstance(node, ast.ClassDef):
+            executed = [*node.decorator_list, *node.bases, *node.keywords]
+            yield from _names_run_at_import(node.body, functions)
+        else:
+            executed = [node]
+        for statement in executed:
+            for inner in ast.walk(statement):
+                if (
+                    isinstance(inner, ast.Name)
+                    and isinstance(inner.ctx, ast.Load)
+                    and inner.id in functions
+                ):
+                    yield inner.id
+
+
 def _handler_roots(tree: ast.Module, functions: dict[str, ast.AST]) -> set[str]:
     roots = {
         name
@@ -131,21 +161,11 @@ def _handler_roots(tree: ast.Module, functions: dict[str, ast.AST]) -> set[str]:
     #
     # Every module-level statement counts, not only an assignment: a bare
     # ``register(_helper)`` hands the helper over just as effectively, and so
-    # does one inside a module-level ``if`` or ``for``.  Definitions and
-    # imports are skipped because they introduce names rather than run them.
-    for node in tree.body:
-        if isinstance(
-            node,
-            (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Import, ast.ImportFrom),
-        ):
-            continue
-        for inner in ast.walk(node):
-            if (
-                isinstance(inner, ast.Name)
-                and isinstance(inner.ctx, ast.Load)
-                and inner.id in functions
-            ):
-                roots.add(inner.id)
+    # does one inside a module-level ``if`` or ``for``, a decorator, a default
+    # argument, or a class body.  What is skipped is a *function body*, which
+    # runs only when called and is scanned as its own function.
+    for name in _names_run_at_import(tree.body, functions):
+        roots.add(name)
     for function in functions.values():
         for node in ast.walk(function):
             if not isinstance(node, ast.Call):
