@@ -147,6 +147,23 @@ class TestReadOperationState:
         assert excinfo.value.code == "record-missing"
 
 
+    def test_replaying_the_same_operation_carries_its_committed_state_end_to_end(self, tmp_path):
+        """Production join: executor -> read_operation_state -> replayed_document."""
+        from mission_kernel import project_legacy_document
+
+        local, _root, states = _committed_repository(tmp_path)
+        # A third operation moves the head; then op-1 is run again -> replay.
+        _v5(local, "op-3").execute_retry_safe_evidence_plan(_plan("build/c.json"))
+        # The same operation again: same operation id, same plan (intent), so
+        # the unit of work answers with the recorded commit instead of a new one.
+        _prepared, execution = _v5(local, "op-1").execute_retry_safe_evidence_plan(_plan("build/a.json"))
+        assert execution.replayed is True
+        assert json.dumps(execution.replayed_document, sort_keys=True) == json.dumps(
+            json.loads(project_legacy_document(states["op-1"].state)), sort_keys=True
+        )
+        assert execution.projection != execution.replayed_document, "the head has moved since op-1"
+
+
 # ----------------------------------------------------------------- ports
 
 
@@ -195,13 +212,12 @@ class TestTheExecutorReadsTheHistoricalStateInsideTheTransaction:
         calls = []
         repository = in_memory_v5_repository(current, replayed=True, replayed_document=historical, read_calls=calls)
 
-        with repository.transaction():
-            _prepared, execution = repository.execute_evidence_transition_effects(
-                lambda state: prepare_progress_update(
-                    state, now=AT, total=1, completed=0, batch_size=1, last_unit=None,
-                    artifact_path=None, iteration=1, evidence_path="progress.json",
-                )
+        _prepared, execution = repository.execute_evidence_transition_effects(  # opens its own transaction
+            lambda state: prepare_progress_update(
+                state, now=AT, total=1, completed=0, batch_size=1, last_unit=None,
+                artifact_path=None, iteration=1, evidence_path="progress.json",
             )
+        )
         assert execution.replayed is True
         assert execution.replayed_document["marker"] == "then"
         assert execution.projection["marker"] == "now"
@@ -232,11 +248,14 @@ def _documents():
         base, at="2030-01-01T00:00:00Z", path="artifacts/mission-artifact.md", format="markdown",
         title="T", redaction_status="unchecked", required_for_pass=False, effect=None,
     )
+    # The historical records carry fields the replaying request does not pass
+    # (`source`, a different redaction status), so a payload built from the
+    # prepared result instead of the historical state is distinguishable.
     after_append = append_artifact_block_document(
-        after_init, at=AT, section="plan", content="first", source=None, label=None
+        after_init, at=AT, section="plan", content="first", source="historical-source", label=None
     )
     after_export = export_artifact_document(
-        after_append, at=AT, destination="out/a.md", redaction_status="checked",
+        after_append, at=AT, destination="out/a.md", redaction_status="reviewed",
         artifact_effect=None, export_effect=None,
     )
     after_publish = record_artifact_publication_document(
@@ -287,8 +306,8 @@ class TestArtifactReplayPayloads:
             _ReplayingRepository(docs["current"], docs["append"]),
         )
         assert set(payload) == {"section", "block"}
-        assert payload["block"]["content"] == "first"
-        assert payload["block"]["timestamp"] == AT
+        assert payload["block"] == docs["append"]["artifact"]["blocks"][-1]
+        assert payload["block"]["source"] == "historical-source", "the prepared block has no source"
 
     def test_export_returns_its_own_export_and_the_current_artifact(self):
         from mission_application.artifact import ArtifactExportRequest, run_artifact_export
@@ -299,7 +318,8 @@ class TestArtifactReplayPayloads:
             _ReplayingRepository(docs["current"], docs["export"]), _render,
         )
         assert set(payload) == {"export", "artifact"}
-        assert payload["export"]["timestamp"] == AT
+        assert payload["export"] == docs["export"]["artifact"]["exports"][-1]
+        assert payload["export"]["redaction_status"] == "reviewed", "the prepared export says checked"
         assert payload["artifact"] == docs["current"]["artifact"], "artifact is the current projection"
 
     def test_publish_returns_its_own_event(self):
@@ -312,7 +332,8 @@ class TestArtifactReplayPayloads:
             _ReplayingRepository(docs["current"], docs["publish"]), _render,
         )
         assert set(payload) == {"publish_event", "artifact"}
-        assert payload["publish_event"]["destination"] == "https://example.invalid/x"
+        assert payload["publish_event"] == docs["publish"]["artifact"]["publish_events"][-1]
+        assert "artifact_path" not in payload["publish_event"], "the prepared event binds an artifact_path"
         assert payload["artifact"] == docs["current"]["artifact"]
 
     def test_render_and_init_return_the_current_artifact(self):
@@ -394,3 +415,44 @@ def test_the_collected_history_code_is_an_expected_gate_to_the_cli():
     spec.loader.exec_module(module)
     assert module._fenced_cli_outcome_kind("operation-history-collected") == "expected-gate"
     assert module._fenced_cli_outcome_kind("record-missing") == "internal-error"
+
+
+def test_executor_handoff_reports_collected_history_as_an_expected_gate(tmp_path, monkeypatch, capsys):
+    """The real path: the command lets FencedCommitError reach main's classifier.
+
+    executor-handoff used to catch FencedCommitError itself and exit as
+    invalid-input, so a replay whose generation was collected -- or a lease
+    rejection -- never reached `_fenced_cli_outcome_kind`.
+    """
+    import importlib.util
+    import sys
+
+    from .mission_state_fixture_corpus import generate_cli_state_bytes
+    from mission_persistence.fenced_commit import FencedCommitError
+
+    path = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
+    spec = importlib.util.spec_from_file_location("issue747_handoff_outcome", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    state_path, _bytes = generate_cli_state_bytes(tmp_path / "cli-init")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(module, "resolve_state_file", lambda _cwd: Path(state_path))
+
+    class _Collected:
+        def execute_transition_effects(self, _prepare, **_kwargs):
+            raise FencedCommitError("operation-history-collected", "the generation is no longer retained")
+
+    monkeypatch.setattr(module, "_legacy_lifecycle_repository", lambda *a, **k: _Collected())
+    monkeypatch.setattr(sys, "argv", ["mission-state.py", "executor-handoff", "begin"])
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.main()
+    # main() re-raises the classified exit, so the classification is observable
+    # on the exception itself (executor-handoff has no --json envelope).
+    assert excinfo.value.code == 2
+    assert getattr(excinfo.value, "outcome_kind", None) == "expected-gate"
+    err = capsys.readouterr().err
+    assert "no longer retained" in err
+    assert "executor handoff rejected" not in err, "the local invalid-input handler must not catch it"

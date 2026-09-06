@@ -217,7 +217,11 @@ from mission_application.planning import (  # noqa: E402
     decide_provider_terminal_result,
     ExecutorHandoffFacts,
     ExecutorHandoffRequest,
+    ExecutorHandoffRejected,
+    TransitionRejected,
     executor_handoff_response,
+    run_executor_handoff,
+    run_transition_effects,
     prepare_executor_handoff,
     prepare_executor_handoff_rejection,
     prepare_specialist_recommendation,
@@ -4431,12 +4435,15 @@ def cmd_specialists(args):
             )
 
         try:
-            _prepared_recommend, _execution_recommend = (
-                _repo_recommend.execute_transition_effects(
-                    prepare_recommendation
-                )
+            # FencedCommitError passes through to main() (#747 item 6), whose
+            # _reject_fenced_lease_for_cli classifies the code.
+            _prepared_recommend, _execution_recommend = run_transition_effects(
+                _repo_recommend,
+                prepare_recommendation,
+                passthrough=(FencedCommitError,),
+                rejected=(OSError, PlanningFailure, ValueError),
             )
-        except (FencedCommitError, OSError, PlanningFailure, ValueError) as exc:
+        except TransitionRejected as exc:
             print(f"ERROR: specialist recommendation rejected: {exc}", file=sys.stderr)
             sys.exit(2)
         _recommend_decision = _execution_recommend.decision
@@ -13321,15 +13328,16 @@ def _cmd_executor_handoff(args, operation: str):
             raise
 
     try:
-        prepared, execution = repository.execute_transition_effects(prepare)
-        response = executor_handoff_response(prepared, execution)
-    except (
-        FencedCommitError,
-        OSError,
-        PlanningFailure,
-        ValueError,
-        PlanningLifecycleError,
-    ) as exc:
+        # FencedCommitError passes through to main() (#747 item 6), whose
+        # _reject_fenced_lease_for_cli classifies the code; everything else
+        # this command rejects is collapsed by the use case.
+        response = run_executor_handoff(
+            repository,
+            prepare,
+            passthrough=(FencedCommitError,),
+            rejected=(OSError, PlanningFailure, ValueError, PlanningLifecycleError),
+        )
+    except ExecutorHandoffRejected as exc:
         print(f"ERROR: executor handoff rejected: {exc}", file=sys.stderr)
         sys.exit(2)
     print(json.dumps(response, ensure_ascii=False))

@@ -33,7 +33,7 @@
 {"path":"skills/mission/bin/mission-state.py","function":"_capture_command_output","rules":{"call.non-allowlisted":6,"control.branch":2,"logic.compare":1,"logic.threshold-literal":3}}
 {"path":"skills/mission/bin/mission-state.py","function":"_classify_non_portable_execution_config","rules":{"call.non-allowlisted":8,"control.branch":6,"logic.arithmetic":4,"logic.boolean":3,"logic.compare":2,"logic.comprehension":1}}
 {"path":"skills/mission/bin/mission-state.py","function":"_close_published_file","rules":{"call.non-allowlisted":1,"io.direct":1}}
-{"path":"skills/mission/bin/mission-state.py","function":"_cmd_executor_handoff","rules":{"call.non-allowlisted":49,"control.branch":2,"io.direct":1,"logic.arithmetic":3,"logic.boolean":3,"logic.business-container":9,"logic.compare":2,"logic.comprehension":1,"state.raw-access":5}}
+{"path":"skills/mission/bin/mission-state.py","function":"_cmd_executor_handoff","rules":{"call.non-allowlisted":48,"control.branch":2,"io.direct":1,"logic.arithmetic":3,"logic.boolean":3,"logic.business-container":9,"logic.compare":2,"logic.comprehension":1,"state.raw-access":5}}
 {"path":"skills/mission/bin/mission-state.py","function":"_codex_hook_config_paths","rules":{"call.non-allowlisted":9,"control.branch":3,"control.loop":1,"io.direct":1,"logic.arithmetic":4,"logic.compare":1,"state.mutation":3}}
 {"path":"skills/mission/bin/mission-state.py","function":"_codex_next_fallback_available","rules":{"logic.boolean":1,"logic.business-container":1,"logic.compare":1}}
 {"path":"skills/mission/bin/mission-state.py","function":"_coerce_scalar","rules":{"call.non-allowlisted":5,"control.branch":2,"logic.compare":2}}
