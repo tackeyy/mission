@@ -14,12 +14,22 @@ import json
 import re
 from typing import Callable, Mapping
 
+from mission_application.cli_operation import (
+    CliOperationIdentity,
+    prepare_cli_operation,
+    text_digest,
+)
 from mission_kernel.artifact import (
+    ARTIFACT_PUBLISH_PROVIDERS,
+    ARTIFACT_REDACTION_STATUSES,
     ArtifactEffectClaim,
     ArtifactRuleError,
     append_artifact_block_document,
     export_artifact_document,
     initialize_artifact_document,
+    normalized_artifact_section,
+    normalized_block_content,
+    optional_artifact_text,
     record_artifact_publication_document,
     render_artifact_document,
 )
@@ -216,6 +226,86 @@ def _artifact_render_bytes(
     render_text: Callable[[dict, dict], str]
 ) -> Callable[[dict, dict], bytes]:
     return lambda state, artifact: render_text(state, artifact).encode("utf-8")
+
+
+@dataclass(frozen=True)
+class ArtifactCliServices:
+    """Adapter-owned capabilities the artifact CLI use cases need (#747 P2-b).
+
+    The adapter keeps the process concerns -- where the state file is, how a
+    path is made project-relative, how the markdown is rendered -- and the use
+    case keeps the decisions.  Injecting them keeps the adapter a single call,
+    which is what the thin-adapter budget requires.
+    """
+
+    resolve_state_file: object
+    artifact_path: object
+    state_relative_path: object
+    resolve_output_path: object
+    repository: object
+    render_markdown: object
+    compatibility_arguments: object
+    canonical_operation: object
+
+
+def _artifact_identity(
+    services: ArtifactCliServices,
+    command_type: str,
+    arguments: dict,
+    *,
+    session_id: str,
+) -> CliOperationIdentity:
+    return prepare_cli_operation(
+        command_type,
+        arguments,
+        session_id=session_id,
+        compatibility_arguments=services.compatibility_arguments,
+        canonical_operation=services.canonical_operation,
+    )
+
+
+def _artifact_repository(services: ArtifactCliServices, cwd, state_path, identity):
+    """Build the repository the operation runs on, carrying its identity."""
+    return services.repository(
+        cwd,
+        state_path,
+        stamp=False,
+        pre_admit_lease=True,
+        session_id=state_path.stem,
+        operation_id=identity.operation_id,
+        operation_command=identity.operation_command,
+        operation_command_type=identity.command_type,
+    )
+
+
+def prepare_artifact_append_operation(
+    section: object,
+    content: object,
+    source: object,
+    label: object,
+    *,
+    session_id: str,
+    compatibility_arguments,
+    canonical_operation,
+) -> CliOperationIdentity:
+    """Identify one append by what it appends, after the kernel's own rules.
+
+    The body enters as a digest of the *stored* form, so a trailing newline
+    the kernel strips does not make a retry a different operation, and the
+    text itself never reaches the operation record.
+    """
+    return prepare_cli_operation(
+        "append-artifact-block",
+        {
+            "content_digest": text_digest(normalized_block_content(content)),
+            "label": optional_artifact_text(label),
+            "section": normalized_artifact_section(section),
+            "source": optional_artifact_text(source),
+        },
+        session_id=session_id,
+        compatibility_arguments=compatibility_arguments,
+        canonical_operation=canonical_operation,
+    )
 
 
 def run_artifact_init(
