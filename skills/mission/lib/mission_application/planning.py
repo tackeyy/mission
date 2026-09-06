@@ -310,7 +310,7 @@ def run_transition_effects(
     repository: object,
     prepare,
     *,
-    passthrough: tuple = (),
+    passthrough: tuple,
     rejected: tuple = (OSError, ValueError),
     rejection: type = TransitionRejected,
 ) -> tuple:
@@ -322,8 +322,12 @@ def run_transition_effects(
     fenced persistence error is a ``ValueError`` whose code the CLI
     classifies (lease codes, CAS codes, ``operation-history-collected``), so
     it has to reach that classifier rather than end as a generic rejection
-    (#747 item 6).  ``passthrough`` is checked first for that reason.
+    (#747 item 6).  ``passthrough`` is checked first for that reason, and it
+    has no default: a caller that forgets it would rebuild the very trap this
+    helper exists to remove, so an empty tuple is refused as well.
     """
+    if not passthrough:
+        raise ValueError("run_transition_effects requires a non-empty passthrough")
     try:
         return repository.execute_transition_effects(prepare)
     except passthrough:
@@ -336,7 +340,7 @@ def run_executor_handoff(
     repository: object,
     prepare,
     *,
-    passthrough: tuple = (),
+    passthrough: tuple,
     rejected: tuple = (OSError, ValueError),
 ) -> dict:
     """Execute one handoff and close it into the stable CLI response."""

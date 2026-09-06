@@ -456,3 +456,13 @@ def test_executor_handoff_reports_collected_history_as_an_expected_gate(tmp_path
     err = capsys.readouterr().err
     assert "no longer retained" in err
     assert "executor handoff rejected" not in err, "the local invalid-input handler must not catch it"
+
+
+def test_the_pass_through_use_case_refuses_to_run_without_a_pass_through():
+    """The default that let FencedCommitError be swallowed is gone; `()` is refused too."""
+    from mission_application.planning import run_transition_effects
+
+    with pytest.raises(TypeError):
+        run_transition_effects(object(), lambda s: s)  # keyword required
+    with pytest.raises(ValueError, match="non-empty passthrough"):
+        run_transition_effects(object(), lambda s: s, passthrough=())
