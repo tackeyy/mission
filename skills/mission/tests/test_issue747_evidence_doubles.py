@@ -140,20 +140,6 @@ def test_the_in_memory_double_defines_every_instance_attribute_the_executor_read
         assert hasattr(double, name), f"double lacks instance state {name}"
 
 
-def test_no_test_module_keeps_a_private_copy_of_the_doubles():
-    """The copies are what drifted; the shared module is the only definition."""
-    from pathlib import Path
-
-    tests = Path(__file__).resolve().parent
-    offenders = []
-    for path in sorted(tests.glob("test_*.py")):
-        if path.name == Path(__file__).name:
-            continue  # this file names the patterns it looks for
-        text = path.read_text(encoding="utf-8")
-        if "class _FakeFencedRepository" in text or "def _in_memory_v5_repository" in text:
-            offenders.append(path.name)
-
-
 def test_the_executor_has_no_use_of_self_the_derivation_cannot_see():
     """Everything ``self`` does in the executor is one of the two derived spellings.
 
@@ -180,10 +166,12 @@ def test_the_derivation_rejects_what_a_regex_would_accept():
         "    d = hasattr(self, '_x')\n"
         "    e = getattr(self, other)\n"
         "    repo = self\n"
+        "    f = self.__getattribute__('_reflected')\n"
+        "    g = self.__dict__['_hidden']\n"
         "    return helper(self)\n"
     )
     assert derived == frozenset({"ok", "_literal"})
-    assert [line for line, _ in unsupported] == [4, 5, 6, 7, 8]
+    assert [line for line, _ in unsupported] == [4, 5, 6, 7, 8, 9, 10]
 
 
 def test_no_test_module_keeps_a_private_copy_of_the_doubles():

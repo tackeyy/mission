@@ -99,6 +99,14 @@ def _executor_source():
     )
 
 
+# Attribute names through which code reaches *other* attributes by a computed
+# name.  Deriving them as the accessed attribute would be wrong, so they count
+# as unsupported uses of `self` instead (fail-closed).
+_REFLECTIVE = frozenset({
+    "__getattribute__", "__getattr__", "__setattr__", "__delattr__", "__dict__", "__class__",
+})
+
+
 def _self_uses(source: str):
     """Classify every use of ``self`` in one method body, by syntax not by regex.
 
@@ -119,6 +127,10 @@ def _self_uses(source: str):
     handled: set = set()  # ids of Name nodes already accounted for
     for node in ast.walk(function):
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "self":
+            if node.attr in _REFLECTIVE:
+                # `self.__getattribute__("_x")` / `self.__dict__["_x"]` reach an
+                # attribute this walk cannot name; left unhandled so it is reported.
+                continue
             derived.add(node.attr)
             handled.add(id(node.value))
         elif (
