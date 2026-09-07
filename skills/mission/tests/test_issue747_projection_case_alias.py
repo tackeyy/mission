@@ -157,6 +157,73 @@ def test_the_pinned_resolver_refuses_the_same_directory(repository, monkeypatch)
         assert later.code != "projection-invalid"
 
 
+def test_the_resolver_refuses_the_repository_at_any_depth(repository, monkeypatch):
+    """Checking only the first segment would leave every deeper one open."""
+    nested = repository.root.parent / "a" / "b" / "outside"
+    nested.mkdir(parents=True)
+    (repository.root.parent / "a" / "b" / "elsewhere").mkdir()
+    _report_as_the_repository(monkeypatch, repository, nested)
+
+    with pytest.raises(FencedCommitError) as refusal:
+        repository._projection_target("a/b/outside/x.md")
+
+    assert refusal.value.code == "projection-invalid"
+    assert repository._projection_target("a/b/elsewhere/x.md") == (
+        repository.root.parent / "a" / "b" / "elsewhere" / "x.md"
+    )
+
+
+def test_the_resolver_refuses_a_deep_target_that_is_the_repository(
+    repository, monkeypatch
+):
+    """The target is the last segment wherever the path leads."""
+    nested = repository.root.parent / "a" / "b" / "outside"
+    nested.mkdir(parents=True)
+    _report_as_the_repository(monkeypatch, repository, nested)
+
+    with pytest.raises(FencedCommitError) as refusal:
+        repository._projection_target("a/b/outside")
+
+    assert refusal.value.code == "projection-invalid"
+
+
+def test_the_pinned_resolver_refuses_the_repository_at_any_depth(
+    repository, monkeypatch
+):
+    """The pinned walk opens one directory per segment; each one is asked."""
+    nested = repository.root.parent / "a" / "b" / "outside"
+    nested.mkdir(parents=True)
+    record = ProjectionRecord(
+        after=ProjectionFileRef(
+            digest="sha256:" + "0" * 64,
+            identity=(0, 0, 0, 0, 0),
+            name="after.blob",
+            size=0,
+        ),
+        base=None,
+        blob_id="b" * 32,
+        parent_identity=(0, 0, 0),
+        relative_path="a/b/outside/x.md",
+    )
+    _report_as_the_repository(monkeypatch, repository, nested)
+
+    with pytest.raises(FencedCommitError) as refusal:
+        with repository._pinned_projection_target(record):
+            pass
+
+    assert refusal.value.code == "projection-invalid"
+
+
+def test_the_refusal_looks_at_the_device_as_well_as_the_inode():
+    """An inode number means nothing without the device that issued it."""
+    from mission_persistence.fenced_commit import _refuse_repository_alias
+
+    root_identity = (1, 2, 0o040700)
+    other_device = os.stat_result((0o040700, 2, 9, 1, 0, 0, 0, 0, 0, 0))
+
+    _refuse_repository_alias(other_device, root_identity)
+
+
 @pytest.mark.parametrize(
     "relative_path",
     [
