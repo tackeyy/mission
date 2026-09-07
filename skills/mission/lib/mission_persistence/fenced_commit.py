@@ -1440,13 +1440,16 @@ def _refuse_repository_alias(
 ) -> None:
     """Refuse a projection step that is the repository under another name.
 
-    The name check compares spellings, and a filesystem that ignores case
-    answers to more than one.  A projection written through such a spelling
-    lands inside the repository -- ``commits`` and ``objects`` among the
-    places it could overwrite -- having passed every string comparison.
+    The name check compares spellings, and a directory can answer to more
+    than one -- a filesystem that ignores case is the ordinary way, a second
+    hard link the less ordinary.  A projection written through any of them
+    lands inside the repository, ``commits`` and ``objects`` among the places
+    it could overwrite, having passed every string comparison.
 
     Identity is the question that has one answer per directory, so it is the
-    one asked here.
+    one asked here.  It answers "is this the repository", not "is this inside
+    it": a distinct directory that a mount places under the repository has an
+    identity of its own and is not caught.
     """
     if _directory_identity(metadata) == root_identity:
         raise FencedCommitError(

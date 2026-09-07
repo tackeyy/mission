@@ -10,6 +10,7 @@ comparison.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -22,6 +23,8 @@ if str(LIB) not in sys.path:
 from mission_persistence.fenced_commit import (  # noqa: E402
     FencedCommitError,
     LocalFencedRepository,
+    ProjectionFileRef,
+    ProjectionRecord,
 )
 
 ROOT_NAME = ".mission-state"
@@ -37,6 +40,62 @@ def repository(tmp_path):
 
 def _ignores_case(root: Path) -> bool:
     return (root.parent / ALIAS).exists()
+
+
+def test_the_refusal_is_about_identity_not_spelling():
+    """The unit the other tests reach only where the filesystem cooperates.
+
+    A second name for one directory needs either a filesystem that ignores
+    case or a privilege this suite does not have, so the decision itself is
+    exercised here, where every platform can run it.
+    """
+    from mission_persistence.fenced_commit import _refuse_repository_alias
+
+    root_identity = (1, 2, 0o040700)
+    same = os.stat_result((0o040700, 2, 1, 1, 0, 0, 0, 0, 0, 0))
+    other = os.stat_result((0o040700, 3, 1, 1, 0, 0, 0, 0, 0, 0))
+
+    _refuse_repository_alias(other, root_identity)  # a different directory
+
+    with pytest.raises(FencedCommitError) as refusal:
+        _refuse_repository_alias(same, root_identity)
+    assert refusal.value.code == "projection-invalid"
+
+
+def test_the_pinned_resolver_refuses_the_same_directory(repository, monkeypatch):
+    """The pinned path decides separately, so it is checked separately.
+
+    Rather than depend on the filesystem offering a second name, the
+    repository is told that one of the directories it opens is itself.
+    """
+    import mission_persistence.fenced_commit as module
+
+    outside = repository.root.parent / "outside"
+    outside.mkdir()
+    record = ProjectionRecord(
+        after=ProjectionFileRef(
+            digest="sha256:" + "0" * 64,
+            identity=(0, 0, 0, 0, 0),
+            name="after.blob",
+            size=0,
+        ),
+        base=None,
+        blob_id="b" * 32,
+        parent_identity=(0, 0, 0),
+        relative_path="outside/x.md",
+    )
+    real_identity = module._directory_identity
+
+    def _every_directory_is_the_repository(metadata):
+        return real_identity(repository.root.lstat())
+
+    monkeypatch.setattr(module, "_directory_identity", _every_directory_is_the_repository)
+
+    with pytest.raises(FencedCommitError) as refusal:
+        with repository._pinned_projection_target(record):
+            pass
+
+    assert refusal.value.code == "projection-invalid"
 
 
 @pytest.mark.parametrize(
