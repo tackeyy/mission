@@ -62,26 +62,33 @@ def _base(*, expired: bool, expires_at: datetime | None = None) -> FencedLease:
     return FencedLease("s-a", CURRENT, 1, _text(expires_at), HISTORY)
 
 
+TOKEN_REQUIRED = ("lease-token-required", "the matching owner omitted its token")
+STILL_LIVE = ("lease-rejected", "the current fenced lease is still live")
+RETIRED_TOKEN = ("stale-fencing-token", "the presented token is retired")
+
 # The whole input space of the branch: the lease is live or expired, the owner
 # matches or does not, and the token is absent, current, retired or fresh.
+# Each row carries what the admission produces, so a refusal is pinned by its
+# detail as well as its code, and a success by the fields the commit reads.
 SPACE = [
-    ("live", "s-a", None, "lease-token-required"),
-    ("live", "s-a", CURRENT, None),
-    ("live", "s-a", RETIRED, "lease-rejected"),
-    ("live", "s-a", FRESH, "lease-rejected"),
-    ("live", "s-b", None, "lease-rejected"),
-    ("live", "s-b", CURRENT, "lease-rejected"),
-    ("live", "s-b", RETIRED, "lease-rejected"),
-    ("live", "s-b", FRESH, "lease-rejected"),
-    ("expired", "s-a", None, None),
-    ("expired", "s-a", CURRENT, None),
-    ("expired", "s-a", RETIRED, "stale-fencing-token"),
-    ("expired", "s-a", FRESH, None),
-    ("expired", "s-b", None, None),
-    ("expired", "s-b", CURRENT, "stale-fencing-token"),
-    ("expired", "s-b", RETIRED, "stale-fencing-token"),
-    ("expired", "s-b", FRESH, None),
+    ("live", "s-a", None, TOKEN_REQUIRED),
+    ("live", "s-a", CURRENT, ("renewed", True)),
+    ("live", "s-a", RETIRED, STILL_LIVE),
+    ("live", "s-a", FRESH, STILL_LIVE),
+    ("live", "s-b", None, STILL_LIVE),
+    ("live", "s-b", CURRENT, STILL_LIVE),
+    ("live", "s-b", RETIRED, STILL_LIVE),
+    ("live", "s-b", FRESH, STILL_LIVE),
+    ("expired", "s-a", None, ("taken-over", False)),
+    ("expired", "s-a", CURRENT, ("renewed", False)),
+    ("expired", "s-a", RETIRED, RETIRED_TOKEN),
+    ("expired", "s-a", FRESH, ("taken-over", False)),
+    ("expired", "s-b", None, ("taken-over", False)),
+    ("expired", "s-b", CURRENT, RETIRED_TOKEN),
+    ("expired", "s-b", RETIRED, RETIRED_TOKEN),
+    ("expired", "s-b", FRESH, ("taken-over", False)),
 ]
+REFUSAL_CODES = {TOKEN_REQUIRED[0], STILL_LIVE[0], RETIRED_TOKEN[0]}
 
 
 @pytest.mark.parametrize("state,owner,token,expected", SPACE)
@@ -91,21 +98,69 @@ def test_the_refusal_covers_the_whole_branch(state, owner, token, expected):
 
     refusal = classify_lease(_Request(owner, token), base, NOW)
 
-    assert (refusal.code if refusal is not None else None) == expected
+    if expected[0] in REFUSAL_CODES:
+        assert (refusal.code, refusal.detail) == expected
+    else:
+        assert refusal is None
 
 
 @pytest.mark.parametrize("state,owner,token,expected", SPACE)
-def test_admit_lease_raises_exactly_what_the_refusal_says(state, owner, token, expected):
-    """The caller of the classifier must not add or drop a refusal."""
+def test_admit_lease_produces_exactly_what_it_did_before(state, owner, token, expected):
+    """The caller of the classifier must not add, drop or reword a refusal.
+
+    A success is pinned by every field the commit later reads -- the action
+    and ``base_was_live`` among them, since neither is recoverable from the
+    digest.
+    """
     base = _base(expired=state == "expired")
     request = _Request(owner, token)
 
-    if expected is None:
-        assert admit_lease(request, base, NOW, TTL) is not None
+    if expected[0] in REFUSAL_CODES:
+        with pytest.raises(FencedCommitError) as refusal:
+            admit_lease(request, base, NOW, TTL)
+        assert (refusal.value.code, refusal.value.detail) == expected
         return
-    with pytest.raises(FencedCommitError) as refusal:
-        admit_lease(request, base, NOW, TTL)
-    assert refusal.value.code == expected
+
+    pending = admit_lease(request, base, NOW, TTL)
+    action, base_was_live = expected
+    assert pending.action == action
+    assert pending.base_was_live is base_was_live
+    assert pending.base == base
+    assert pending.admitted_at == _text(NOW)
+    assert pending.target.owner_session_id == request.lease_owner_session_id or (
+        action == "renewed" and pending.target.owner_session_id == base.owner_session_id
+    )
+    assert pending.digest.startswith("sha256:")
+
+
+def test_a_retired_token_is_found_beyond_the_first_history_entry():
+    """The history is searched, not sampled.
+
+    Reading only its first entry leaves every earlier takeover able to present
+    a token the rules retired.
+    """
+    older = LeaseHistoryEntry(
+        owner_session_id="s-a",
+        lease_id="c" * 32,
+        fencing_epoch=1,
+        reason="lease-expired-takeover",
+        at="2025-12-30T00:00:00Z",
+    )
+    newer = LeaseHistoryEntry(
+        owner_session_id="s-a",
+        lease_id="d" * 32,
+        fencing_epoch=2,
+        reason="lease-expired-takeover",
+        at="2025-12-31T00:00:00Z",
+    )
+    base = FencedLease(
+        "s-a", CURRENT, 3, _text(NOW - timedelta(seconds=1)), (older, newer)
+    )
+
+    for entry in (older, newer):
+        refusal = classify_lease(_Request("s-b", entry.lease_id), base, NOW)
+        assert refusal is not None, entry.lease_id
+        assert (refusal.code, refusal.detail) == RETIRED_TOKEN
 
 
 def test_an_absent_lease_is_acquired_rather_than_refused():
