@@ -207,19 +207,27 @@ def execute_evidence_operation(repository: object, prepare) -> dict:
     command = prepared.command
     payload = copy.deepcopy(prepared.result)
     replayed = execution.replayed
+    # #747 P2-b: a replay answers from the state its own operation committed,
+    # not from the current head.  Another operation may have written the same
+    # slot since, and reading the head would then report a mismatch for a
+    # retry that is in fact correct -- which is the crash-retry case this
+    # command identity exists to serve.  ``artifact.py`` reads the same way.
+    source = execution.replayed_document if replayed else projection
+    if not isinstance(source, dict):
+        raise EvidenceFailure("evidence-replay-document-invalid")
     if isinstance(command, UpdateProgress):
         if not _record_matches(
-            projection.get("progress"), payload.get("progress"), replayed, prepared,
-            projection,
+            source.get("progress"), payload.get("progress"), replayed, prepared,
+            source,
         ):
             raise EvidenceFailure("progress-projection-mismatch")
         if replayed:
-            payload["progress"] = copy.deepcopy(projection.get("progress"))
+            payload["progress"] = copy.deepcopy(source.get("progress"))
     elif isinstance(command, ClearProgress):
-        if "progress" in projection:
+        if "progress" in source:
             raise EvidenceFailure("progress-projection-mismatch")
     elif isinstance(command, GenerateContextManifest):
-        record = (projection.get("context_manifests") or {}).get(
+        record = (source.get("context_manifests") or {}).get(
             str(command.iteration)
         )
         if not isinstance(record, dict) or any(
@@ -230,7 +238,7 @@ def execute_evidence_operation(repository: object, prepare) -> dict:
         # path and digest are content-addressed and this record has no
         # clock-derived field, so the projected values need no store authority.
     elif isinstance(command, RecordVerification):
-        history = projection.get("verification_history")
+        history = source.get("verification_history")
         if not isinstance(history, list) or not history:
             raise EvidenceFailure("verification-projection-mismatch")
         expected = payload.get("verification")
@@ -238,19 +246,19 @@ def execute_evidence_operation(repository: object, prepare) -> dict:
             matches = [
                 record
                 for record in history
-                if _record_matches(record, expected, True, prepared, projection)
+                if _record_matches(record, expected, True, prepared, source)
             ]
             if len(matches) != 1:
                 raise EvidenceFailure("verification-projection-mismatch")
             record = matches[0]
         else:
             record = history[-1]
-        if not _record_matches(record, expected, replayed, prepared, projection):
+        if not _record_matches(record, expected, replayed, prepared, source):
             raise EvidenceFailure("verification-projection-mismatch")
         if replayed:
             payload["verification"] = copy.deepcopy(record)
     elif isinstance(command, GenerateClaimsLedger):
-        record = (projection.get("claims_ledgers") or {}).get(str(command.iteration))
+        record = (source.get("claims_ledgers") or {}).get(str(command.iteration))
         if not isinstance(record, dict) or record.get("digest") != payload.get("digest"):
             raise EvidenceFailure("claims-ledger-projection-mismatch")
     return payload

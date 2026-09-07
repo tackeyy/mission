@@ -357,6 +357,64 @@ class TestRealCli:
         rewritten = _projected_state(run_cli, tmp_path).get("progress")
         assert rewritten["updated_at"] != progress["updated_at"]
 
+    def test_a_retry_still_replays_after_another_operation_wrote_the_same_slot(
+        self, run_cli, tmp_path
+    ):
+        """The crash-retry case: the head has moved on before the retry arrives.
+
+        A replay answers from the state its own operation committed.  Reading
+        the current head instead would report a mismatch here, which is the
+        one situation a caller-stable id exists to survive.
+        """
+        _init_mission(run_cli, tmp_path)
+        env = {"MISSION_OPERATION_ID": "progress-interrupted"}
+        arguments = ("progress", "update", "--total", "5", "--completed", "2", "--iteration", "1")
+        first = run_cli(*arguments, cwd=tmp_path, env_extra=env)
+        assert first.returncode == 0, first.stderr
+        recorded = json.loads(first.stdout)["progress"]
+
+        intervening = run_cli(
+            "progress", "update", "--total", "5", "--completed", "4", "--iteration", "1",
+            cwd=tmp_path,
+        )
+        assert intervening.returncode == 0, intervening.stderr
+        head = _projected_state(run_cli, tmp_path).get("progress")
+        assert head["completed"] == 4
+
+        retry = run_cli(*arguments, cwd=tmp_path, env_extra=env)
+
+        assert retry.returncode == 0, retry.stderr
+        # The reply is the original record, not the head and not a new write.
+        assert json.loads(retry.stdout)["progress"] == recorded
+        assert _projected_state(run_cli, tmp_path).get("progress") == head
+
+    def test_a_context_manifest_retry_survives_an_intervening_operation(
+        self, run_cli, tmp_path
+    ):
+        """Same shape for the manifest route, which reads a keyed record."""
+        _init_mission(run_cli, tmp_path)
+        env = {"MISSION_OPERATION_ID": "manifest-interrupted"}
+        arguments = (
+            "context-manifest", "--iteration", "1", "--out", "docs/p2b-manifest.md",
+        )
+        first = run_cli(*arguments, cwd=tmp_path, env_extra=env)
+        assert first.returncode == 0, first.stderr
+        recorded = json.loads(first.stdout)
+
+        # The intervening run must overwrite the same keyed record, or the
+        # head and the historical state would not differ where it matters.
+        intervening = run_cli(
+            "context-manifest", "--iteration", "1", "--out", "docs/p2b-other.md",
+            cwd=tmp_path,
+        )
+        assert intervening.returncode == 0, intervening.stderr
+        assert json.loads(intervening.stdout) != recorded
+
+        retry = run_cli(*arguments, cwd=tmp_path, env_extra=env)
+
+        assert retry.returncode == 0, retry.stderr
+        assert json.loads(retry.stdout) == recorded
+
     def test_an_unusable_identity_is_reported_as_input_and_changes_nothing(self, run_cli, tmp_path):
         _init_mission(run_cli, tmp_path)
         before = _artifact_blocks(run_cli, tmp_path)
