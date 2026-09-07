@@ -286,6 +286,84 @@ def test_a_target_that_cannot_be_inspected_is_refused(repository, monkeypatch):
     assert refusal.value.detail == "projection target cannot be inspected"
 
 
+def _record_every_question(monkeypatch):
+    """Collect the identity each resolver hands to the refusal."""
+    import mission_persistence.fenced_commit as module
+
+    asked = []
+    real = module._refuse_repository_alias
+
+    def _spy(metadata, root_identity):
+        asked.append(module._directory_identity(metadata))
+        return real(metadata, root_identity)
+
+    monkeypatch.setattr(module, "_refuse_repository_alias", _spy)
+    return asked
+
+
+def test_the_resolver_asks_about_every_directory_it_walks(repository, monkeypatch):
+    """Positions are endless; asking at each step is the property to hold.
+
+    Chasing "first", "middle" and "last" leaves whatever position the next
+    mutation picks.  What the resolver owes is one question per directory it
+    passes through, and that is what this fixes.
+    """
+    import mission_persistence.fenced_commit as module
+
+    for name in ("a", "a/b", "a/b/c", "a/b/c/d"):
+        (repository.root.parent / name).mkdir()
+    asked = _record_every_question(monkeypatch)
+
+    repository._projection_target("a/b/c/d/x.md")
+
+    walked = [
+        repository.root.parent / "a",
+        repository.root.parent / "a" / "b",
+        repository.root.parent / "a" / "b" / "c",
+        repository.root.parent / "a" / "b" / "c" / "d",
+    ]
+    expected = [module._directory_identity(step.lstat()) for step in walked]
+    assert asked[: len(expected)] == expected, "a directory was passed unasked"
+
+
+def test_the_pinned_resolver_asks_about_every_directory_it_opens(
+    repository, monkeypatch
+):
+    """Same property on the pinned walk, which opens one per segment."""
+    import mission_persistence.fenced_commit as module
+
+    for name in ("a", "a/b", "a/b/c", "a/b/c/d"):
+        (repository.root.parent / name).mkdir()
+    record = ProjectionRecord(
+        after=ProjectionFileRef(
+            digest="sha256:" + "0" * 64,
+            identity=(0, 0, 0, 0, 0),
+            name="after.blob",
+            size=0,
+        ),
+        base=None,
+        blob_id="b" * 32,
+        parent_identity=(0, 0, 0),
+        relative_path="a/b/c/d/x.md",
+    )
+    asked = _record_every_question(monkeypatch)
+
+    try:
+        with repository._pinned_projection_target(record):
+            pass
+    except FencedCommitError as later:
+        assert later.code != "projection-invalid"
+
+    walked = [
+        repository.root.parent / "a",
+        repository.root.parent / "a" / "b",
+        repository.root.parent / "a" / "b" / "c",
+        repository.root.parent / "a" / "b" / "c" / "d",
+    ]
+    expected = [module._directory_identity(step.lstat()) for step in walked]
+    assert asked == expected, "a directory was opened unasked"
+
+
 def test_the_refusal_looks_at_the_device_as_well_as_the_inode():
     """An inode number means nothing without the device that issued it."""
     from mission_persistence.fenced_commit import _refuse_repository_alias
