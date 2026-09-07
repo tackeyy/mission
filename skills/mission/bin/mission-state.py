@@ -521,6 +521,9 @@ from mission_application.integration_gate import (  # noqa: E402
     run_changeset_digest,
     run_integration_gate,
 )
+from mission_kernel.artifact import (  # noqa: E402
+    unknown_artifact_section_message,
+)
 from mission_kernel.commands import GENERIC_SET_FROZEN_FIELDS  # noqa: E402
 from mission_kernel.errors import MissionStateDecodeError, StrictReadError  # noqa: E402
 from mission_kernel.json_codec import (  # noqa: E402
@@ -8316,12 +8319,6 @@ def _artifact_cli_fail(message: str, exit_code: int):
     sys.exit(exit_code)
 
 
-def _unknown_artifact_section_message() -> str:
-    return "ERROR: unknown artifact section. Use one of: " + ", ".join(
-        sorted(ARTIFACT_SECTIONS)
-    )
-
-
 _EVIDENCE_CLI_SERVICES = EvidenceCliServices(
     resolve_state_file,
     _resolve_evidence_output_path,
@@ -8344,7 +8341,7 @@ _ARTIFACT_CLI_SERVICES = ArtifactCliServices(
     _compatibility_operation_arguments,
     _canonical_compatibility_operation,
     _read_artifact_input,
-    _unknown_artifact_section_message,
+    unknown_artifact_section_message,
     iso_now,
     _artifact_cli_fail,
 )

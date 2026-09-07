@@ -46,6 +46,18 @@ class ArtifactEffectClaim:
     size: int
 
 
+
+def unknown_artifact_section_message() -> str:
+    """The refusal text for a section name the rules do not define.
+
+    It lives beside ``ARTIFACT_SECTIONS`` so the list it prints cannot drift
+    from the list it validates against.
+    """
+    return "ERROR: unknown artifact section. Use one of: " + ", ".join(
+        sorted(ARTIFACT_SECTIONS)
+    )
+
+
 def _text(value: object, code: str, *, allow_empty: bool = False) -> str:
     if (
         not isinstance(value, str)
