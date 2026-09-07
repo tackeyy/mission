@@ -12,6 +12,8 @@ import re
 from pathlib import PurePosixPath
 from typing import Optional
 
+from mission_kernel.projection_path import ProjectionRejection, resolve_projection_path
+
 REPOSITORY_ROOT_NAME = ".mission-state"
 BLOB_ID_PREFIX = "evidence:"
 
@@ -38,17 +40,23 @@ def canonical_publication_path(
         raise EvidencePublicationError(
             "publication-path-invalid", "publication path must be a non-empty string"
         )
-    candidate = PurePosixPath(relative_path)
-    if candidate.is_absolute():
-        raise EvidencePublicationError(
-            "publication-path-invalid", "publication path must be relative"
-        )
-    parts = candidate.parts
-    if not parts or any(part in {"", ".", ".."} for part in parts):
-        raise EvidencePublicationError(
-            "publication-path-invalid", "publication path has an empty or relative segment"
-        )
-    if parts[0] == repository_root_name:
+    resolved = resolve_projection_path(
+        PurePosixPath(relative_path), root_name=repository_root_name
+    )
+    if isinstance(resolved, ProjectionRejection):
+        # The decision is shared; the wording is not.  A caller of this
+        # command reads these messages, and they say more than the unit of
+        # work's single refusal does.
+        if resolved.reason == "absolute":
+            raise EvidencePublicationError(
+                "publication-path-invalid", "publication path must be relative"
+            )
+        if resolved.reason == "empty-or-relative-segment":
+            raise EvidencePublicationError(
+                "publication-path-invalid",
+                "publication path has an empty or relative segment",
+            )
+        parts = PurePosixPath(relative_path).parts
         # Name the way out: a caller whose existing command stops working
         # needs to know what to write instead, and the message is the only
         # place that reaches a runbook this change never touched.
@@ -59,7 +67,7 @@ def canonical_publication_path(
             "outside it, for example %s"
             % (repository_root_name, "/".join(parts[1:]) or "evidence/output.json"),
         )
-    return "/".join(parts)
+    return "/".join(resolved)
 
 
 def derive_blob_id(
