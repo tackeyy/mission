@@ -214,6 +214,78 @@ def test_the_pinned_resolver_refuses_the_repository_at_any_depth(
     assert refusal.value.code == "projection-invalid"
 
 
+def test_the_resolver_refuses_the_repository_in_the_middle_of_a_path(
+    repository, monkeypatch
+):
+    """Checking the ends would leave everything between them open."""
+    middle = repository.root.parent / "a" / "outside"
+    (middle / "b").mkdir(parents=True)
+    (repository.root.parent / "a" / "elsewhere" / "b").mkdir(parents=True)
+    _report_as_the_repository(monkeypatch, repository, middle)
+
+    with pytest.raises(FencedCommitError) as refusal:
+        repository._projection_target("a/outside/b/x.md")
+
+    assert refusal.value.code == "projection-invalid"
+    assert repository._projection_target("a/elsewhere/b/x.md") == (
+        repository.root.parent / "a" / "elsewhere" / "b" / "x.md"
+    )
+
+
+def test_the_pinned_resolver_refuses_the_repository_in_the_middle(
+    repository, monkeypatch
+):
+    """The pinned walk opens each segment, so each one is asked."""
+    middle = repository.root.parent / "a" / "outside"
+    (middle / "b").mkdir(parents=True)
+    record = ProjectionRecord(
+        after=ProjectionFileRef(
+            digest="sha256:" + "0" * 64,
+            identity=(0, 0, 0, 0, 0),
+            name="after.blob",
+            size=0,
+        ),
+        base=None,
+        blob_id="b" * 32,
+        parent_identity=(0, 0, 0),
+        relative_path="a/outside/b/x.md",
+    )
+    _report_as_the_repository(monkeypatch, repository, middle)
+
+    with pytest.raises(FencedCommitError) as refusal:
+        with repository._pinned_projection_target(record):
+            pass
+
+    assert refusal.value.code == "projection-invalid"
+
+
+def test_a_target_that_cannot_be_inspected_is_refused(repository, monkeypatch):
+    """Asking the filesystem can fail, and an unanswered question is a refusal.
+
+    The resolver did not look at the target before, so this refusal is new.
+    Treating "cannot tell" as "not the repository" would be the one reading
+    that lets a projection through unexamined.
+    """
+    import mission_persistence.fenced_commit as module
+
+    outside = repository.root.parent / "outside"
+    outside.mkdir()
+    real_lstat = Path.lstat
+
+    def _refuse_to_answer(self, *arguments, **keywords):
+        if self == outside / "x.md":
+            raise PermissionError(13, "denied")
+        return real_lstat(self, *arguments, **keywords)
+
+    monkeypatch.setattr(Path, "lstat", _refuse_to_answer)
+
+    with pytest.raises(FencedCommitError) as refusal:
+        repository._projection_target("outside/x.md")
+
+    assert refusal.value.code == "projection-invalid"
+    assert refusal.value.detail == "projection target cannot be inspected"
+
+
 def test_the_refusal_looks_at_the_device_as_well_as_the_inode():
     """An inode number means nothing without the device that issued it."""
     from mission_persistence.fenced_commit import _refuse_repository_alias
