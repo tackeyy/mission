@@ -62,6 +62,58 @@ def _base(*, expired: bool, expires_at: datetime | None = None) -> FencedLease:
     return FencedLease("s-a", CURRENT, 1, _text(expires_at), HISTORY)
 
 
+def _expected_target(action, base, request):
+    """The lease the admission should produce, built without asking it.
+
+    A takeover mints its identifier, so that one field is read back; every
+    other field is stated here, including the epoch and the history entry the
+    superseded lease leaves behind.
+    """
+    if action == "renewed":
+        return FencedLease(
+            base.owner_session_id,
+            base.lease_id,
+            base.fencing_epoch,
+            _text(max(_moment(base.lease_expires_at), NOW + timedelta(seconds=TTL))),
+            base.lease_history,
+        )
+    assert action == "taken-over"
+    return FencedLease(
+        request.lease_owner_session_id,
+        request.presented_lease_id or _MINTED,
+        base.fencing_epoch + 1,
+        _text(NOW + timedelta(seconds=TTL)),
+        base.lease_history
+        + (
+            LeaseHistoryEntry(
+                owner_session_id=base.owner_session_id,
+                lease_id=base.lease_id,
+                fencing_epoch=base.fencing_epoch,
+                reason="lease-expired-takeover",
+                at=_text(NOW),
+            ),
+        ),
+    )
+
+
+def _moment(text):
+    return datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+
+class _Minted:
+    """Stands for the identifier a takeover mints, which cannot be predicted."""
+
+    def __eq__(self, other):
+        return isinstance(other, str) and len(other) == 32 and _HEX.issuperset(other)
+
+    def __repr__(self):  # pragma: no cover - only for assertion output
+        return "<minted token>"
+
+
+_HEX = set("0123456789abcdef")
+_MINTED = _Minted()
+
+
 TOKEN_REQUIRED = ("lease-token-required", "the matching owner omitted its token")
 STILL_LIVE = ("lease-rejected", "the current fenced lease is still live")
 RETIRED_TOKEN = ("stale-fencing-token", "the presented token is retired")
@@ -127,10 +179,7 @@ def test_admit_lease_produces_exactly_what_it_did_before(state, owner, token, ex
     assert pending.base_was_live is base_was_live
     assert pending.base == base
     assert pending.admitted_at == _text(NOW)
-    assert pending.target.owner_session_id == request.lease_owner_session_id or (
-        action == "renewed" and pending.target.owner_session_id == base.owner_session_id
-    )
-    assert pending.digest.startswith("sha256:")
+    assert pending.target == _expected_target(action, base, request)
 
 
 def test_a_retired_token_is_found_beyond_the_first_history_entry():
@@ -264,19 +313,26 @@ def test_base_was_live_is_not_covered_by_the_digest():
 
     The field decides whether the commit may proceed, while the digest is
     built from the action, the two leases and the timestamp.  Flipping the
-    flag on an otherwise identical result leaves the digest untouched, so a
-    test that compares digests would not notice.
+    flag on an otherwise identical result leaves the digest untouched.
     """
     import dataclasses
-
-    import mission_persistence.fenced_commit as module
 
     pending = admit_lease(_Request("s-a", CURRENT), _base(expired=False), NOW, TTL)
     flipped = dataclasses.replace(pending, base_was_live=not pending.base_was_live)
 
     assert flipped.digest == pending.digest
     assert flipped.base_was_live != pending.base_was_live
-    # And the digest really is a function of those four, not of the flag.
-    assert module._pending_digest(
-        pending.action, pending.base, pending.target, pending.admitted_at
-    ) == pending.digest
+
+
+def test_the_digest_of_a_renewal_is_the_value_it_has_always_had():
+    """Recorded from the behaviour being preserved, not recomputed from it.
+
+    Asking the production helper for the expectation would agree with any
+    digest it happens to produce.  This renewal has no minted identifier, so
+    its digest is fixed and can be written down.
+    """
+    pending = admit_lease(_Request("s-a", CURRENT), _base(expired=False), NOW, TTL)
+
+    assert pending.digest == (
+        "sha256:d05ef86634b5b4148771970d6056777c54b5198667dfb0c05ee16b02cf70471c"
+    )
