@@ -273,12 +273,15 @@ def execute_evidence_operation(repository: object, prepare) -> dict:
         if not isinstance(record, dict):
             raise EvidenceFailure("claims-ledger-projection-mismatch")
         if replayed:
-            # Same shape as the manifest above: the ledger digests state a
-            # later operation can move.
-            if not isinstance(record.get("digest"), str):
-                raise EvidenceFailure("claims-ledger-projection-mismatch")
-            payload["digest"] = record["digest"]
-        elif record.get("digest") != payload.get("digest"):
+            # Nothing reaches here today: the claims ledger CLI takes no
+            # caller-stable identity, so its operations never replay.  Were
+            # one to, the ledger body in the payload would still be the
+            # current head's while the digest came from the record -- an
+            # answer whose two halves describe different states.  Rebuilding
+            # it needs the ledger projector, which is out of this PR's scope,
+            # so the branch refuses instead of returning the mixture.
+            raise EvidenceFailure("claims-ledger-replay-unsupported")
+        if record.get("digest") != payload.get("digest"):
             raise EvidenceFailure("claims-ledger-projection-mismatch")
     return payload
 
@@ -295,6 +298,11 @@ def _replayed_context_payload(
     if not isinstance(record.get("path"), str) or not isinstance(
         record.get("generated_at"), str
     ):
+        raise EvidenceFailure("context-projection-mismatch")
+    # The record's own path cannot be both the input and the expectation: that
+    # accepts a record written for a different destination.  The command says
+    # where this invocation asked to publish, so that is what has to match.
+    if record["path"] != command.effect.publication_path:
         raise EvidenceFailure("context-projection-mismatch")
     try:
         projected, _content, findings_count = project_context_manifest(

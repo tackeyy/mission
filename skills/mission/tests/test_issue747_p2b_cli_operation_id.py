@@ -274,6 +274,101 @@ def _init_mission(run_cli, root):
     assert result.returncode == 0, result.stderr
 
 
+def _replay_execution(historical: dict, current: dict):
+    """A stubbed repository whose replay committed ``historical``."""
+    from mission_application.ports import LegacyCommandExecutionResult
+    from mission_kernel.json_codec import freeze_json_value
+
+    class _Repository:
+        def execute_evidence_transition_effects(self, prepare):
+            prepared = prepare(current)
+            return prepared, LegacyCommandExecutionResult(
+                None,
+                freeze_json_value(current),
+                replayed=True,
+                replayed_state=freeze_json_value(historical),
+            )
+
+    return _Repository()
+
+
+def test_a_replayed_manifest_record_must_be_the_one_this_command_asked_for():
+    """The record's own path cannot be both the input and the expectation.
+
+    Taking it as both accepts a record written for another destination, and
+    the reply then names a file this invocation never asked to publish.
+    """
+    sys.path.insert(0, str(MISSION_ROOT / "lib"))
+    from mission_application.evidence import (
+        EvidenceFailure,
+        PreparedEvidenceOperation,
+        execute_evidence_operation,
+    )
+    from mission_kernel.commands import (
+        ContextManifestEffectClaim,
+        GenerateContextManifest,
+    )
+
+    claim = ContextManifestEffectClaim(
+        "context-manifest", "requested.json", "docs/requested.json", "sha256:" + "0" * 64, 1,
+    )
+    command = GenerateContextManifest("2026-01-01T00:00:00Z", 1, claim)
+    prepared = PreparedEvidenceOperation(
+        command,
+        (),
+        {"path": "docs/requested.json", "digest": claim.digest, "findings_count": 0},
+    )
+    # The record has to be one the historical state really produces, or the
+    # re-projection would refuse it for the digest and the path check would
+    # never be what stopped it.
+    from mission_kernel.evidence import project_context_manifest
+
+    committed = {"mission": "m", "score_history": []}
+    stored, _content, _count = project_context_manifest(
+        committed,
+        iteration=1,
+        publication_path="docs/different.json",
+        at="2026-01-01T00:00:00Z",
+    )
+    historical = {**committed, "context_manifests": {"1": stored}}
+    repository = _replay_execution(historical, {"context_manifests": {}})
+
+    with pytest.raises(EvidenceFailure) as refusal:
+        execute_evidence_operation(repository, lambda _state: prepared)
+
+    assert refusal.value.code == "context-projection-mismatch"
+
+
+def test_a_claims_ledger_replay_is_refused_rather_than_half_answered():
+    """No caller-stable identity reaches this command, so nothing replays it.
+
+    If one did, the digest would come from the record while the ledger body
+    still came from the current head -- two halves describing different
+    states.  Refusing says so instead of returning the mixture.
+    """
+    sys.path.insert(0, str(MISSION_ROOT / "lib"))
+    from mission_application.evidence import (
+        EvidenceFailure,
+        PreparedEvidenceOperation,
+        execute_evidence_operation,
+    )
+    from mission_kernel.commands import ClaimsLedgerEffectClaim, GenerateClaimsLedger
+
+    digest = "sha256:" + "2" * 64
+    claim = ClaimsLedgerEffectClaim("claims-ledger", "ledger.json", "docs/ledger.json", digest, 1)
+    command = GenerateClaimsLedger("2026-01-01T00:00:00Z", 1, digest, claim)
+    prepared = PreparedEvidenceOperation(
+        command, (), {"digest": digest, "ledger": {"stale_count": 1}},
+    )
+    historical = {"claims_ledgers": {"1": {"digest": "sha256:" + "3" * 64}}}
+    repository = _replay_execution(historical, {"claims_ledgers": {}})
+
+    with pytest.raises(EvidenceFailure) as refusal:
+        execute_evidence_operation(repository, lambda _state: prepared)
+
+    assert refusal.value.code == "claims-ledger-replay-unsupported"
+
+
 class TestRealCli:
     def test_a_retry_with_the_same_identity_appends_once(self, run_cli, tmp_path):
         _init_mission(run_cli, tmp_path)
