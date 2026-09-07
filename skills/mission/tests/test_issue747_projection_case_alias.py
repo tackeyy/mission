@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -88,12 +89,18 @@ def test_the_resolver_refuses_a_parent_that_is_the_repository(
     """Runs anywhere: the second name is arranged rather than found."""
     outside = repository.root.parent / "outside"
     outside.mkdir()
+    (repository.root.parent / "elsewhere").mkdir()
     _report_as_the_repository(monkeypatch, repository, outside)
 
     with pytest.raises(FencedCommitError) as refusal:
         repository._projection_target("outside/x.md")
 
     assert refusal.value.code == "projection-invalid"
+    # And a directory that is not the repository still resolves, so this
+    # says the refusal is about the directory rather than about refusing.
+    assert repository._projection_target("elsewhere/x.md") == (
+        repository.root.parent / "elsewhere" / "x.md"
+    )
 
 
 def test_the_resolver_refuses_a_target_that_is_the_repository(
@@ -102,12 +109,16 @@ def test_the_resolver_refuses_a_target_that_is_the_repository(
     """The single-segment path has no parent to catch it."""
     outside = repository.root.parent / "outside"
     outside.mkdir()
+    (repository.root.parent / "elsewhere").mkdir()
     _report_as_the_repository(monkeypatch, repository, outside)
 
     with pytest.raises(FencedCommitError) as refusal:
         repository._projection_target("outside")
 
     assert refusal.value.code == "projection-invalid"
+    assert repository._projection_target("elsewhere") == (
+        repository.root.parent / "elsewhere"
+    )
 
 
 def test_the_pinned_resolver_refuses_the_same_directory(repository, monkeypatch):
@@ -126,6 +137,8 @@ def test_the_pinned_resolver_refuses_the_same_directory(repository, monkeypatch)
         parent_identity=(0, 0, 0),
         relative_path="outside/x.md",
     )
+    elsewhere = repository.root.parent / "elsewhere"
+    elsewhere.mkdir()
     _report_as_the_repository(monkeypatch, repository, outside)
 
     with pytest.raises(FencedCommitError) as refusal:
@@ -133,6 +146,15 @@ def test_the_pinned_resolver_refuses_the_same_directory(repository, monkeypatch)
             pass
 
     assert refusal.value.code == "projection-invalid"
+
+    # The same shape against a directory that is not the repository gets past
+    # this decision; whatever stops it later is a different check.
+    other = replace(record, relative_path="elsewhere/x.md")
+    try:
+        with repository._pinned_projection_target(other):
+            pass
+    except FencedCommitError as later:
+        assert later.code != "projection-invalid"
 
 
 @pytest.mark.parametrize(
