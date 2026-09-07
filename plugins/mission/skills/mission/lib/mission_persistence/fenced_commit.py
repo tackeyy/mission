@@ -1435,6 +1435,25 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _refuse_repository_alias(
+    metadata: os.stat_result, root_identity: tuple[int, int, int]
+) -> None:
+    """Refuse a projection step that is the repository under another name.
+
+    The name check compares spellings, and a filesystem that ignores case
+    answers to more than one.  A projection written through such a spelling
+    lands inside the repository -- ``commits`` and ``objects`` among the
+    places it could overwrite -- having passed every string comparison.
+
+    Identity is the question that has one answer per directory, so it is the
+    one asked here.
+    """
+    if _directory_identity(metadata) == root_identity:
+        raise FencedCommitError(
+            "projection-invalid", "projection target is outside its compatibility root"
+        )
+
+
 def _directory_identity(metadata: os.stat_result) -> tuple[int, int, int]:
     return metadata.st_dev, metadata.st_ino, metadata.st_mode
 
@@ -2723,7 +2742,9 @@ class LocalFencedRepository:
                 "projection-invalid", "projection target is outside its compatibility root"
             )
         target = self.root.parent.joinpath(*candidate.parts)
-        repository_device = self.root.lstat().st_dev
+        root_metadata = self.root.lstat()
+        repository_device = root_metadata.st_dev
+        root_identity = _directory_identity(root_metadata)
         current = self.root.parent
         for part in candidate.parts[:-1]:
             current = current / part
@@ -2749,6 +2770,21 @@ class LocalFencedRepository:
                 raise FencedCommitError(
                     "projection-invalid", "projection parent is not a safe same-filesystem directory"
                 )
+            _refuse_repository_alias(metadata, root_identity)
+        # The name is checked above, but a name is not the directory it opens.
+        # On a case-insensitive filesystem the repository answers to spellings
+        # that are not its own, so a projection could reach inside it -- over
+        # ``commits`` or ``objects`` -- while passing a comparison of strings.
+        # Whether the target is the repository is a question about the
+        # filesystem, so it is asked of the filesystem.
+        try:
+            _refuse_repository_alias(target.lstat(), root_identity)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise FencedCommitError(
+                "projection-invalid", "projection target cannot be inspected"
+            ) from exc
         return target
 
     def _verify_pinned_projection_target(
@@ -2840,6 +2876,7 @@ class LocalFencedRepository:
                         "repository-changed",
                         "projection parent cannot be pinned",
                     )
+                _refuse_repository_alias(opened, _directory_identity(self.root.lstat()))
                 identities.append(identity)
             pinned = _PinnedProjectionTarget(
                 descriptors=tuple(descriptors),
