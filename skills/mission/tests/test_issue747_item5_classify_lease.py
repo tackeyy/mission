@@ -324,6 +324,56 @@ def test_base_was_live_is_not_covered_by_the_digest():
     assert flipped.base_was_live != pending.base_was_live
 
 
+def test_a_takeover_with_a_supplied_identifier_is_fixed_whole():
+    """Injecting the identifier removes the one unpredictable field.
+
+    With it supplied, every field of the superseding lease and its digest can
+    be written down, which is what the parametrised cases cannot do while the
+    identifier is minted.
+    """
+    base = _base(expired=True)
+
+    pending = admit_lease(
+        _Request("s-b", None), base, NOW, TTL, generated_lease_id="b" * 32
+    )
+
+    assert pending.action == "taken-over"
+    assert pending.base_was_live is False
+    assert pending.target == FencedLease(
+        "s-b",
+        "b" * 32,
+        base.fencing_epoch + 1,
+        _text(NOW + timedelta(seconds=TTL)),
+        base.lease_history
+        + (
+            LeaseHistoryEntry(
+                owner_session_id="s-a",
+                lease_id=CURRENT,
+                fencing_epoch=1,
+                reason="lease-expired-takeover",
+                at=_text(NOW),
+            ),
+        ),
+    )
+    assert pending.digest == (
+        "sha256:ebb8dbe8bf9faacaa712d42ae015332df9c3dbf35b3683d8c94cb2966b7362eb"
+    )
+
+
+def test_a_minted_identifier_is_never_one_the_rules_have_retired():
+    """Reusing the superseded token would defeat the fencing it establishes."""
+    base = _base(expired=True)
+
+    minted = {
+        admit_lease(_Request("s-b", None), base, NOW, TTL).target.lease_id
+        for _ in range(20)
+    }
+
+    assert CURRENT not in minted
+    assert RETIRED not in minted
+    assert len(minted) == 20, "a minted identifier that repeats is not minted"
+
+
 def test_the_digest_of_a_renewal_is_the_value_it_has_always_had():
     """Recorded from the behaviour being preserved, not recomputed from it.
 
