@@ -62,14 +62,56 @@ def test_the_refusal_is_about_identity_not_spelling():
     assert refusal.value.code == "projection-invalid"
 
 
-def test_the_pinned_resolver_refuses_the_same_directory(repository, monkeypatch):
-    """The pinned path decides separately, so it is checked separately.
+def _report_as_the_repository(monkeypatch, repository, disguised: Path):
+    """Make one directory answer with the repository's identity, and no other.
 
-    Rather than depend on the filesystem offering a second name, the
-    repository is told that one of the directories it opens is itself.
+    Replacing the identity of everything would pass whatever metadata the
+    caller happened to hand over, so a resolver that compared the wrong
+    directory would still look correct.  Only ``disguised`` is changed.
     """
     import mission_persistence.fenced_commit as module
 
+    real = module._directory_identity
+    root_identity = real(repository.root.lstat())
+    disguised_identity = real(disguised.lstat())
+
+    def _identity(metadata):
+        found = real(metadata)
+        return root_identity if found == disguised_identity else found
+
+    monkeypatch.setattr(module, "_directory_identity", _identity)
+
+
+def test_the_resolver_refuses_a_parent_that_is_the_repository(
+    repository, monkeypatch
+):
+    """Runs anywhere: the second name is arranged rather than found."""
+    outside = repository.root.parent / "outside"
+    outside.mkdir()
+    _report_as_the_repository(monkeypatch, repository, outside)
+
+    with pytest.raises(FencedCommitError) as refusal:
+        repository._projection_target("outside/x.md")
+
+    assert refusal.value.code == "projection-invalid"
+
+
+def test_the_resolver_refuses_a_target_that_is_the_repository(
+    repository, monkeypatch
+):
+    """The single-segment path has no parent to catch it."""
+    outside = repository.root.parent / "outside"
+    outside.mkdir()
+    _report_as_the_repository(monkeypatch, repository, outside)
+
+    with pytest.raises(FencedCommitError) as refusal:
+        repository._projection_target("outside")
+
+    assert refusal.value.code == "projection-invalid"
+
+
+def test_the_pinned_resolver_refuses_the_same_directory(repository, monkeypatch):
+    """The pinned path decides separately, so it is checked separately."""
     outside = repository.root.parent / "outside"
     outside.mkdir()
     record = ProjectionRecord(
@@ -84,12 +126,7 @@ def test_the_pinned_resolver_refuses_the_same_directory(repository, monkeypatch)
         parent_identity=(0, 0, 0),
         relative_path="outside/x.md",
     )
-    real_identity = module._directory_identity
-
-    def _every_directory_is_the_repository(metadata):
-        return real_identity(repository.root.lstat())
-
-    monkeypatch.setattr(module, "_directory_identity", _every_directory_is_the_repository)
+    _report_as_the_repository(monkeypatch, repository, outside)
 
     with pytest.raises(FencedCommitError) as refusal:
         with repository._pinned_projection_target(record):
