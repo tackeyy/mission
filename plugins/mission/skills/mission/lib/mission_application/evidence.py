@@ -230,7 +230,18 @@ def execute_evidence_operation(repository: object, prepare) -> dict:
         record = (source.get("context_manifests") or {}).get(
             str(command.iteration)
         )
-        if not isinstance(record, dict) or any(
+        if not isinstance(record, dict):
+            raise EvidenceFailure("context-projection-mismatch")
+        if replayed:
+            # The manifest digests state the operation read -- the score
+            # history among it -- so a later operation moves what this
+            # invocation would compute now.  Comparing the recomputed digest
+            # would refuse the retry over a difference the original run never
+            # saw.  Re-projecting from the state this operation committed
+            # gives back what it returned, and checks the stored record
+            # against it rather than taking it on trust.
+            payload = _replayed_context_payload(source, command, record, payload)
+        elif any(
             record.get(key) != payload.get(value)
             for key, value in (("path", "path"), ("digest", "digest"))
         ):
@@ -259,9 +270,49 @@ def execute_evidence_operation(repository: object, prepare) -> dict:
             payload["verification"] = copy.deepcopy(record)
     elif isinstance(command, GenerateClaimsLedger):
         record = (source.get("claims_ledgers") or {}).get(str(command.iteration))
-        if not isinstance(record, dict) or record.get("digest") != payload.get("digest"):
+        if not isinstance(record, dict):
+            raise EvidenceFailure("claims-ledger-projection-mismatch")
+        if replayed:
+            # Same shape as the manifest above: the ledger digests state a
+            # later operation can move.
+            if not isinstance(record.get("digest"), str):
+                raise EvidenceFailure("claims-ledger-projection-mismatch")
+            payload["digest"] = record["digest"]
+        elif record.get("digest") != payload.get("digest"):
             raise EvidenceFailure("claims-ledger-projection-mismatch")
     return payload
+
+
+def _replayed_context_payload(
+    source: dict, command: object, record: dict, payload: dict
+) -> dict:
+    """Rebuild a manifest reply from the state its own operation committed.
+
+    ``findings_count`` is not in the stored record, so it cannot simply be
+    copied; re-projecting recovers it and, at the same time, says whether the
+    record materializes from that state.
+    """
+    if not isinstance(record.get("path"), str) or not isinstance(
+        record.get("generated_at"), str
+    ):
+        raise EvidenceFailure("context-projection-mismatch")
+    try:
+        projected, _content, findings_count = project_context_manifest(
+            source,
+            iteration=command.iteration,
+            publication_path=record["path"],
+            at=record["generated_at"],
+        )
+    except EvidenceRuleError:
+        raise EvidenceFailure("context-projection-mismatch") from None
+    if projected != record:
+        raise EvidenceFailure("context-projection-mismatch")
+    return {
+        **payload,
+        "path": record["path"],
+        "digest": record["digest"],
+        "findings_count": findings_count,
+    }
 
 
 def _record_matches(

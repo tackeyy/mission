@@ -415,6 +415,41 @@ class TestRealCli:
         assert retry.returncode == 0, retry.stderr
         assert json.loads(retry.stdout) == recorded
 
+    def test_a_context_manifest_retry_survives_a_change_to_what_it_digests(
+        self, run_cli, push_provenance_score, tmp_path
+    ):
+        """The manifest digests the score history, which a later run moves.
+
+        Overwriting the keyed record is not enough to catch this: the reply
+        has to come from the record the operation committed, because what the
+        command would compute *now* is legitimately different.
+        """
+        _init_mission(run_cli, tmp_path)
+        env = {"MISSION_OPERATION_ID": "manifest-restated"}
+        arguments = (
+            "context-manifest", "--iteration", "1", "--out", "docs/p2b-scored.md",
+        )
+        first = run_cli(*arguments, cwd=tmp_path, env_extra=env)
+        assert first.returncode == 0, first.stderr
+        recorded = json.loads(first.stdout)
+
+        # Findings put entries in the manifest, so both the digest and the
+        # count a fresh run reports move away from what the first run saw.
+        push_provenance_score(tmp_path, open_high=1)
+        moved = run_cli(
+            "context-manifest", "--iteration", "1", "--out", "docs/p2b-moved.md",
+            cwd=tmp_path,
+        )
+        assert moved.returncode == 0, moved.stderr
+        moved_reply = json.loads(moved.stdout)
+        assert moved_reply["digest"] != recorded["digest"]
+        assert moved_reply["findings_count"] != recorded["findings_count"]
+
+        retry = run_cli(*arguments, cwd=tmp_path, env_extra=env)
+
+        assert retry.returncode == 0, retry.stderr
+        assert json.loads(retry.stdout) == recorded
+
     def test_an_unusable_identity_is_reported_as_input_and_changes_nothing(self, run_cli, tmp_path):
         _init_mission(run_cli, tmp_path)
         before = _artifact_blocks(run_cli, tmp_path)
