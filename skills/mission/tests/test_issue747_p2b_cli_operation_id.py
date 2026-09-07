@@ -339,6 +339,51 @@ def test_a_replayed_manifest_record_must_be_the_one_this_command_asked_for():
     assert refusal.value.code == "context-projection-mismatch"
 
 
+def test_a_manifest_record_that_the_state_does_not_produce_is_refused():
+    """The record is checked against the state, not taken on trust.
+
+    Re-projecting recovers the reply; comparing the result with the stored
+    record is what says the record belongs to that state at all.
+    """
+    sys.path.insert(0, str(MISSION_ROOT / "lib"))
+    from mission_application.evidence import (
+        EvidenceFailure,
+        PreparedEvidenceOperation,
+        execute_evidence_operation,
+    )
+    from mission_kernel.commands import (
+        ContextManifestEffectClaim,
+        GenerateContextManifest,
+    )
+    from mission_kernel.evidence import project_context_manifest
+
+    committed = {"mission": "m", "score_history": []}
+    stored, _content, _count = project_context_manifest(
+        committed,
+        iteration=1,
+        publication_path="docs/tampered.json",
+        at="2026-01-01T00:00:00Z",
+    )
+    # One field of the record no longer matches what the state produces.
+    tampered = {**stored, "digest": "sha256:" + "9" * 64}
+    claim = ContextManifestEffectClaim(
+        "context-manifest", "tampered.json", "docs/tampered.json", tampered["digest"], 1,
+    )
+    command = GenerateContextManifest("2026-01-01T00:00:00Z", 1, claim)
+    prepared = PreparedEvidenceOperation(
+        command,
+        (),
+        {"path": "docs/tampered.json", "digest": claim.digest, "findings_count": 0},
+    )
+    historical = {**committed, "context_manifests": {"1": tampered}}
+    repository = _replay_execution(historical, {"context_manifests": {}})
+
+    with pytest.raises(EvidenceFailure) as refusal:
+        execute_evidence_operation(repository, lambda _state: prepared)
+
+    assert refusal.value.code == "context-projection-mismatch"
+
+
 def test_a_claims_ledger_replay_is_refused_rather_than_half_answered():
     """No caller-stable identity reaches this command, so nothing replays it.
 
@@ -544,6 +589,60 @@ class TestRealCli:
 
         assert retry.returncode == 0, retry.stderr
         assert json.loads(retry.stdout) == recorded
+
+    def test_two_exports_of_one_file_under_different_statuses_are_two_operations(
+        self, run_cli, tmp_path
+    ):
+        """The status is part of what an export is, not decoration.
+
+        Leaving it out of the identity would make the second call replay the
+        first and report a redaction status the file was never written under.
+        """
+        _init_mission(run_cli, tmp_path)
+        run_cli("artifact", "append", "--section", "plan", "--text", "one", cwd=tmp_path)
+        env = {"MISSION_OPERATION_ID": "export-status"}
+        first = run_cli(
+            "artifact", "export", "--to", "docs/p2b-status.md",
+            "--redaction-status", "checked", cwd=tmp_path, env_extra=env,
+        )
+        assert first.returncode == 0, first.stderr
+
+        second = run_cli(
+            "artifact", "export", "--to", "docs/p2b-status.md",
+            "--redaction-status", "reviewed", cwd=tmp_path, env_extra=env,
+        )
+
+        assert second.returncode == 2
+        assert "operation ID has a different intent" in second.stderr
+
+    def test_two_publications_with_different_approval_text_are_two_operations(
+        self, run_cli, tmp_path
+    ):
+        """The approval text is the consent being recorded, so it identifies it."""
+        _init_mission(run_cli, tmp_path)
+        # Publishing needs a decided redaction status; export is what sets it.
+        run_cli("artifact", "append", "--section", "plan", "--text", "one", cwd=tmp_path)
+        staged = run_cli(
+            "artifact", "export", "--to", "docs/p2b-consent.md",
+            "--redaction-status", "checked", cwd=tmp_path,
+        )
+        assert staged.returncode == 0, staged.stderr
+        env = {"MISSION_OPERATION_ID": "publish-consent"}
+        arguments = (
+            "artifact", "publish", "--provider", "local",
+            "--destination", "docs/p2b-publish.md", "--require-confirm",
+        )
+        first = run_cli(
+            *arguments, "--approval-text", "approved by A", cwd=tmp_path, env_extra=env,
+        )
+        assert first.returncode == 0, first.stderr
+
+        second = run_cli(
+            *arguments, "--approval-text", "approved by B", cwd=tmp_path, env_extra=env,
+        )
+
+        assert second.returncode == 2
+        assert "operation ID has a different intent" in second.stderr
 
     def test_an_unusable_identity_is_reported_as_input_and_changes_nothing(self, run_cli, tmp_path):
         _init_mission(run_cli, tmp_path)
