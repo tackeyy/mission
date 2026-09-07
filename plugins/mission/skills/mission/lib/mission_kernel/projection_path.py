@@ -2,9 +2,10 @@
 
 Three places asked the same question and each wrote its own answer: the
 publication contract in the application layer and the two path resolvers in
-persistence.  The answers agree today -- 26 inputs were put through all three
-and none differed -- but they are three copies, and the next change has to
-find all three.
+persistence.  The answers agree today, but they are three copies, and the
+next change has to find all three.  #761 added a further condition to the two
+in persistence and wrote it at three call sites there; the application layer,
+which asks the same question, did not get it.
 
 **This decides only what the parts can tell.**  Whether the input is a string
 at all, and what a refusal is called, stay with the caller: the application
