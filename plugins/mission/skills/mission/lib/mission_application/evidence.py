@@ -10,6 +10,11 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from datetime import datetime, timezone
 
+from mission_application.cli_operation import (
+    CliOperationIdentity,
+    CliOperationRejected,
+    prepare_cli_operation,
+)
 from mission_application.evidence_publication import (
     EvidencePublicationError,
     canonical_publication_path,
@@ -202,22 +207,41 @@ def execute_evidence_operation(repository: object, prepare) -> dict:
     command = prepared.command
     payload = copy.deepcopy(prepared.result)
     replayed = execution.replayed
+    # #747 P2-b: a replay answers from the state its own operation committed,
+    # not from the current head.  Another operation may have written the same
+    # slot since, and reading the head would then report a mismatch for a
+    # retry that is in fact correct -- which is the crash-retry case this
+    # command identity exists to serve.  ``artifact.py`` reads the same way.
+    source = execution.replayed_document if replayed else projection
+    if not isinstance(source, dict):
+        raise EvidenceFailure("evidence-replay-document-invalid")
     if isinstance(command, UpdateProgress):
         if not _record_matches(
-            projection.get("progress"), payload.get("progress"), replayed, prepared,
-            projection,
+            source.get("progress"), payload.get("progress"), replayed, prepared,
+            source,
         ):
             raise EvidenceFailure("progress-projection-mismatch")
         if replayed:
-            payload["progress"] = copy.deepcopy(projection.get("progress"))
+            payload["progress"] = copy.deepcopy(source.get("progress"))
     elif isinstance(command, ClearProgress):
-        if "progress" in projection:
+        if "progress" in source:
             raise EvidenceFailure("progress-projection-mismatch")
     elif isinstance(command, GenerateContextManifest):
-        record = (projection.get("context_manifests") or {}).get(
+        record = (source.get("context_manifests") or {}).get(
             str(command.iteration)
         )
-        if not isinstance(record, dict) or any(
+        if not isinstance(record, dict):
+            raise EvidenceFailure("context-projection-mismatch")
+        if replayed:
+            # The manifest digests state the operation read -- the score
+            # history among it -- so a later operation moves what this
+            # invocation would compute now.  Comparing the recomputed digest
+            # would refuse the retry over a difference the original run never
+            # saw.  Re-projecting from the state this operation committed
+            # gives back what it returned, and checks the stored record
+            # against it rather than taking it on trust.
+            payload = _replayed_context_payload(source, command, record, payload)
+        elif any(
             record.get(key) != payload.get(value)
             for key, value in (("path", "path"), ("digest", "digest"))
         ):
@@ -225,7 +249,7 @@ def execute_evidence_operation(repository: object, prepare) -> dict:
         # path and digest are content-addressed and this record has no
         # clock-derived field, so the projected values need no store authority.
     elif isinstance(command, RecordVerification):
-        history = projection.get("verification_history")
+        history = source.get("verification_history")
         if not isinstance(history, list) or not history:
             raise EvidenceFailure("verification-projection-mismatch")
         expected = payload.get("verification")
@@ -233,22 +257,70 @@ def execute_evidence_operation(repository: object, prepare) -> dict:
             matches = [
                 record
                 for record in history
-                if _record_matches(record, expected, True, prepared, projection)
+                if _record_matches(record, expected, True, prepared, source)
             ]
             if len(matches) != 1:
                 raise EvidenceFailure("verification-projection-mismatch")
             record = matches[0]
         else:
             record = history[-1]
-        if not _record_matches(record, expected, replayed, prepared, projection):
+        if not _record_matches(record, expected, replayed, prepared, source):
             raise EvidenceFailure("verification-projection-mismatch")
         if replayed:
             payload["verification"] = copy.deepcopy(record)
     elif isinstance(command, GenerateClaimsLedger):
-        record = (projection.get("claims_ledgers") or {}).get(str(command.iteration))
-        if not isinstance(record, dict) or record.get("digest") != payload.get("digest"):
+        record = (source.get("claims_ledgers") or {}).get(str(command.iteration))
+        if not isinstance(record, dict):
+            raise EvidenceFailure("claims-ledger-projection-mismatch")
+        if replayed:
+            # Nothing reaches here today: the claims ledger CLI takes no
+            # caller-stable identity, so its operations never replay.  Were
+            # one to, the ledger body in the payload would still be the
+            # current head's while the digest came from the record -- an
+            # answer whose two halves describe different states.  Rebuilding
+            # it needs the ledger projector, which is out of this PR's scope,
+            # so the branch refuses instead of returning the mixture.
+            raise EvidenceFailure("claims-ledger-replay-unsupported")
+        if record.get("digest") != payload.get("digest"):
             raise EvidenceFailure("claims-ledger-projection-mismatch")
     return payload
+
+
+def _replayed_context_payload(
+    source: dict, command: object, record: dict, payload: dict
+) -> dict:
+    """Rebuild a manifest reply from the state its own operation committed.
+
+    ``findings_count`` is not in the stored record, so it cannot simply be
+    copied; re-projecting recovers it and, at the same time, says whether the
+    record materializes from that state.
+    """
+    if not isinstance(record.get("path"), str) or not isinstance(
+        record.get("generated_at"), str
+    ):
+        raise EvidenceFailure("context-projection-mismatch")
+    # The record's own path cannot be both the input and the expectation: that
+    # accepts a record written for a different destination.  The command says
+    # where this invocation asked to publish, so that is what has to match.
+    if record["path"] != command.effect.publication_path:
+        raise EvidenceFailure("context-projection-mismatch")
+    try:
+        projected, _content, findings_count = project_context_manifest(
+            source,
+            iteration=command.iteration,
+            publication_path=record["path"],
+            at=record["generated_at"],
+        )
+    except EvidenceRuleError:
+        raise EvidenceFailure("context-projection-mismatch") from None
+    if projected != record:
+        raise EvidenceFailure("context-projection-mismatch")
+    return {
+        **payload,
+        "path": record["path"],
+        "digest": record["digest"],
+        "findings_count": findings_count,
+    }
 
 
 def _record_matches(
@@ -390,6 +462,33 @@ class _PlanRouteAdapter:
         return self._plan_route(self._plan)
 
 
+def context_manifest_plan(*, now, iteration, publication_path, project_root):
+    """Build the retry plan, naming a refusal the way every caller expects.
+
+    Building the plan normalises the path, so a refusal happens here rather
+    than inside prepare.  It has to reach the caller as the same failure it
+    always was -- callers branch on ``code``, and reporting a bad timestamp
+    as a bad path sends them to the wrong place -- so the translation lives
+    here and not at each call site.
+    """
+    from mission_application.retry_plan import ContextManifestRetryPlan
+
+    try:
+        return ContextManifestRetryPlan.for_request(
+            now=now,
+            iteration=iteration,
+            publication_path=publication_path,
+            project_root=project_root,
+        )
+    except EvidencePublicationError as exc:
+        raise EvidenceFailure(
+            "context-publication-path-invalid"
+            if exc.code == "publication-path-invalid"
+            else exc.code,
+            exc.detail,
+        ) from exc
+
+
 def run_context_manifest(
     request: ContextManifestRequest, repository: object
 ) -> dict:
@@ -408,23 +507,12 @@ def run_context_manifest(
         # rather than inside prepare.  It has to reach the caller as the same
         # failure it always was, in the same order the callback route would
         # have found it, or the CLI stops reporting it as a rejection.
-        try:
-            plan = ContextManifestRetryPlan.for_request(
-                now=request.now,
-                iteration=request.iteration,
-                publication_path=request.publication_path,
-                project_root=request.project_root,
-            )
-        except EvidencePublicationError as exc:
-            # Keep the refusal's name, not only its type: callers branch on
-            # `code`, and reporting a bad timestamp as a bad path sends them
-            # to the wrong place.
-            raise EvidenceFailure(
-                "context-publication-path-invalid"
-                if exc.code == "publication-path-invalid"
-                else exc.code,
-                exc.detail,
-            ) from exc
+        plan = context_manifest_plan(
+            now=request.now,
+            iteration=request.iteration,
+            publication_path=request.publication_path,
+            project_root=request.project_root,
+        )
         # The plan route returns what the executor returns, so the same
         # post-processing has to run: the caller expects the projected result,
         # not the raw (prepared, execution) pair.
@@ -494,6 +582,194 @@ def render_claims_ledger_cli(args: object, services: ClaimsLedgerCliServices) ->
         services,
     )
     return json.dumps({"ok": True, **result}, ensure_ascii=False, indent=2)
+
+
+@dataclass(frozen=True)
+class EvidenceCliServices:
+    """Adapter-owned capabilities the progress and context CLI use cases need (#747 P2-b)."""
+
+    resolve_state_file: object
+    resolve_output_path: object
+    repository: object
+    progress_archive_path: object
+    compatibility_arguments: object
+    canonical_operation: object
+    now: object
+    fail: object
+
+
+PROGRESS_STATE_FILE_MISSING = "ERROR: state.json が見つかりません。先に `init` してください。"
+CONTEXT_STATE_FILE_MISSING = "ERROR: state.json が見つかりません。"
+PROGRESS_RANGE_INVALID = (
+    "ERROR: --total/--completed must satisfy 0 <= completed <= total"
+)
+CONTEXT_ITERATION_INVALID = "ERROR: --iteration は 1 以上で指定してください"
+CONTEXT_OUTPUT_INVALID = "ERROR: context output filename is invalid"
+
+
+def _identity_or_refusal(services, build):
+    """An unusable caller id is refused the way the CLI refuses bad input."""
+    try:
+        return build()
+    except CliOperationRejected as exc:
+        services.fail("ERROR: %s" % (exc,), 2)
+
+
+def _evidence_state_file(cwd, services, message):
+    state_file = services.resolve_state_file(cwd)
+    if not state_file.exists():
+        services.fail(message, 1)
+    return state_file
+
+
+def _evidence_repository(services, cwd, state_file, identity, *, stamp):
+    return services.repository(
+        cwd,
+        state_file,
+        stamp=stamp,
+        pre_admit_lease=True,
+        session_id=state_file.stem,
+        operation_id=identity.operation_id,
+        operation_command=identity.operation_command,
+        operation_command_type=identity.command_type,
+    )
+
+
+def prepare_progress_update_operation(
+    total: object,
+    completed: object,
+    batch_size: object,
+    last_unit: object,
+    artifact_path: object,
+    iteration: object,
+    *,
+    session_id: str,
+    compatibility_arguments,
+    canonical_operation,
+) -> CliOperationIdentity:
+    """Identify one progress update by the counts it records, not by when."""
+    return prepare_cli_operation(
+        "update-progress",
+        {
+            "artifact_path": artifact_path,
+            "batch_size": batch_size,
+            "completed": completed,
+            "iteration": iteration,
+            "last_unit": last_unit,
+            "total": total,
+        },
+        session_id=session_id,
+        compatibility_arguments=compatibility_arguments,
+        canonical_operation=canonical_operation,
+    )
+
+
+def prepare_context_manifest_operation(
+    plan: object,
+    *,
+    session_id: str,
+    compatibility_arguments,
+    canonical_operation,
+) -> CliOperationIdentity:
+    """Identify one context manifest by the plan's own normalised fields.
+
+    The plan is what the retry loop keeps identical across attempts, and it
+    has already canonicalised the publication path, so reading the values off
+    it is what keeps the identity and the operation in step.
+    """
+    return prepare_cli_operation(
+        "generate-context-manifest",
+        {
+            "iteration": getattr(plan, "iteration"),
+            "publication_path": getattr(plan, "publication_path"),
+        },
+        session_id=session_id,
+        compatibility_arguments=compatibility_arguments,
+        canonical_operation=canonical_operation,
+    )
+
+
+def run_progress_update_cli(args, cwd, services) -> str:
+    state_file = _evidence_state_file(cwd, services, PROGRESS_STATE_FILE_MISSING)
+    total = getattr(args, "total")
+    completed = getattr(args, "completed")
+    if total < 0 or completed < 0 or completed > total:
+        services.fail(PROGRESS_RANGE_INVALID, 2)
+    identity = _identity_or_refusal(services, lambda: prepare_progress_update_operation(
+        total,
+        completed,
+        getattr(args, "batch_size"),
+        getattr(args, "last_unit"),
+        getattr(args, "artifact"),
+        getattr(args, "iteration"),
+        session_id=state_file.stem,
+        compatibility_arguments=services.compatibility_arguments,
+        canonical_operation=services.canonical_operation,
+    ))
+    try:
+        result = run_progress_update(
+            ProgressUpdateRequest(
+                now=services.now(),
+                total=total,
+                completed=completed,
+                batch_size=getattr(args, "batch_size"),
+                last_unit=getattr(args, "last_unit"),
+                artifact_path=getattr(args, "artifact"),
+                iteration=getattr(args, "iteration"),
+                evidence_path=lambda data, iteration: services.progress_archive_path(
+                    cwd, data, iteration
+                ),
+            ),
+            _evidence_repository(services, cwd, state_file, identity, stamp=True),
+        )
+    except EvidenceFailure as exc:
+        services.fail("ERROR: %s" % (exc.code,), 2)
+    return json.dumps(
+        {"ok": True, **result},
+        indent=2 if getattr(args, "json", False) else None,
+        ensure_ascii=False,
+    )
+
+
+def run_context_manifest_cli(args, cwd, services) -> str:
+    state_file = _evidence_state_file(cwd, services, CONTEXT_STATE_FILE_MISSING)
+    output = Path(str(getattr(args, "out")))
+    try:
+        validate_context_iteration_override(getattr(args, "iteration"))
+    except EvidenceFailure:
+        services.fail(CONTEXT_ITERATION_INVALID, 2)
+    if not output.name or output.name in {".", ".."}:
+        services.fail(CONTEXT_OUTPUT_INVALID, 2)
+    services.resolve_output_path(cwd, str(output))
+    now = services.now()
+    try:
+        plan = context_manifest_plan(
+            now=now,
+            iteration=getattr(args, "iteration"),
+            publication_path=str(output),
+            project_root=cwd,
+        )
+    except EvidenceFailure as exc:
+        services.fail("ERROR: %s" % (exc,), 2)
+    identity = _identity_or_refusal(services, lambda: prepare_context_manifest_operation(
+        plan,
+        session_id=state_file.stem,
+        compatibility_arguments=services.compatibility_arguments,
+        canonical_operation=services.canonical_operation,
+    ))
+    try:
+        result = run_context_manifest(
+            ContextManifestRequest(
+                now=now,
+                iteration=getattr(args, "iteration"),
+                publication_path=str(output),
+                project_root=cwd,
+            ),
+            _evidence_repository(services, cwd, state_file, identity, stamp=False),
+        )
+    except EvidenceFailure as exc:
+        services.fail("ERROR: %s" % (exc,), 2)
+    return json.dumps({"ok": True, **result}, ensure_ascii=False)
 
 
 def _translate(call):

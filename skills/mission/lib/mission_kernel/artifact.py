@@ -11,6 +11,9 @@ from typing import Mapping, Optional
 ARTIFACT_REDACTION_STATUSES = frozenset(
     {"unchecked", "checked", "reviewed", "not-needed"}
 )
+# The providers a publication may be recorded for.  Named here so the CLI and
+# the rules share one vocabulary rather than two that can drift (#747 P2-b).
+ARTIFACT_PUBLISH_PROVIDERS = frozenset({"claude-code", "local"})
 ARTIFACT_SECTIONS = frozenset(
     {
         "mission",
@@ -41,6 +44,18 @@ class ArtifactEffectClaim:
     target: str
     digest: str
     size: int
+
+
+
+def unknown_artifact_section_message() -> str:
+    """The refusal text for a section name the rules do not define.
+
+    It lives beside ``ARTIFACT_SECTIONS`` so the list it prints cannot drift
+    from the list it validates against.
+    """
+    return "ERROR: unknown artifact section. Use one of: " + ", ".join(
+        sorted(ARTIFACT_SECTIONS)
+    )
 
 
 def _text(value: object, code: str, *, allow_empty: bool = False) -> str:
@@ -178,6 +193,41 @@ def initialize_artifact_document(
     if effect is not None:
         _bind_identity(document, artifact, effect)
     return document
+
+
+def normalized_block_content(content: object) -> str:
+    """Return the content exactly as an appended block stores it.
+
+    The stored form is what decides whether two invocations are the same
+    operation, so callers that need to identify an operation before it runs
+    ask here rather than re-deriving the rule (#747 P2-b).
+    """
+    if not isinstance(content, str):
+        raise ArtifactRuleError("artifact-content-invalid")
+    return content.rstrip()
+
+
+def optional_artifact_text(value: object) -> object:
+    """Return ``None`` where the artifact rules treat a value as absent.
+
+    ``source``, ``label`` and a publish ``destination`` are omitted when they
+    are empty, so an empty string and ``None`` describe the same operation.
+    """
+    return value or None
+
+
+def normalized_artifact_section(section: object) -> str:
+    """Return the canonical section name, or refuse an unknown one.
+
+    The CLI accepts ``follow-ups`` for ``follow_ups``; both name the same
+    section, so both have to reach the same operation identity.
+    """
+    if not isinstance(section, str):
+        raise ArtifactRuleError("artifact-section-invalid")
+    key = section.strip().lower().replace("-", "_")
+    if key not in ARTIFACT_SECTIONS:
+        raise ArtifactRuleError("artifact-section-invalid")
+    return key
 
 
 def append_artifact_block_document(

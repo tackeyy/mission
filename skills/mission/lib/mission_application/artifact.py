@@ -14,12 +14,22 @@ import json
 import re
 from typing import Callable, Mapping
 
+from mission_application.cli_operation import (
+    CliOperationIdentity,
+    prepare_cli_operation,
+    text_digest,
+)
 from mission_kernel.artifact import (
+    ARTIFACT_PUBLISH_PROVIDERS,
+    ARTIFACT_REDACTION_STATUSES,
     ArtifactEffectClaim,
     ArtifactRuleError,
     append_artifact_block_document,
     export_artifact_document,
     initialize_artifact_document,
+    normalized_artifact_section,
+    normalized_block_content,
+    optional_artifact_text,
     record_artifact_publication_document,
     render_artifact_document,
 )
@@ -216,6 +226,190 @@ def _artifact_render_bytes(
     render_text: Callable[[dict, dict], str]
 ) -> Callable[[dict, dict], bytes]:
     return lambda state, artifact: render_text(state, artifact).encode("utf-8")
+
+
+@dataclass(frozen=True)
+class ArtifactCliServices:
+    """Adapter-owned capabilities the artifact CLI use cases need (#747 P2-b).
+
+    The adapter keeps the process concerns -- where the state file is, how a
+    path is made project-relative, how the markdown is rendered -- and the use
+    case keeps the decisions.  Injecting them keeps the adapter a single call,
+    which is what the thin-adapter budget requires.
+    """
+
+    resolve_state_file: object
+    artifact_path: object
+    state_relative_path: object
+    resolve_output_path: object
+    repository: object
+    render_markdown: object
+    compatibility_arguments: object
+    canonical_operation: object
+    read_input: object
+    unknown_section_message: object
+    now: object
+    fail: object
+
+
+def _artifact_identity(
+    services: ArtifactCliServices,
+    command_type: str,
+    arguments: dict,
+    *,
+    session_id: str,
+) -> CliOperationIdentity:
+    return prepare_cli_operation(
+        command_type,
+        arguments,
+        session_id=session_id,
+        compatibility_arguments=services.compatibility_arguments,
+        canonical_operation=services.canonical_operation,
+    )
+
+
+def _artifact_repository(services: ArtifactCliServices, cwd, state_path, identity):
+    """Build the repository the operation runs on, carrying its identity."""
+    return services.repository(
+        cwd,
+        state_path,
+        stamp=False,
+        pre_admit_lease=True,
+        session_id=state_path.stem,
+        operation_id=identity.operation_id,
+        operation_command=identity.operation_command,
+        operation_command_type=identity.command_type,
+    )
+
+
+def prepare_artifact_append_operation(
+    section: object,
+    content: object,
+    source: object,
+    label: object,
+    *,
+    session_id: str,
+    compatibility_arguments,
+    canonical_operation,
+) -> CliOperationIdentity:
+    """Identify one append by what it appends, after the kernel's own rules.
+
+    The body enters as a digest of the *stored* form, so a trailing newline
+    the kernel strips does not make a retry a different operation, and the
+    text itself never reaches the operation record.
+    """
+    return prepare_cli_operation(
+        "append-artifact-block",
+        {
+            "content_digest": text_digest(normalized_block_content(content)),
+            "label": optional_artifact_text(label),
+            "section": normalized_artifact_section(section),
+            "source": optional_artifact_text(source),
+        },
+        session_id=session_id,
+        compatibility_arguments=compatibility_arguments,
+        canonical_operation=canonical_operation,
+    )
+
+
+def prepare_artifact_init_operation(
+    artifact_path: object,
+    format: object,
+    title: object,
+    redaction_status: object,
+    required_for_pass: object,
+    *,
+    session_id: str,
+    compatibility_arguments,
+    canonical_operation,
+) -> CliOperationIdentity:
+    """Identify one initialisation.
+
+    An absent title and an empty one produce the same artifact (the mission
+    name is used), so they describe one operation.
+    """
+    return prepare_cli_operation(
+        "initialize-artifact",
+        {
+            "artifact_path": artifact_path,
+            "format": format,
+            "redaction_status": redaction_status,
+            "required_for_pass": required_for_pass,
+            "title": optional_artifact_text(title),
+        },
+        session_id=session_id,
+        compatibility_arguments=compatibility_arguments,
+        canonical_operation=canonical_operation,
+    )
+
+
+def prepare_artifact_render_operation(
+    redaction_status: object,
+    *,
+    session_id: str,
+    compatibility_arguments,
+    canonical_operation,
+) -> CliOperationIdentity:
+    """Identify one render.  A render appends no history; only the status decides it."""
+    return prepare_cli_operation(
+        "render-artifact",
+        {"redaction_status": redaction_status},
+        session_id=session_id,
+        compatibility_arguments=compatibility_arguments,
+        canonical_operation=canonical_operation,
+    )
+
+
+def prepare_artifact_export_operation(
+    destination: object,
+    redaction_status: object,
+    *,
+    session_id: str,
+    compatibility_arguments,
+    canonical_operation,
+) -> CliOperationIdentity:
+    """Identify one export by where it writes and under which status.
+
+    The destination is already project-relative here: the adapter resolves it
+    the same way for the export itself, so the same file named two ways is
+    one operation.
+    """
+    return prepare_cli_operation(
+        "export-artifact",
+        {"destination": destination, "redaction_status": redaction_status},
+        session_id=session_id,
+        compatibility_arguments=compatibility_arguments,
+        canonical_operation=canonical_operation,
+    )
+
+
+def prepare_artifact_publish_operation(
+    provider: object,
+    destination: object,
+    approval_text: object,
+    *,
+    session_id: str,
+    compatibility_arguments,
+    canonical_operation,
+) -> CliOperationIdentity:
+    """Identify one recorded publication.
+
+    The destination is **not** resolved as a path here: a publication may name
+    a URL or nothing at all, and the rules store whatever was given.  Only the
+    empty/absent equivalence is applied, because the rules treat those alike.
+    The approval text enters as a digest, like any other body.
+    """
+    return prepare_cli_operation(
+        "record-artifact-publication",
+        {
+            "approval_digest": text_digest(approval_text),
+            "destination": optional_artifact_text(destination),
+            "provider": provider,
+        },
+        session_id=session_id,
+        compatibility_arguments=compatibility_arguments,
+        canonical_operation=canonical_operation,
+    )
 
 
 def run_artifact_init(

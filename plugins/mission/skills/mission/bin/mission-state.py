@@ -182,6 +182,7 @@ from mission_application.review import (  # noqa: E402
 )
 from mission_application.artifact import (  # noqa: E402
     ArtifactAppendRequest,
+    ArtifactCliServices,
     ArtifactExportRequest,
     ArtifactInitRequest,
     ArtifactPublishRequest,
@@ -194,7 +195,17 @@ from mission_application.artifact import (  # noqa: E402
     run_artifact_publish,
     run_artifact_render,
 )
+from mission_application.artifact_cli import (  # noqa: E402
+    run_artifact_append_cli,
+    run_artifact_export_cli,
+    run_artifact_init_cli,
+    run_artifact_publish_cli,
+    run_artifact_render_cli,
+)
 from mission_application.evidence import (  # noqa: E402
+    EvidenceCliServices,
+    run_context_manifest_cli,
+    run_progress_update_cli,
     ClaimsLedgerCliRequest,
     ClaimsLedgerCliServices,
     ContextManifestRequest,
@@ -509,6 +520,9 @@ from mission_application.integration_gate import (  # noqa: E402
     IntegrationGateServices,
     run_changeset_digest,
     run_integration_gate,
+)
+from mission_kernel.artifact import (  # noqa: E402
+    unknown_artifact_section_message,
 )
 from mission_kernel.commands import GENERIC_SET_FROZEN_FIELDS  # noqa: E402
 from mission_kernel.errors import MissionStateDecodeError, StrictReadError  # noqa: E402
@@ -6443,18 +6457,6 @@ def _require_artifact(data: dict) -> dict:
     return artifact
 
 
-def _validate_artifact_section(section: str) -> str:
-    key = section.strip().lower().replace("-", "_")
-    if key not in ARTIFACT_SECTIONS:
-        print(
-            "ERROR: unknown artifact section. Use one of: "
-            + ", ".join(sorted(ARTIFACT_SECTIONS)),
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    return key
-
-
 def _read_artifact_input(args) -> tuple[str, str | None]:
     has_text = getattr(args, "text", None) is not None
     has_file = getattr(args, "file", None) is not None
@@ -6689,129 +6691,23 @@ def _bind_artifact_publication(
 
 
 def cmd_artifact_init(args):
-    cwd = Path.cwd()
-    sf = resolve_state_file(cwd)
-    if not sf.exists():
-        print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
-        sys.exit(1)
-    if args.redaction_status not in ARTIFACT_REDACTION_STATUSES:
-        print("ERROR: invalid --redaction-status", file=sys.stderr)
-        sys.exit(2)
-    now = iso_now()
-    try:
-        request = ArtifactInitRequest(
-            now=now,
-            artifact_path=_state_relative_path(
-                cwd,
-                str(_artifact_path(cwd, sf.stem)),
-            ),
-            format=args.format,
-            title=args.title,
-            redaction_status=args.redaction_status,
-            required_for_pass=bool(args.required_for_pass),
-        )
-        result = run_artifact_init(
-            request,
-            _legacy_lifecycle_repository(cwd, sf, stamp=False, pre_admit_lease=True),
-            _render_artifact_markdown,
-        )
-    except EvidenceFailure as exc:
-        print(f"ERROR: {exc.code}", file=sys.stderr)
-        sys.exit(2)
-    print(json.dumps({"ok": True, **result}, indent=2 if args.json else None, ensure_ascii=False))
+    print(run_artifact_init_cli(args, Path.cwd(), _ARTIFACT_CLI_SERVICES))
 
 
 def cmd_artifact_append(args):
-    cwd = Path.cwd()
-    sf = resolve_state_file(cwd)
-    if not sf.exists():
-        print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
-        sys.exit(1)
-    section = _validate_artifact_section(args.section)
-    content, source = _read_artifact_input(args)
-    try:
-        result = run_artifact_append(
-            ArtifactAppendRequest(iso_now(), section, content, source, args.label),
-            _legacy_lifecycle_repository(cwd, sf, stamp=False, pre_admit_lease=True),
-        )
-    except EvidenceFailure as exc:
-        print(f"ERROR: {exc.code}", file=sys.stderr)
-        sys.exit(2)
-    print(json.dumps({"ok": True, **result}, indent=2 if args.json else None, ensure_ascii=False))
+    print(run_artifact_append_cli(args, Path.cwd(), _ARTIFACT_CLI_SERVICES))
 
 
 def cmd_artifact_render(args):
-    cwd = Path.cwd()
-    sf = resolve_state_file(cwd)
-    if not sf.exists():
-        print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
-        sys.exit(1)
-    try:
-        result = run_artifact_render(
-            ArtifactRenderRequest(iso_now(), args.redaction_status),
-            _legacy_lifecycle_repository(cwd, sf, stamp=False, pre_admit_lease=True),
-            _render_artifact_markdown,
-        )
-    except EvidenceFailure as exc:
-        print(f"ERROR: {exc.code}", file=sys.stderr)
-        sys.exit(2)
-    print(json.dumps({"ok": True, **result}, indent=2 if args.json else None, ensure_ascii=False))
+    print(run_artifact_render_cli(args, Path.cwd(), _ARTIFACT_CLI_SERVICES))
 
 
 def cmd_artifact_export(args):
-    cwd = Path.cwd()
-    sf = resolve_state_file(cwd)
-    if not sf.exists():
-        print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
-        sys.exit(1)
-    if args.redaction_status not in ARTIFACT_REDACTION_STATUSES - {"unchecked"}:
-        print("ERROR: export requires --redaction-status checked|reviewed|not-needed", file=sys.stderr)
-        sys.exit(2)
-    destination = _state_relative_path(cwd, str(_resolve_evidence_output_path(cwd, args.to)))
-    try:
-        result = run_artifact_export(
-            ArtifactExportRequest(iso_now(), destination, args.redaction_status),
-            _legacy_lifecycle_repository(cwd, sf, stamp=False, pre_admit_lease=True),
-            _render_artifact_markdown,
-        )
-    except EvidenceFailure as exc:
-        print(f"ERROR: {exc.code}", file=sys.stderr)
-        sys.exit(2)
-    print(json.dumps({"ok": True, **result}, indent=2 if args.json else None, ensure_ascii=False))
+    print(run_artifact_export_cli(args, Path.cwd(), _ARTIFACT_CLI_SERVICES))
 
 
 def cmd_artifact_publish(args):
-    cwd = Path.cwd()
-    sf = resolve_state_file(cwd)
-    if not sf.exists():
-        print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
-        sys.exit(1)
-    if args.provider not in ARTIFACT_PUBLISH_PROVIDERS:
-        print("ERROR: unsupported artifact publish provider", file=sys.stderr)
-        sys.exit(2)
-    if not args.require_confirm or not args.approval_text:
-        print(
-            "ERROR: artifact publish requires --require-confirm and --approval-text. "
-            "This command records publish consent; it does not silently publish remotely.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    try:
-        result = run_artifact_publish(
-            ArtifactPublishRequest(
-                iso_now(),
-                args.provider,
-                args.destination,
-                args.approval_text,
-                args.require_confirm,
-            ),
-            _legacy_lifecycle_repository(cwd, sf, stamp=False, pre_admit_lease=True),
-            _render_artifact_markdown,
-        )
-    except EvidenceFailure as exc:
-        print(f"ERROR: {exc.code}", file=sys.stderr)
-        sys.exit(2)
-    print(json.dumps({"ok": True, **result}, indent=2 if args.json else None, ensure_ascii=False))
+    print(run_artifact_publish_cli(args, Path.cwd(), _ARTIFACT_CLI_SERVICES))
 
 
 def _progress_archive_path(cwd: Path, data: dict, iteration: int) -> str:
@@ -6822,36 +6718,7 @@ def _progress_archive_path(cwd: Path, data: dict, iteration: int) -> str:
 
 
 def cmd_progress_update(args):
-    cwd = Path.cwd()
-    sf = resolve_state_file(cwd)
-    if not sf.exists():
-        print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
-        sys.exit(1)
-    total = args.total
-    completed = args.completed
-    if total < 0 or completed < 0 or completed > total:
-        print("ERROR: --total/--completed must satisfy 0 <= completed <= total", file=sys.stderr)
-        sys.exit(2)
-    try:
-        result = run_progress_update(
-            ProgressUpdateRequest(
-                now=iso_now(),
-                total=total,
-                completed=completed,
-                batch_size=args.batch_size,
-                last_unit=args.last_unit,
-                artifact_path=args.artifact,
-                iteration=args.iteration,
-                evidence_path=lambda data, iteration: _progress_archive_path(
-                    cwd, data, iteration
-                ),
-            ),
-            _legacy_lifecycle_repository(cwd, sf, stamp=True, pre_admit_lease=True),
-        )
-    except EvidenceFailure as exc:
-        print(f"ERROR: {exc.code}", file=sys.stderr)
-        sys.exit(2)
-    print(json.dumps({"ok": True, **result}, indent=2 if args.json else None, ensure_ascii=False))
+    print(run_progress_update_cli(args, Path.cwd(), _EVIDENCE_CLI_SERVICES))
 
 
 def cmd_progress_get(args):
@@ -8444,6 +8311,40 @@ def _legacy_lifecycle_repository(
         legacy_factory,
         v5_factory,
     )
+
+
+
+def _artifact_cli_fail(message: str, exit_code: int):
+    print(message, file=sys.stderr)
+    sys.exit(exit_code)
+
+
+_EVIDENCE_CLI_SERVICES = EvidenceCliServices(
+    resolve_state_file,
+    _resolve_evidence_output_path,
+    _legacy_lifecycle_repository,
+    _progress_archive_path,
+    _compatibility_operation_arguments,
+    _canonical_compatibility_operation,
+    iso_now,
+    _artifact_cli_fail,
+)
+
+
+_ARTIFACT_CLI_SERVICES = ArtifactCliServices(
+    resolve_state_file,
+    _artifact_path,
+    _state_relative_path,
+    _resolve_evidence_output_path,
+    _legacy_lifecycle_repository,
+    _render_artifact_markdown,
+    _compatibility_operation_arguments,
+    _canonical_compatibility_operation,
+    _read_artifact_input,
+    unknown_artifact_section_message,
+    iso_now,
+    _artifact_cli_fail,
+)
 
 
 def cmd_activity_start(args):
@@ -13781,40 +13682,7 @@ def _require_score_resubmit_reason(data: dict, iteration: int, reason: str | Non
 
 
 def cmd_context_manifest(args):
-    """#241: bounded context manifest を生成する.
-
-    reviewer fork に渡す evidence manifest: mission goal, iteration,
-    prior findings を state から抽出し JSON で出力する。
-    """
-    cwd = Path.cwd()
-    sf = resolve_state_file(cwd)
-    if not sf.exists():
-        print("ERROR: state.json が見つかりません。", file=sys.stderr)
-        sys.exit(1)
-    out = Path(args.out)
-    try:
-        validate_context_iteration_override(args.iteration)
-    except EvidenceFailure:
-        print("ERROR: --iteration は 1 以上で指定してください", file=sys.stderr)
-        sys.exit(2)
-    if not out.name or out.name in {".", ".."}:
-        print("ERROR: context output filename is invalid", file=sys.stderr)
-        sys.exit(2)
-    _resolve_evidence_output_path(cwd, str(out))
-    try:
-        result = run_context_manifest(
-            ContextManifestRequest(
-                now=iso_now(),
-                iteration=args.iteration,
-                publication_path=str(out),
-                project_root=cwd,
-            ),
-            _legacy_lifecycle_repository(cwd, sf, stamp=False, pre_admit_lease=True),
-        )
-    except EvidenceFailure as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        sys.exit(2)
-    print(json.dumps({"ok": True, **result}, ensure_ascii=False))
+    print(run_context_manifest_cli(args, Path.cwd(), _EVIDENCE_CLI_SERVICES))
 
 
 def cmd_push_score(args):
