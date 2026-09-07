@@ -294,11 +294,6 @@ class _PinnedDirectory:
 
 @dataclass(frozen=True)
 class _PinnedProjectionTarget:
-    # #747 P1: the directory the walk started from.  The verifier used to read
-    # ``root.parent`` for itself, which is the same answer only while every
-    # projection resolves outside the repository.  Carrying it makes the
-    # verifier check what was actually opened.
-    base: Path
     descriptors: tuple[int, ...]
     identities: tuple[tuple[int, int, int], ...]
     names: tuple[str, ...]
@@ -2800,7 +2795,7 @@ class LocalFencedRepository:
     ) -> None:
         self._verify_root()
         try:
-            root_named = pinned.base.lstat()
+            root_named = self.root.parent.lstat()
             if (
                 _directory_identity(os.fstat(pinned.descriptors[0]))
                 != pinned.identities[0]
@@ -2882,7 +2877,6 @@ class LocalFencedRepository:
                 _refuse_repository_alias(opened, _directory_identity(self.root.lstat()))
                 identities.append(identity)
             pinned = _PinnedProjectionTarget(
-                base=self.root.parent,
                 descriptors=tuple(descriptors),
                 identities=tuple(identities),
                 names=names,

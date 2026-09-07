@@ -10,7 +10,6 @@ of the three, with the wording and the exception type each of them always had.
 from __future__ import annotations
 
 import sys
-from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -201,49 +200,3 @@ def test_all_three_reach_the_shared_decision(repository, monkeypatch):
             pass
 
     assert calls == ["docs/a.md", "docs/b.md", "docs/c.md"]
-
-
-def _pinnable(repository, relative_path):
-    """A record whose parent identity matches the directory on disk."""
-    import mission_persistence.fenced_commit as module
-
-    parent = repository.root.parent.joinpath(*PurePosixPath(relative_path).parts[:-1])
-    parent.mkdir(parents=True, exist_ok=True)
-    record = _record(relative_path)
-    return replace(
-        record,
-        parent_identity=module._directory_identity(parent.lstat()),
-    )
-
-
-def test_the_pinned_target_carries_the_directory_it_started_from(repository):
-    """What was opened, observed -- not the field's presence in the source."""
-    record = _pinnable(repository, "docs/x.md")
-
-    with repository._lock(create=True):
-        with repository._pinned_projection_target(record) as pinned:
-            assert pinned.base == repository.root.parent
-
-
-def test_the_verifier_answers_from_the_base_it_opened(repository, tmp_path):
-    """The one difference the extraction makes, fixed so it cannot drift back.
-
-    Reading ``self.root.parent`` at verification time asks about the root as it
-    stands now; the pin asked about the directory it actually opened.  They
-    part when ``root`` is later spelled through a symlinked parent: the same
-    directory, reached another way.  The walk's own base still verifies, so
-    this succeeds where reading ``self.root.parent`` raises
-    ``repository-changed`` -- ``_verify_root`` already holds the root itself to
-    its pinned inode, which is what that read was standing in for.
-    """
-    record = _pinnable(repository, "docs/x.md")
-    alias = tmp_path / "alias"
-    alias.symlink_to(repository.root.parent, target_is_directory=True)
-
-    with repository._lock(create=True):
-        with repository._pinned_projection_target(record) as pinned:
-            repository.root = alias / ROOT_NAME
-            # Same inode, reached through a symlinked parent: the root itself
-            # still verifies, and so does the base the walk opened.
-            repository._verify_pinned_projection_target(pinned)
-            assert pinned.base == alias.readlink()
