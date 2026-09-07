@@ -323,7 +323,7 @@ def test_the_resolver_asks_about_every_directory_it_walks(repository, monkeypatc
         repository.root.parent / "a" / "b" / "c" / "d",
     ]
     expected = [module._directory_identity(step.lstat()) for step in walked]
-    assert asked[: len(expected)] == expected, "a directory was passed unasked"
+    assert asked == expected, "a directory was passed unasked, or asked twice"
 
 
 def test_the_pinned_resolver_asks_about_every_directory_it_opens(
