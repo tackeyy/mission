@@ -1311,6 +1311,54 @@ def validate_execution_request(request: ExecutionRequest) -> None:
     _audit_record(request.audit)
 
 
+@dataclass(frozen=True)
+class LeaseRefusal:
+    """Why an admission cannot proceed, as the code and detail it raises with."""
+
+    code: str
+    detail: str
+
+
+def classify_lease(
+    request: ExecutionRequest,
+    base: Union[LegacyAbsentLease, FencedLease],
+    admitted_at: datetime,
+) -> Optional[LeaseRefusal]:
+    """Say whether this request is refused by the lease it would run under.
+
+    The decision used to live inside ``admit_lease``'s control flow, where the
+    only way to ask it was to also mint a lease.  #747 item 5 needs the answer
+    on its own, and having two copies of it is how the two would drift apart,
+    so ``admit_lease`` calls this rather than repeating the conditions.
+
+    ``None`` means the admission proceeds -- acquired, renewed or taken over.
+    """
+    if isinstance(base, LegacyAbsentLease):
+        return None
+    matching_owner = base.owner_session_id == request.lease_owner_session_id
+    if matching_owner and request.presented_lease_id == base.lease_id:
+        # A renewal, whether or not the lease has expired: the holder is
+        # presenting the very token it was given.
+        return None
+    if admitted_at < _parse_time(base.lease_expires_at):
+        if matching_owner and request.presented_lease_id is None:
+            return LeaseRefusal(
+                "lease-token-required", "the matching owner omitted its token"
+            )
+        return LeaseRefusal(
+            "lease-rejected", "the current fenced lease is still live"
+        )
+    retired = {entry.lease_id for entry in base.lease_history}
+    if request.presented_lease_id == base.lease_id or (
+        request.presented_lease_id is not None
+        and request.presented_lease_id in retired
+    ):
+        return LeaseRefusal(
+            "stale-fencing-token", "the presented token is retired"
+        )
+    return None
+
+
 def admit_lease(
     request: ExecutionRequest,
     base: Union[LegacyAbsentLease, FencedLease],
@@ -1336,6 +1384,9 @@ def admit_lease(
     else:
         base_expiry = _parse_time(base.lease_expires_at)
         base_was_live = admitted_at < base_expiry
+        refusal = classify_lease(request, base, admitted_at)
+        if refusal is not None:
+            raise FencedCommitError(refusal.code, refusal.detail)
         if (
             base.owner_session_id == request.lease_owner_session_id
             and request.presented_lease_id == base.lease_id
@@ -1349,20 +1400,7 @@ def admit_lease(
                 base.lease_history,
             )
             action = "renewed"
-        elif base_was_live:
-            if (
-                base.owner_session_id == request.lease_owner_session_id
-                and request.presented_lease_id is None
-            ):
-                raise FencedCommitError("lease-token-required", "the matching owner omitted its token")
-            raise FencedCommitError("lease-rejected", "the current fenced lease is still live")
         else:
-            retired = {entry.lease_id for entry in base.lease_history}
-            if request.presented_lease_id == base.lease_id or (
-                request.presented_lease_id is not None
-                and request.presented_lease_id in retired
-            ):
-                raise FencedCommitError("stale-fencing-token", "the presented token is retired")
             new_lease_id = (
                 request.presented_lease_id or generated_lease_id or secrets.token_hex(16)
             )
