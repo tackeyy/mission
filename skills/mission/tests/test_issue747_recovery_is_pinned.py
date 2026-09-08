@@ -504,11 +504,19 @@ def test_a_changed_parent_now_blocks_the_rollback(tmp_path):
             # proceeds -- which is exactly the limit the PR body records and
             # #747 carries.  Asserting a block here would be asserting that
             # inode numbers are never reused.
-            assert removal in {"recreate", "detach"}, (removal, recorded)
+            # Only a recreated directory can legitimately land on the same
+            # identity: the others leave the original in place (``chmod``,
+            # ``detach``) or leave nothing at the name at all (``delete``).
+            # A match anywhere else is the identity check having stopped
+            # working, and must not be waved through by this branch.
+            assert removal == "recreate", (removal, recorded)
             local.recover("test")
             assert not list(
                 (repository / "transactions" / "prepared").glob("*.json")
             ), removal
+            # And it restored: the rollback ran to completion in the directory
+            # that answered, rather than stopping half way.
+            assert projection.read_bytes() == base_bytes, removal
             continue
 
         with pytest.raises(FencedCommitError) as blocked:
