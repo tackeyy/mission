@@ -847,6 +847,12 @@ class V5CompatibilityRepository:
         self._operation_id = operation_id
         self._operation_command = operation_command
         self._operation_command_type = operation_command_type
+        # #747 3a: the kernel command a typed evidence run prepared, so the
+        # admission can say which command is asking.  An ordinary CLI run
+        # supplies no caller operation identity, and its command then travels
+        # as a compatibility wrapper -- the audit is the one field that can
+        # carry the answer, and the intent digest does not fold it.
+        self._prepared_command_type: str | None = None
         self._admitted: AdmittedSnapshot | None = None
         self._observed_base: dict | None = None
         self._replayed: OperationReplay | None = None
@@ -976,7 +982,14 @@ class V5CompatibilityRepository:
                     separators=(",", ":"),
                 ).encode("utf-8")
             )
-        command_type = self._operation_command_type or "compatibility-mutation"
+        # The prepared command comes first: it is read from the command this
+        # run actually built, while the caller-supplied category is a label
+        # that a caller may leave at the compatibility default.
+        command_type = (
+            self._prepared_command_type
+            or self._operation_command_type
+            or "compatibility-mutation"
+        )
         if blobs is None:
             blobs = VerifiedBlobSet(())
         return ExecutionRequest(
@@ -1381,8 +1394,33 @@ class V5CompatibilityRepository:
                 effects, prepared.command, repository_root_name=root
             )
             observed = self.observed_base()
-            current = self.load(blobs=blobs)
+            # Say which command is asking before the admission reads the
+            # blobs: the repository authorises the in-root destination from
+            # this, and it has no other way to know.
+            try:
+                self._prepared_command_type = kernel_command_type(prepared.command)
+            except TypeError:
+                self._prepared_command_type = None
+            try:
+                current = self.load(blobs=blobs)
+            finally:
+                self._prepared_command_type = None
             admitted = self._admitted
+            if admitted is not None:
+                # The audit travelled with the request, so it could have been
+                # any string had the request come from somewhere else.  Here
+                # both are in hand, so they are compared.
+                declared = admitted.request.audit.command_type
+                actual = None
+                try:
+                    actual = kernel_command_type(prepared.command)
+                except TypeError:
+                    actual = None
+                if actual is not None and declared != actual:
+                    raise FencedCommitError(
+                        "audit-binding-mismatch",
+                        "the admitted audit names a different command",
+                    )
             if admitted is not None and not base_agrees(
                 observed=observed,
                 admitted={

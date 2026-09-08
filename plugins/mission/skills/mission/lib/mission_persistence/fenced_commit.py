@@ -1276,6 +1276,45 @@ def _prepared_binding_digest(prepared: PreparedCommit) -> str:
     return _sha256(_canonical_bytes(document, limit=STATE_LIMIT))
 
 
+def refuse_unauthorized_generated_blobs(command_type, blobs) -> None:
+    """Refuse a request whose blobs publish in-root under the wrong command.
+
+    #747 3a. The blob set built from a command's effects already asks this,
+    and that is not enough: this request carries a command and a blob set
+    directly, and the effect binding the kernel compares looks at kind,
+    target, digest and size -- never at the path.  A binding assembled by
+    hand, with a claim and content that are otherwise correct, reached the
+    in-root destination under a command that never asked for it.
+
+    The command is read from the audit because that is the field which
+    survives every route: an ordinary CLI run carries no caller operation
+    identity, so its command travels as a compatibility wrapper.  The audit
+    is not folded into the intent digest, so naming the command there changes
+    no identity.  It is also only a claim -- the executor compares it against
+    the command it prepared, where both are in hand.
+
+    Only generated bindings are considered.  A captured blob is caller input
+    read from wherever the caller had it, and where it was read from is not
+    a destination this rule owns.
+    """
+    from mission_application.evidence_publication import (
+        EvidencePublicationError,
+        authorize_generated_destinations,
+    )
+
+    paths = tuple(
+        blob.binding.relative_path
+        for blob in getattr(blobs, "blobs", ())
+        if getattr(blob.binding, "origin", "captured") == "generated"
+    )
+    if not paths:
+        return
+    try:
+        authorize_generated_destinations(paths, command_type=command_type)
+    except EvidencePublicationError as exc:
+        raise FencedCommitError("request-invalid", str(exc)) from exc
+
+
 def validate_execution_request(request: ExecutionRequest) -> None:
     """Validate the shared immutable request before either writer uses it."""
     if not isinstance(request, ExecutionRequest):
@@ -1300,6 +1339,7 @@ def validate_execution_request(request: ExecutionRequest) -> None:
             raise FencedCommitError(
                 "audit-binding-mismatch", "audit command category differs"
             )
+    refuse_unauthorized_generated_blobs(request.audit.command_type, request.blobs)
     expected_intent = compute_intent_digest(
         session_id=request.session_id,
         lease_owner_session_id=request.lease_owner_session_id,
