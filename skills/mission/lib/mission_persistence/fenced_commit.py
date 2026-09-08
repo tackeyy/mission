@@ -2851,10 +2851,12 @@ class LocalFencedRepository:
         # the list did not take.
         #
         # **A window remains and cannot be closed in Python.**  An interrupt
-        # delivered between ``os.open`` returning and the ``try`` being entered
+        # delivered between ``os.open`` returning and its result being stored
         # leaks one descriptor.  Nothing expressible here makes those two
         # atomic; what is removed is the wider gap a helper call opened, where
-        # the interrupt could land in the argument setup or the new frame.
+        # the interrupt could land in the argument setup or the new frame, and
+        # the instruction before the guard, where the outer ``finally`` had
+        # not been entered either.
         try:
             try:
                 owned = len(descriptors)

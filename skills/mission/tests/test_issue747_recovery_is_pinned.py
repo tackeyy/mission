@@ -408,8 +408,10 @@ def test_a_changed_parent_now_blocks_the_rollback(tmp_path):
     ``st_mode``.  It is also how the rollforward arm has always behaved, which
     is why the two now agree.
 
-    **The two are not equally recoverable.**  A deleted or recreated parent
-    cannot be made to match again; a mode change can, by restoring the mode.
+    **They are not equally recoverable.**  A deleted or recreated parent cannot
+    be made to match again -- the identity it had is gone.  A mode change can,
+    by restoring the mode, and a directory moved aside can, by putting it back:
+    in both of those the directory the prepare opened still exists.
     """
     import pytest
 
@@ -421,7 +423,7 @@ def test_a_changed_parent_now_blocks_the_rollback(tmp_path):
         _kill_during_commit,
     )
 
-    for removal in ("delete", "recreate", "chmod"):
+    for removal in ("delete", "recreate", "chmod", "detach"):
         root = tmp_path / removal
         root.mkdir()
         local, repository, clock, _state_path, base_bytes, _result = _commit_cli_init(
@@ -454,7 +456,23 @@ def test_a_changed_parent_now_blocks_the_rollback(tmp_path):
             # The identity a projection records includes the mode, so the same
             # directory with different permissions is not the one the prepare
             # opened.  This needs no competitor and no deletion.
-            projection.parent.chmod(0o700)
+            #
+            # The new mode is derived from the old one rather than written as
+            # a constant: the fixture's mode depends on the process umask, and
+            # a constant that happens to match it would change nothing and
+            # leave this case asserting an outcome it never produced.
+            before = projection.parent.stat().st_mode
+            projection.parent.chmod(before ^ 0o070)
+            assert projection.parent.stat().st_mode != before, (
+                "the mode did not change; this case is measuring nothing"
+            )
+        elif removal == "detach":
+            # Not deleted -- moved aside, with another directory taking the
+            # name.  The prepare's directory still exists, so this one *is*
+            # recoverable, by putting it back.
+            detached = projection.parent.parent / "compatibility-detached"
+            projection.parent.rename(detached)
+            projection.parent.mkdir()
         else:
             for child in projection.parent.iterdir():
                 child.unlink()
@@ -490,7 +508,7 @@ def test_an_append_that_fails_closes_the_descriptor_it_could_not_take(
     leak the descriptor on its own account and prove nothing about this code.
 
     **One window remains and is not closed here**: an interrupt delivered
-    between ``os.open`` returning and the ``try`` being entered.  Nothing
+    between ``os.open`` returning and its result being stored.  Nothing
     expressible in Python makes those two atomic.
     """
     import sys
