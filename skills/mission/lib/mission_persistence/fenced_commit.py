@@ -25,6 +25,7 @@ from mission_kernel.json_codec import (
     encode_json_object,
     thaw_json_object,
 )
+from mission_kernel.projection_path import ProjectionRejection, resolve_projection_path
 from mission_kernel.model import (
     FencedLease,
     FrozenJsonObject,
@@ -2735,16 +2736,14 @@ class LocalFencedRepository:
 
     def _projection_target(self, relative_path: str) -> Path:
         candidate = PurePosixPath(relative_path)
-        if (
-            candidate.is_absolute()
-            or not candidate.parts
-            or candidate.parts[0] == self.root.name
-            or any(part in {"", ".", ".."} for part in candidate.parts)
-        ):
+        resolved = resolve_projection_path(candidate, root_name=self.root.name)
+        if isinstance(resolved, ProjectionRejection):
+            # The unit of work answers with one refusal whatever the reason;
+            # the reasons themselves are the application layer's to explain.
             raise FencedCommitError(
                 "projection-invalid", "projection target is outside its compatibility root"
             )
-        target = self.root.parent.joinpath(*candidate.parts)
+        target = self.root.parent.joinpath(*resolved)
         root_metadata = self.root.lstat()
         repository_device = root_metadata.st_dev
         root_identity = _directory_identity(root_metadata)
@@ -2836,12 +2835,8 @@ class LocalFencedRepository:
     @contextmanager
     def _pinned_projection_target(self, projection: ProjectionRecord):
         candidate = PurePosixPath(projection.relative_path)
-        if (
-            candidate.is_absolute()
-            or not candidate.parts
-            or candidate.parts[0] == self.root.name
-            or any(part in {"", ".", ".."} for part in candidate.parts)
-        ):
+        resolved = resolve_projection_path(candidate, root_name=self.root.name)
+        if isinstance(resolved, ProjectionRejection):
             raise FencedCommitError(
                 "projection-invalid",
                 "projection target is outside its compatibility root",
