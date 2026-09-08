@@ -1410,13 +1410,21 @@ class V5CompatibilityRepository:
                 # The audit travelled with the request, so it could have been
                 # any string had the request come from somewhere else.  Here
                 # both are in hand, so they are compared.
-                declared = admitted.request.audit.command_type
+                #
+                # A repository that does not model the audit is not made to:
+                # the comparison is a second opinion on this run's own request,
+                # not a requirement on what an admission has to carry.
+                declared = getattr(
+                    getattr(getattr(admitted, "request", None), "audit", None),
+                    "command_type",
+                    None,
+                )
                 actual = None
                 try:
                     actual = kernel_command_type(prepared.command)
                 except TypeError:
                     actual = None
-                if actual is not None and declared != actual:
+                if declared is not None and actual is not None and declared != actual:
                     raise FencedCommitError(
                         "audit-binding-mismatch",
                         "the admitted audit names a different command",

@@ -171,5 +171,8 @@ def test_the_executor_compares_the_audit_against_the_command_it_prepared():
     )
     # The comparison itself, not merely the error it would raise: a guard
     # whose condition is disabled still contains the message.
-    assert "if actual is not None and declared != actual:" in source
+    assert (
+        "if declared is not None and actual is not None and declared != actual:"
+        in source
+    )
     assert "audit-binding-mismatch" in source
