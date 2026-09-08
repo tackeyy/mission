@@ -438,13 +438,52 @@ def test_the_blob_identifier_comes_from_the_declared_path():
 
 
 def test_a_command_without_a_declared_path_produces_no_blobs():
-    """Artifact and progress publish through their own path in this stage."""
+    """The artifact commands still publish through their own path.
+
+    #747 3a moved ``update-progress`` off this branch, so the case it used to
+    stand for is now held by a command that is still on it.
+    """
+    from mission_kernel.artifact import ArtifactEffectClaim
+    from mission_kernel.commands import InitializeArtifact
+    from mission_persistence.evidence_order import blob_set_from_effects
+
+    claim = ArtifactEffectClaim("artifact", "a.md", "sha256:" + "0" * 64, 2)
+    command = InitializeArtifact(
+        "2026-01-01T00:00:00Z", "a.md", "markdown", "t", "none", False, claim
+    )
+    assert blob_set_from_effects((_effect(target="a.md"),), command).blobs == ()
+
+
+def test_progress_now_declares_its_path_through_its_effect_target():
+    """The progress claim has no publication path field; its target is the path.
+
+    Reading the field name from the command type is what lets one claim keep
+    ``publication_path`` and another keep ``target`` without two rules.
+    """
+    from mission_application.evidence_publication import derive_blob_id
     from mission_kernel.commands import ProgressEffectClaim, UpdateProgress
     from mission_persistence.evidence_order import blob_set_from_effects
 
-    claim = ProgressEffectClaim("progress", "p.json", "sha256:" + "0" * 64, 2)
+    path = ".mission-state/archive/iter-1-abcdef01-progress.md"
+    claim = ProgressEffectClaim("progress", path, "sha256:" + "0" * 64, 2)
     command = UpdateProgress("2026-01-01T00:00:00Z", 1, 0, 1, None, None, 1, claim)
-    assert blob_set_from_effects((_effect(target="p.json"),), command).blobs == ()
+    blobs = blob_set_from_effects((_effect(target=path),), command)
+    assert len(blobs.blobs) == 1
+    assert blobs.blobs[0].binding.relative_path == path
+    assert blobs.blobs[0].binding.blob_id == derive_blob_id(path)
+
+
+def test_a_command_that_may_not_write_in_root_is_refused_there():
+    """Well-formed is not permitted: the path alone cannot say who asked."""
+    import pytest
+
+    from mission_application.evidence_publication import EvidencePublicationError
+    from mission_persistence.evidence_order import blob_set_from_effects
+
+    path = ".mission-state/archive/iter-1-abcdef01-progress.md"
+    with pytest.raises(EvidencePublicationError) as caught:
+        blob_set_from_effects((_effect(),), _context_command(path))
+    assert caught.value.code == "publication-destination-unauthorized"
 
 
 def test_no_effects_produce_no_blobs():

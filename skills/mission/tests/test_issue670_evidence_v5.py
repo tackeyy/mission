@@ -158,6 +158,21 @@ def test_v5_publication_closes_the_transaction_on_success():
     assert closed == [True]
 
 
+def _artifact_prepare(state):
+    from mission_application.artifact import prepare_artifact_init
+
+    return prepare_artifact_init(
+        state,
+        now="2030-01-01T00:00:00Z",
+        artifact_path="a.md",
+        format="markdown",
+        title="t",
+        redaction_status="unchecked",
+        required_for_pass=False,
+        render=lambda _document, _artifact: b"# t\n",
+    )
+
+
 def test_publication_binding_truth_value_cannot_reenter_persistence(tmp_path, run_cli):
     """`__eq__` and `__bool__` both run inside the production guard (#670 review).
 
@@ -243,13 +258,17 @@ def test_publication_binding_truth_value_cannot_reenter_persistence(tmp_path, ru
                 last_unit=None,
                 artifact_path=None,
                 iteration=1,
-                evidence_path="progress.json",
+                evidence_path=".mission-state/archive/iter-1-abcdef01-progress.md",
             )
 
         # The v5 executor only accepts its own injected publisher, so the probe
         # replaces that binding rather than passing one in.
+        #
+        # #747 3a: progress no longer reaches that publisher, so the probe is
+        # driven through the branch that still has one -- an artifact command,
+        # whose claim carries no publication path.
         repository._effect_transaction = publisher
-        repository.execute_evidence_transition_effects(prepare)
+        repository.execute_transition_effects(_artifact_prepare)
     finally:
         os.chdir(previous)
         for key, value in previous_env.items():
