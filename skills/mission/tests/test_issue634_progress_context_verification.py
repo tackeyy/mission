@@ -135,9 +135,10 @@ def test_four_evidence_reducers_own_only_their_observation_fields():
     at = "2030-01-02T03:04:05Z"
     target = ".mission-state/archive/progress.md"
     progress_bytes = (
+        # #747 3a dropped the timestamp: the unit of work publishes this now,
+        # and the same operation retried later has to produce the same bytes.
         "<!-- mission-progress-meta: session_id=portable-run "
-        "mission_id=abcdef0123456789 iteration=1 "
-        "updated_at=2030-01-02T03:04:05Z -->\n\n"
+        "mission_id=abcdef0123456789 iteration=1 -->\n\n"
         "# Mission Progress Checkpoint\n\n"
         "- kind: batch\n- total: 7\n- completed: 3\n- remaining: 4\n"
         "- batch_size: 2\n- last_unit: unit-3\n"

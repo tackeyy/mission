@@ -12,7 +12,11 @@ import re
 from pathlib import PurePosixPath
 from typing import Optional
 
-from mission_kernel.projection_path import ProjectionRejection, resolve_projection_path
+from mission_kernel.projection_path import (
+    ProjectionRejection,
+    resolve_internal_archive_path,
+    resolve_projection_path,
+)
 
 REPOSITORY_ROOT_NAME = ".mission-state"
 BLOB_ID_PREFIX = "evidence:"
@@ -70,6 +74,72 @@ def canonical_publication_path(
     return "/".join(resolved)
 
 
+def canonical_generated_path(
+    relative_path: str, *, repository_root_name: str = REPOSITORY_ROOT_NAME
+) -> str:
+    """Return the canonical form of any path a generated file may take.
+
+    A generated file goes to one of two places, and the two rules are
+    disjoint: outside the repository as a projection, or inside it at the one
+    in-root destination #747 3a opens.  This says which paths are well formed,
+    not which command may use which -- the permission to write in-root is
+    bound to the command type where the claim and the command are both in
+    hand, and is not re-decided here.
+
+    Three callers need the same answer: the blob set built from the effects,
+    the identifier derived from the path, and the binding read back from a
+    persisted record.  A rule split between them is how the writer and the
+    reader drift apart.
+    """
+    if isinstance(relative_path, str) and relative_path:
+        internal = resolve_internal_archive_path(
+            PurePosixPath(relative_path), root_name=repository_root_name
+        )
+        if not isinstance(internal, ProjectionRejection):
+            return "/".join(internal)
+    # Not the in-root destination, so the projection rule answers -- including
+    # the refusals, whose wording names the way out for a caller that meant to
+    # publish outside and got the path wrong.
+    return canonical_publication_path(
+        relative_path, repository_root_name=repository_root_name
+    )
+
+
+def authorize_generated_destinations(
+    paths,
+    *,
+    command_type,
+    repository_root_name: str = REPOSITORY_ROOT_NAME,
+) -> None:
+    """Refuse an in-root destination for a command that may not write one.
+
+    Well-formedness and permission are different questions and are asked in
+    different places: ``canonical_generated_path`` says the path is one a
+    generated file may take, and this says this command may take it.  Asking
+    only the first would let any command reach the in-root destination once
+    the shape exists.
+
+    A path that is neither shape raises from the canonicaliser rather than
+    passing as "not internal, so no permission needed".
+    """
+    permitted = command_type in INTERNAL_DESTINATION_COMMAND_TYPES
+    for path in paths:
+        canonical = canonical_generated_path(
+            path, repository_root_name=repository_root_name
+        )
+        internal = resolve_internal_archive_path(
+            PurePosixPath(canonical), root_name=repository_root_name
+        )
+        if isinstance(internal, ProjectionRejection) or permitted:
+            continue
+        raise EvidencePublicationError(
+            "publication-destination-unauthorized",
+            "%s may not publish inside the repository root (%s); the path %s "
+            "is reserved for the commands that own it"
+            % (command_type, repository_root_name, canonical),
+        )
+
+
 def derive_blob_id(
     canonical_path: str, *, repository_root_name: str = REPOSITORY_ROOT_NAME
 ) -> str:
@@ -79,7 +149,7 @@ def derive_blob_id(
     the identifier differ between the prepare and the retry that follows it.
     """
     if (
-        canonical_publication_path(
+        canonical_generated_path(
             canonical_path, repository_root_name=repository_root_name
         )
         != canonical_path
@@ -222,7 +292,7 @@ def _canonical_binding(
         raise EvidencePublicationError(
             "blob-binding-invalid", "blob path is not a string"
         )
-    canonical = canonical_publication_path(
+    canonical = canonical_generated_path(
         record["relative_path"], repository_root_name=repository_root_name
     )
     if record["blob_id"] != derive_blob_id(
@@ -305,6 +375,27 @@ TYPED_COMMAND_SCHEMA = "mission-kernel-command/1"
 PATH_BEARING_COMMAND_TYPES = frozenset(
     {"generate-claims-ledger", "generate-context-manifest"}
 )
+
+# #747 3a: which commands may publish inside the repository.  Everything else
+# publishes as a projection of it.  The list is explicit rather than derived
+# from the path, because the path alone cannot say who asked: a binding built
+# by hand carries a well-formed path and no permission.
+INTERNAL_DESTINATION_COMMAND_TYPES = frozenset({"update-progress"})
+
+# Which attribute of a command's effect claim holds the path it publishes to.
+# The two projection commands carry it separately from the effect target; the
+# progress claim has no such field and its target *is* the path.  Reading the
+# field name from here keeps the two spellings from becoming two rules.
+#
+# This is deliberately not ``PATH_BEARING_COMMAND_TYPES``: that one says the
+# *encoded* claim must carry a ``publication_path`` key, which the progress
+# claim does not and must not gain -- adding it would change the kernel
+# command schema, and with it every operation identity already recorded.
+PUBLICATION_PATH_FIELD_BY_COMMAND_TYPE = {
+    "generate-claims-ledger": "publication_path",
+    "generate-context-manifest": "publication_path",
+    "update-progress": "target",
+}
 EFFECT_FIELDS_BY_COMMAND_TYPE = {
     "export-artifact": ("artifact_effect", "export_effect"),
     "generate-claims-ledger": ("effect",),

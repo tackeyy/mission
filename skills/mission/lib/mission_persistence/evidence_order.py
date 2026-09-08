@@ -103,7 +103,8 @@ def blob_set_from_effects(effects, command, *, repository_root_name=None):
     from mission_application.evidence_publication import (
         EvidencePublicationError,
         REPOSITORY_ROOT_NAME,
-        canonical_publication_path,
+        authorize_generated_destinations,
+        canonical_generated_path,
         derive_blob_id,
     )
     from mission_kernel.commands import kernel_command_type
@@ -126,8 +127,14 @@ def blob_set_from_effects(effects, command, *, repository_root_name=None):
                 "effect-claim-invalid",
                 "no publication claim names the effect target %r" % (effect.target,),
             )
-        canonical = canonical_publication_path(
-            claim.publication_path, repository_root_name=root
+        canonical = canonical_generated_path(
+            _claim_publication_path(claim, command_type), repository_root_name=root
+        )
+        # #747 3a: the in-root destination is bound to the command type, and
+        # this is the one place that knows both.  The path alone cannot say
+        # who asked for it.
+        authorize_generated_destinations(
+            (canonical,), command_type=command_type, repository_root_name=root
         )
         blobs.append(
             VerifiedBlob(
@@ -152,15 +159,24 @@ def _publication_claims(command, command_type):
     """Return the claims of one command that name a publication path."""
     from mission_application.evidence_publication import (
         EFFECT_FIELDS_BY_COMMAND_TYPE,
-        PATH_BEARING_COMMAND_TYPES,
+        PUBLICATION_PATH_FIELD_BY_COMMAND_TYPE,
     )
 
-    if command_type not in PATH_BEARING_COMMAND_TYPES:
+    if command_type not in PUBLICATION_PATH_FIELD_BY_COMMAND_TYPE:
         return ()
     return tuple(
         getattr(command, field)
         for field in EFFECT_FIELDS_BY_COMMAND_TYPE.get(command_type, ())
     )
+
+
+def _claim_publication_path(claim, command_type):
+    """Read where one claim publishes to, wherever that command keeps it."""
+    from mission_application.evidence_publication import (
+        PUBLICATION_PATH_FIELD_BY_COMMAND_TYPE,
+    )
+
+    return getattr(claim, PUBLICATION_PATH_FIELD_BY_COMMAND_TYPE[command_type])
 
 
 class OrderedEvidenceRun:

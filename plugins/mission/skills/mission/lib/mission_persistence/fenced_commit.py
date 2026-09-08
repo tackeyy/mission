@@ -25,7 +25,11 @@ from mission_kernel.json_codec import (
     encode_json_object,
     thaw_json_object,
 )
-from mission_kernel.projection_path import ProjectionRejection, resolve_projection_path
+from mission_kernel.projection_path import (
+    ProjectionRejection,
+    resolve_internal_archive_path,
+    resolve_projection_path,
+)
 from mission_kernel.model import (
     FencedLease,
     FrozenJsonObject,
@@ -2734,21 +2738,40 @@ class LocalFencedRepository:
             metadata.st_mtime_ns,
         )
 
-    def _projection_target(self, relative_path: str) -> Path:
+    def _resolve_generated_parts(self, relative_path: str) -> tuple[tuple[str, ...], bool]:
+        """Return where a generated file goes, and whether that is in-root.
+
+        Two destinations exist and they are disjoint (#747 3a): a projection
+        beside the repository, or the one in-root path progress writes.  Both
+        are spelled from the repository's parent -- the in-root form simply
+        names the repository as its first segment -- so only the acceptance
+        and the alias question differ, not the join.
+
+        Whether *this command* may use the in-root form was already settled
+        where the claim and the command type were both in hand.  Asking again
+        here would need the command, which this seam does not have.
+        """
         candidate = PurePosixPath(relative_path)
         resolved = resolve_projection_path(candidate, root_name=self.root.name)
-        if isinstance(resolved, ProjectionRejection):
-            # The unit of work answers with one refusal whatever the reason;
-            # the reasons themselves are the application layer's to explain.
-            raise FencedCommitError(
-                "projection-invalid", "projection target is outside its compatibility root"
-            )
+        if not isinstance(resolved, ProjectionRejection):
+            return resolved, False
+        internal = resolve_internal_archive_path(candidate, root_name=self.root.name)
+        if not isinstance(internal, ProjectionRejection):
+            return internal, True
+        # The unit of work answers with one refusal whatever the reason;
+        # the reasons themselves are the application layer's to explain.
+        raise FencedCommitError(
+            "projection-invalid", "projection target is outside its compatibility root"
+        )
+
+    def _projection_target(self, relative_path: str) -> Path:
+        resolved, internal = self._resolve_generated_parts(relative_path)
         target = self.root.parent.joinpath(*resolved)
         root_metadata = self.root.lstat()
         repository_device = root_metadata.st_dev
         root_identity = _directory_identity(root_metadata)
         current = self.root.parent
-        for part in candidate.parts[:-1]:
+        for index, part in enumerate(resolved[:-1]):
             current = current / part
             try:
                 metadata = current.lstat()
@@ -2772,7 +2795,17 @@ class LocalFencedRepository:
                 raise FencedCommitError(
                     "projection-invalid", "projection parent is not a safe same-filesystem directory"
                 )
-            _refuse_repository_alias(metadata, root_identity)
+            if internal and index == 0:
+                # The in-root destination's first step *is* the repository, so
+                # the alias question inverts: anything but the repository here
+                # is a directory that merely answers to its name.
+                if _directory_identity(metadata) != root_identity:
+                    raise FencedCommitError(
+                        "projection-invalid",
+                        "projection parent is not the repository it names",
+                    )
+            else:
+                _refuse_repository_alias(metadata, root_identity)
         # The name is checked above, but a name is not the directory it opens.
         # On a case-insensitive filesystem the repository answers to spellings
         # that are not its own, so a projection could reach inside it -- over
@@ -2834,16 +2867,10 @@ class LocalFencedRepository:
 
     @contextmanager
     def _pinned_projection_target(self, projection: ProjectionRecord):
-        candidate = PurePosixPath(projection.relative_path)
-        resolved = resolve_projection_path(candidate, root_name=self.root.name)
-        if isinstance(resolved, ProjectionRejection):
-            raise FencedCommitError(
-                "projection-invalid",
-                "projection target is outside its compatibility root",
-            )
+        resolved, internal = self._resolve_generated_parts(projection.relative_path)
         descriptors = []
         identities = []
-        names = tuple(candidate.parts[:-1])
+        names = tuple(resolved[:-1])
         try:
             descriptor = os.open(
                 os.fspath(self.root.parent),
@@ -2874,13 +2901,25 @@ class LocalFencedRepository:
                         "repository-changed",
                         "projection parent cannot be pinned",
                     )
-                _refuse_repository_alias(opened, _directory_identity(self.root.lstat()))
+                if internal and len(identities) == 1:
+                    # The first step of the in-root destination is the
+                    # repository itself; anything else at that name is a
+                    # different directory wearing it.
+                    if identity != _directory_identity(self.root.lstat()):
+                        raise FencedCommitError(
+                            "projection-invalid",
+                            "projection parent is not the repository it names",
+                        )
+                else:
+                    _refuse_repository_alias(
+                        opened, _directory_identity(self.root.lstat())
+                    )
                 identities.append(identity)
             pinned = _PinnedProjectionTarget(
                 descriptors=tuple(descriptors),
                 identities=tuple(identities),
                 names=names,
-                target_name=candidate.parts[-1],
+                target_name=resolved[-1],
             )
             if pinned.parent_identity != projection.parent_identity:
                 raise FencedCommitError(
