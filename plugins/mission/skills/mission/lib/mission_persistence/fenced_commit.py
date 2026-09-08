@@ -2901,6 +2901,49 @@ class LocalFencedRepository:
             for descriptor in reversed(descriptors):
                 os.close(descriptor)
 
+    def _require_pinned_projection_ref(
+        self,
+        pinned: _PinnedProjectionTarget,
+        reference: ProjectionFileRef,
+        *,
+        allowed_link_counts: tuple[int, ...],
+    ) -> bytes:
+        """Require the pinned target to hold exactly one reference's content.
+
+        The path-taking form resolves the name again on every call, so a
+        directory swapped between the check and the act sends the next
+        operation somewhere else.  This one reads through the descriptor the
+        walk opened, which no later rename can redirect.
+        """
+        value = self._read_pinned_projection_bytes(
+            pinned,
+            limit=STATE_LIMIT,
+            allowed_link_counts=allowed_link_counts,
+        )
+        assert value is not None
+        content, identity = value
+        if (
+            identity != reference.identity
+            or len(content) != reference.size
+            or _sha256(content) != reference.digest
+        ):
+            raise FencedCommitError(
+                "projection-invalid", "projection identity or bytes differ"
+            )
+        return content
+
+    def _pinned_projection_exists(self, pinned: _PinnedProjectionTarget) -> bool:
+        """Say whether anything is at the pinned name, symlinks included."""
+        try:
+            os.lstat(pinned.target_name, dir_fd=pinned.descriptor)
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise FencedCommitError(
+                "recovery-ambiguous", "projection target cannot be inspected"
+            ) from exc
+        return True
+
     def _read_pinned_projection_bytes(
         self,
         pinned: _PinnedProjectionTarget,
@@ -3887,19 +3930,22 @@ class LocalFencedRepository:
             self.root / "transactions" / "projections" / prepare.transaction_id
         )
         for index, projection in enumerate(prepare.projections):
-            target = self._projection_target(projection.relative_path)
-            if projection.base is None:
-                if target.exists() or target.is_symlink():
-                    raise FencedCommitError(
-                        "recovery-ambiguous",
-                        "rolled-back new projection still exists",
+            # Through the pinned walk rather than the name: a directory
+            # replaced between resolving and reading would otherwise answer
+            # for a different one.
+            with self._pinned_projection_target(projection) as pinned:
+                if projection.base is None:
+                    if self._pinned_projection_exists(pinned):
+                        raise FencedCommitError(
+                            "recovery-ambiguous",
+                            "rolled-back new projection still exists",
+                        )
+                else:
+                    self._require_pinned_projection_ref(
+                        pinned,
+                        projection.base,
+                        allowed_link_counts=(1,),
                     )
-            else:
-                self._require_projection_ref(
-                    target,
-                    projection.base,
-                    allowed_link_counts=(1,),
-                )
             base_path = bundle / ("base-%03d.blob" % index)
             if base_path.exists() or base_path.is_symlink():
                 raise FencedCommitError(
@@ -3934,69 +3980,87 @@ class LocalFencedRepository:
                 projection.after,
                 allowed_link_counts=(1, 2),
             )
-            target = self._projection_target(projection.relative_path)
-            current = self._read_projection_bytes(
-                target,
-                limit=STATE_LIMIT,
-                allow_missing=True,
-                allowed_link_counts=(1, 2),
-            )
-            base_path = bundle / ("base-%03d.blob" % index)
-            base_backup = self._read_projection_bytes(
-                base_path,
-                limit=STATE_LIMIT,
-                allow_missing=True,
-                allowed_link_counts=(1,),
-            )
-            if projection.base is None:
-                if current is not None:
-                    if not self._projection_value_matches(current, projection.after):
-                        raise FencedCommitError(
-                            "recovery-ambiguous", "created projection was replaced"
-                        )
-                    os.unlink(target)
-                    self._fsync_projection_directory(target.parent)
-                if base_backup is not None:
-                    raise FencedCommitError(
-                        "recovery-ambiguous", "new projection has an unexpected base backup"
-                    )
-            elif self._projection_value_matches(current, projection.base):
-                if base_backup is not None:
-                    raise FencedCommitError(
-                        "recovery-ambiguous", "base projection has a duplicate private inode"
-                    )
-            else:
-                if current is not None:
-                    if not self._projection_value_matches(current, projection.after):
-                        raise FencedCommitError(
-                            "recovery-ambiguous", "published projection identity is ambiguous"
-                        )
-                    os.unlink(target)
-                    self._fsync_projection_directory(target.parent)
-                self._fault("during-projection-rollback:%d" % index)
-                if not self._projection_value_matches(base_backup, projection.base):
-                    raise FencedCommitError(
-                        "recovery-blocked", "exact projection backup is unavailable"
-                    )
-                try:
-                    os.rename(os.fspath(base_path), os.fspath(target))
-                except OSError as exc:
-                    raise FencedCommitError(
-                        "recovery-blocked", "exact projection backup cannot be restored"
-                    ) from exc
-                self._fsync_projection_directory(bundle)
-                self._fsync_projection_directory(target.parent)
-            if projection.base is None:
-                if target.exists() or target.is_symlink():
-                    raise FencedCommitError(
-                        "recovery-blocked", "created projection still exists after rollback"
-                    )
-            else:
-                self._require_projection_ref(
-                    target,
-                    projection.base,
+            # Every read, unlink and rename below goes through the descriptor
+            # the walk opened.  Resolving the name once and then acting on it
+            # by name leaves a window in which the directory is replaced.
+            with self._pinned_projection_target(projection) as pinned:
+                current = self._read_pinned_projection_bytes(
+                    pinned,
+                    limit=STATE_LIMIT,
+                    allow_missing=True,
+                    allowed_link_counts=(1, 2),
+                )
+                base_path = bundle / ("base-%03d.blob" % index)
+                base_backup = self._read_projection_bytes(
+                    base_path,
+                    limit=STATE_LIMIT,
+                    allow_missing=True,
                     allowed_link_counts=(1,),
                 )
+                if projection.base is None:
+                    if current is not None:
+                        if not self._projection_value_matches(
+                            current, projection.after
+                        ):
+                            raise FencedCommitError(
+                                "recovery-ambiguous", "created projection was replaced"
+                            )
+                        os.unlink(pinned.target_name, dir_fd=pinned.descriptor)
+                        os.fsync(pinned.descriptor)
+                    if base_backup is not None:
+                        raise FencedCommitError(
+                            "recovery-ambiguous",
+                            "new projection has an unexpected base backup",
+                        )
+                elif self._projection_value_matches(current, projection.base):
+                    if base_backup is not None:
+                        raise FencedCommitError(
+                            "recovery-ambiguous",
+                            "base projection has a duplicate private inode",
+                        )
+                else:
+                    if current is not None:
+                        if not self._projection_value_matches(
+                            current, projection.after
+                        ):
+                            raise FencedCommitError(
+                                "recovery-ambiguous",
+                                "published projection identity is ambiguous",
+                            )
+                        os.unlink(pinned.target_name, dir_fd=pinned.descriptor)
+                        os.fsync(pinned.descriptor)
+                    self._fault("during-projection-rollback:%d" % index)
+                    if not self._projection_value_matches(
+                        base_backup, projection.base
+                    ):
+                        raise FencedCommitError(
+                            "recovery-blocked", "exact projection backup is unavailable"
+                        )
+                    try:
+                        os.rename(
+                            os.fspath(base_path),
+                            pinned.target_name,
+                            dst_dir_fd=pinned.descriptor,
+                        )
+                    except OSError as exc:
+                        raise FencedCommitError(
+                            "recovery-blocked",
+                            "exact projection backup cannot be restored",
+                        ) from exc
+                    self._fsync_projection_directory(bundle)
+                    os.fsync(pinned.descriptor)
+                if projection.base is None:
+                    if self._pinned_projection_exists(pinned):
+                        raise FencedCommitError(
+                            "recovery-blocked",
+                            "created projection still exists after rollback",
+                        )
+                else:
+                    self._require_pinned_projection_ref(
+                        pinned,
+                        projection.base,
+                        allowed_link_counts=(1,),
+                    )
 
     def _cleanup_projection_bundle_unlocked(
         self,
@@ -4012,62 +4076,18 @@ class LocalFencedRepository:
         if not bundle.exists() and not bundle.is_symlink():
             return
         for index, projection in enumerate(prepare.projections):
-            target = self._projection_target(projection.relative_path)
             after_path = bundle / projection.after.name
-            if target_is_authoritative:
-                self._require_projection_ref(
-                    target,
-                    projection.after,
-                    allowed_link_counts=(1, 2),
-                )
-                base_path = bundle / ("base-%03d.blob" % index)
-                if projection.base is not None:
-                    if base_path.exists() or base_path.is_symlink():
-                        self._require_projection_ref(
-                            base_path,
-                            projection.base,
-                            allowed_link_counts=(1,),
-                        )
-                        os.unlink(base_path)
-                        self._fsync_projection_directory(bundle)
-                        self._fault(
-                            "during-projection-cleanup-base:%d" % index
-                        )
-                if after_path.exists() or after_path.is_symlink():
-                    self._require_projection_ref(
-                        after_path,
-                        projection.after,
-                        allowed_link_counts=(2,),
-                    )
-                else:
-                    self._require_projection_ref(
-                        target,
-                        projection.after,
-                        allowed_link_counts=(1,),
-                    )
-            else:
-                if after_path.exists() or after_path.is_symlink():
-                    self._require_projection_ref(
-                        after_path,
-                        projection.after,
-                        allowed_link_counts=(1,),
-                    )
-                base_path = bundle / ("base-%03d.blob" % index)
-                if base_path.exists() or base_path.is_symlink():
-                    raise FencedCommitError(
-                        "recovery-blocked", "projection base residue remains after rollback"
-                    )
-            if after_path.exists() or after_path.is_symlink():
-                os.unlink(after_path)
-                self._fsync_projection_directory(bundle)
-                self._fault(
-                    "during-projection-cleanup-after:%d" % index
-                )
-            if target_is_authoritative:
-                self._require_projection_ref(
-                    target,
-                    projection.after,
-                    allowed_link_counts=(1,),
+            # The target is only ever reached through the pinned walk here,
+            # for the same reason as the rollback above: the name can be made
+            # to answer for a different directory between two operations.
+            with self._pinned_projection_target(projection) as pinned:
+                self._cleanup_one_projection_unlocked(
+                    pinned,
+                    projection,
+                    index,
+                    bundle=bundle,
+                    after_path=after_path,
+                    target_is_authoritative=target_is_authoritative,
                 )
         try:
             os.rmdir(bundle)
@@ -4076,6 +4096,73 @@ class LocalFencedRepository:
             raise FencedCommitError(
                 "recovery-blocked", "projection bundle cleanup failed"
             ) from exc
+
+    def _cleanup_one_projection_unlocked(
+        self,
+        pinned: _PinnedProjectionTarget,
+        projection: ProjectionRecord,
+        index: int,
+        *,
+        bundle: Path,
+        after_path: Path,
+        target_is_authoritative: bool,
+    ) -> None:
+        """Retire one projection's bundle entries against its pinned target."""
+        if target_is_authoritative:
+            self._require_pinned_projection_ref(
+                pinned,
+                projection.after,
+                allowed_link_counts=(1, 2),
+            )
+            base_path = bundle / ("base-%03d.blob" % index)
+            if projection.base is not None:
+                if base_path.exists() or base_path.is_symlink():
+                    self._require_projection_ref(
+                        base_path,
+                        projection.base,
+                        allowed_link_counts=(1,),
+                    )
+                    os.unlink(base_path)
+                    self._fsync_projection_directory(bundle)
+                    self._fault(
+                        "during-projection-cleanup-base:%d" % index
+                    )
+            if after_path.exists() or after_path.is_symlink():
+                self._require_projection_ref(
+                    after_path,
+                    projection.after,
+                    allowed_link_counts=(2,),
+                )
+            else:
+                self._require_pinned_projection_ref(
+                    pinned,
+                    projection.after,
+                    allowed_link_counts=(1,),
+                )
+        else:
+            if after_path.exists() or after_path.is_symlink():
+                self._require_projection_ref(
+                    after_path,
+                    projection.after,
+                    allowed_link_counts=(1,),
+                )
+            base_path = bundle / ("base-%03d.blob" % index)
+            if base_path.exists() or base_path.is_symlink():
+                raise FencedCommitError(
+                    "recovery-blocked", "projection base residue remains after rollback"
+                )
+        if after_path.exists() or after_path.is_symlink():
+            os.unlink(after_path)
+            self._fsync_projection_directory(bundle)
+            self._fault(
+                "during-projection-cleanup-after:%d" % index
+            )
+        if target_is_authoritative:
+            self._require_pinned_projection_ref(
+                pinned,
+                projection.after,
+                allowed_link_counts=(1,),
+            )
 
     def _prepared_entries_unlocked(self) -> list[str]:
         with self._pinned_directory("transactions", "prepared") as pinned:
