@@ -2888,15 +2888,33 @@ class LocalFencedRepository:
                     "projection parent differs from its durable identity",
                 )
             self._verify_pinned_projection_target(pinned)
-            yield pinned
-            self._verify_pinned_projection_target(pinned)
         except FencedCommitError:
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
             raise
         except OSError as exc:
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
             raise FencedCommitError(
                 "repository-changed",
                 "projection parent cannot be pinned",
             ) from exc
+        # The body runs outside that mapping.  An ``OSError`` raised while the
+        # caller holds the pin is the caller's failure -- a refused unlink, a
+        # full filesystem -- and calling it "the parent cannot be pinned"
+        # renames a fault the pin had nothing to do with.  Only the closing
+        # verification, which is this walk's own question, is mapped again.
+        try:
+            yield pinned
+            try:
+                self._verify_pinned_projection_target(pinned)
+            except FencedCommitError:
+                raise
+            except OSError as exc:
+                raise FencedCommitError(
+                    "repository-changed",
+                    "projection parent cannot be pinned",
+                ) from exc
         finally:
             for descriptor in reversed(descriptors):
                 os.close(descriptor)
