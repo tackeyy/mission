@@ -1,13 +1,21 @@
-"""#747 3a: who may write inside the repository, enforced where both halves meet.
+"""#747 3a: who may write inside the repository.
 
-The blob set built from a command's effects is one way in, and it knows the
-command type, so it can refuse an in-root destination for a command that has
-no business writing one.  It is not the only way in: ``ExecutionRequest``
-takes a command and a blob set directly, and nothing there compared the two.
-A hand-built binding with the right digest and the wrong path would therefore
-publish in-root under a command that never asked to.
+The blob set built from a command's effects knows the command type, so it can
+refuse an in-root destination for a command that has no business writing one.
+Every route that publishes goes through it, and these fix that refusal.
 
-So the rule is enforced at both entries, and these fix that.
+**It is not the only way in, and this does not close the other one.**
+``ExecutionRequest`` takes a command and a blob set directly, and nothing
+there compares them; the effect binding the kernel checks looks at kind,
+target, digest and size, never at the path.  A caller that assembles a
+binding by hand therefore reaches the in-root destination under a command
+that never asked for it.
+
+Enforcing it there needs the kernel command type, which the request does not
+carry: an ordinary CLI invocation supplies no caller operation identity, so
+its command travels as a ``compatibility-mutation`` wrapper.  Threading the
+typed command through changes the command binding check and the intent
+digest, which is why it is tracked on #747 rather than done here.
 """
 
 from __future__ import annotations
