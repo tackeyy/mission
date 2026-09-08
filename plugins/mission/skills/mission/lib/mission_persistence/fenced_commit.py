@@ -2844,21 +2844,35 @@ class LocalFencedRepository:
         descriptors = []
         identities = []
         names = tuple(candidate.parts[:-1])
+        # An open descriptor that is not yet in ``descriptors`` belongs to
+        # nobody: the ``finally`` below closes the list, and a failure between
+        # the open and the append -- an interrupt, ``MemoryError`` -- would
+        # leave that one behind.  It is held here until the list owns it.
+        pending: list[int] = []
+
+        def _own(opened: int) -> int:
+            pending.append(opened)
+            descriptors.append(opened)
+            pending.clear()
+            return opened
+
         try:
             try:
-                descriptor = os.open(
-                    os.fspath(self.root.parent),
-                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                descriptor = _own(
+                    os.open(
+                        os.fspath(self.root.parent),
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    )
                 )
-                descriptors.append(descriptor)
                 identities.append(_directory_identity(os.fstat(descriptor)))
                 for name in names:
-                    descriptor = os.open(
-                        name,
-                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                        dir_fd=descriptors[-1],
+                    descriptor = _own(
+                        os.open(
+                            name,
+                            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=descriptors[-1],
+                        )
                     )
-                    descriptors.append(descriptor)
                     opened = os.fstat(descriptor)
                     named = os.stat(
                         name,
@@ -2917,8 +2931,9 @@ class LocalFencedRepository:
             # names some failures and not others, and a descriptor's lifetime
             # must not depend on which name a failure got: an exception the
             # mapping does not mention -- ``MemoryError``, an interrupt -- was
-            # leaking two of them.
-            for descriptor in reversed(descriptors):
+            # leaking them.  ``pending`` holds the one the list does not own
+            # yet, so a failure between an open and its append closes it too.
+            for descriptor in reversed(descriptors + pending):
                 os.close(descriptor)
 
     def _require_pinned_projection_ref(

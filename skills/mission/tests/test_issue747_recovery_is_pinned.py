@@ -461,3 +461,54 @@ def test_a_deleted_parent_now_blocks_the_rollback(tmp_path):
         assert next(
             (repository / "transactions" / "prepared").glob("*.json")
         ).exists(), removal
+
+
+def test_every_opened_descriptor_is_handed_to_the_owner(tmp_path):
+    """The window the closing loop cannot see, closed by construction.
+
+    A descriptor that is open but not yet in the list belongs to nobody: the
+    closing loop walks the list.  A failure in between -- an interrupt, or
+    ``MemoryError`` from the append -- would leave that one behind.
+
+    This is structural because the window is two bytecodes wide: injecting a
+    failure inside it means failing the append itself, and a spy that raises
+    around ``os.open`` leaks the descriptor on its own account rather than
+    exercising the code under test.  What can be fixed is that no ``os.open``
+    result reaches anything but the owner.
+    """
+    import ast
+    import textwrap
+
+    from mission_persistence.fenced_commit import LocalFencedRepository
+
+    tree = ast.parse(
+        textwrap.dedent(
+            inspect.getsource(LocalFencedRepository._pinned_projection_target)
+        )
+    )
+    opens = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "open"
+    ]
+    assert len(opens) == 2, len(opens)
+    owned = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_own"
+    ]
+    # Every open's result is the owner's argument, and nothing else's.
+    assert len(owned) == len(opens), (len(owned), len(opens))
+    for call in owned:
+        assert len(call.args) == 1
+        argument = call.args[0]
+        assert isinstance(argument, ast.Call) and argument in opens, ast.unparse(
+            argument
+        )
+    # And the owner is what the closing loop reads, together with the list.
+    source = inspect.getsource(LocalFencedRepository._pinned_projection_target)
+    assert "reversed(descriptors + pending)" in source
