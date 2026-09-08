@@ -2845,34 +2845,39 @@ class LocalFencedRepository:
         identities = []
         names = tuple(candidate.parts[:-1])
         # An open descriptor that is not yet in ``descriptors`` belongs to
-        # nobody: the ``finally`` below closes the list, and a failure between
-        # the open and the append -- an interrupt, ``MemoryError`` -- would
-        # leave that one behind.  It is held here until the list owns it.
-        pending: list[int] = []
-
-        def _own(opened: int) -> int:
-            pending.append(opened)
-            descriptors.append(opened)
-            pending.clear()
-            return opened
-
+        # nobody: the ``finally`` below closes the list, so a failure between
+        # the open and the append would leave that one behind.  Each open is
+        # followed immediately by the append, under a handler that closes what
+        # the list did not take.
+        #
+        # **A window remains and cannot be closed in Python.**  An interrupt
+        # delivered between ``os.open`` returning and the ``try`` being entered
+        # leaks one descriptor.  Nothing expressible here makes those two
+        # atomic; what is removed is the wider gap a helper call opened, where
+        # the interrupt could land in the argument setup or the new frame.
         try:
             try:
-                descriptor = _own(
-                    os.open(
-                        os.fspath(self.root.parent),
-                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                    )
+                descriptor = os.open(
+                    os.fspath(self.root.parent),
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
                 )
+                try:
+                    descriptors.append(descriptor)
+                except BaseException:
+                    os.close(descriptor)
+                    raise
                 identities.append(_directory_identity(os.fstat(descriptor)))
                 for name in names:
-                    descriptor = _own(
-                        os.open(
-                            name,
-                            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                            dir_fd=descriptors[-1],
-                        )
+                    descriptor = os.open(
+                        name,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                        dir_fd=descriptors[-1],
                     )
+                    try:
+                        descriptors.append(descriptor)
+                    except BaseException:
+                        os.close(descriptor)
+                        raise
                     opened = os.fstat(descriptor)
                     named = os.stat(
                         name,
@@ -2931,9 +2936,11 @@ class LocalFencedRepository:
             # names some failures and not others, and a descriptor's lifetime
             # must not depend on which name a failure got: an exception the
             # mapping does not mention -- ``MemoryError``, an interrupt -- was
-            # leaking them.  ``pending`` holds the one the list does not own
-            # yet, so a failure between an open and its append closes it too.
-            for descriptor in reversed(descriptors + pending):
+            # leaking them.  Only the list is walked: each open hands its
+            # descriptor to the list under a handler, so nothing else holds
+            # one -- and walking a second holder would risk closing an fd
+            # twice, which replaces the original failure with ``EBADF``.
+            for descriptor in reversed(descriptors):
                 os.close(descriptor)
 
     def _require_pinned_projection_ref(

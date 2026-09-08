@@ -18,6 +18,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 LIB = Path(__file__).resolve().parents[1] / "lib"
 if str(LIB) not in sys.path:
     sys.path.insert(0, str(LIB))
@@ -463,52 +465,75 @@ def test_a_deleted_parent_now_blocks_the_rollback(tmp_path):
         ).exists(), removal
 
 
-def test_every_opened_descriptor_is_handed_to_the_owner(tmp_path):
-    """The window the closing loop cannot see, closed by construction.
+@pytest.mark.parametrize("occurrence", [0, 1])
+def test_an_append_that_fails_closes_the_descriptor_it_could_not_take(
+    tmp_path, occurrence
+):
+    """The window the closing loop cannot see.
 
     A descriptor that is open but not yet in the list belongs to nobody: the
-    closing loop walks the list.  A failure in between -- an interrupt, or
-    ``MemoryError`` from the append -- would leave that one behind.
+    closing loop walks the list.  Each open therefore hands its descriptor to
+    the list under a handler that closes what the list did not take.
 
-    This is structural because the window is two bytecodes wide: injecting a
-    failure inside it means failing the append itself, and a spy that raises
-    around ``os.open`` leaks the descriptor on its own account rather than
-    exercising the code under test.  What can be fixed is that no ``os.open``
-    result reaches anything but the owner.
+    The failure is injected by tracing the frame and raising on the line that
+    appends, which does not wrap ``os.open`` -- a spy around the open would
+    leak the descriptor on its own account and prove nothing about this code.
+
+    **One window remains and is not closed here**: an interrupt delivered
+    between ``os.open`` returning and the ``try`` being entered.  Nothing
+    expressible in Python makes those two atomic.
     """
-    import ast
-    import textwrap
+    import sys
 
-    from mission_persistence.fenced_commit import LocalFencedRepository
+    import pytest
 
-    tree = ast.parse(
-        textwrap.dedent(
-            inspect.getsource(LocalFencedRepository._pinned_projection_target)
+    local, record = _repository_with_projection(tmp_path)
+    method = type(local)._pinned_projection_target.__wrapped__
+    filename = method.__code__.co_filename
+    method_lines = {
+        line for _, _, line in method.__code__.co_lines() if line is not None
+    }
+    append_lines = [
+        number
+        for number, text in enumerate(
+            Path(filename).read_text().split("\n"), start=1
         )
-    )
-    opens = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "open"
+        if text.strip() == "descriptors.append(descriptor)" and number in method_lines
     ]
-    assert len(opens) == 2, len(opens)
-    owned = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "_own"
-    ]
-    # Every open's result is the owner's argument, and nothing else's.
-    assert len(owned) == len(opens), (len(owned), len(opens))
-    for call in owned:
-        assert len(call.args) == 1
-        argument = call.args[0]
-        assert isinstance(argument, ast.Call) and argument in opens, ast.unparse(
-            argument
-        )
-    # And the owner is what the closing loop reads, together with the list.
-    source = inspect.getsource(LocalFencedRepository._pinned_projection_target)
-    assert "reversed(descriptors + pending)" in source
+    assert append_lines, "the append moved; this test is measuring nothing"
+
+    assert len(append_lines) == 2, append_lines
+    fired = []
+    seen = []
+
+    def _local_trace(frame, event, arg):
+        if (
+            event == "line"
+            and frame.f_code is method.__code__
+            and frame.f_lineno in append_lines
+        ):
+            seen.append(frame.f_lineno)
+            # The root's append and the child's are separate lines, each with
+            # its own handler; failing only the first would leave the second
+            # unchecked.
+            if len(seen) - 1 == occurrence and not fired:
+                fired.append(frame.f_lineno)
+                raise MemoryError()
+        return _local_trace
+
+    def _trace(frame, event, arg):
+        if event == "call" and frame.f_code is method.__code__:
+            return _local_trace
+        return None
+
+    with local._lock(create=True):
+        before = _open_descriptor_count()
+        sys.settrace(_trace)
+        try:
+            with pytest.raises(MemoryError):
+                with local._pinned_projection_target(record):
+                    pass
+        finally:
+            sys.settrace(None)
+        assert fired, "append occurrence %d was never reached" % occurrence
+        assert _open_descriptor_count() - before == 0, "the descriptor leaked"
