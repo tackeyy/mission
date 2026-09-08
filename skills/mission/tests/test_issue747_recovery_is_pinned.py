@@ -460,6 +460,9 @@ def test_a_changed_parent_now_blocks_the_rollback(tmp_path):
             projection_relative_path="compatibility/state.json",
         )
         assert killed.returncode == 91, killed.stderr
+        from mission_persistence.fenced_commit import _directory_identity
+
+        recorded = _directory_identity(projection.parent.lstat())
 
         if removal == "chmod":
             # The identity a projection records includes the mode, so the same
@@ -488,6 +491,25 @@ def test_a_changed_parent_now_blocks_the_rollback(tmp_path):
             projection.parent.rmdir()
             if removal == "recreate":
                 projection.parent.mkdir()
+
+        try:
+            now = _directory_identity(projection.parent.lstat())
+        except FileNotFoundError:
+            now = None
+
+        if now == recorded:
+            # The rule is "the identity the prepare recorded", not "a
+            # different directory".  A recreated directory that lands on the
+            # same inode with the same mode satisfies it, and recovery
+            # proceeds -- which is exactly the limit the PR body records and
+            # #747 carries.  Asserting a block here would be asserting that
+            # inode numbers are never reused.
+            assert removal in {"recreate", "detach"}, (removal, recorded)
+            local.recover("test")
+            assert not list(
+                (repository / "transactions" / "prepared").glob("*.json")
+            ), removal
+            continue
 
         with pytest.raises(FencedCommitError) as blocked:
             local.recover("test")
