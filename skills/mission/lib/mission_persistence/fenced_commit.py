@@ -1276,7 +1276,9 @@ def _prepared_binding_digest(prepared: PreparedCommit) -> str:
     return _sha256(_canonical_bytes(document, limit=STATE_LIMIT))
 
 
-def refuse_unauthorized_generated_blobs(command_type, blobs) -> None:
+def refuse_unauthorized_generated_blobs(
+    command_type, blobs, *, repository_root_name: Optional[str] = None
+) -> None:
     """Refuse a request whose blobs publish in-root under the wrong command.
 
     #747 3a. The blob set built from a command's effects already asks this,
@@ -1309,14 +1311,32 @@ def refuse_unauthorized_generated_blobs(command_type, blobs) -> None:
     )
     if not paths:
         return
+    from mission_application.evidence_publication import REPOSITORY_ROOT_NAME
+
     try:
-        authorize_generated_destinations(paths, command_type=command_type)
+        authorize_generated_destinations(
+            paths,
+            command_type=command_type,
+            repository_root_name=(
+                REPOSITORY_ROOT_NAME
+                if repository_root_name is None
+                else repository_root_name
+            ),
+        )
     except EvidencePublicationError as exc:
         raise FencedCommitError("request-invalid", str(exc)) from exc
 
 
-def validate_execution_request(request: ExecutionRequest) -> None:
-    """Validate the shared immutable request before either writer uses it."""
+def validate_execution_request(
+    request: ExecutionRequest, *, repository_root_name: Optional[str] = None
+) -> None:
+    """Validate the shared immutable request before either writer uses it.
+
+    ``repository_root_name`` is the name the repository actually carries.  The
+    in-root rule is expressed against it, so a repository laid out under a
+    different name would otherwise be judged against the default and its own
+    subtree would read as external.
+    """
     if not isinstance(request, ExecutionRequest):
         raise FencedCommitError("request-invalid", "request type is invalid")
     _session_id(request.session_id)
@@ -1339,7 +1359,11 @@ def validate_execution_request(request: ExecutionRequest) -> None:
             raise FencedCommitError(
                 "audit-binding-mismatch", "audit command category differs"
             )
-    refuse_unauthorized_generated_blobs(request.audit.command_type, request.blobs)
+    refuse_unauthorized_generated_blobs(
+        request.audit.command_type,
+        request.blobs,
+        repository_root_name=repository_root_name,
+    )
     expected_intent = compute_intent_digest(
         session_id=request.session_id,
         lease_owner_session_id=request.lease_owner_session_id,
@@ -2197,7 +2221,7 @@ class LocalFencedRepository:
         resolved-operation index is not consulted (``begin`` remains the
         authority for that).
         """
-        validate_execution_request(request)
+        validate_execution_request(request, repository_root_name=self.root.name)
         # Taking the lock the usual way lays the repository out and creates
         # its lock file.  Neither may happen here: writing nothing is the
         # point of this entry point.  A root without a lock file or an
@@ -2542,7 +2566,7 @@ class LocalFencedRepository:
                 )
 
     def begin(self, request: ExecutionRequest) -> Union[AdmittedSnapshot, OperationReplay]:
-        validate_execution_request(request)
+        validate_execution_request(request, repository_root_name=self.root.name)
         with self._lock():
             prepared_entries = self._prepared_entries_unlocked()
             if not prepared_entries:
@@ -2729,7 +2753,7 @@ class LocalFencedRepository:
         request: ExecutionRequest,
     ) -> RepositoryExecutionResult:
         """Run one explicit request through admission, decision, stage, and commit."""
-        validate_execution_request(request)
+        validate_execution_request(request, repository_root_name=self.root.name)
         if request.typed_command is None:
             raise FencedCommitError("request-invalid", "typed command is required")
         admitted = self.begin(request)
@@ -4587,7 +4611,9 @@ class LocalFencedRepository:
             raise FencedCommitError(
                 "precondition-mismatch", "prepared transaction ID is invalid"
             )
-        validate_execution_request(prepared.admitted.request)
+        validate_execution_request(
+            prepared.admitted.request, repository_root_name=self.root.name
+        )
         _digest(prepared.binding_digest, "prepared.binding_digest")
         stored_digest = self._stage_binding_registry.get(prepared.transaction_id)
         if (

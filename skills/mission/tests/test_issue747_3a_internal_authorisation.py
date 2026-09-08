@@ -4,18 +4,11 @@ The blob set built from a command's effects knows the command type, so it can
 refuse an in-root destination for a command that has no business writing one.
 Every route that publishes goes through it, and these fix that refusal.
 
-**It is not the only way in, and this does not close the other one.**
-``ExecutionRequest`` takes a command and a blob set directly, and nothing
-there compares them; the effect binding the kernel checks looks at kind,
-target, digest and size, never at the path.  A caller that assembles a
-binding by hand therefore reaches the in-root destination under a command
-that never asked for it.
-
-Enforcing it there needs the kernel command type, which the request does not
-carry: an ordinary CLI invocation supplies no caller operation identity, so
-its command travels as a ``compatibility-mutation`` wrapper.  Threading the
-typed command through changes the command binding check and the intent
-digest, which is why it is tracked on #747 rather than done here.
+**It is not the only way in.** ``ExecutionRequest`` takes a command and a blob
+set directly, and the effect binding the kernel checks looks at kind, target,
+digest and size, never at the path.  That entry is guarded too, keyed on the
+audit -- see ``test_issue747_3a_request_authorisation.py``, which owns those
+cases.  This file is about the rule itself, not about where it is applied.
 """
 
 from __future__ import annotations

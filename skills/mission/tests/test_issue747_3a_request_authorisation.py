@@ -136,7 +136,66 @@ def test_the_request_validation_applies_the_rule():
     from mission_persistence import fenced_commit
 
     source = inspect.getsource(fenced_commit.validate_execution_request)
-    assert "refuse_unauthorized_generated_blobs(request.audit.command_type" in source
+    assert "refuse_unauthorized_generated_blobs(" in source
+    assert "request.audit.command_type" in source
+    # The rule is expressed against the repository's own root name, so a
+    # repository laid out under a different one is judged by its own name
+    # rather than by the default.
+    assert "repository_root_name=repository_root_name" in source
+
+
+def test_the_repository_passes_its_own_root_name_to_the_validation():
+    """Otherwise a custom root's own subtree reads as external and passes."""
+    import inspect
+
+    from mission_persistence import fenced_commit
+
+    import ast
+    import textwrap
+
+    source = textwrap.dedent(
+        inspect.getsource(fenced_commit.LocalFencedRepository)
+    )
+    calls = [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "validate_execution_request"
+    ]
+    assert calls, "the repository stopped validating its requests"
+    for call in calls:
+        names = {
+            keyword.arg: ast.unparse(keyword.value) for keyword in call.keywords
+        }
+        assert names.get("repository_root_name") == "self.root.name", ast.unparse(
+            call
+        )
+
+
+def test_a_custom_root_is_judged_by_its_own_name():
+    from mission_persistence.fenced_commit import (
+        FencedCommitError,
+        refuse_unauthorized_generated_blobs,
+    )
+
+    custom = ".custom-state/archive/iter-2-abcdef01-progress.md"
+    # Under the default name this path is outside the repository, so it needs
+    # no permission -- which is exactly the hole.
+    refuse_unauthorized_generated_blobs(
+        "generate-context-manifest", _blob_set(_binding(custom))
+    )
+    with pytest.raises(FencedCommitError):
+        refuse_unauthorized_generated_blobs(
+            "generate-context-manifest",
+            _blob_set(_binding(custom)),
+            repository_root_name=".custom-state",
+        )
+    refuse_unauthorized_generated_blobs(
+        "update-progress",
+        _blob_set(_binding(custom)),
+        repository_root_name=".custom-state",
+    )
 
 
 def test_the_executor_names_the_command_it_prepared():
