@@ -2845,66 +2845,63 @@ class LocalFencedRepository:
         identities = []
         names = tuple(candidate.parts[:-1])
         try:
-            descriptor = os.open(
-                os.fspath(self.root.parent),
-                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-            )
-            descriptors.append(descriptor)
-            identities.append(_directory_identity(os.fstat(descriptor)))
-            for name in names:
+            try:
                 descriptor = os.open(
-                    name,
+                    os.fspath(self.root.parent),
                     os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                    dir_fd=descriptors[-1],
                 )
                 descriptors.append(descriptor)
-                opened = os.fstat(descriptor)
-                named = os.stat(
-                    name,
-                    dir_fd=descriptors[-2],
-                    follow_symlinks=False,
-                )
-                identity = _directory_identity(opened)
-                if (
-                    not stat.S_ISDIR(opened.st_mode)
-                    or _directory_identity(named) != identity
-                    or identity[0] != self.root.lstat().st_dev
-                ):
-                    raise FencedCommitError(
-                        "repository-changed",
-                        "projection parent cannot be pinned",
+                identities.append(_directory_identity(os.fstat(descriptor)))
+                for name in names:
+                    descriptor = os.open(
+                        name,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                        dir_fd=descriptors[-1],
                     )
-                _refuse_repository_alias(opened, _directory_identity(self.root.lstat()))
-                identities.append(identity)
-            pinned = _PinnedProjectionTarget(
-                descriptors=tuple(descriptors),
-                identities=tuple(identities),
-                names=names,
-                target_name=candidate.parts[-1],
-            )
-            if pinned.parent_identity != projection.parent_identity:
-                raise FencedCommitError(
-                    "recovery-ambiguous",
-                    "projection parent differs from its durable identity",
+                    descriptors.append(descriptor)
+                    opened = os.fstat(descriptor)
+                    named = os.stat(
+                        name,
+                        dir_fd=descriptors[-2],
+                        follow_symlinks=False,
+                    )
+                    identity = _directory_identity(opened)
+                    if (
+                        not stat.S_ISDIR(opened.st_mode)
+                        or _directory_identity(named) != identity
+                        or identity[0] != self.root.lstat().st_dev
+                    ):
+                        raise FencedCommitError(
+                            "repository-changed",
+                            "projection parent cannot be pinned",
+                        )
+                    _refuse_repository_alias(opened, _directory_identity(self.root.lstat()))
+                    identities.append(identity)
+                pinned = _PinnedProjectionTarget(
+                    descriptors=tuple(descriptors),
+                    identities=tuple(identities),
+                    names=names,
+                    target_name=candidate.parts[-1],
                 )
-            self._verify_pinned_projection_target(pinned)
-        except FencedCommitError:
-            for descriptor in reversed(descriptors):
-                os.close(descriptor)
-            raise
-        except OSError as exc:
-            for descriptor in reversed(descriptors):
-                os.close(descriptor)
-            raise FencedCommitError(
-                "repository-changed",
-                "projection parent cannot be pinned",
-            ) from exc
-        # The body runs outside that mapping.  An ``OSError`` raised while the
-        # caller holds the pin is the caller's failure -- a refused unlink, a
-        # full filesystem -- and calling it "the parent cannot be pinned"
-        # renames a fault the pin had nothing to do with.  Only the closing
-        # verification, which is this walk's own question, is mapped again.
-        try:
+                if pinned.parent_identity != projection.parent_identity:
+                    raise FencedCommitError(
+                        "recovery-ambiguous",
+                        "projection parent differs from its durable identity",
+                    )
+                self._verify_pinned_projection_target(pinned)
+            except FencedCommitError:
+                raise
+            except OSError as exc:
+                raise FencedCommitError(
+                    "repository-changed",
+                    "projection parent cannot be pinned",
+                ) from exc
+            # The body runs outside that mapping.  An ``OSError`` raised while
+            # the caller holds the pin is the caller's failure -- a refused
+            # unlink, a full filesystem -- and calling it "the parent cannot
+            # be pinned" renames a fault the pin had nothing to do with.
+            # Only the closing verification, which is this walk's own
+            # question, is mapped again.
             yield pinned
             try:
                 self._verify_pinned_projection_target(pinned)
@@ -2916,6 +2913,11 @@ class LocalFencedRepository:
                     "projection parent cannot be pinned",
                 ) from exc
         finally:
+            # One place closes them, whatever left through.  The mapping above
+            # names some failures and not others, and a descriptor's lifetime
+            # must not depend on which name a failure got: an exception the
+            # mapping does not mention -- ``MemoryError``, an interrupt -- was
+            # leaking two of them.
             for descriptor in reversed(descriptors):
                 os.close(descriptor)
 
@@ -4095,17 +4097,31 @@ class LocalFencedRepository:
             return
         for index, projection in enumerate(prepare.projections):
             after_path = bundle / projection.after.name
-            # The target is only ever reached through the pinned walk here,
-            # for the same reason as the rollback above: the name can be made
-            # to answer for a different directory between two operations.
-            with self._pinned_projection_target(projection) as pinned:
+            if target_is_authoritative:
+                # The target is only ever reached through the pinned walk, for
+                # the same reason as the rollback above: the name can be made
+                # to answer for a different directory between two operations.
+                #
+                # The other branch never touches the target -- it retires the
+                # bundle after a rollback already restored it -- so opening a
+                # walk there would only add a way to fail.
+                with self._pinned_projection_target(projection) as pinned:
+                    self._cleanup_one_projection_unlocked(
+                        pinned,
+                        projection,
+                        index,
+                        bundle=bundle,
+                        after_path=after_path,
+                        target_is_authoritative=True,
+                    )
+            else:
                 self._cleanup_one_projection_unlocked(
-                    pinned,
+                    None,
                     projection,
                     index,
                     bundle=bundle,
                     after_path=after_path,
-                    target_is_authoritative=target_is_authoritative,
+                    target_is_authoritative=False,
                 )
         try:
             os.rmdir(bundle)
@@ -4117,7 +4133,7 @@ class LocalFencedRepository:
 
     def _cleanup_one_projection_unlocked(
         self,
-        pinned: _PinnedProjectionTarget,
+        pinned: Optional[_PinnedProjectionTarget],
         projection: ProjectionRecord,
         index: int,
         *,
@@ -4125,7 +4141,11 @@ class LocalFencedRepository:
         after_path: Path,
         target_is_authoritative: bool,
     ) -> None:
-        """Retire one projection's bundle entries against its pinned target."""
+        """Retire one projection's bundle entries against its pinned target.
+
+        ``pinned`` is ``None`` exactly when the target is not authoritative:
+        that branch reads only the bundle, which is the transaction's own.
+        """
         if target_is_authoritative:
             self._require_pinned_projection_ref(
                 pinned,

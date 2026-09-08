@@ -86,15 +86,19 @@ def test_the_mutating_operations_carry_a_directory_descriptor():
     assert "dst_dir_fd=pinned.descriptor" in source
     # Syncing the directory by name would reopen it, which is the same window.
     assert "self._fsync_projection_directory(target.parent)" not in source
-    assert "os.fsync(pinned.descriptor)" in source
+    # Every one of them: two after an unlink, one after the restore.  A
+    # substring check passes with any single one removed.
+    assert source.count("os.fsync(pinned.descriptor)") == 3
 
 
 def test_every_recovery_method_opens_the_pinned_walk():
     for name in RECOVERY_METHODS:
         source = _source(name)
         if name == "_cleanup_one_projection_unlocked":
-            # It receives the pinned target rather than opening one.
-            assert "pinned: _PinnedProjectionTarget" in source
+            # It receives the pinned target rather than opening one, and only
+            # when the target is authoritative -- the other branch reads the
+            # transaction's own bundle and has no target to reach.
+            assert "pinned: Optional[_PinnedProjectionTarget]" in source
             continue
         assert "with self._pinned_projection_target(projection) as pinned:" in source, name
 
@@ -241,3 +245,219 @@ def test_the_closing_verification_still_maps_its_own_failure(tmp_path):
             LocalFencedRepository._verify_pinned_projection_target = original
     assert caught.value.code == "repository-changed"
     assert len(calls) == 2, "the closing verification did not run"
+
+
+def _open_descriptor_count():
+    """How many file descriptors this process holds right now."""
+    return len(os.listdir("/dev/fd"))
+
+
+def test_no_descriptor_leaks_on_any_path(tmp_path):
+    """The pin holds directory descriptors; every exit closes them.
+
+    The mapping above names some failures and not others.  A descriptor's
+    lifetime must not depend on which name a failure got: closing inside the
+    named branches leaves the ones nobody named -- ``MemoryError``, an
+    interrupt -- holding two of them open.
+    """
+    import errno
+
+    import pytest
+
+    from mission_persistence.fenced_commit import FencedCommitError
+
+    local, record = _repository_with_projection(tmp_path)
+
+    def _measure(raise_inside):
+        with local._lock(create=True):
+            before = _open_descriptor_count()
+            try:
+                with local._pinned_projection_target(record):
+                    if raise_inside is not None:
+                        raise raise_inside
+            except BaseException:
+                pass
+            return _open_descriptor_count() - before
+
+    assert _measure(None) == 0, "the normal exit leaks"
+    assert _measure(RuntimeError("stop")) == 0, "a body error leaks"
+    assert _measure(OSError(errno.EACCES, "refused")) == 0, "a body OSError leaks"
+    assert _measure(FencedCommitError("recovery-blocked", "verdict")) == 0
+    # The exceptions the mapping does not mention are the ones that leaked.
+    assert _measure(MemoryError()) == 0, "an unnamed exception leaks"
+    assert _measure(KeyboardInterrupt()) == 0, "an interrupt leaks"
+
+
+def test_no_descriptor_leaks_when_the_walk_itself_fails(tmp_path):
+    """Construction can fail part way, with some descriptors already open."""
+    import pytest
+
+    from mission_persistence.fenced_commit import FencedCommitError, LocalFencedRepository
+
+    local, record = _repository_with_projection(tmp_path)
+    original = LocalFencedRepository._verify_pinned_projection_target
+
+    def _raises(self, pinned):
+        raise MemoryError()
+
+    with local._lock(create=True):
+        before = _open_descriptor_count()
+        LocalFencedRepository._verify_pinned_projection_target = _raises
+        try:
+            with pytest.raises(MemoryError):
+                with local._pinned_projection_target(record):
+                    pass
+        finally:
+            LocalFencedRepository._verify_pinned_projection_target = original
+        assert _open_descriptor_count() - before == 0
+
+
+def test_a_parent_swapped_mid_rollback_lands_in_the_directory_that_was_opened(
+    tmp_path,
+):
+    """The point of the pin, made deterministic.
+
+    The fault hook inside the rollback's pinned body is the moment the window
+    used to be open: the path had been resolved, the operations had not run.
+    Swapping the parent there sent the restore into whatever answered to the
+    name afterwards.  Through the descriptor the walk opened, the restore
+    lands in the directory that was checked, and the closing verification --
+    which asks the same question of the same descriptor -- refuses to call the
+    transaction resolved.
+    """
+    import os
+
+    import pytest
+
+    from mission_persistence.fenced_commit import FencedCommitError
+
+    from .test_issue504_crash_recovery import (
+        _cli_mutation_from_bytes,
+        _commit_cli_init,
+        _kill_during_commit,
+    )
+
+    local, repository, clock, _state_path, base_bytes, _result = _commit_cli_init(
+        tmp_path
+    )
+    clock_text = clock.current.strftime("%Y-%m-%dT%H:%M:%SZ")
+    target_bytes = _cli_mutation_from_bytes(
+        tmp_path / "actual-cli-target",
+        base_bytes,
+        lease_id="fixture-lease",
+        now=clock_text,
+        phase="reviewing",
+    )
+    target_path = tmp_path / "actual-cli-target-state.json"
+    target_path.write_bytes(target_bytes)
+    projection = repository.parent / "compatibility" / "state.json"
+    projection.parent.mkdir(parents=True)
+    projection.write_bytes(base_bytes)
+    killed = _kill_during_commit(
+        repository,
+        target_path,
+        clock_text=clock_text,
+        fault_point="after-projection:0",
+        projection_source=target_path,
+        projection_relative_path="compatibility/state.json",
+    )
+    assert killed.returncode == 91, killed.stderr
+
+    original_parent = projection.parent
+    detached_parent = repository.parent / "compatibility-detached"
+    swapped = []
+
+    def swap_parent(point: str) -> None:
+        if point == "during-projection-rollback:0" and not swapped:
+            swapped.append(point)
+            original_parent.rename(detached_parent)
+            original_parent.mkdir()
+
+    local.fault_injector = swap_parent
+    try:
+        with pytest.raises(FencedCommitError) as blocked:
+            local.recover("test")
+    finally:
+        local.fault_injector = None
+
+    assert swapped, "the rollback did not reach the point the window was at"
+    # The transaction is not resolved, and the prepare survives for a later
+    # recovery to decide.
+    assert blocked.value.code in {"recovery-ambiguous", "repository-changed"}
+    assert next((repository / "transactions" / "prepared").glob("*.json")).exists()
+    # The restore went into the directory the walk opened, which is now the
+    # detached one -- not into whatever took over the name.
+    assert (detached_parent / "state.json").read_bytes() == base_bytes
+    assert not (original_parent / "state.json").exists()
+    assert os.listdir(original_parent) == []
+
+
+def test_a_deleted_parent_now_blocks_the_rollback(tmp_path):
+    """The one place this changes what a non-competing run does.
+
+    Before, the rollback resolved the name each time and would create the
+    parent again on the way; the transaction resolved.  Now the walk has to
+    open the directory the prepare recorded, and a parent that is gone -- or
+    replaced by a new one with a new inode -- is not that directory, so
+    recovery refuses to decide rather than restoring into a stranger.
+
+    This is reachable without a competitor: deleting the projection directory
+    is enough.  It is also how the rollforward arm has always behaved, which
+    is why the two now agree.
+    """
+    import pytest
+
+    from mission_persistence.fenced_commit import FencedCommitError
+
+    from .test_issue504_crash_recovery import (
+        _cli_mutation_from_bytes,
+        _commit_cli_init,
+        _kill_during_commit,
+    )
+
+    for removal in ("delete", "recreate"):
+        root = tmp_path / removal
+        root.mkdir()
+        local, repository, clock, _state_path, base_bytes, _result = _commit_cli_init(
+            root
+        )
+        clock_text = clock.current.strftime("%Y-%m-%dT%H:%M:%SZ")
+        target_bytes = _cli_mutation_from_bytes(
+            root / "actual-cli-target",
+            base_bytes,
+            lease_id="fixture-lease",
+            now=clock_text,
+            phase="reviewing",
+        )
+        target_path = root / "actual-cli-target-state.json"
+        target_path.write_bytes(target_bytes)
+        projection = repository.parent / "compatibility" / "state.json"
+        projection.parent.mkdir(parents=True)
+        projection.write_bytes(base_bytes)
+        killed = _kill_during_commit(
+            repository,
+            target_path,
+            clock_text=clock_text,
+            fault_point="after-projection:0",
+            projection_source=target_path,
+            projection_relative_path="compatibility/state.json",
+        )
+        assert killed.returncode == 91, killed.stderr
+
+        for child in projection.parent.iterdir():
+            child.unlink()
+        projection.parent.rmdir()
+        if removal == "recreate":
+            projection.parent.mkdir()
+
+        with pytest.raises(FencedCommitError) as blocked:
+            local.recover("test")
+        # Which of the two names it gets depends on whether anything answers
+        # to the name at all; both say the transaction is not resolved.
+        assert blocked.value.code in {"recovery-ambiguous", "repository-changed"}, (
+            removal,
+            blocked.value.code,
+        )
+        assert next(
+            (repository / "transactions" / "prepared").glob("*.json")
+        ).exists(), removal
