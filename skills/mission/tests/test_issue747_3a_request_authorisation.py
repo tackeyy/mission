@@ -164,6 +164,9 @@ def test_the_repository_passes_its_own_root_name_to_the_validation():
         and node.func.id == "validate_execution_request"
     ]
     assert calls, "the repository stopped validating its requests"
+    # The count too: dropping one of the four call sites leaves the rest
+    # correct, and a rule that only checks the survivors would not notice.
+    assert len(calls) == 4, len(calls)
     for call in calls:
         names = {
             keyword.arg: ast.unparse(keyword.value) for keyword in call.keywords
@@ -235,3 +238,58 @@ def test_the_executor_compares_the_audit_against_the_command_it_prepared():
         in source
     )
     assert "audit-binding-mismatch" in source
+
+
+def test_a_malformed_audit_gets_the_typed_refusal():
+    """Reading the audit before validating it turns a bad request into a crash.
+
+    Every other malformed field raises ``FencedCommitError``; the authorisation
+    reads ``audit.command_type``, so a request whose audit is absent used to
+    reach an ``AttributeError`` instead -- a different failure for the same
+    class of input.
+    """
+    import json
+
+    from mission_application.ports import ExecutionRequest
+    from mission_kernel.json_codec import decode_json_object
+    from mission_persistence.fenced_commit import (
+        FencedCommitError,
+        validate_execution_request,
+    )
+    from mission_persistence.local_uow import VerifiedBlobSet
+
+    session = "cx-" + "0" * 64
+    command = decode_json_object(
+        json.dumps(
+            {"schema": "mission-command-intent/1", "type": "update-progress"},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    for audit in (None, "update-progress", 7, object()):
+        request = ExecutionRequest(
+            session_id=session,
+            lease_owner_session_id=session,
+            command=command,
+            blobs=VerifiedBlobSet(()),
+            operation_id="0" * 32,
+            intent_digest="sha256:" + "0" * 64,
+            presented_lease_id=None,
+            audit=audit,
+            typed_command=None,
+        )
+        with pytest.raises(FencedCommitError) as caught:
+            validate_execution_request(request)
+        assert caught.value.code == "audit-metadata-invalid", audit
+
+
+def test_the_audit_is_validated_before_it_is_read():
+    """Order matters, and only the order distinguishes the two failures."""
+    import inspect
+
+    from mission_persistence import fenced_commit
+
+    source = inspect.getsource(fenced_commit.validate_execution_request)
+    assert source.index("_audit_record(request.audit)") < source.index(
+        "refuse_unauthorized_generated_blobs("
+    )

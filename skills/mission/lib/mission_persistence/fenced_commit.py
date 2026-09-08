@@ -1359,6 +1359,10 @@ def validate_execution_request(
             raise FencedCommitError(
                 "audit-binding-mismatch", "audit command category differs"
             )
+    # The audit is validated before it is read.  Reading it first turns a
+    # malformed request into an ``AttributeError`` instead of the typed
+    # refusal every other malformed field gets.
+    _audit_record(request.audit)
     refuse_unauthorized_generated_blobs(
         request.audit.command_type,
         request.blobs,
@@ -1377,7 +1381,6 @@ def validate_execution_request(
         )
     if request.presented_lease_id is not None:
         _token(request.presented_lease_id, "presented_lease_id")
-    _audit_record(request.audit)
 
 
 @dataclass(frozen=True)
