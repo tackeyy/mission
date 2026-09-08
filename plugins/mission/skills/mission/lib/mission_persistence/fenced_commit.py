@@ -2857,6 +2857,7 @@ class LocalFencedRepository:
         # the interrupt could land in the argument setup or the new frame.
         try:
             try:
+                owned = len(descriptors)
                 descriptor = os.open(
                     os.fspath(self.root.parent),
                     os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
@@ -2864,10 +2865,16 @@ class LocalFencedRepository:
                 try:
                     descriptors.append(descriptor)
                 except BaseException:
-                    os.close(descriptor)
+                    # Whether the list took it, not whether the append
+                    # returned: an exception delivered after the append
+                    # succeeded would otherwise close a descriptor the list
+                    # already owns, and the ``finally`` would close it again.
+                    if len(descriptors) == owned:
+                        os.close(descriptor)
                     raise
                 identities.append(_directory_identity(os.fstat(descriptor)))
                 for name in names:
+                    owned = len(descriptors)
                     descriptor = os.open(
                         name,
                         os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
@@ -2876,7 +2883,8 @@ class LocalFencedRepository:
                     try:
                         descriptors.append(descriptor)
                     except BaseException:
-                        os.close(descriptor)
+                        if len(descriptors) == owned:
+                            os.close(descriptor)
                         raise
                     opened = os.fstat(descriptor)
                     named = os.stat(
