@@ -394,8 +394,8 @@ def test_a_parent_swapped_mid_rollback_lands_in_the_directory_that_was_opened(
     assert os.listdir(original_parent) == []
 
 
-def test_a_deleted_parent_now_blocks_the_rollback(tmp_path):
-    """The one place this changes what a non-competing run does.
+def test_a_changed_parent_now_blocks_the_rollback(tmp_path):
+    """The places this changes what a non-competing run does.
 
     Before, the rollback resolved the name each time and would create the
     parent again on the way; the transaction resolved.  Now the walk has to
@@ -404,8 +404,12 @@ def test_a_deleted_parent_now_blocks_the_rollback(tmp_path):
     recovery refuses to decide rather than restoring into a stranger.
 
     This is reachable without a competitor: deleting the projection directory
-    is enough.  It is also how the rollforward arm has always behaved, which
+    is enough, and so is changing its mode -- the recorded identity carries
+    ``st_mode``.  It is also how the rollforward arm has always behaved, which
     is why the two now agree.
+
+    **The two are not equally recoverable.**  A deleted or recreated parent
+    cannot be made to match again; a mode change can, by restoring the mode.
     """
     import pytest
 
@@ -417,7 +421,7 @@ def test_a_deleted_parent_now_blocks_the_rollback(tmp_path):
         _kill_during_commit,
     )
 
-    for removal in ("delete", "recreate"):
+    for removal in ("delete", "recreate", "chmod"):
         root = tmp_path / removal
         root.mkdir()
         local, repository, clock, _state_path, base_bytes, _result = _commit_cli_init(
@@ -446,11 +450,17 @@ def test_a_deleted_parent_now_blocks_the_rollback(tmp_path):
         )
         assert killed.returncode == 91, killed.stderr
 
-        for child in projection.parent.iterdir():
-            child.unlink()
-        projection.parent.rmdir()
-        if removal == "recreate":
-            projection.parent.mkdir()
+        if removal == "chmod":
+            # The identity a projection records includes the mode, so the same
+            # directory with different permissions is not the one the prepare
+            # opened.  This needs no competitor and no deletion.
+            projection.parent.chmod(0o700)
+        else:
+            for child in projection.parent.iterdir():
+                child.unlink()
+            projection.parent.rmdir()
+            if removal == "recreate":
+                projection.parent.mkdir()
 
         with pytest.raises(FencedCommitError) as blocked:
             local.recover("test")
@@ -537,3 +547,20 @@ def test_an_append_that_fails_closes_the_descriptor_it_could_not_take(
             sys.settrace(None)
         assert fired, "append occurrence %d was never reached" % occurrence
         assert _open_descriptor_count() - before == 0, "the descriptor leaked"
+
+
+def test_the_owner_check_asks_whether_the_list_took_it(tmp_path):
+    """Closing on ``append`` failing is not the same as closing on not-owned.
+
+    ``except BaseException`` also catches an exception delivered after the
+    append succeeded, when the list already owns the descriptor.  Closing then
+    makes the ``finally`` close it a second time, and the second close raises
+    over the original failure.  Only the length comparison tells the two
+    apart, and no ordinary run reaches the difference.
+    """
+    source = _source("_pinned_projection_target")
+    assert source.count("owned = len(descriptors)") == 2
+    assert source.count("if descriptor is not None and len(descriptors) == owned:") == 2
+    # The sentinel keeps the open inside the guarded block: an interrupt on the
+    # bytecodes before it then finds nothing open.
+    assert source.count("descriptor = None") == 2

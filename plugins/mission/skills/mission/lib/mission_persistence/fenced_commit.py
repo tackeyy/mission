@@ -2858,32 +2858,34 @@ class LocalFencedRepository:
         try:
             try:
                 owned = len(descriptors)
-                descriptor = os.open(
-                    os.fspath(self.root.parent),
-                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                )
+                descriptor = None
                 try:
+                    descriptor = os.open(
+                        os.fspath(self.root.parent),
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    )
                     descriptors.append(descriptor)
                 except BaseException:
                     # Whether the list took it, not whether the append
                     # returned: an exception delivered after the append
                     # succeeded would otherwise close a descriptor the list
                     # already owns, and the ``finally`` would close it again.
-                    if len(descriptors) == owned:
+                    if descriptor is not None and len(descriptors) == owned:
                         os.close(descriptor)
                     raise
                 identities.append(_directory_identity(os.fstat(descriptor)))
                 for name in names:
                     owned = len(descriptors)
-                    descriptor = os.open(
-                        name,
-                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                        dir_fd=descriptors[-1],
-                    )
+                    descriptor = None
                     try:
+                        descriptor = os.open(
+                            name,
+                            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=descriptors[-1],
+                        )
                         descriptors.append(descriptor)
                     except BaseException:
-                        if len(descriptors) == owned:
+                        if descriptor is not None and len(descriptors) == owned:
                             os.close(descriptor)
                         raise
                     opened = os.fstat(descriptor)
