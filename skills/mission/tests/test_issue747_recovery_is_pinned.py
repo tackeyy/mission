@@ -408,10 +408,19 @@ def test_a_changed_parent_now_blocks_the_rollback(tmp_path):
     ``st_mode``.  It is also how the rollforward arm has always behaved, which
     is why the two now agree.
 
-    **They are not equally recoverable.**  A deleted or recreated parent cannot
-    be made to match again -- the identity it had is gone.  A mode change can,
-    by restoring the mode, and a directory moved aside can, by putting it back:
-    in both of those the directory the prepare opened still exists.
+    **They are not equally recoverable.**  A mode change is undone by restoring
+    the mode, and a directory moved aside by putting it back: in both, the
+    directory the prepare opened still exists.  A deleted one does not, and
+    nothing puts its identity back deliberately.
+
+    **"Deleted" is not the same as "can never match again".**  The identity is
+    ``(st_dev, st_ino, st_mode)``, and an inode number is reused after the file
+    it named is gone.  A recreated directory that lands on the same inode with
+    the same mode on the same device therefore *does* match, and recovery then
+    writes into a directory that is not the one the prepare opened.  This is a
+    property of identifying a directory that way -- the commit side has relied
+    on it since before this change -- and is carried on #747 rather than
+    claimed away here.
     """
     import pytest
 
