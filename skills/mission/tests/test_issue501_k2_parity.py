@@ -294,6 +294,7 @@ def test_decide_and_guidance_share_one_named_transition_table():
         "artifact-render",
         "claims-ledger-generate",
         "context-manifest-generate",
+        "executor-handoff-abort",
         "executor-handoff-begin",
         "executor-handoff-complete",
         "executor-handoff-record-step",
