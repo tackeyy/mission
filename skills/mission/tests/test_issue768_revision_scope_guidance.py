@@ -206,6 +206,24 @@ def test_partial_or_malformed_shas_are_rejected(state_dir, run_cli, review_input
     assert "40" in result.stderr
 
 
+def test_skill_md_documents_both_flags_and_the_reviewed_sha_rule():
+    """SKILL.md の案内が退行しないよう固定する.
+
+    本 issue の原因の半分は「文書どおりに呼ぶと必ず止まる」ことだった。実装だけ直して
+    文書が戻ると同じ失敗が再発するので、記述そのものを検査する
+    (独立 Checker が、記述を丸ごと削る変異を全テストが通すことを検出した)。
+    """
+    skill = (
+        Path(__file__).resolve().parent.parent / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+    assert "--base-sha" in skill
+    assert "--head-sha" in skill
+    # 「レビュー時に固定した SHA を渡す」ことまで書かれていること。実行時に算出すると
+    # rev-parse HEAD == head_sha の検査が空回りするので、この一文が案内の要になる。
+    assert "レビュー時に固定した" in skill
+
+
 def test_non_git_project_still_accepts_omitted_shas(
     state_dir, run_cli, review_inputs, tmp_path
 ):
