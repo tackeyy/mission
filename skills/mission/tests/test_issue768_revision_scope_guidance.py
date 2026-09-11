@@ -14,11 +14,23 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import subprocess
 from pathlib import Path
 
 import pytest
+
+
+MISSION_STATE_PY = Path(__file__).resolve().parent.parent / "bin" / "mission-state.py"
+
+
+def _load_mission_state():
+    spec = importlib.util.spec_from_file_location("gs_revision_scope", MISSION_STATE_PY)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -127,6 +139,71 @@ def test_git_project_with_reviewed_shas_is_accepted(
     )
 
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        {"kind": "not-applicable"},
+        {"kind": "not-applicable", "reason_code": "other"},
+        {"kind": "not-applicable", "reason_code": "non-git", "extra": 1},
+    ],
+    ids=["missing-reason", "wrong-reason", "extra-key"],
+)
+def test_malformed_not_applicable_is_invalid_not_a_missing_flag(tmp_path, scope):
+    """形が壊れた not-applicable は「引数不足」ではなく「形の不正」として落とす.
+
+    2 つを同じ文言にすると、直し方が違う失敗を同じ案内へ倒すことになる
+    (フラグを足しても直らないのに、フラグを足せと言うことになる)。
+    `_validate_revision_scope` は保存済み provenance の scope も検査する
+    (`_revalidate_score_provenance`) ので、この分岐は本番でも到達しうる。
+    """
+    module = _load_mission_state()
+
+    with pytest.raises(ValueError) as caught:
+        module._validate_revision_scope(tmp_path, scope)
+
+    message = str(caught.value)
+    assert "invalid" in message
+    assert "--base-sha" not in message
+    assert "--head-sha" not in message
+
+
+def test_well_formed_not_applicable_in_git_project_names_both_flags(tmp_path):
+    """形は正しいが git project、のときだけフラグ不足として案内する."""
+    _make_git_project(tmp_path)
+    module = _load_mission_state()
+
+    with pytest.raises(ValueError) as caught:
+        module._validate_revision_scope(
+            tmp_path, {"kind": "not-applicable", "reason_code": "non-git"}
+        )
+
+    message = str(caught.value)
+    assert "--base-sha" in message
+    assert "--head-sha" in message
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--base-sha", "0" * 40],
+        ["--head-sha", "0" * 40],
+        ["--base-sha", "0" * 40, "--head-sha", "abc"],
+        ["--base-sha", "not-a-sha", "--head-sha", "0" * 40],
+    ],
+    ids=["base-only", "head-only", "short-head", "non-hex-base"],
+)
+def test_partial_or_malformed_shas_are_rejected(state_dir, run_cli, review_inputs, args):
+    """片方だけ・40 桁でない SHA は拒否する.
+
+    本 PR が触った分岐ではないが同じ関数にあり、ここが緩むと
+    「レビューした head を宣言する」という設計が崩れるので固定する。
+    """
+    result = _finalize(run_cli, state_dir, review_inputs, *args)
+
+    assert result.returncode == 2
+    assert "40" in result.stderr
 
 
 def test_non_git_project_still_accepts_omitted_shas(
