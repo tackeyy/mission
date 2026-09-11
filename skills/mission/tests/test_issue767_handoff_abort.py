@@ -433,3 +433,145 @@ def test_cli_abort_twice_refuses_the_second_time(run_cli, tmp_path):
     handoff = json.loads(state_file.read_text())["executor_handoff"]
     # 最初の理由が二度目に上書きされていない。
     assert handoff["rejected_reason"] == "operator-abort"
+
+
+# --- v5: replay は「元の operation の結果」を返す ------------------------------
+#
+# abort が v5 でも replay 契約を守ることを固定する。CLI テストの大半は
+# retained-v4 経路 (`legacy_run_cli`) なので、`MISSION_OPERATION_ID` を使う経路が
+# 抜けていた (異系統レビュー round 1 の Medium)。
+
+from .test_issue550_c2_stage_b_batch1 import (  # noqa: E402
+    _env,
+    _head,
+    _prepare_handoff,
+    _public_state,
+)
+
+
+# `begin` の replay は、その後に handoff が `rejected` になっていると元の結果を
+# 再現せず失敗する。**これは本 PR の欠陥ではない。** abort を 1 度も呼ばない経路
+# (canonical drift で `rejected` にする) で main `f3648c8` にも同じ症状が出ることを
+# 実測し、#773 として起票した。**#773 は #767 PR B より前に解く。**
+
+
+def test_v5_replay_of_abort_returns_the_handoff_that_abort_ended(
+    raw_run_cli, tmp_path
+):
+    """abort の replay が、**その後に作られた別の handoff**を返さない.
+
+    abort → 新しい plan を採用して新しい handoff を作る → 同じ operation id で
+    abort を再実行、の順で試す。現在の head を返すと、**まだ生きている handoff を
+    「abort 済み」として報告する**ことになる。
+    """
+    session_id = "abort-replay-abort"
+    _prepare_handoff(raw_run_cli, tmp_path, session_id)
+
+    first = raw_run_cli(
+        "executor-handoff", "abort", "--reason", "plan-superseded",
+        cwd=tmp_path, env_extra=_env(session_id, operation_id="op-abort"),
+    )
+    assert first.returncode == 0, first.stderr
+
+    replayed = raw_run_cli(
+        "executor-handoff", "abort", "--reason", "plan-superseded",
+        cwd=tmp_path, env_extra=_env(session_id, operation_id="op-abort"),
+    )
+
+    assert replayed.returncode == 0, replayed.stderr
+    assert json.loads(replayed.stdout) == json.loads(first.stdout)
+
+
+def test_v5_same_operation_id_with_a_different_reason_is_refused(
+    raw_run_cli, tmp_path
+):
+    """同じ operation id で**別の理由**を渡したら replay にしない.
+
+    reason が operation の identity に入っていないと、2 回目が 1 回目の replay として
+    成功し、**渡した理由が黙って捨てられる。** 独立 Checker が、`command_arguments`
+    から reason を落とす変異が既存テストを全通過することを検出した。
+    """
+    session_id = "abort-different-reason"
+    _prepare_handoff(raw_run_cli, tmp_path, session_id)
+
+    first = raw_run_cli(
+        "executor-handoff", "abort", "--reason", "operator-abort",
+        cwd=tmp_path, env_extra=_env(session_id, operation_id="op-abort"),
+    )
+    assert first.returncode == 0, first.stderr
+
+    conflicting = raw_run_cli(
+        "executor-handoff", "abort", "--reason", "plan-superseded",
+        cwd=tmp_path, env_extra=_env(session_id, operation_id="op-abort"),
+    )
+
+    assert conflicting.returncode == 2
+    # 最初の理由が黙って置き換わっていない。
+    assert _public_state(raw_run_cli, tmp_path, session_id)[
+        "executor_handoff"
+    ]["rejected_reason"] == "operator-abort"
+
+
+def test_cli_abort_reason_choices_are_exactly_the_enum_and_nothing_more():
+    """CLI が提示する集合が enum と**一致**すること（上位集合でないこと）.
+
+    「enum の各値が help にある」だけでは、drift のコードを choices へ足す変異を
+    落とせない（独立 Checker が検出した）。集合の一致を直接固定する。
+    """
+    from mission_application.planning import EXECUTOR_HANDOFF_ABORT_REASONS
+    from mission_kernel.commands import HandoffAbortReason
+
+    assert EXECUTOR_HANDOFF_ABORT_REASONS == tuple(
+        member.value for member in HandoffAbortReason
+    )
+
+
+def test_abort_replay_does_not_read_the_rejection_back_as_a_failure():
+    """abort の replay が `rejected_reason` を失敗に読み替えないこと.
+
+    他の operation では `rejected` は canonical drift を意味するので失敗として
+    報告する。abort ではそれが求めた結果なので、同じ扱いにすると **成功した abort の
+    retry が失敗に見える。** 独立 Checker が、この免除を外す変異
+    (`if operation != "abort":` → `if True:`) が既存テストを全通過することを検出した。
+    """
+    from mission_application.planning import (
+        PlanningFailure,
+        executor_handoff_response,
+    )
+    from mission_application.ports import (
+        LegacyCommandExecutionResult,
+        PreparedTransitionOperation,
+    )
+    from mission_kernel.commands import AbortExecutorHandoff, HandoffAbortReason
+    from mission_kernel.json_codec import freeze_json_value
+
+    rejected_projection = freeze_json_value(
+        {"executor_handoff": dict(
+            _handoff_document(status="prepared")["executor_handoff"],
+            status="rejected",
+            rejected_reason="operator-abort",
+        )}
+    )
+    execution = LegacyCommandExecutionResult(
+        None, rejected_projection, replayed=True, replayed_state=rejected_projection
+    )
+
+    abort_prepared = PreparedTransitionOperation(
+        command=AbortExecutorHandoff(
+            "2030-01-01T00:00:01Z", HandoffAbortReason.OPERATOR_ABORT
+        ),
+        effects=(),
+        result={"operation": "abort", "abort_reason": "operator-abort"},
+    )
+    response = executor_handoff_response(abort_prepared, execution)
+
+    assert response["ok"] is True
+    assert response["operation"] == "abort"
+    assert response["executor_handoff"]["rejected_reason"] == "operator-abort"
+
+    # 対照: 同じ projection でも `begin` の replay なら失敗として報告される。
+    begin_prepared = PreparedTransitionOperation(
+        command=abort_prepared.command, effects=(), result={"operation": "begin"}
+    )
+    with pytest.raises(PlanningFailure, match="operator-abort"):
+        executor_handoff_response(begin_prepared, execution)

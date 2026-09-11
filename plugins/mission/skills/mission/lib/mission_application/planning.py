@@ -309,6 +309,48 @@ def prepare_executor_handoff_rejection(
     )
 
 
+# --- executor handoff: the static per-operation tables ------------------------
+#
+# These are policy, not wiring: they decide which facts an operation is run
+# with.  They live here rather than beside the argparse code so that they are
+# reviewed as application logic (#767 round 1).
+
+# Operation -> kernel command type.
+EXECUTOR_HANDOFF_COMMAND_NAMES = {
+    "begin": "executor-handoff-begin",
+    "verify": "executor-handoff-verify-step",
+    "record": "executor-handoff-record-step",
+    "complete": "executor-handoff-complete",
+    "abort": "executor-handoff-abort",
+}
+
+# #767 D3.  ``abort`` must not read the canonical plan.  The situations it
+# exists for -- an executor that stopped answering, a plan about to be replaced
+# -- are the ones where that read fails, so requiring it would shut the only
+# exit at the moment it is needed.
+EXECUTOR_HANDOFF_READS_PLAN = {
+    "begin": True,
+    "verify": True,
+    "record": True,
+    "complete": True,
+    "abort": False,
+}
+
+# (the operation was already replayed, the operation reads the plan) -> which
+# source the step ids come from.  ``replay`` derives them from the stored
+# handoff and touches no file, which is also what abort needs.
+EXECUTOR_HANDOFF_FACTS_SOURCE = {
+    (True, True): "replay",
+    (True, False): "replay",
+    (False, True): "fresh",
+    (False, False): "replay",
+}
+
+# The closed set of abort reasons, as the CLI must offer them.  Derived from the
+# kernel enum so the two cannot drift.
+EXECUTOR_HANDOFF_ABORT_REASONS = tuple(member.value for member in HandoffAbortReason)
+
+
 def prepare_executor_handoff_abort(
     state: object,
     *,

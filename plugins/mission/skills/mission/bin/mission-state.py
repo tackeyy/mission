@@ -223,6 +223,10 @@ from mission_application.evidence import (  # noqa: E402
     verify_published_evidence_effects,
 )
 from mission_application.planning import (  # noqa: E402
+    EXECUTOR_HANDOFF_ABORT_REASONS,
+    EXECUTOR_HANDOFF_COMMAND_NAMES,
+    EXECUTOR_HANDOFF_FACTS_SOURCE,
+    EXECUTOR_HANDOFF_READS_PLAN,
     PlanningFailure,
     commit_plan_evidence,
     decide_provider_terminal_result,
@@ -524,10 +528,7 @@ from mission_application.integration_gate import (  # noqa: E402
 from mission_kernel.artifact import (  # noqa: E402
     unknown_artifact_section_message,
 )
-from mission_kernel.commands import (  # noqa: E402
-    GENERIC_SET_FROZEN_FIELDS,
-    HandoffAbortReason,
-)
+from mission_kernel.commands import GENERIC_SET_FROZEN_FIELDS  # noqa: E402
 from mission_kernel.errors import MissionStateDecodeError, StrictReadError  # noqa: E402
 from mission_kernel.json_codec import (  # noqa: E402
     _reject_duplicate_json_pairs,
@@ -13123,49 +13124,11 @@ def cmd_planning_reselect(args):
     print(json.dumps({"ok": True, "planning_policy_version": 1, "next_action": "reselect-planning-provider"}, ensure_ascii=False))
 
 
-# Operation -> kernel command type.  A fixed table, not a decision, so it sits
-# beside the adapter rather than inside it (ADR-006).
-_EXECUTOR_HANDOFF_COMMAND_NAMES = {
-    "begin": "executor-handoff-begin",
-    "verify": "executor-handoff-verify-step",
-    "record": "executor-handoff-record-step",
-    "complete": "executor-handoff-complete",
-    "abort": "executor-handoff-abort",
-}
-
-# #767 D3.  ``abort`` must not read the canonical plan.  The situations it
-# exists for -- an executor that stopped answering, a plan about to be replaced
-# -- are the ones where that read fails, so requiring it would shut the only
-# exit at the moment it is needed.  The replay path already derives the step
-# ids from the stored handoff, so abort reuses it.
-_EXECUTOR_HANDOFF_READS_PLAN = {
-    "begin": True,
-    "verify": True,
-    "record": True,
-    "complete": True,
-    "abort": False,
-}
-
-# (the operation was already replayed, the operation reads the plan) -> source.
-_EXECUTOR_HANDOFF_FACTS_SOURCE = {
-    (True, True): "replay",
-    (True, False): "replay",
-    (False, True): "fresh",
-    (False, False): "replay",
-}
-
-# Derived from the kernel enum so the two cannot drift; the CLI must not accept
-# a reason the kernel would refuse, and must not refuse one it would accept.
-_EXECUTOR_HANDOFF_ABORT_REASONS = tuple(
-    member.value for member in HandoffAbortReason
-)
-
-
 def _cmd_executor_handoff(args, operation: str):
     cwd = Path.cwd()
     sf = resolve_state_file(cwd)
     session_id = sf.stem
-    command_name = _EXECUTOR_HANDOFF_COMMAND_NAMES[operation]
+    command_name = EXECUTOR_HANDOFF_COMMAND_NAMES[operation]
     command_arguments = {
         "begin": {},
         "verify": {"step_id": getattr(args, "step_id", None)},
@@ -13250,9 +13213,9 @@ def _cmd_executor_handoff(args, operation: str):
             steps, dependencies, raw = {
                 "replay": replay_facts,
                 "fresh": fresh_facts,
-            }[_EXECUTOR_HANDOFF_FACTS_SOURCE[(
+            }[EXECUTOR_HANDOFF_FACTS_SOURCE[(
                 bool(getattr(repository, "operation_replayed", False)),
-                _EXECUTOR_HANDOFF_READS_PLAN[operation],
+                EXECUTOR_HANDOFF_READS_PLAN[operation],
             )]]()
             return prepare_executor_handoff(
                 data,
@@ -16966,12 +16929,12 @@ def _add_executor_handoff_parsers(subparsers) -> None:
     p_abort = handoff_sub.add_parser("abort", help="end an open handoff by operator decision")
     # `--reason` is required: the discard cannot be undone, so it is not run
     # without a record of why.
-    p_abort.add_argument("--reason", required=True, choices=_EXECUTOR_HANDOFF_ABORT_REASONS)
+    p_abort.add_argument("--reason", required=True, choices=EXECUTOR_HANDOFF_ABORT_REASONS)
     # Wired as a binding rather than a fifth `cmd_executor_handoff_*` function.
     # The thin-adapter guard requires any *new* adapter function to be free of
-    # violations (`docs/design/626-thin-adapter-guard.md`), and a one-line
-    # delegation to a local helper is not: naming the helper is only allowed
-    # inside parser wiring, which is where this sits.
+    # violations (`docs/design/626-thin-adapter-guard.md` section 1), and a
+    # one-line delegation to a local helper is not: naming the helper is only
+    # allowed inside parser wiring, which is where this sits.
     p_abort.set_defaults(
         func=lambda args: _cmd_executor_handoff(args, "abort"),
         command_outcome_tracking=True,
