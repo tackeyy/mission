@@ -41,6 +41,8 @@ from .commands import (
     RecordSpecialistRecommendation,
     RecordVerification,
     RejectExecutorHandoff,
+    AbortExecutorHandoff,
+    HandoffAbortReason,
     RenderArtifact,
     ResumeStale,
     SetExtensionFields,
@@ -1623,6 +1625,43 @@ def _reject_executor_handoff(
     )
 
 
+# #767 D3.  ``prepared`` and ``consuming`` are the two statuses that hold work
+# open, so they are the two that need a published way out.  The other three are
+# terminal: aborting them would report success without changing anything, and a
+# second abort would overwrite the first reason.
+_ABORTABLE_HANDOFF_STATUSES = (PreparedHandoff, ConsumingHandoff)
+
+
+def _abort_executor_handoff(
+    state: MissionState, raw_command: object
+) -> Transition:
+    command = raw_command
+    assert isinstance(command, AbortExecutorHandoff)
+    handoff = state.handoff
+    if not isinstance(handoff, _ABORTABLE_HANDOFF_STATUSES):
+        raise _Rejected("executor-handoff-not-abortable")
+    # The reason has to arrive as the enum, not as its value.  Accepting the
+    # string would let any caller assembling the command write an arbitrary
+    # reason, which is the thing the closed set exists to prevent.
+    if not isinstance(command.reason, HandoffAbortReason):
+        raise _Rejected("executor-handoff-abort-reason-invalid")
+    rejected = RejectedHandoff(
+        handoff.schema,
+        handoff.handoff_id,
+        handoff.plan,
+        handoff.ordered_step_ids,
+        command.reason.value,
+        getattr(handoff, "begun_at", None),
+    )
+    # Decisions are left alone.  ``prepared`` with decisions is exactly the case
+    # D2 refuses to discard on its own; dropping them here would lose the record
+    # of completed steps at the moment the operator is told it is safe to move on.
+    return Transition(
+        _handoff_state(state, at=command.at, handoff=rejected),
+        (KernelEvent("executor-handoff-aborted"),),
+    )
+
+
 _SPECIALIST_AUTHORITY_FIELDS = frozenset(
     {
         "phase",
@@ -1904,6 +1943,12 @@ TRANSITION_TABLE = build_transition_table(
             RejectExecutorHandoff,
             _command_type_guard(RejectExecutorHandoff),
             _reject_executor_handoff,
+        ),
+        TransitionRule(
+            "executor-handoff-abort",
+            AbortExecutorHandoff,
+            _command_type_guard(AbortExecutorHandoff),
+            _abort_executor_handoff,
         ),
         TransitionRule(
             "specialists-record-recommendation",

@@ -26,7 +26,9 @@ from mission_application.ports import (
 from mission_kernel.commands import (
     BeginExecutorHandoff,
     CanonicalPlanObservation,
+    AbortExecutorHandoff,
     CanonicalPlanRejectionCode,
+    HandoffAbortReason,
     CompleteExecutorHandoff,
     RecordExecutorStep,
     RecordSpecialistRecommendation,
@@ -192,6 +194,7 @@ class ExecutorHandoffRequest:
     at: str
     step_id: str | None = None
     result: str | None = None
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -227,6 +230,14 @@ def prepare_executor_handoff(
         facts, ExecutorHandoffFacts
     ):
         raise PlanningFailure("executor-handoff-request-invalid")
+    if request.operation == "abort":
+        # #767 D3.  Abort ends the handoff and nothing else, so the plan facts
+        # the adapter carries are not consulted -- including the consistency
+        # check below.  Requiring them would tie the exit to a plan that, in
+        # the cases abort exists for, is already gone or already replaced.
+        return prepare_executor_handoff_abort(
+            state, at=request.at, reason_code=request.reason
+        )
     if set(facts.dependencies) != set(facts.step_ids):
         raise PlanningFailure("executor-handoff-dependencies-invalid")
     try:
@@ -294,6 +305,77 @@ def prepare_executor_handoff_rejection(
         result={
             "operation": attempted_operation,
             "rejection": reason.value,
+        },
+    )
+
+
+# --- executor handoff: the static per-operation tables ------------------------
+#
+# These are policy, not wiring: they decide which facts an operation is run
+# with.  They live here rather than beside the argparse code so that they are
+# reviewed as application logic (#767 round 1).
+
+# Operation -> kernel command type.
+EXECUTOR_HANDOFF_COMMAND_NAMES = {
+    "begin": "executor-handoff-begin",
+    "verify": "executor-handoff-verify-step",
+    "record": "executor-handoff-record-step",
+    "complete": "executor-handoff-complete",
+    "abort": "executor-handoff-abort",
+}
+
+# #767 D3.  ``abort`` must not read the canonical plan.  The situations it
+# exists for -- an executor that stopped answering, a plan about to be replaced
+# -- are the ones where that read fails, so requiring it would shut the only
+# exit at the moment it is needed.
+EXECUTOR_HANDOFF_READS_PLAN = {
+    "begin": True,
+    "verify": True,
+    "record": True,
+    "complete": True,
+    "abort": False,
+}
+
+# (the operation was already replayed, the operation reads the plan) -> which
+# source the step ids come from.  ``replay`` derives them from the stored
+# handoff and touches no file, which is also what abort needs.
+EXECUTOR_HANDOFF_FACTS_SOURCE = {
+    (True, True): "replay",
+    (True, False): "replay",
+    (False, True): "fresh",
+    (False, False): "replay",
+}
+
+# The closed set of abort reasons, as the CLI must offer them.  Derived from the
+# kernel enum so the two cannot drift.
+EXECUTOR_HANDOFF_ABORT_REASONS = tuple(member.value for member in HandoffAbortReason)
+
+
+def prepare_executor_handoff_abort(
+    state: object,
+    *,
+    at: object,
+    reason_code: object,
+) -> PreparedTransitionOperation:
+    """Prepare the published exit for an open handoff (#767 D3).
+
+    The reason arrives as a plain string from the command line and is turned
+    into the closed enum here.  Anything the enum does not name -- including a
+    canonical-drift code -- is refused, so a person's decision never lands in
+    the vocabulary that drift counts are read from.
+    """
+    if not isinstance(state, Mapping) or not isinstance(at, str) or not at:
+        raise PlanningFailure("executor-handoff-abort-invalid")
+    try:
+        reason = HandoffAbortReason(reason_code)
+    except (TypeError, ValueError) as exc:
+        raise PlanningFailure("executor-handoff-abort-invalid") from exc
+    return PreparedTransitionOperation(
+        command=AbortExecutorHandoff(at, reason),
+        effects=(),
+        result={
+            "operation": "abort",
+            "abort_reason": reason.value,
         },
     )
 
@@ -375,14 +457,19 @@ def executor_handoff_response(
         )
     projection = execution.projection
     handoff = projection.get("executor_handoff")
-    rejection = prepared.result.get("rejection")
-    if rejection is None and execution.replayed and isinstance(handoff, Mapping):
-        rejection = handoff.get("rejected_reason")
-    if isinstance(rejection, str):
-        raise PlanningFailure(rejection)
     operation = prepared.result.get("operation")
-    if operation not in {"begin", "verify", "record", "complete"}:
+    if operation not in {"begin", "verify", "record", "complete", "abort"}:
         raise PlanningFailure("executor-handoff-execution-invalid")
+    if operation != "abort":
+        # For every other operation a rejected handoff means the canonical plan
+        # drifted, which is a failure to report.  For abort, ``rejected`` is the
+        # outcome the caller asked for, so reading it back -- on a replay of the
+        # same operation id, say -- must not turn success into an error (#767).
+        rejection = prepared.result.get("rejection")
+        if rejection is None and execution.replayed and isinstance(handoff, Mapping):
+            rejection = handoff.get("rejected_reason")
+        if isinstance(rejection, str):
+            raise PlanningFailure(rejection)
     return {
         "ok": True,
         "operation": operation,

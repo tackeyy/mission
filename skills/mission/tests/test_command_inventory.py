@@ -1747,6 +1747,7 @@ def test_c2_repository_and_direct_write_inventories_are_closed_and_disjoint():
 
     assert C2_REPOSITORY_COMMANDS == frozenset(
         {
+            "executor-handoff abort",
             "executor-handoff begin",
             "executor-handoff complete",
             "executor-handoff record-step",

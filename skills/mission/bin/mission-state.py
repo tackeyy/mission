@@ -223,6 +223,10 @@ from mission_application.evidence import (  # noqa: E402
     verify_published_evidence_effects,
 )
 from mission_application.planning import (  # noqa: E402
+    EXECUTOR_HANDOFF_ABORT_REASONS,
+    EXECUTOR_HANDOFF_COMMAND_NAMES,
+    EXECUTOR_HANDOFF_FACTS_SOURCE,
+    EXECUTOR_HANDOFF_READS_PLAN,
     PlanningFailure,
     commit_plan_evidence,
     decide_provider_terminal_result,
@@ -13124,12 +13128,7 @@ def _cmd_executor_handoff(args, operation: str):
     cwd = Path.cwd()
     sf = resolve_state_file(cwd)
     session_id = sf.stem
-    command_name = {
-        "begin": "executor-handoff-begin",
-        "verify": "executor-handoff-verify-step",
-        "record": "executor-handoff-record-step",
-        "complete": "executor-handoff-complete",
-    }[operation]
+    command_name = EXECUTOR_HANDOFF_COMMAND_NAMES[operation]
     command_arguments = {
         "begin": {},
         "verify": {"step_id": getattr(args, "step_id", None)},
@@ -13138,6 +13137,7 @@ def _cmd_executor_handoff(args, operation: str):
             "step_id": getattr(args, "step_id", None),
         },
         "complete": {},
+        "abort": {"reason": getattr(args, "reason", None)},
     }[operation]
     try:
         target_bytes = sf.read_bytes()
@@ -13211,9 +13211,12 @@ def _cmd_executor_handoff(args, operation: str):
                 return steps, dependencies, raw
 
             steps, dependencies, raw = {
-                True: replay_facts,
-                False: fresh_facts,
-            }[bool(getattr(repository, "operation_replayed", False))]()
+                "replay": replay_facts,
+                "fresh": fresh_facts,
+            }[EXECUTOR_HANDOFF_FACTS_SOURCE[(
+                bool(getattr(repository, "operation_replayed", False)),
+                EXECUTOR_HANDOFF_READS_PLAN[operation],
+            )]]()
             return prepare_executor_handoff(
                 data,
                 ExecutorHandoffRequest(
@@ -13221,6 +13224,7 @@ def _cmd_executor_handoff(args, operation: str):
                     at=at,
                     step_id=getattr(args, "step_id", None),
                     result=getattr(args, "result", None),
+                    reason=getattr(args, "reason", None),
                 ),
                 ExecutorHandoffFacts(
                     plan_path=plan.get("path"),
@@ -16922,6 +16926,19 @@ def _add_executor_handoff_parsers(subparsers) -> None:
     p_record_step.set_defaults(func=cmd_executor_handoff_record, command_outcome_tracking=True)
     p_complete = handoff_sub.add_parser("complete", help="consume handoff after all canonical steps")
     p_complete.set_defaults(func=cmd_executor_handoff_complete, command_outcome_tracking=True)
+    p_abort = handoff_sub.add_parser("abort", help="end an open handoff by operator decision")
+    # `--reason` is required: the discard cannot be undone, so it is not run
+    # without a record of why.
+    p_abort.add_argument("--reason", required=True, choices=EXECUTOR_HANDOFF_ABORT_REASONS)
+    # Wired as a binding rather than a fifth `cmd_executor_handoff_*` function.
+    # The thin-adapter guard requires any *new* adapter function to be free of
+    # violations (`docs/design/626-thin-adapter-guard.md` section 1), and a
+    # one-line delegation to a local helper is not: naming the helper is only
+    # allowed inside parser wiring, which is where this sits.
+    p_abort.set_defaults(
+        func=lambda args: _cmd_executor_handoff(args, "abort"),
+        command_outcome_tracking=True,
+    )
 
 
 def _add_evidence_handoff_parsers(subparsers) -> None:
