@@ -378,15 +378,18 @@ def test_cli_abort_offers_exactly_the_enum_reasons_as_closed_choices(run_cli, tm
     見るだけでは外れたことが分からない (変異 11 が生き残った)。**help に列挙される
     ことまで見る**と、値が有限集合として提示されなくなった変異を落とせる。
     """
-    from mission_kernel.commands import HandoffAbortReason
+    import re
+
+    from mission_application.planning import EXECUTOR_HANDOFF_ABORT_REASONS
 
     result = run_cli("executor-handoff", "abort", "--help", cwd=tmp_path)
 
     assert result.returncode == 0, result.stderr
-    for member in HandoffAbortReason:
-        assert member.value in result.stdout
-    # 有限集合として出ていること (自由入力の `--reason REASON` ではない)。
-    assert "--reason REASON" not in result.stdout
+    # **包含ではなく一致で見る。** 「enum の各値が help にある」だけだと、parser に
+    # 別の集合を渡して値を増やす変異が通る (独立 Checker が round 2 で検出した)。
+    offered = re.search(r"--reason \{([^}]*)\}", result.stdout)
+    assert offered is not None, result.stdout
+    assert set(offered.group(1).split(",")) == set(EXECUTOR_HANDOFF_ABORT_REASONS)
 
 
 @pytest.mark.parametrize(
@@ -455,14 +458,15 @@ from .test_issue550_c2_stage_b_batch1 import (  # noqa: E402
 # 実測し、#773 として起票した。**#773 は #767 PR B より前に解く。**
 
 
-def test_v5_replay_of_abort_returns_the_handoff_that_abort_ended(
+def test_v5_replay_of_abort_returns_the_same_result_as_the_first_call(
     raw_run_cli, tmp_path
 ):
-    """abort の replay が、**その後に作られた別の handoff**を返さない.
+    """同じ operation id の abort を 2 度呼ぶと、2 度目は 1 度目の結果を返す.
 
-    abort → 新しい plan を採用して新しい handoff を作る → 同じ operation id で
-    abort を再実行、の順で試す。現在の head を返すと、**まだ生きている handoff を
-    「abort 済み」として報告する**ことになる。
+    **検証しているのは abort 直後の replay までである。** 「abort のあと新しい
+    handoff が作られてから replay する」経路は、adopt-core / advance が `rejected` を
+    破棄できるようになって初めて到達でき、それは PR B の範囲なので本 PR では
+    起こせない。その経路の欠陥は #773 で扱う。
     """
     session_id = "abort-replay-abort"
     _prepare_handoff(raw_run_cli, tmp_path, session_id)
