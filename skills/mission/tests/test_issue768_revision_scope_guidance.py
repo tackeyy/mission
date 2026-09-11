@@ -222,6 +222,11 @@ def test_skill_md_documents_both_flags_and_the_reviewed_sha_rule():
     # 「レビュー時に固定した SHA を渡す」ことまで書かれていること。実行時に算出すると
     # rev-parse HEAD == head_sha の検査が空回りするので、この一文が案内の要になる。
     assert "レビュー時に固定した" in skill
+    # **コマンド例が実行時算出へ戻っていないこと。** 説明文が残っていても、例が
+    # `--head-sha $(git rev-parse HEAD)` になっていれば読み手はそれを写す
+    # (独立 Checker が、例だけを差し替える変異を文言検査がすり抜けることを検出した)。
+    assert "$(git rev-parse" not in skill
+    assert "$(git merge-base" not in skill
 
 
 def test_non_git_project_still_accepts_omitted_shas(
