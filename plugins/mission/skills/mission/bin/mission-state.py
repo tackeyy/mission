@@ -10573,6 +10573,19 @@ def _revision_scope_from_args(args) -> dict:
     return {"kind": "git", "base_sha": base, "head_sha": head}
 
 
+_NOT_APPLICABLE_SCOPE_ERROR = {
+    True: "not-applicable revision_scope is invalid",
+    # **算出せよとは書かない。** 下の検査は `rev-parse HEAD == head_sha` なので、
+    # 実行時に `git rev-parse HEAD` で埋めると常に成立して空回りする。渡すのは
+    # レビュー時に固定した SHA で、その一致検査が「レビュー後に head が動いた」を捕まえる。
+    False: (
+        "git project では --base-sha と --head-sha が必須です。"
+        "レビュー時に固定した base / head の 40 桁 SHA を渡してください。"
+        "実行時に算出した値を渡すと、reviewed head の一致検査が空回りします"
+    ),
+}
+
+
 def _validate_revision_scope(cwd: Path, scope: object) -> None:
     """Bind git scope to this checked-out project, never to a SHA-shaped claim."""
     if not isinstance(scope, dict):
@@ -10581,8 +10594,15 @@ def _validate_revision_scope(cwd: Path, scope: object) -> None:
                          capture_output=True, text=True)
     is_git = git.returncode == 0
     if scope.get("kind") == "not-applicable":
-        if scope != {"kind": "not-applicable", "reason_code": "non-git"} or is_git:
-            raise ValueError("not-applicable revision_scope is allowed only for non-git projects")
+        # 失敗の理由で文言を分ける。旧文言は「non-git でのみ許される」とだけ言い、
+        # 読んだ人を「この project を non-git 扱いにする方法」探しへ誘導していた。
+        # 形が壊れている場合とフラグが足りない場合では直し方が違う。
+        #
+        # 分岐を足さず定数の索引で選ぶ。adapter は argparse 配線と機械的変換だけを
+        # 持つ契約で (ADR-006)、判断を書き足すと thin-adapter ratchet が止める。
+        malformed = scope != {"kind": "not-applicable", "reason_code": "non-git"}
+        if malformed or is_git:
+            raise ValueError(_NOT_APPLICABLE_SCOPE_ERROR[malformed])
         return
     if scope.get("kind") != "git":
         raise ValueError("revision_scope is invalid")
