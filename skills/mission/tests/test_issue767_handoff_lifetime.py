@@ -415,25 +415,62 @@ def test_adopting_a_new_plan_is_refused_while_a_handoff_is_in_flight(
 # 求めているのはこのためである。
 
 
-def _kernel_states(tmp_path):
+def _digest(seed: str = "a") -> str:
+    import hashlib
+
+    return "sha256:" + hashlib.sha256(seed.encode("utf-8")).hexdigest()
+
+
+def _planning_document() -> dict:
+    """planning phase の v4 文書。**CLI を起動せずに組む.**
+
+    `generate_cli_state_corpus` は多数のサブプロセスを起こすので、変異注入の
+    ように何度も回す検査には重すぎる。ここで要るのは「canonical plan があり
+    planning にいる」state だけなので、文書を直接書く。
+    """
+    return {
+        "schema_version": 4,
+        "mission": "re-enter executing after an iteration",
+        "mission_id": "mission-767",
+        "session_id": "portable-session",
+        "phase": "planning",
+        "iteration": 2,
+        "loop_active": True,
+        "passes": False,
+        "halt_reason": "",
+        "updated_at": "2029-12-31T23:59:58Z",
+        "canonical_plan": {
+            "schema": "mission-plan/1",
+            "path": ".mission-state/plans/plan.json",
+            "digest": _digest(),
+            "source": "provider",
+            "source_id": "inv_" + "1" * 32,
+            "source_digest": _digest("b"),
+            "selection_source": "automatic",
+            "iteration": 2,
+            "generation": 4,
+            "validated_at": "2030-01-01T00:00:00Z",
+        },
+        "decisions": [],
+    }
+
+
+def _kernel_states():
     """planning の state と、そこから executing へ進む command を返す."""
-    from mission_kernel import decode_snapshot
+    from mission_kernel import decode_mission_state
     from mission_kernel.commands import AdvancePhase
     from mission_kernel.model import Phase, PreparedHandoff
-    from .mission_state_fixture_corpus import (
-        canonical_json_bytes,
-        generate_cli_state_corpus,
-    )
 
-    corpus = generate_cli_state_corpus(tmp_path.resolve())
-    planning = decode_snapshot(canonical_json_bytes(corpus["provider_plan"])).state
+    state = decode_mission_state(
+        json.dumps(_planning_document()).encode("utf-8")
+    )
     handoff = PreparedHandoff(
         schema="mission-handoff/1",
-        handoff_id="handoff-767-lifetime",
-        plan=planning.plan,
-        ordered_step_ids=("execute",),
+        handoff_id="handoff-767-next",
+        plan=state.plan,
+        ordered_step_ids=("step-1", "step-2"),
     )
-    return planning, AdvancePhase(Phase.EXECUTING, handoff)
+    return state, AdvancePhase(Phase.EXECUTING, handoff)
 
 
 def _with_handoff(state, kind, decisions=()):
@@ -447,7 +484,7 @@ def _with_handoff(state, kind, decisions=()):
         RejectedHandoff,
     )
 
-    common = ("mission-handoff/1", "handoff-767-existing", state.plan, ("execute",))
+    common = ("mission-handoff/1", "handoff-767-existing", state.plan, ("step-1",))
     existing = {
         "prepared": lambda: PreparedHandoff(*common),
         "consuming": lambda: ConsumingHandoff(*common, "2030-01-01T00:00:00Z"),
@@ -481,14 +518,14 @@ def _with_handoff(state, kind, decisions=()):
     ("kind", "decisions", "expected"),
     [
         ("prepared", (), None),
-        ("prepared", ("execute",), "handoff-has-recorded-steps"),
+        ("prepared", ("step-1",), "handoff-has-recorded-steps"),
         ("consuming", (), "handoff-in-flight"),
         ("consumed", (), None),
         ("rejected", (), None),
     ],
     ids=["prepared-clean", "prepared-with-step", "consuming", "consumed", "rejected"],
 )
-def test_the_kernel_itself_applies_the_table(tmp_path, kind, decisions, expected):
+def test_the_kernel_itself_applies_the_table(kind, decisions, expected):
     """受け入れ条件 9。**kernel が単独で D2 の表を適用する.**
 
     application 層の早期拒否を外しても、ここが通る限り誤った advance は commit されない。
@@ -496,7 +533,7 @@ def test_the_kernel_itself_applies_the_table(tmp_path, kind, decisions, expected
     """
     from mission_kernel.transitions import decide
 
-    planning, command = _kernel_states(tmp_path)
+    planning, command = _kernel_states()
 
     result = decide(_with_handoff(planning, kind, decisions), command)
 
@@ -595,3 +632,104 @@ def test_decisions_that_cannot_be_counted_are_not_reported_as_zero(state):
     from mission_application.planning import recorded_handoff_steps
 
     assert recorded_handoff_steps(state, {"handoff_id": "mine"}) is None
+
+
+# --- #774 からの引き継ぎ: complete / verify の replay ---------------------------
+#
+# #774 では不変条件を公開 projection という proxy で固定しており、この 2 つの
+# operation は replay されていなかった。**本 PR が handoff の寿命を変えることで、
+# replay 後に別の handoff が作られる経路が初めて到達可能になる。**
+
+
+def test_replaying_verify_step_survives_a_later_handoff_replacement(
+    raw_run_cli, tmp_path
+):
+    """`verify-step` の replay が、その後に作られた**別の** handoff を返さない.
+
+    replay の応答は `replayed_state` から組むので、あとで handoff が入れ替わっても
+    元の operation が見た handoff を返す。
+    """
+    session_id = "r767-replay-verify"
+    _prepare_handoff(raw_run_cli, tmp_path, session_id)
+    assert raw_run_cli(
+        "executor-handoff", "begin",
+        cwd=tmp_path, env_extra=_env(session_id, operation_id="op-begin"),
+    ).returncode == 0
+    first = raw_run_cli(
+        "executor-handoff", "verify-step", "--step-id", "s1",
+        cwd=tmp_path, env_extra=_env(session_id, operation_id="op-verify"),
+    )
+    assert first.returncode == 0, first.stderr
+    original = json.loads(first.stdout)["executor_handoff"]["handoff_id"]
+
+    # handoff を終わらせ、次の iteration で別の handoff を作る。
+    assert raw_run_cli(
+        "executor-handoff", "abort", "--reason", "operator-abort",
+        cwd=tmp_path, env_extra=_env(session_id, operation_id="op-abort"),
+    ).returncode == 0
+    assert _back_to_planning(
+        raw_run_cli, tmp_path, session_id, "op-back"
+    ).returncode == 0
+    assert raw_run_cli(
+        "advance", "--phase", "executing",
+        cwd=tmp_path, env_extra=_env(session_id, operation_id="op-advance-2"),
+    ).returncode == 0
+    replacement = _public_state(raw_run_cli, tmp_path, session_id)["executor_handoff"]
+    assert replacement["handoff_id"] != original
+
+    replayed = raw_run_cli(
+        "executor-handoff", "verify-step", "--step-id", "s1",
+        cwd=tmp_path, env_extra=_env(session_id, operation_id="op-verify"),
+    )
+
+    assert replayed.returncode == 0, replayed.stderr
+    assert json.loads(replayed.stdout) == json.loads(first.stdout)
+    assert json.loads(replayed.stdout)["executor_handoff"]["handoff_id"] == original
+
+
+def test_replaying_complete_survives_a_later_handoff_replacement(
+    raw_run_cli, tmp_path
+):
+    """`complete` の replay が、その後に作られた**別の** handoff を返さない.
+
+    `complete` は handoff を `consumed` にする。その後 D2 が `consumed` を破棄して
+    新しい handoff を作っても、replay は元の `consumed` を返さなければならない。
+    """
+    session_id = "r767-replay-complete"
+    _prepare_handoff(raw_run_cli, tmp_path, session_id)
+    for operation_id, command in [
+        ("op-begin", ("begin",)),
+        ("op-s1", ("record-step", "--step-id", "s1", "--result", "ok")),
+        ("op-s2", ("record-step", "--step-id", "s2", "--result", "ok")),
+    ]:
+        assert raw_run_cli(
+            "executor-handoff", *command,
+            cwd=tmp_path, env_extra=_env(session_id, operation_id=operation_id),
+        ).returncode == 0, command
+    first = raw_run_cli(
+        "executor-handoff", "complete",
+        cwd=tmp_path, env_extra=_env(session_id, operation_id="op-complete"),
+    )
+    assert first.returncode == 0, first.stderr
+    original = json.loads(first.stdout)["executor_handoff"]
+    assert original["status"] == "consumed"
+
+    assert _back_to_planning(
+        raw_run_cli, tmp_path, session_id, "op-back"
+    ).returncode == 0
+    assert raw_run_cli(
+        "advance", "--phase", "executing",
+        cwd=tmp_path, env_extra=_env(session_id, operation_id="op-advance-2"),
+    ).returncode == 0
+    replacement = _public_state(raw_run_cli, tmp_path, session_id)["executor_handoff"]
+    assert replacement["status"] == "prepared"
+    assert replacement["handoff_id"] != original["handoff_id"]
+
+    replayed = raw_run_cli(
+        "executor-handoff", "complete",
+        cwd=tmp_path, env_extra=_env(session_id, operation_id="op-complete"),
+    )
+
+    assert replayed.returncode == 0, replayed.stderr
+    assert json.loads(replayed.stdout) == json.loads(first.stdout)
+    assert json.loads(replayed.stdout)["executor_handoff"]["status"] == "consumed"
