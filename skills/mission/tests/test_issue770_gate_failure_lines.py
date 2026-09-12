@@ -127,6 +127,28 @@ def test_excerpt_reserves_space_for_tail_and_marks_truncation():
     assert "tail sentinel" in excerpt
 
 
+def test_excerpt_marks_truncation_in_the_matched_failure_section():
+    """A truncated matching section must identify its own omitted records."""
+    output = "\n".join(
+        "FAILED marker-{:03d} {}".format(index, "y" * 20) for index in range(400)
+    )
+
+    excerpt = gate.suite_failure_excerpt(output, "", limit=4000)
+    matched_section, _ = excerpt.split("[suite_failure] output tail:\n", 1)
+
+    assert "[suite_failure] output truncated" in matched_section
+
+
+def test_excerpt_marks_truncation_at_the_declared_4000_character_limit():
+    """A long no-match log must not silently omit its truncation marker."""
+    output = "\n".join("l{:03d} {}".format(index, "x" * 25) for index in range(145))
+
+    excerpt = gate.suite_failure_excerpt(output, "", limit=4000)
+
+    assert len(excerpt) <= 4000
+    assert "output truncated" in excerpt
+
+
 def test_excerpt_keeps_the_actual_final_line_when_every_line_matches():
     """The tail is selected before duplicate matched records are removed."""
     excerpt = gate.suite_failure_excerpt(
@@ -150,6 +172,16 @@ def test_excerpt_uses_the_final_nonmatching_lines_for_its_tail():
     assert "final tail sentinel" in excerpt
 
 
+def test_excerpt_uses_final_no_match_lines_for_its_tail():
+    """Runners without English markers still need their final diagnostics."""
+    output = "\n".join("診断行 {:02d}".format(index) for index in range(40))
+
+    excerpt = gate.suite_failure_excerpt(output, "", limit=180)
+
+    assert "診断行 39" in excerpt
+    assert "診断行 00" not in excerpt
+
+
 def test_excerpt_removes_controls_and_every_emitted_line_has_the_fixed_prefix():
     """Only newline may separate records after untrusted suite output is surfaced."""
     controls = "\x00\x01\x1b\r\x7f\u0085\u009b\u009d\u2028\u2029"
@@ -171,6 +203,16 @@ def test_excerpt_rejects_limits_that_cannot_hold_both_required_headers():
     """A matching excerpt always needs both section headings."""
     with pytest.raises(ValueError, match="at least"):
         gate.suite_failure_excerpt("FAILED example\n", "", limit=60)
+
+
+def test_excerpt_enforces_the_exact_minimum_limit_boundary():
+    """Both section headers fit at 67 characters, and no smaller limit does."""
+    with pytest.raises(ValueError, match="at least"):
+        gate.suite_failure_excerpt("FAILED example\n", "", limit=66)
+
+    excerpt = gate.suite_failure_excerpt("FAILED example\n", "", limit=67)
+
+    assert len(excerpt) <= 67
 
 
 def test_excerpt_preserves_stdout_before_stderr():
@@ -249,8 +291,8 @@ def test_successful_suite_does_not_add_logger_output(tmp_path):
     assert logged == []
 
 
-def test_the_embedded_word_guard_would_reject_a_substring_matching_mutation(monkeypatch):
-    """This regression test is intentionally sensitive to a substring matcher."""
+def test_excerpt_resolves_the_failure_classifier_through_the_module_attribute(monkeypatch):
+    """The formatter intentionally uses the module-level classifier seam."""
     monkeypatch.setattr(gate, "_is_failure_line", lambda line: "FAIL" in line)
 
     excerpt = gate.suite_failure_excerpt("FAILURE is not a marker\n", "", limit=4000)

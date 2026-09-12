@@ -281,16 +281,23 @@ def _bounded_failure_section(
         if len(proposed) <= limit:
             selected = chosen_entries
             continue
-        without_marker = "\n".join([_SUITE_FAILURE_PREFIX + title] + chosen)
-        if from_end and len(without_marker) <= limit:
-            selected = chosen_entries
         break
     rendered = [_SUITE_FAILURE_PREFIX + title] + [
         _SUITE_FAILURE_PREFIX + line for _, line in selected
     ]
-    if len("\n".join(rendered + [marker])) <= limit:
-        rendered.append(marker)
     return "\n".join(rendered), True, {index for index, _ in selected}
+
+
+def _with_truncation_marker(section: str, truncated: bool, limit: int) -> str:
+    """Append the reserved marker whenever a bounded section omitted output."""
+    if not truncated:
+        return section
+    marker = _SUITE_FAILURE_PREFIX + "output truncated"
+    marked = "\n".join((section, marker))
+    # At the documented 67-character minimum both required headers fit exactly,
+    # but no diagnostic line can fit.  Every larger bounded section reserves this
+    # marker before accepting content in `_bounded_failure_section`.
+    return marked if len(marked) <= limit else section
 
 
 def suite_failure_excerpt(stdout, stderr, *, limit):
@@ -326,21 +333,29 @@ def suite_failure_excerpt(stdout, stderr, *, limit):
             entry for entry in entries
             if entry[0] in matched_indices
         ]
-        matched_section, _, matched_selected_indices = _bounded_failure_section(
+        matched_section, matched_truncated, matched_selected_indices = _bounded_failure_section(
             _MATCHED_FAILURE_TITLE, matched_entries, matched_budget
+        )
+        matched_section = _with_truncation_marker(
+            matched_section, matched_truncated, matched_budget
         )
         tail_entries = [
             entry for entry in entries if entry[0] not in matched_selected_indices
         ]
-        tail_section, _, _ = _bounded_failure_section(
+        tail_section, tail_truncated, _ = _bounded_failure_section(
             _OUTPUT_TAIL_TITLE,
             tail_entries,
             limit - len(matched_section) - 1,
             from_end=True,
         )
+        tail_section = _with_truncation_marker(
+            tail_section, tail_truncated, limit - len(matched_section) - 1
+        )
         return "\n".join((matched_section, tail_section))
-    tail_section, _, _ = _bounded_failure_section(_OUTPUT_TAIL_TITLE, entries, limit, from_end=True)
-    return tail_section
+    tail_section, tail_truncated, _ = _bounded_failure_section(
+        _OUTPUT_TAIL_TITLE, entries, limit, from_end=True
+    )
+    return _with_truncation_marker(tail_section, tail_truncated, limit)
 
 
 def load_suite_contract(operations, *, base_sha: str, step: int) -> dict:
