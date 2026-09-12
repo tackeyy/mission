@@ -109,34 +109,42 @@ real 2.41
 
 **この切り替えは本番へ漏らさない。** 下の D2 で経路を閉じる。
 
-### D2. 本番の hook が変数を**明示的に除去**する（継承を塞ぐ）
+### D2. 切り替えは「時計も注入されているとき」だけ効く（連言で隔離する）
 
-新しい環境変数 `MISSION_STOP_GUARD_PER_COMMAND_BUDGET` を置く。**値が `1` のときだけ**
-`resolve_deadline` が carried deadline を**予算の起点として採らず**、常に `now + budget` を
-返す（読むこと自体はやめない。D4 を参照）。
+新しい環境変数 `MISSION_STOP_GUARD_PER_COMMAND_BUDGET` を置く。
+**ただし、それ単独では何も起きない。**
 
-**既存の変数を再利用しない。** `CONTINUATION_ENV_VAR` や `DEADLINE_ENV_VAR` の意味を
-変えると、本番の fail-closed に影響する。
+**次の 2 つが同時に成立するときだけ**、`resolve_deadline` は carried deadline を予算の
+起点として採らず `now + budget` を返す。
 
-#### 「hook が設定しない」では隔離にならない
+1. `MISSION_STOP_GUARD_PER_COMMAND_BUDGET` が `1`
+2. **`MISSION_STOP_GUARD_NOW_EPOCH` が設定され、有効な値である**（観測時刻の注入）
 
-round 1 の High。`scripts/mission-stop-guard.sh` は **親の環境をそのまま継承**して
-`python3` を起動する。したがって **利用者や起動元がこの変数を持っていれば、本番でも
-効いてしまう。** 「hook が設定しない」は「本番では未設定」を保証しない。
+#### なぜこの形にするか
 
-**本番の hook は、この変数を明示的に取り除いてから CLI を起動する。**
+**round 1 の High と round 2 の Medium は、同じ 1 点の裏表だった。**
 
-```
-_mission_state_bounded() {
-  ... env -u MISSION_STOP_GUARD_PER_COMMAND_BUDGET python3 "$MISSION_STATE_PY" "$@"
-}
-```
+- round 1: hook は親の環境を継承するので「hook が設定しない」では本番へ漏れる
+- round 2: **対象テストは CLI を直接呼ばず hook を起動する**。hook が除去すると、
+  テストからも切り替えられない
 
-**これで隔離の向きが逆になる。** 変数が有効になるのは
-**hook を経由せずに CLI を直接起動した場合だけ**であり、それがテストの経路である。
+**除去では両立しない。** 変数を通す経路とテストの経路が同じだからである。
 
-`env -u` が使えない環境では、shell の中で `unset` してから起動する。
-**どちらにせよ、除去は hook の内側で行う。**
+**連言にすると両立する。** 2 番目の条件は**テストが既に注入しているもの**で、hook を
+素通りして CLI へ届く（`_guard_observed_epoch` が環境から直接読む）。
+したがって **hook は一切変更しなくてよい。**
+
+#### 隔離として十分な理由
+
+**本番で 1 だけ設定しても何も変わらない。** 2 も設定するということは、**ガードが見る
+「いま」を呼び出し側が決めている**ということであり、そのとき壁時計の予算は意味を持たない。
+
+**この連言は新しい能力を与えない。** `MISSION_STOP_GUARD_NOW_EPOCH` を本番で設定できる
+なら、**ガードの鮮度・stale 判定はすでに偽装できている。** 予算の起点が変わることは、
+それに比べて小さい。**既存の露出の内側にある。**
+
+**逆に、除去する形にすると本番の hook を変えることになる。** 変えないで済むなら、
+そのほうが漏れる面が小さい。
 
 ### D3. 予算を跨ぐ挙動を検査するテストは、この切り替えを使わない
 
@@ -156,7 +164,7 @@ round 1 の Medium。現行の `resolve_deadline` は carried deadline の**存�
 
 **決定を 1 つに揃える。**
 
-| 段階 | 変数なし | 変数あり |
+| 段階 | 連言が不成立 | 連言が成立 |
 |---|---|---|
 | carried deadline を読む | 読む | **読む（検証のため）** |
 | 無効なら継続で `GuardBudgetLost` | 上げる | **上げる（同じ）** |
@@ -164,15 +172,15 @@ round 1 の Medium。現行の `resolve_deadline` は carried deadline の**存�
 
 **変わるのは最後の 1 行だけである。** 継続 token の妥当性検査は従来どおり働く。
 
-### D5. 切り替えが本番へ漏れていないことを検査する
+### D5. 連言が成立しない組み合わせで何も変わらないことを検査する
 
-- `resolve_deadline` が、変数なしでは従来どおり carried deadline を採ること
-- 変数ありでは採らず `now + budget` を返すこと
-- **継続で予算を失ったときの `GuardBudgetLost` が、変数の有無に関わらず送出されること**
-- **`scripts/mission-stop-guard.sh` が CLI 起動時にこの変数を除去すること**
+- **`PER_COMMAND_BUDGET` だけ**では従来どおり carried deadline を採ること
+- **`NOW_EPOCH` だけ**でも従来どおりであること
+- **両方あるときだけ** `now + budget` を返すこと
+- **`NOW_EPOCH` が不正な値**（空・負・非数値）のときは連言が成立しないこと
+- **継続で予算を失ったときの `GuardBudgetLost` が、どの組み合わせでも送出されること**
 
-最後の 1 つが round 1 の High への答えである。**「設定しない」ではなく「除去する」を
-検査する。** 親から継承した値が子へ届かないことを、hook を実際に走らせて確かめる。
+**1 つ目が round 1 の High への答えである。** 親から変数を継承しただけでは何も起きない。
 
 ### D6. 終端理由の統一は本 Issue の範囲外
 
@@ -187,15 +195,15 @@ stderr へ理由を出して非ゼロ終了し、shell はその stderr を rece
 
 ## 受け入れ条件
 
-1. `MISSION_STOP_GUARD_PER_COMMAND_BUDGET=1` のとき、`resolve_deadline` は
-   carried deadline を**予算の起点として採らず** `now + budget` を返す。
+1. **2 つの変数が揃っているとき**、`resolve_deadline` は carried deadline を
+   **予算の起点として採らず** `now + budget` を返す。
    **読むこと自体はやめない**（条件 4 の検証に要る）
 2. 変数が無いとき、`resolve_deadline` の挙動は現状と同一である
-3. 変数が `1` 以外（空・`0`・`true`・未知の値）のときも現状と同一である
-4. **継続で予算を失ったときの `GuardBudgetLost` は、変数の有無に関わらず送出される**
-5. **`scripts/mission-stop-guard.sh` は CLI 起動時にこの変数を除去する。**
-   親の環境に `MISSION_STOP_GUARD_PER_COMMAND_BUDGET=1` があっても、hook 経由の CLI には
-   届かない（hook を実際に走らせて確かめる）
+3. `PER_COMMAND_BUDGET` が `1` 以外（空・`0`・`true`・未知の値）のときも現状と同一である
+4. **継続で予算を失ったときの `GuardBudgetLost` は、変数のどの組み合わせでも送出される**
+5. **`MISSION_STOP_GUARD_PER_COMMAND_BUDGET=1` だけでは何も変わらない。**
+   `MISSION_STOP_GUARD_NOW_EPOCH` が有効な値として設定されているときにだけ効く
+5b. **`scripts/mission-stop-guard.sh` を変更しない**（差分が無いことを検査する）
 6. `test_stop_guard_dedupe.py` と `test_stop_hook.py` が、共有ヘルパー 1 箇所でこの変数を
    設定する。**個々のテストが直接設定しない**
 7. `test_issue742_stop_guard_timeout.py` と `test_issue754_guard_budget_reserve.py` は
@@ -206,9 +214,9 @@ stderr へ理由を出して非ゼロ終了し、shell はその stderr を rece
 
 ## テストリスト
 
-- 純関数: `resolve_deadline` の変数あり / なし / 不正値
-- 純関数: 継続の fail-closed が変数に影響されない
-- 統合: hook 経由の CLI に、親から継承した変数が届かない
+- 純関数: `resolve_deadline` の 2 変数の組み合わせ（両方 / 片方ずつ / なし / 不正値）
+- 純関数: 継続の fail-closed がどの組み合わせでも働く
+- 文字列: `scripts/mission-stop-guard.sh` に差分が無い
 - 文字列: 対象 2 ファイルが共有ヘルパー経由で設定し、他の 2 ファイルが設定しない
 - 統合: 1 コマンドが予算を超えれば従来どおり打ち切られる
 
