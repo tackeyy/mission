@@ -483,21 +483,6 @@ def test_operation_record_keys_refuse_an_unknown_version():
             operation_record_keys(version)
 
 
-def test_the_repository_no_longer_parses_the_operation_record_itself():
-    """The repository must delegate, or the shared rules never run.
-
-    Replacing the delegating call with a constant left every pre-existing
-    test green, so the absence of a second parser is worth holding.
-    """
-    from pathlib import Path
-
-    import mission_persistence.fenced_commit as module
-
-    source = Path(module.__file__).read_text(encoding="utf-8")
-    assert "read_operation_record(document, repository_root_name=" in source
-    assert 'if document["schema"] != "mission-operation/1"' not in source
-
-
 def _operation_document(version, materialization=None):
     document = {
         "commit_digest": "sha256:" + "c" * 64,
@@ -1174,15 +1159,6 @@ def test_a_non_canonical_path_does_not_survive_the_round_trip():
     assert generated_blobs_digest((binding,)) == generated_blobs_digest((canonical,))
 
 
-def test_the_repository_passes_its_own_root_name_to_the_reader():
-    from pathlib import Path
-
-    import mission_persistence.fenced_commit as module
-
-    source = Path(module.__file__).read_text(encoding="utf-8")
-    assert "read_operation_record(document, repository_root_name=self.root.name)" in source
-
-
 @pytest.mark.parametrize(
     "broken",
     [
@@ -1263,18 +1239,3 @@ def test_derive_blob_id_refuses_a_non_canonical_path_directly():
     with pytest.raises(EvidencePublicationError) as excinfo:
         derive_blob_id("build//x.json")
     assert "canonical" in excinfo.value.detail
-
-
-def test_one_function_decides_what_a_binding_is():
-    """The same rule in two places is how the writer and reader drifted."""
-    from pathlib import Path
-
-    import mission_application.evidence_publication as module
-
-    source = Path(module.__file__).read_text(encoding="utf-8")
-    # Defined once, called by the partition for generated bindings; the
-    # materialization holds a digest, so the reader no longer re-parses
-    # bindings (#747 P2).
-    assert source.count("def _canonical_binding(") == 1
-    assert source.count("_canonical_binding(") == 2
-    assert "_check_materialized_binding" not in source

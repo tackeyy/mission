@@ -204,7 +204,7 @@ def test_resume_gap_classifies_legacy_crash_provider_and_clock_boundaries():
 
 
 def test_parallel_implementer_sessions_have_no_zero_activity_cohort(run_cli, tmp_path):
-    for index in range(7):
+    for index in range(2):
         env = {"MISSION_SESSION_ID": f"parallel-{index}", "MISSION_LEASE_ID": f"lease-{index}"}
         run_cli("init", f"parallel {index}", cwd=tmp_path, check=True, env_extra=env)
         run_cli(

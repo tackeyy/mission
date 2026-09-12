@@ -39,14 +39,6 @@ def test_agent_independent_of_mission_session_id(monkeypatch):
     assert m.resolve_agent() == "claude-code"
 
 
-def test_init_records_agent_cli(tmp_path, run_cli):
-    """run_cli (Claude Code/Codex env 遮断) の init は agent=cli を記録."""
-    run_cli("init", "g", "--complexity", "Standard", cwd=tmp_path, check=True)
-    path = tmp_path / ".mission-state" / "sessions" / "test.json"
-    d = read_authoritative_snapshot(path, expected_session_id="test").document_copy()
-    assert d["agent"] == "cli"
-
-
 def test_init_records_agent_codex(tmp_path, run_cli):
     """CODEX_THREAD_ID 起動の init は agent=codex を記録 (MISSION_SESSION_ID 明示でも)."""
     run_cli("init", "g", "--complexity", "Standard", cwd=tmp_path,

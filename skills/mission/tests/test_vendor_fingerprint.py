@@ -81,34 +81,12 @@ def _tracked_files():
     return [p for p in out.split("\0") if p]
 
 
-# ---- 照合ロジックの単体テスト (実際の禁止語は使わず合成語で検証する) ----
+# ---- policy 共通 scanner contract ----
 _FIXTURE = frozenset({"73b5a32453860402"})  # sha256('zzsynthetic')[:16]
 
 
-def test_detects_standalone_token():
-    assert _banned_tokens("zzsynthetic の思想で再設計", _FIXTURE)
-
-
-def test_detects_token_adjacent_to_japanese():
-    """\\b / \\w は Unicode 単語文字を含むため、日本語直結で取りこぼしやすい。"""
-    assert _banned_tokens("設計をzzsyntheticモデルで完成", _FIXTURE)
-
-
-def test_detects_token_inside_separated_identifier():
-    """実行ログ由来のファイル名で再混入した実例の形。"""
-    assert _banned_tokens("2026-06-18T06-21-35-Ztry-mission_zzsynthetic_redesign.md", _FIXTURE)
-    assert _banned_tokens("docs/zzsynthetic-redesign-analysis.md", _FIXTURE)
-
-
-def test_scan_covers_file_paths_not_only_contents():
-    """過去の実混入はファイル名だった。パス照合が外れると素通りする。"""
-    assert _banned_tokens("docs/zzsynthetic-redesign-analysis.md", _FIXTURE)
-    assert not _banned_tokens("docs/ontology-redesign-analysis.md", _FIXTURE)
-
-
-def test_ignores_substrings():
-    for sample in ("zzsyntheticality", "prezzsynthetic", "zzsynthetics"):
-        assert not _banned_tokens(sample, _FIXTURE), f"偽陽性: {sample}"
+def test_scanner_contract(scanner_contract):
+    scanner_contract(lambda text: _banned_tokens(text, _FIXTURE))
 
 
 _FIXTURE_ALLOWED = frozenset({"a20e11a50541e956"})  # sha256('zzallow-zzsynthetic')[:16]

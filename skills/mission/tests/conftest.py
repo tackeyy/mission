@@ -19,6 +19,32 @@ from scoring_provenance import reduce_review_aggregate
 REVIEW_SCORE_KEYS = ("mission_achievement", "accuracy", "completeness", "usability")
 
 
+@pytest.fixture
+def scanner_contract():
+    """Shared behavioral contract for hashed-token repository scanners."""
+    def assert_contract(scanner):
+        detected = (
+            "zzsynthetic の思想で再設計",
+            "設計をzzsyntheticモデルで完成",
+            "docs/zzsynthetic-redesign-analysis.md",
+            "project_root=/dev/zzsynthetic 不存在",
+            "ZZSYNTHETIC ラン",
+        )
+        ignored = (
+            "zzsyntheticality",
+            "prezzsynthetic",
+            "zzsynthetics",
+            "docs/ontology-redesign-analysis.md",
+            "mission の scoring gate を修正",
+        )
+        for sample in detected:
+            assert scanner(sample), f"取りこぼし: {sample}"
+        for sample in ignored:
+            assert not scanner(sample), f"偽陽性: {sample}"
+
+    return assert_contract
+
+
 def write_canonical_review_aggregate(root, reviews, *, iteration=1, name_prefix="fixture"):
     """Write a content-addressed aggregate whose claim is reducer-derived.
 
