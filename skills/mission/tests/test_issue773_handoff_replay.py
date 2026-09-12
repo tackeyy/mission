@@ -590,3 +590,49 @@ def test_a_fenced_error_from_prepare_is_not_swallowed_by_the_hold(monkeypatch):
 
     assert response["ok"] is True
     assert ExecutorHandoffRejected is not None
+
+
+def test_every_handoff_command_leaves_a_handoff_behind(raw_run_cli, tmp_path):
+    """fail-closed の根拠となる不変条件を固定する.
+
+    replay で `executor_handoff` が無いことを失敗として扱う判断は、「どの handoff 命令も
+    handoff を残す」ことに依っている。**この不変条件が崩れると、いままで成功していた
+    replay が失敗に変わる**（独立 Checker の指摘）。
+
+    `begin` / `verify-step` / `record-step` / `complete` / `abort` を実際に通し、
+    どの時点でも state に `executor_handoff` があることを見る。
+    """
+    session_id = "r773-invariant"
+    _prepare_handoff(raw_run_cli, tmp_path, session_id)
+    # `_head` は v5 の生ファイルで projection ではないので、公開 state を読む。
+    observed = [_public_state(raw_run_cli, tmp_path, session_id).get("executor_handoff")]
+
+    steps = [
+        ("op-begin", ("begin",)),
+        ("op-verify", ("verify-step", "--step-id", "s1")),
+        ("op-record-1", ("record-step", "--step-id", "s1", "--result", "ok")),
+        ("op-record-2", ("record-step", "--step-id", "s2", "--result", "ok")),
+        ("op-complete", ("complete",)),
+    ]
+    for operation_id, command in steps:
+        result = raw_run_cli(
+            "executor-handoff", *command,
+            cwd=tmp_path, env_extra=_env(session_id, operation_id=operation_id),
+        )
+        assert result.returncode == 0, (command, result.stderr)
+        observed.append(
+            _public_state(raw_run_cli, tmp_path, session_id).get("executor_handoff")
+        )
+
+    assert all(isinstance(item, dict) for item in observed), observed
+
+    # abort も同じ（別 session で `prepared` から直接）。
+    abort_session = "r773-invariant-abort"
+    _prepare_handoff(raw_run_cli, tmp_path, abort_session)
+    assert raw_run_cli(
+        "executor-handoff", "abort", "--reason", "operator-abort",
+        cwd=tmp_path, env_extra=_env(abort_session, operation_id="op-abort"),
+    ).returncode == 0
+    assert isinstance(
+        _public_state(raw_run_cli, tmp_path, abort_session).get("executor_handoff"), dict
+    )
