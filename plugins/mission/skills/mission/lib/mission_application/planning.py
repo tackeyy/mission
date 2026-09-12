@@ -23,10 +23,13 @@ from mission_application.ports import (
     LegacyCommandExecutionResult,
     PreparedTransitionOperation,
 )
+from mission_kernel.transitions import handoff_discard_refusal
 from mission_kernel.commands import (
     BeginExecutorHandoff,
     CanonicalPlanObservation,
+    AbortExecutorHandoff,
     CanonicalPlanRejectionCode,
+    HandoffAbortReason,
     CompleteExecutorHandoff,
     RecordExecutorStep,
     RecordSpecialistRecommendation,
@@ -192,6 +195,7 @@ class ExecutorHandoffRequest:
     at: str
     step_id: str | None = None
     result: str | None = None
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -227,6 +231,14 @@ def prepare_executor_handoff(
         facts, ExecutorHandoffFacts
     ):
         raise PlanningFailure("executor-handoff-request-invalid")
+    if request.operation == "abort":
+        # #767 D3.  Abort ends the handoff and nothing else, so the plan facts
+        # the adapter carries are not consulted -- including the consistency
+        # check below.  Requiring them would tie the exit to a plan that, in
+        # the cases abort exists for, is already gone or already replaced.
+        return prepare_executor_handoff_abort(
+            state, at=request.at, reason_code=request.reason
+        )
     if set(facts.dependencies) != set(facts.step_ids):
         raise PlanningFailure("executor-handoff-dependencies-invalid")
     try:
@@ -298,12 +310,146 @@ def prepare_executor_handoff_rejection(
     )
 
 
+# --- executor handoff: the static per-operation tables ------------------------
+#
+# These are policy, not wiring: they decide which facts an operation is run
+# with.  They live here rather than beside the argparse code so that they are
+# reviewed as application logic (#767 round 1).
+
+# Operation -> kernel command type.
+EXECUTOR_HANDOFF_COMMAND_NAMES = {
+    "begin": "executor-handoff-begin",
+    "verify": "executor-handoff-verify-step",
+    "record": "executor-handoff-record-step",
+    "complete": "executor-handoff-complete",
+    "abort": "executor-handoff-abort",
+}
+
+# #767 D3.  ``abort`` must not read the canonical plan.  The situations it
+# exists for -- an executor that stopped answering, a plan about to be replaced
+# -- are the ones where that read fails, so requiring it would shut the only
+# exit at the moment it is needed.
+EXECUTOR_HANDOFF_READS_PLAN = {
+    "begin": True,
+    "verify": True,
+    "record": True,
+    "complete": True,
+    "abort": False,
+}
+
+# (the operation was already replayed, the operation reads the plan) -> which
+# source the step ids come from.  ``replay`` derives them from the stored
+# handoff and touches no file, which is also what abort needs.
+EXECUTOR_HANDOFF_FACTS_SOURCE = {
+    (True, True): "replay",
+    (True, False): "replay",
+    (False, True): "fresh",
+    (False, False): "replay",
+}
+
+# The closed set of abort reasons, as the CLI must offer them.  Derived from the
+# kernel enum so the two cannot drift.
+EXECUTOR_HANDOFF_ABORT_REASONS = tuple(member.value for member in HandoffAbortReason)
+
+
+def prepare_executor_handoff_abort(
+    state: object,
+    *,
+    at: object,
+    reason_code: object,
+) -> PreparedTransitionOperation:
+    """Prepare the published exit for an open handoff (#767 D3).
+
+    The reason arrives as a plain string from the command line and is turned
+    into the closed enum here.  Anything the enum does not name -- including a
+    canonical-drift code -- is refused, so a person's decision never lands in
+    the vocabulary that drift counts are read from.
+    """
+    if not isinstance(state, Mapping) or not isinstance(at, str) or not at:
+        raise PlanningFailure("executor-handoff-abort-invalid")
+    try:
+        reason = HandoffAbortReason(reason_code)
+    except (TypeError, ValueError) as exc:
+        raise PlanningFailure("executor-handoff-abort-invalid") from exc
+    return PreparedTransitionOperation(
+        command=AbortExecutorHandoff(at, reason),
+        effects=(),
+        result={
+            "operation": "abort",
+            "abort_reason": reason.value,
+        },
+    )
+
+
 class TransitionRejected(Exception):
     """One typed transition could not be executed; the message names why."""
 
 
 class ExecutorHandoffRejected(TransitionRejected):
     """One executor handoff could not be executed; the message names why."""
+
+
+@dataclass(frozen=True)
+class UnpreparedOperation:
+    """Stands in for a prepare that failed, until admission says what it was (#773).
+
+    The v5 executor runs prepare before it can tell the caller whether the
+    operation is a replay, so a failure against the current state arrives too
+    early to act on.  This carries the transaction that far and nothing
+    further: it is deliberately absent from the kernel's decision table, so
+    ``decide`` answers ``unknown-command`` and nothing is committed.  The
+    caller then either discards the held failure (it was a replay) or raises
+    it in place of that rejection, so this type never reaches a user.
+    """
+
+
+def unprepared_operation() -> PreparedTransitionOperation:
+    """Return the prepared operation that stands in for a failed prepare.
+
+    The effects are empty so that the request carries the same (absent)
+    materialization as a real executor handoff; a generated blob here would
+    give ``_assert_replay_materializes`` something to disagree about.
+    """
+    return PreparedTransitionOperation(
+        command=UnpreparedOperation(), effects=(), result={}
+    )
+
+
+# #773 D2.  A replayed operation records only its state, never its response, so
+# success and failure are read back from the handoff it left behind.  The two
+# vocabularies are disjoint (fixed by #767), and membership is tested rather
+# than a prefix: a prefix test would silently misread a value whose spelling
+# changed, and these sets are the authority on what each one means.
+_REPLAY_FAILURE_REASONS = frozenset(
+    member.value for member in CanonicalPlanRejectionCode
+)
+_REPLAY_SUCCESS_REASONS = frozenset(member.value for member in HandoffAbortReason)
+UNKNOWN_REPLAY_REASON = "executor-handoff-replay-reason-unknown"
+
+
+MISSING_REPLAY_HANDOFF = "executor-handoff-replay-handoff-missing"
+
+
+def _replayed_handoff_failure(handoff: object) -> str | None:
+    """Return the reason the replayed operation failed, or ``None`` if it did not."""
+    if not isinstance(handoff, Mapping):
+        # Every handoff command leaves a handoff behind, so its absence means
+        # the recorded state is not the one this operation wrote.  Answering
+        # ``ok`` with nothing in hand would be the same fail-open the unknown
+        # reason code is closed against.
+        return MISSING_REPLAY_HANDOFF
+    if handoff.get("status") != "rejected":
+        return None
+    reason = handoff.get("rejected_reason")
+    # Failure is tested first.  The two vocabularies are disjoint today (fixed by
+    # a test in #767), so the order does not change any answer -- but if that
+    # ever breaks, a value claimed by both should be read as the failure.
+    if isinstance(reason, str) and reason in _REPLAY_FAILURE_REASONS:
+        return reason
+    if reason in _REPLAY_SUCCESS_REASONS:
+        return None
+    # Neither vocabulary claims it, so what the operation did is unknown.
+    return UNKNOWN_REPLAY_REASON
 
 
 def run_transition_effects(
@@ -340,16 +486,44 @@ def run_executor_handoff(
     repository: object,
     prepare,
     *,
+    operation: str,
     passthrough: tuple,
     rejected: tuple = (OSError, ValueError),
 ) -> dict:
-    """Execute one handoff and close it into the stable CLI response."""
+    """Execute one handoff and close it into the stable CLI response.
+
+    ``operation`` is the subcommand this invocation ran.  It is passed rather
+    than read back from the state because a replayed operation's state does not
+    name it -- a ``consuming`` handoff looks the same after ``begin``,
+    ``verify-step`` and ``record-step``.  Taking it from the caller is sound
+    because the operation is folded into the command the intent digest covers,
+    so a different subcommand is a different operation, not a replay (#773).
+    """
+    held: list[BaseException] = []
+
+    def prepare_or_hold(data):
+        try:
+            return prepare(data)
+        except passthrough:
+            raise
+        except rejected as exc:
+            # Whether the current state admits this operation only matters if
+            # it is about to be committed, and that is not known until
+            # admission.  Hold the failure and answer once it is.
+            held.append(exc)
+            return unprepared_operation()
+
     prepared, execution = run_transition_effects(
-        repository, prepare, passthrough=passthrough, rejected=rejected,
+        repository, prepare_or_hold, passthrough=passthrough, rejected=rejected,
         rejection=ExecutorHandoffRejected,
     )
+    if held and not execution.replayed:
+        # Not a replay: the failure stands.  It is raised in place of the
+        # placeholder's ``unknown-command`` rejection, which says nothing about
+        # why the operation could not be prepared.
+        raise ExecutorHandoffRejected(str(held[0])) from held[0]
     try:
-        return executor_handoff_response(prepared, execution)
+        return executor_handoff_response(prepared, execution, operation=operation)
     except passthrough:
         raise
     except rejected as exc:
@@ -359,11 +533,21 @@ def run_executor_handoff(
 def executor_handoff_response(
     prepared: object,
     execution: object,
+    *,
+    operation: object,
 ) -> dict:
-    """Close one executor result into the stable CLI response or rejection."""
+    """Close one executor result into the stable CLI response or rejection.
+
+    On a replay nothing this transaction's prepare produced is read: it was
+    built against the current state, which the replayed operation never saw and
+    which nothing here is going to change.  The answer is the state that
+    operation committed (#773).
+    """
     if not isinstance(prepared, PreparedTransitionOperation) or not isinstance(
         execution, LegacyCommandExecutionResult
     ):
+        raise PlanningFailure("executor-handoff-execution-invalid")
+    if operation not in {"begin", "verify", "record", "complete", "abort"}:
         raise PlanningFailure("executor-handoff-execution-invalid")
     decision = execution.decision
     if decision is not None and not decision.accepted:
@@ -373,16 +557,27 @@ def executor_handoff_response(
             if reason is not None
             else "executor-handoff-transition-rejected"
         )
-    projection = execution.projection
-    handoff = projection.get("executor_handoff")
-    rejection = prepared.result.get("rejection")
-    if rejection is None and execution.replayed and isinstance(handoff, Mapping):
-        rejection = handoff.get("rejected_reason")
-    if isinstance(rejection, str):
-        raise PlanningFailure(rejection)
-    operation = prepared.result.get("operation")
-    if operation not in {"begin", "verify", "record", "complete"}:
-        raise PlanningFailure("executor-handoff-execution-invalid")
+    if execution.replayed:
+        replayed_state = execution.replayed_state
+        if replayed_state is None:
+            # Unreachable today: ``LegacyCommandExecutionResult`` refuses to be
+            # built with ``replayed`` set and no state.  Kept because reading a
+            # replay out of the current head is the defect this function exists
+            # to fix, and a loosened invariant must not restore it silently.
+            raise PlanningFailure("executor-handoff-execution-invalid")
+        handoff = replayed_state.thaw().get("executor_handoff")
+        failure = _replayed_handoff_failure(handoff)
+        if failure is not None:
+            raise PlanningFailure(failure)
+        return {"ok": True, "operation": operation, "executor_handoff": handoff}
+    handoff = execution.projection.get("executor_handoff")
+    if operation != "abort":
+        # A rejected handoff means the canonical plan drifted, which is a
+        # failure to report.  For abort, ``rejected`` is the outcome the caller
+        # asked for, so it is not one (#767).
+        rejection = prepared.result.get("rejection")
+        if isinstance(rejection, str):
+            raise PlanningFailure(rejection)
     return {
         "ok": True,
         "operation": operation,
@@ -639,6 +834,128 @@ def decide_executor_handoff(
     return ExecutorHandoffResult(next_handoff, None)
 
 
+# #767 D5.  The guidance names only commands that exist.  The message this
+# replaced pointed at `handoff resume`, which was never a subcommand, so the
+# reader had nothing to run -- that was half of what this issue was about.
+_HANDOFF_REFUSAL_GUIDANCE = {
+    "handoff-in-flight": (
+        "executor handoff is in flight; finish the remaining steps with "
+        "`mission-state.py executor-handoff complete`, or end it with "
+        "`mission-state.py executor-handoff abort --reason <code>`"
+    ),
+    "handoff-has-recorded-steps": (
+        "executor handoff already records completed steps; finish it with "
+        "`mission-state.py executor-handoff complete`, or end it with "
+        "`mission-state.py executor-handoff abort --reason <code>` "
+        "(replacing it would lose those steps)"
+    ),
+    "handoff-status-unknown": (
+        "executor handoff carries a status this version does not recognise; "
+        "end it with `mission-state.py executor-handoff abort --reason <code>`"
+    ),
+    "handoff-decisions-unknown": (
+        "executor handoff decisions cannot be counted; end it with "
+        "`mission-state.py executor-handoff abort --reason <code>`"
+    ),
+}
+
+
+def handoff_refusal_guidance(refusal: object) -> str:
+    """Return the sentence for one refusal code.
+
+    A code with no entry still has to say something the reader can run, so it
+    falls back to the abort route rather than to a message naming no command.
+    """
+    return _HANDOFF_REFUSAL_GUIDANCE.get(
+        refusal, _HANDOFF_REFUSAL_GUIDANCE["handoff-status-unknown"]
+    )
+
+
+def raw_handoff_is_absent(handoff: object) -> bool:
+    """Say whether the raw document carries no handoff at all.
+
+    The same three spellings the codec reads as absent: the key missing, an
+    explicit ``None``, and an empty object (``codec_v4._decode_legacy_handoff``).
+    Reading any of them as a present-but-unreadable handoff would refuse a state
+    the kernel admits, so the two layers have to spell this the same way.
+    """
+    return handoff is None or handoff == {}
+
+
+def recorded_handoff_steps(state: Mapping, handoff: object) -> object:
+    """Count the decisions already recorded against this handoff.
+
+    A non-int is returned when the document cannot be counted, so the shared
+    table refuses rather than reading an unreadable document as "no steps".
+
+    A *missing* ``decisions`` key is not uncountable: the codec reads it as an
+    empty list, so treating it as unknown here would refuse a state the kernel
+    admits.  Only a present-but-not-a-list value is uncountable, and the codec
+    rejects that before any command runs.
+    """
+    if not isinstance(state, Mapping) or not isinstance(handoff, Mapping):
+        return None
+    handoff_id = handoff.get("handoff_id")
+    decisions = state.get("decisions", [])
+    if not isinstance(handoff_id, str) or not isinstance(decisions, list):
+        return None
+    return sum(
+        1
+        for item in decisions
+        if isinstance(item, Mapping) and item.get("handoff_id") == handoff_id
+    )
+
+
+def plan_adoption_handoff_refusal(state: Mapping, plan: object) -> str | None:
+    """Return the code refusing to adopt this plan over the existing handoff.
+
+    #767 D1.  A handoff is bound to the plan it was prepared from, so adopting a
+    different one leaves a document the codec refuses to read.  Either the
+    handoff goes with the plan it belonged to, or the adoption does not happen;
+    writing the plan and keeping the handoff breaks the binding invariant.
+
+    ``None`` is returned when there is nothing to refuse -- no handoff, a
+    handoff the shared table admits dropping, or an adoption that leaves the
+    binding untouched.  The last case is what makes applying the same adoption
+    twice a no-op rather than a refusal.
+    """
+    handoff = state.get("executor_handoff")
+    if raw_handoff_is_absent(handoff):
+        return None
+    if not isinstance(handoff, Mapping):
+        return "handoff-status-unknown"
+    if not _plan_binding_changes(state, plan):
+        return None
+    return handoff_discard_refusal(
+        handoff.get("status"), recorded_handoff_steps(state, handoff)
+    )
+
+
+def _plan_binding_changes(state: Mapping, plan: object) -> bool:
+    """Say whether adopting ``plan`` moves the binding the handoff is tied to.
+
+    Compared field by field rather than by digest: re-adopting identical
+    content still raises the generation, so equal digests do not mean an
+    unchanged binding.  An unreadable current plan counts as a change, since
+    nothing can be shown to have stayed the same.
+    """
+    current = state.get("canonical_plan")
+    if not isinstance(current, Mapping) or not isinstance(plan, Mapping):
+        return True
+    return any(
+        current.get(field) != plan.get(field)
+        for field in (
+            "path",
+            "digest",
+            "generation",
+            "source",
+            "source_id",
+            "selection_source",
+            "iteration",
+        )
+    )
+
+
 def commit_plan_evidence(
     *,
     state: dict,
@@ -655,11 +972,29 @@ def commit_plan_evidence(
     binding = typed_plan_binding(plan)
     if lease_verified is not True:
         raise PlanningFailure("lease-rejected")
+    refusal = plan_adoption_handoff_refusal(state, plan)
+    if refusal is not None:
+        # Code first, sentence after.  The adapter maps this failure the same
+        # way it maps a malformed candidate, so whatever arrives here is what it
+        # prints and records as the reason.  A sentence alone would drop the
+        # machine-readable code from that record; a code alone would leave the
+        # reader with no command to run.
+        raise PlanningFailure(
+            "{}: {}".format(refusal, handoff_refusal_guidance(refusal))
+        )
     try:
         publish(binding)
     except Exception as exc:
         raise PlanningFailure("plan-publication-failed") from exc
+    discard = _plan_binding_changes(state, plan) and not raw_handoff_is_absent(
+        state.get("executor_handoff")
+    )
     state["canonical_plan"] = dict(plan)
+    if discard:
+        # #767 D1.  The handoff belonged to the plan just replaced, and the
+        # table above already said it may go.  Removing it is what lets the
+        # next iteration prepare a fresh one.
+        state.pop("executor_handoff", None)
     return binding
 
 

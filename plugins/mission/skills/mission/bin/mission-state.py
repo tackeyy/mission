@@ -223,6 +223,10 @@ from mission_application.evidence import (  # noqa: E402
     verify_published_evidence_effects,
 )
 from mission_application.planning import (  # noqa: E402
+    EXECUTOR_HANDOFF_ABORT_REASONS,
+    EXECUTOR_HANDOFF_COMMAND_NAMES,
+    EXECUTOR_HANDOFF_FACTS_SOURCE,
+    EXECUTOR_HANDOFF_READS_PLAN,
     PlanningFailure,
     commit_plan_evidence,
     decide_provider_terminal_result,
@@ -10573,6 +10577,19 @@ def _revision_scope_from_args(args) -> dict:
     return {"kind": "git", "base_sha": base, "head_sha": head}
 
 
+_NOT_APPLICABLE_SCOPE_ERROR = {
+    True: "not-applicable revision_scope is invalid",
+    # **算出せよとは書かない。** 下の検査は `rev-parse HEAD == head_sha` なので、
+    # 実行時に `git rev-parse HEAD` で埋めると常に成立して空回りする。渡すのは
+    # レビュー時に固定した SHA で、その一致検査が「レビュー後に head が動いた」を捕まえる。
+    False: (
+        "git project では --base-sha と --head-sha が必須です。"
+        "レビュー時に固定した base / head の 40 桁 SHA を渡してください。"
+        "実行時に算出した値を渡すと、reviewed head の一致検査が空回りします"
+    ),
+}
+
+
 def _validate_revision_scope(cwd: Path, scope: object) -> None:
     """Bind git scope to this checked-out project, never to a SHA-shaped claim."""
     if not isinstance(scope, dict):
@@ -10581,8 +10598,15 @@ def _validate_revision_scope(cwd: Path, scope: object) -> None:
                          capture_output=True, text=True)
     is_git = git.returncode == 0
     if scope.get("kind") == "not-applicable":
-        if scope != {"kind": "not-applicable", "reason_code": "non-git"} or is_git:
-            raise ValueError("not-applicable revision_scope is allowed only for non-git projects")
+        # 失敗の理由で文言を分ける。旧文言は「non-git でのみ許される」とだけ言い、
+        # 読んだ人を「この project を non-git 扱いにする方法」探しへ誘導していた。
+        # 形が壊れている場合とフラグが足りない場合では直し方が違う。
+        #
+        # 分岐を足さず定数の索引で選ぶ。adapter は argparse 配線と機械的変換だけを
+        # 持つ契約で (ADR-006)、判断を書き足すと thin-adapter ratchet が止める。
+        malformed = scope != {"kind": "not-applicable", "reason_code": "non-git"}
+        if malformed or is_git:
+            raise ValueError(_NOT_APPLICABLE_SCOPE_ERROR[malformed])
         return
     if scope.get("kind") != "git":
         raise ValueError("revision_scope is invalid")
@@ -12945,16 +12969,18 @@ def cmd_planning_adopt_core(args):
             "generation": generation,
             "validated_at": iso_now(),
         }
+        # Publication is adapter-owned; A4 owns the authority-bearing plan
+        # admission and the canonical state mutation after that publication.
+        # #767 D1: adoption also refuses when the handoff bound to the plan
+        # being replaced may not be dropped, so it shares this failure mapping.
         try:
             typed_plan_binding(plan)
             canonical_plan_identity(cwd, plan, reader=_read_strict_review_file)
+            commit_plan_evidence(
+                state=data, plan=plan, lease_verified=True, publish=lambda _binding: None
+            )
         except (OSError, PlanningFailure, PlanningLifecycleError) as exc:
-            _provider_gate(f"core-plan-candidate-invalid:{exc}")
-        # Publication is adapter-owned; A4 owns the authority-bearing plan
-        # admission and the canonical state mutation after that publication.
-        commit_plan_evidence(
-            state=data, plan=plan, lease_verified=True, publish=lambda _binding: None
-        )
+            _provider_gate(f"core-plan-not-adoptable:{exc}")
         records[f"core:{source_id}"] = {
             key: plan[key]
             for key in ("generation", "source", "source_id", "selection_source", "iteration")
@@ -13022,14 +13048,16 @@ def cmd_planning_promote_provider_plan(args):
                 "source": "provider", "source_id": args.invocation_id, "source_digest": source_digest,
                 "selection_source": invocation.get("selection_source") or "automatic",
                 "iteration": data.get("iteration"), "generation": record.get("generation"), "validated_at": iso_now()}
+        # #767 D1: adoption also refuses when the handoff bound to the plan
+        # being replaced may not be dropped, so it shares this failure mapping.
         try:
             typed_plan_binding(plan)
             _raw, _steps = canonical_plan_identity(cwd, plan, reader=_read_strict_review_file)
+            commit_plan_evidence(
+                state=data, plan=plan, lease_verified=True, publish=lambda _binding: None
+            )
         except (OSError, PlanningFailure, PlanningLifecycleError) as exc:
-            _provider_gate(f"provider-plan-candidate-invalid:{exc}")
-        commit_plan_evidence(
-            state=data, plan=plan, lease_verified=True, publish=lambda _binding: None
-        )
+            _provider_gate(f"provider-plan-not-adoptable:{exc}")
         data.setdefault("planning_source_records", {})[f"provider:{args.invocation_id}"] = {
             key: plan[key] for key in ("generation", "source", "source_id", "selection_source", "iteration")
         }
@@ -13104,12 +13132,7 @@ def _cmd_executor_handoff(args, operation: str):
     cwd = Path.cwd()
     sf = resolve_state_file(cwd)
     session_id = sf.stem
-    command_name = {
-        "begin": "executor-handoff-begin",
-        "verify": "executor-handoff-verify-step",
-        "record": "executor-handoff-record-step",
-        "complete": "executor-handoff-complete",
-    }[operation]
+    command_name = EXECUTOR_HANDOFF_COMMAND_NAMES[operation]
     command_arguments = {
         "begin": {},
         "verify": {"step_id": getattr(args, "step_id", None)},
@@ -13118,6 +13141,7 @@ def _cmd_executor_handoff(args, operation: str):
             "step_id": getattr(args, "step_id", None),
         },
         "complete": {},
+        "abort": {"reason": getattr(args, "reason", None)},
     }[operation]
     try:
         target_bytes = sf.read_bytes()
@@ -13191,9 +13215,12 @@ def _cmd_executor_handoff(args, operation: str):
                 return steps, dependencies, raw
 
             steps, dependencies, raw = {
-                True: replay_facts,
-                False: fresh_facts,
-            }[bool(getattr(repository, "operation_replayed", False))]()
+                "replay": replay_facts,
+                "fresh": fresh_facts,
+            }[EXECUTOR_HANDOFF_FACTS_SOURCE[(
+                bool(getattr(repository, "operation_replayed", False)),
+                EXECUTOR_HANDOFF_READS_PLAN[operation],
+            )]]()
             return prepare_executor_handoff(
                 data,
                 ExecutorHandoffRequest(
@@ -13201,6 +13228,7 @@ def _cmd_executor_handoff(args, operation: str):
                     at=at,
                     step_id=getattr(args, "step_id", None),
                     result=getattr(args, "result", None),
+                    reason=getattr(args, "reason", None),
                 ),
                 ExecutorHandoffFacts(
                     plan_path=plan.get("path"),
@@ -13235,6 +13263,7 @@ def _cmd_executor_handoff(args, operation: str):
         response = run_executor_handoff(
             repository,
             prepare,
+            operation=operation,
             passthrough=(FencedCommitError,),
             rejected=(OSError, PlanningFailure, ValueError, PlanningLifecycleError),
         )
@@ -16902,6 +16931,19 @@ def _add_executor_handoff_parsers(subparsers) -> None:
     p_record_step.set_defaults(func=cmd_executor_handoff_record, command_outcome_tracking=True)
     p_complete = handoff_sub.add_parser("complete", help="consume handoff after all canonical steps")
     p_complete.set_defaults(func=cmd_executor_handoff_complete, command_outcome_tracking=True)
+    p_abort = handoff_sub.add_parser("abort", help="end an open handoff by operator decision")
+    # `--reason` is required: the discard cannot be undone, so it is not run
+    # without a record of why.
+    p_abort.add_argument("--reason", required=True, choices=EXECUTOR_HANDOFF_ABORT_REASONS)
+    # Wired as a binding rather than a fifth `cmd_executor_handoff_*` function.
+    # The thin-adapter guard requires any *new* adapter function to be free of
+    # violations (`docs/design/626-thin-adapter-guard.md` section 1), and a
+    # one-line delegation to a local helper is not: naming the helper is only
+    # allowed inside parser wiring, which is where this sits.
+    p_abort.set_defaults(
+        func=lambda args: _cmd_executor_handoff(args, "abort"),
+        command_outcome_tracking=True,
+    )
 
 
 def _add_evidence_handoff_parsers(subparsers) -> None:

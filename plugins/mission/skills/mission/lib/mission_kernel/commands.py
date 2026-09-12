@@ -319,6 +319,26 @@ class RejectExecutorHandoff:
     reason_code: CanonicalPlanRejectionCode
 
 
+class HandoffAbortReason(str, Enum):
+    """Why a person ended an open handoff (#767 D3).
+
+    Deliberately disjoint from ``CanonicalPlanRejectionCode``.  That set means
+    "the canonical plan drifted", and it is what later counts of drift are read
+    from.  Mixing a person's decision into it would make every abort look like
+    a drift event.
+    """
+
+    EXECUTOR_ABANDONED = "executor-abandoned"
+    PLAN_SUPERSEDED = "plan-superseded"
+    OPERATOR_ABORT = "operator-abort"
+
+
+@dataclass(frozen=True)
+class AbortExecutorHandoff:
+    at: str
+    reason: HandoffAbortReason
+
+
 @dataclass(frozen=True)
 class RecordSpecialistRecommendation:
     at: str
@@ -396,6 +416,7 @@ GENERIC_SET_DEDICATED_FIELDS = frozenset(
 
 
 Command = Union[
+    AbortExecutorHandoff,
     AdvancePhase,
     AppendArtifactBlock,
     ClearProgress,
@@ -423,6 +444,7 @@ Command = Union[
 
 
 _COMMAND_TYPES = {
+    AbortExecutorHandoff: "executor-handoff-abort",
     AdvancePhase: "advance-phase",
     AppendArtifactBlock: "append-artifact-block",
     ClearProgress: "clear-progress",
