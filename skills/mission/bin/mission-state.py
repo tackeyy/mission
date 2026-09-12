@@ -12969,16 +12969,18 @@ def cmd_planning_adopt_core(args):
             "generation": generation,
             "validated_at": iso_now(),
         }
+        # Publication is adapter-owned; A4 owns the authority-bearing plan
+        # admission and the canonical state mutation after that publication.
+        # #767 D1: adoption also refuses when the handoff bound to the plan
+        # being replaced may not be dropped, so it shares this failure mapping.
         try:
             typed_plan_binding(plan)
             canonical_plan_identity(cwd, plan, reader=_read_strict_review_file)
+            commit_plan_evidence(
+                state=data, plan=plan, lease_verified=True, publish=lambda _binding: None
+            )
         except (OSError, PlanningFailure, PlanningLifecycleError) as exc:
-            _provider_gate(f"core-plan-candidate-invalid:{exc}")
-        # Publication is adapter-owned; A4 owns the authority-bearing plan
-        # admission and the canonical state mutation after that publication.
-        commit_plan_evidence(
-            state=data, plan=plan, lease_verified=True, publish=lambda _binding: None
-        )
+            _provider_gate(f"core-plan-not-adoptable:{exc}")
         records[f"core:{source_id}"] = {
             key: plan[key]
             for key in ("generation", "source", "source_id", "selection_source", "iteration")
@@ -13046,14 +13048,16 @@ def cmd_planning_promote_provider_plan(args):
                 "source": "provider", "source_id": args.invocation_id, "source_digest": source_digest,
                 "selection_source": invocation.get("selection_source") or "automatic",
                 "iteration": data.get("iteration"), "generation": record.get("generation"), "validated_at": iso_now()}
+        # #767 D1: adoption also refuses when the handoff bound to the plan
+        # being replaced may not be dropped, so it shares this failure mapping.
         try:
             typed_plan_binding(plan)
             _raw, _steps = canonical_plan_identity(cwd, plan, reader=_read_strict_review_file)
+            commit_plan_evidence(
+                state=data, plan=plan, lease_verified=True, publish=lambda _binding: None
+            )
         except (OSError, PlanningFailure, PlanningLifecycleError) as exc:
-            _provider_gate(f"provider-plan-candidate-invalid:{exc}")
-        commit_plan_evidence(
-            state=data, plan=plan, lease_verified=True, publish=lambda _binding: None
-        )
+            _provider_gate(f"provider-plan-not-adoptable:{exc}")
         data.setdefault("planning_source_records", {})[f"provider:{args.invocation_id}"] = {
             key: plan[key] for key in ("generation", "source", "source_id", "selection_source", "iteration")
         }
