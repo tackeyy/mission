@@ -23,6 +23,7 @@ from mission_application.ports import (
     LegacyCommandExecutionResult,
     PreparedTransitionOperation,
 )
+from mission_kernel.transitions import handoff_discard_refusal
 from mission_kernel.commands import (
     BeginExecutorHandoff,
     CanonicalPlanObservation,
@@ -833,6 +834,112 @@ def decide_executor_handoff(
     return ExecutorHandoffResult(next_handoff, None)
 
 
+# #767 D5.  The guidance names only commands that exist.  The message this
+# replaced pointed at `handoff resume`, which was never a subcommand, so the
+# reader had nothing to run -- that was half of what this issue was about.
+_HANDOFF_REFUSAL_GUIDANCE = {
+    "handoff-in-flight": (
+        "executor handoff is in flight; finish the remaining steps with "
+        "`mission-state.py executor-handoff complete`, or end it with "
+        "`mission-state.py executor-handoff abort --reason <code>`"
+    ),
+    "handoff-has-recorded-steps": (
+        "executor handoff already records completed steps; finish it with "
+        "`mission-state.py executor-handoff complete`, or end it with "
+        "`mission-state.py executor-handoff abort --reason <code>` "
+        "(replacing it would lose those steps)"
+    ),
+    "handoff-status-unknown": (
+        "executor handoff carries a status this version does not recognise; "
+        "end it with `mission-state.py executor-handoff abort --reason <code>`"
+    ),
+    "handoff-decisions-unknown": (
+        "executor handoff decisions cannot be counted; end it with "
+        "`mission-state.py executor-handoff abort --reason <code>`"
+    ),
+}
+
+
+def handoff_refusal_guidance(refusal: object) -> str:
+    """Return the sentence for one refusal code.
+
+    A code with no entry still has to say something the reader can run, so it
+    falls back to the abort route rather than to a message naming no command.
+    """
+    return _HANDOFF_REFUSAL_GUIDANCE.get(
+        refusal, _HANDOFF_REFUSAL_GUIDANCE["handoff-status-unknown"]
+    )
+
+
+def recorded_handoff_steps(state: Mapping, handoff: object) -> object:
+    """Count the decisions already recorded against this handoff.
+
+    A non-int is returned when the document cannot be counted, so the shared
+    table refuses rather than reading an unreadable document as "no steps".
+    """
+    if not isinstance(state, Mapping) or not isinstance(handoff, Mapping):
+        return None
+    handoff_id = handoff.get("handoff_id")
+    decisions = state.get("decisions")
+    if not isinstance(handoff_id, str) or not isinstance(decisions, list):
+        return None
+    return sum(
+        1
+        for item in decisions
+        if isinstance(item, Mapping) and item.get("handoff_id") == handoff_id
+    )
+
+
+def plan_adoption_handoff_refusal(state: Mapping, plan: object) -> str | None:
+    """Return the code refusing to adopt this plan over the existing handoff.
+
+    #767 D1.  A handoff is bound to the plan it was prepared from, so adopting a
+    different one leaves a document the codec refuses to read.  Either the
+    handoff goes with the plan it belonged to, or the adoption does not happen;
+    writing the plan and keeping the handoff breaks the binding invariant.
+
+    ``None`` is returned when there is nothing to refuse -- no handoff, a
+    handoff the shared table admits dropping, or an adoption that leaves the
+    binding untouched.  The last case is what makes applying the same adoption
+    twice a no-op rather than a refusal.
+    """
+    handoff = state.get("executor_handoff")
+    if handoff is None:
+        return None
+    if not isinstance(handoff, Mapping):
+        return "handoff-status-unknown"
+    if not _plan_binding_changes(state, plan):
+        return None
+    return handoff_discard_refusal(
+        handoff.get("status"), recorded_handoff_steps(state, handoff)
+    )
+
+
+def _plan_binding_changes(state: Mapping, plan: object) -> bool:
+    """Say whether adopting ``plan`` moves the binding the handoff is tied to.
+
+    Compared field by field rather than by digest: re-adopting identical
+    content still raises the generation, so equal digests do not mean an
+    unchanged binding.  An unreadable current plan counts as a change, since
+    nothing can be shown to have stayed the same.
+    """
+    current = state.get("canonical_plan")
+    if not isinstance(current, Mapping) or not isinstance(plan, Mapping):
+        return True
+    return any(
+        current.get(field) != plan.get(field)
+        for field in (
+            "path",
+            "digest",
+            "generation",
+            "source",
+            "source_id",
+            "selection_source",
+            "iteration",
+        )
+    )
+
+
 def commit_plan_evidence(
     *,
     state: dict,
@@ -849,11 +956,24 @@ def commit_plan_evidence(
     binding = typed_plan_binding(plan)
     if lease_verified is not True:
         raise PlanningFailure("lease-rejected")
+    refusal = plan_adoption_handoff_refusal(state, plan)
+    if refusal is not None:
+        # The sentence, not the bare code: the adapter maps this failure the
+        # same way it maps a malformed candidate, so what it prints is whatever
+        # arrives here.  A code alone would leave the reader with no command to
+        # run, which is the shape #767 set out to remove.
+        raise PlanningFailure(handoff_refusal_guidance(refusal))
     try:
         publish(binding)
     except Exception as exc:
         raise PlanningFailure("plan-publication-failed") from exc
+    discard = _plan_binding_changes(state, plan) and state.get("executor_handoff") is not None
     state["canonical_plan"] = dict(plan)
+    if discard:
+        # #767 D1.  The handoff belonged to the plan just replaced, and the
+        # table above already said it may go.  Removing it is what lets the
+        # next iteration prepare a fresh one.
+        state.pop("executor_handoff", None)
     return binding
 
 

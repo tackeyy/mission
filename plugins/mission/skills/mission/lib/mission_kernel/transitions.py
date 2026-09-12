@@ -659,6 +659,55 @@ def _merge_extension_fields(
     return next_state
 
 
+# #767 D2.  The one place that decides whether an existing handoff may be
+# dropped so the mission can enter executing again.  Both the kernel transition
+# and the application layer's early refusal read this, so the two cannot answer
+# differently (D4).
+#
+# The table is keyed by status because that is what the recorded state carries.
+# ``prepared`` is split by whether any step was recorded: ``record-step`` does
+# not require ``consuming``, so a prepared handoff can already hold completed
+# work, and replacing it would lose that record.
+_HANDOFF_DISCARD_REFUSALS = {
+    "absent": None,
+    "consumed": None,
+    "rejected": None,
+    "consuming": "handoff-in-flight",
+}
+_HANDOFF_STATUS_UNKNOWN = "handoff-status-unknown"
+_HANDOFF_DECISIONS_UNKNOWN = "handoff-decisions-unknown"
+_HANDOFF_HAS_RECORDED_STEPS = "handoff-has-recorded-steps"
+
+
+def handoff_status_name(handoff: object) -> object:
+    """Return the recorded status of a handoff as the table spells it.
+
+    ``AbsentHandoff`` carries a plain string while the others carry the enum,
+    so the two are normalised here rather than at each call site.
+    """
+    kind = getattr(handoff, "kind", None)
+    return getattr(kind, "value", kind)
+
+
+def handoff_discard_refusal(status: object, recorded_steps: object) -> str | None:
+    """Return the code refusing to discard this handoff, or ``None`` if it may go.
+
+    Unknown statuses are refused rather than treated as "not consuming".  A
+    table that answers by exclusion would silently admit any status added
+    later, which is the opposite of what this gate is for (D4).
+    """
+    # ``bool`` is an ``int``, but a truth value is not a count of anything; a
+    # ``True`` read as 1 would refuse a clean handoff and ``False`` as 0 would
+    # discard one holding completed work.
+    if type(recorded_steps) is not int or recorded_steps < 0:
+        return _HANDOFF_DECISIONS_UNKNOWN
+    if status == "prepared":
+        return _HANDOFF_HAS_RECORDED_STEPS if recorded_steps else None
+    if not isinstance(status, str) or status not in _HANDOFF_DISCARD_REFUSALS:
+        return _HANDOFF_STATUS_UNKNOWN
+    return _HANDOFF_DISCARD_REFUSALS[status]
+
+
 def _advance(state: MissionState, raw_command: object) -> Transition:
     command = raw_command
     assert isinstance(command, AdvancePhase)
@@ -675,8 +724,16 @@ def _advance(state: MissionState, raw_command: object) -> Transition:
         raise _Rejected("canonical-plan-required")
     new_handoff = state.handoff
     if command.target is Phase.EXECUTING:
-        if not isinstance(state.handoff, AbsentHandoff):
-            raise _Rejected("handoff-already-exists")
+        # #767 D2.  A handoff left over from the previous iteration no longer
+        # blocks re-entry on its own; what matters is whether dropping it would
+        # lose work.  ``absent`` answers ``None`` here, so the first entry is
+        # unchanged.
+        refusal = handoff_discard_refusal(
+            handoff_status_name(state.handoff),
+            len(state.a4.current_handoff_decisions),
+        )
+        if refusal is not None:
+            raise _Rejected(refusal)
         if not isinstance(command.prepared_handoff, PreparedHandoff):
             raise _Rejected("prepared-handoff-required")
         if command.prepared_handoff.plan != state.plan:
