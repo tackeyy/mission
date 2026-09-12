@@ -49,6 +49,7 @@ COMMAND_OWNER_REGISTRY = {
     ),
     **_owned(
         "A4.specialist-planning",
+        "executor-handoff abort",
         "executor-handoff begin",
         "executor-handoff complete",
         "executor-handoff record-step",
@@ -119,6 +120,7 @@ COMMAND_OWNER_REGISTRY = {
 
 C2_REPOSITORY_COMMANDS = frozenset(
     {
+        "executor-handoff abort",
         "executor-handoff begin",
         "executor-handoff complete",
         "executor-handoff record-step",
