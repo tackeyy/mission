@@ -223,6 +223,105 @@ SUITE_REPORT_SCHEMA = "mission-suite-report/1"
 # rule would have to mean the same thing to every runner a repository might
 # declare; every runner already inherits the environment.
 SUITE_REPORT_ENV = "MISSION_SUITE_REPORT"
+_SUITE_FAILURE_PREFIX = "[suite_failure] "
+_ASCII_PUNCTUATION = r'''!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~'''
+
+
+def _sanitize_suite_output(value: str) -> str:
+    """Keep only line structure that cannot alter the gate's terminal output."""
+    kept = []
+    for character in value:
+        codepoint = ord(character)
+        if character in ("\n", "\t"):
+            kept.append(character)
+        elif (codepoint <= 0x1F or codepoint == 0x7F
+              or 0x80 <= codepoint <= 0x9F
+              or character in ("\u2028", "\u2029")):
+            # Suite output becomes terminal-bound at this boundary; dropping
+            # controls prevents terminal actions and forged gate log records.
+            continue
+        else:
+            kept.append(character)
+    return "".join(kept)
+
+
+def _is_failure_line(line: str) -> bool:
+    tokens = [token.strip(_ASCII_PUNCTUATION) for token in re.split(r"[ \t]+", line)]
+    tokens = [token for token in tokens if token]
+    for index, token in enumerate(tokens):
+        if token in {"FAILED", "FAIL", "ERROR"}:
+            return True
+        if token == "not" and index + 1 < len(tokens) and tokens[index + 1] == "ok":
+            return True
+    return False
+
+
+def _bounded_failure_section(
+    title: str, lines: list[str], limit: int, *, from_end: bool = False
+) -> tuple[str, bool]:
+    rendered = [_SUITE_FAILURE_PREFIX + title]
+    rendered.extend(_SUITE_FAILURE_PREFIX + line for line in lines)
+    full = "\n".join(rendered)
+    if len(full) <= limit:
+        return full, False
+
+    marker = _SUITE_FAILURE_PREFIX + "output truncated"
+    selected = []
+    candidates = reversed(lines) if from_end else iter(lines)
+    for line in candidates:
+        candidate = _SUITE_FAILURE_PREFIX + line
+        chosen = selected + [candidate]
+        if from_end:
+            chosen = list(reversed(chosen))
+        proposed = "\n".join([_SUITE_FAILURE_PREFIX + title] + chosen + [marker])
+        if len(proposed) > limit:
+            break
+        selected.append(candidate)
+    if from_end:
+        selected.reverse()
+    rendered = [_SUITE_FAILURE_PREFIX + title] + selected
+    if len("\n".join(rendered + [marker])) <= limit:
+        rendered.append(marker)
+    return "\n".join(rendered), True
+
+
+def suite_failure_excerpt(stdout, stderr, *, limit):
+    """Return a bounded diagnostic view of a failed declared suite."""
+    streams = [stream for stream in (stdout or "", stderr or "") if stream]
+    sanitized = _sanitize_suite_output("\n".join(streams))
+    lines = sanitized.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    if not any(lines):
+        return _SUITE_FAILURE_PREFIX + "output unavailable"
+
+    matched_indices = {index for index, line in enumerate(lines) if _is_failure_line(line)}
+    matched = [line for index, line in enumerate(lines) if index in matched_indices]
+    tail = [line for index, line in enumerate(lines) if index not in matched_indices]
+    # Runner-neutral matching deliberately permits ordinary prose to overmatch;
+    # a runner-specific format would make diagnostics disappear for other runners.
+    # Showing both matches and tail keeps that bounded false-positive cost useful.
+    matched_budget = (limit * 2) // 3 if matched else 0
+    separator_budget = 1 if matched else 0
+    tail_budget = limit - matched_budget - separator_budget
+    if matched:
+        matched_section, matched_truncated = _bounded_failure_section(
+            "matched failure lines:", matched, matched_budget
+        )
+        tail_section, tail_truncated = _bounded_failure_section(
+            "output tail:", tail, tail_budget, from_end=True
+        )
+        if not matched_truncated:
+            tail_section, tail_truncated = _bounded_failure_section(
+                "output tail:", tail, limit - len(matched_section) - separator_budget, from_end=True
+            )
+        elif not tail_truncated:
+            matched_section, matched_truncated = _bounded_failure_section(
+                "matched failure lines:", matched, limit - len(tail_section) - separator_budget
+            )
+        return "\n".join((matched_section, tail_section))
+    tail_section, _ = _bounded_failure_section("output tail:", tail, limit, from_end=True)
+    return tail_section
 
 
 def load_suite_contract(operations, *, base_sha: str, step: int) -> dict:
@@ -346,6 +445,7 @@ def run_declared_suite(command, *, runner, cwd, report_path, expected_tree_sha, 
     if result.returncode != 0:
         if logger is not None:
             logger("suite_exit={}".format(result.returncode))
+            logger(suite_failure_excerpt(result.stdout, result.stderr, limit=4000))
         raise IntegrationGateError(step, "suite-failed", "integrated tree suite failed")
     return require_suite_report(
         read_suite_report(report_path), expected_tree_sha=expected_tree_sha, step=step
