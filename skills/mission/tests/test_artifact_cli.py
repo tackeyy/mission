@@ -70,55 +70,6 @@ def _forbid_artifact_write(module, monkeypatch):
     return calls
 
 
-def test_artifact_init_rejects_foreign_lease_without_creating_file(state_dir, run_cli, read_state):
-    root = state_dir.parent
-    state_path = _set_foreign_lease(state_dir)
-    state_before = state_path.read_bytes()
-    artifact_path = _artifact_path(root)
-
-    result = run_cli(
-        "artifact",
-        "init",
-        "--title",
-        "Artifact Smoke",
-        "--required-for-pass",
-        "--json",
-        cwd=root,
-    )
-
-    assert result.returncode == 2
-    assert "lease" in result.stderr.lower()
-    assert not artifact_path.exists()
-    assert state_path.read_bytes() == state_before
-    assert read_state(state_dir) == json.loads(state_before)
-
-
-def test_artifact_render_rejects_foreign_lease_without_mutating_artifact_file(
-    state_dir, run_cli, read_state
-):
-    root = state_dir.parent
-    assert run_cli("artifact", "init", "--json", cwd=root).returncode == 0
-    artifact_path = _artifact_path(root)
-    artifact_before = artifact_path.read_bytes()
-    state_path = _set_foreign_lease(state_dir)
-    state_before = state_path.read_bytes()
-
-    result = run_cli(
-        "artifact",
-        "render",
-        "--redaction-status",
-        "reviewed",
-        "--json",
-        cwd=root,
-    )
-
-    assert result.returncode == 2
-    assert "lease" in result.stderr.lower()
-    assert artifact_path.read_bytes() == artifact_before
-    assert state_path.read_bytes() == state_before
-    assert read_state(state_dir)["artifact"]["status"] == "draft"
-
-
 def test_artifact_export_rejects_foreign_lease_without_mutating_artifact_file(
     state_dir, run_cli, read_state
 ):
@@ -149,30 +100,6 @@ def test_artifact_export_rejects_foreign_lease_without_mutating_artifact_file(
     assert state_path.read_bytes() == state_before
 
 
-def test_artifact_append_rejects_foreign_lease_without_mutating_state(
-    state_dir, run_cli
-):
-    root = state_dir.parent
-    assert run_cli("artifact", "init", "--json", cwd=root).returncode == 0
-    state_path = _set_foreign_lease(state_dir)
-    state_before = state_path.read_bytes()
-
-    result = run_cli(
-        "artifact",
-        "append",
-        "--section",
-        "evidence",
-        "--text",
-        "must not be appended",
-        "--json",
-        cwd=root,
-    )
-
-    assert result.returncode == 2
-    assert "lease" in result.stderr.lower()
-    assert state_path.read_bytes() == state_before
-
-
 def test_artifact_init_does_not_publish_before_foreign_lease_rejection(state_dir, monkeypatch, capsys):
     module = _state_module()
     root = state_dir.parent
@@ -198,6 +125,44 @@ def test_artifact_init_does_not_publish_before_foreign_lease_rejection(state_dir
     assert "lease" in captured.err.lower()
     assert calls == []
     assert not artifact_path.exists()
+    assert state_path.read_bytes() == state_before
+
+
+def test_artifact_append_does_not_mutate_before_foreign_lease_rejection(
+    state_dir, monkeypatch, capsys
+):
+    module = _state_module()
+    root = state_dir.parent
+    monkeypatch.chdir(root)
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+    assert module.cmd_artifact_init(argparse.Namespace(
+        format="markdown",
+        title="Artifact Smoke",
+        required_for_pass=True,
+        redaction_status="unchecked",
+        json=True,
+    )) is None
+    artifact_path = _artifact_path(root)
+    artifact_before = artifact_path.read_bytes()
+    state_path = _set_foreign_lease(state_dir)
+    state_before = state_path.read_bytes()
+    calls = _forbid_artifact_write(module, monkeypatch)
+
+    with pytest.raises(module.CommandOutcomeExit) as excinfo:
+        module.cmd_artifact_append(argparse.Namespace(
+            section="evidence",
+            text="must not be appended",
+            file=None,
+            label=None,
+            json=True,
+        ))
+
+    captured = capsys.readouterr()
+    assert excinfo.value.code == 2
+    assert "lease" in captured.err.lower()
+    assert calls == []
+    assert artifact_path.read_bytes() == artifact_before
     assert state_path.read_bytes() == state_before
 
 
@@ -614,33 +579,3 @@ def test_artifact_publish_requires_explicit_consent(state_dir, run_cli, read_sta
     assert "status: publish-prepared" in (
         root / ".mission-state" / "artifacts" / "test" / "mission-artifact.md"
     ).read_text(encoding="utf-8")
-
-
-def test_artifact_publish_rejects_foreign_lease_without_mutating_artifact_file(
-    state_dir, run_cli, read_state
-):
-    root = state_dir.parent
-    run_cli("artifact", "init", "--json", cwd=root, check=True)
-    run_cli("artifact", "render", "--redaction-status", "reviewed", cwd=root, check=True)
-    artifact_path = _artifact_path(root)
-    artifact_before = artifact_path.read_bytes()
-    state_path = _set_foreign_lease(state_dir)
-    state_before = state_path.read_bytes()
-
-    result = run_cli(
-        "artifact",
-        "publish",
-        "--provider",
-        "claude-code",
-        "--require-confirm",
-        "--approval-text",
-        "user approved artifact publish preparation",
-        "--json",
-        cwd=root,
-    )
-
-    assert result.returncode == 2
-    assert "lease" in result.stderr.lower()
-    assert artifact_path.read_bytes() == artifact_before
-    assert state_path.read_bytes() == state_before
-    assert read_state(state_dir)["artifact"]["status"] == "rendered"

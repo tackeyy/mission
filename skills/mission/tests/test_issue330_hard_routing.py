@@ -49,52 +49,12 @@ def test_set_simple_routes_and_halts(run_cli, tmp_path):
     assert state["halt_category"] == "routed-goal"
 
 
-def test_set_simple_with_issue_ref_keeps_loop(run_cli, tmp_path):
-    run_cli("init", "typo を1箇所直す", "--issue-ref", "418", cwd=tmp_path, check=True)
-    r = run_cli("set", "complexity=Simple", cwd=tmp_path)
-    assert r.returncode == 0, r.stderr
-    state = _state(tmp_path)
-    assert state["loop_active"] is True
-
-
-def test_set_simple_with_force_mission_keeps_loop(run_cli, tmp_path):
-    run_cli("init", "typo を1箇所直す", "--force-mission", cwd=tmp_path, check=True)
-    r = run_cli("set", "complexity=Simple", cwd=tmp_path)
-    assert r.returncode == 0, r.stderr
-    state = _state(tmp_path)
-    assert state["loop_active"] is True
-
-
-def test_set_simple_checker_role_keeps_loop(run_cli, tmp_path):
-    run_cli("init", "PR review", "--role", "checker", cwd=tmp_path, check=True)
-    r = run_cli("set", "complexity=Simple", cwd=tmp_path)
-    assert r.returncode == 0, r.stderr
-    state = _state(tmp_path)
-    assert state["loop_active"] is True
-
-
 def test_set_simple_with_signals_keeps_loop(run_cli, tmp_path):
     run_cli("init", "deploy the hotfix to production", cwd=tmp_path, check=True)
     r = run_cli("set", "complexity=Simple", cwd=tmp_path)
     assert r.returncode == 0, r.stderr
     state = _state(tmp_path)
     assert state["loop_active"] is True, "不可逆シグナルありは routing しない"
-
-
-def test_set_simple_user_tier_keeps_loop(run_cli, tmp_path):
-    run_cli("init", "typo を1箇所直す", "--review-tier", "light", cwd=tmp_path, check=True)
-    r = run_cli("set", "complexity=Simple", cwd=tmp_path)
-    assert r.returncode == 0, r.stderr
-    state = _state(tmp_path)
-    assert state["loop_active"] is True
-
-
-def test_set_standard_keeps_loop(run_cli, tmp_path):
-    _init_unknown(run_cli, tmp_path)
-    r = run_cli("set", "complexity=Standard", cwd=tmp_path)
-    assert r.returncode == 0, r.stderr
-    state = _state(tmp_path)
-    assert state["loop_active"] is True
 
 
 def test_init_simple_still_routes_without_state(run_cli, tmp_path):

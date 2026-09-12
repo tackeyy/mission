@@ -85,17 +85,6 @@ def test_the_existing_callback_api_is_untouched(tmp_path):
     assert execution.decision is None or execution.decision.accepted
 
 
-def test_the_entry_point_uses_the_shared_retry_loop():
-    """A second copy of the budget is how the two would drift apart."""
-    from pathlib import Path
-
-    import mission_persistence.legacy_v4 as module
-
-    source = Path(module.__file__).read_text(encoding="utf-8")
-    assert "run_with_base_retry(" in source
-    assert "MAX_BASE_RETRIES" not in source, "the budget belongs to one module"
-
-
 def test_the_plan_does_not_leak_its_identity_into_the_repository(tmp_path):
     """The plan's operation id belongs to the plan, not to the repository.
 

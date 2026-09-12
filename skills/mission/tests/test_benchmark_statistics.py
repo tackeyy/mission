@@ -77,33 +77,23 @@ def _summarize(records: list[dict], tasks: list[dict] | None = None) -> dict:
     return MODULE.summarize(records, tasks, "run-x", "abc1234", TASKS_PATH)
 
 
-# ===== repeats_observed =====
+# ===== repeats_observed and statistical_confidence =====
 
 
-def test_repeats_observed_single_record():
-    """Single record per cell -> repeats_observed == 1."""
-    records = [
-        _record("claude_code_goal_command", task_id="t1"),
-        _record("mission", task_id="t1"),
-    ]
-    summary = _summarize(records)
-    assert summary["repeats_observed"] == 1
-
-
-def test_repeats_observed_three_repeats():
-    """3 records per cell -> repeats_observed == 3."""
+@pytest.mark.parametrize(
+    ("count", "confidence"),
+    [(0, "single-sample"), (1, "single-sample"), (2, "low"), (3, "adequate")],
+)
+def test_repeat_count_maps_to_confidence(count, confidence):
     records = []
-    for i in range(3):
-        records.append(_record("claude_code_goal_command", task_id="t1", run_index=i))
-        records.append(_record("mission", task_id="t1", run_index=i))
+    for index in range(count):
+        records.append(_record("claude_code_goal_command", task_id="t1", run_index=index))
+        records.append(_record("mission", task_id="t1", run_index=index))
+
     summary = _summarize(records, tasks=[{"id": "t1"}])
-    assert summary["repeats_observed"] == 3
 
-
-def test_repeats_observed_zero_records():
-    """No records -> repeats_observed == 0."""
-    summary = _summarize([])
-    assert summary["repeats_observed"] == 0
+    assert summary["repeats_observed"] == count
+    assert summary["statistical_confidence"] == confidence
 
 
 def test_repeats_observed_disagreeing_cells_reports_minimum():
@@ -130,48 +120,6 @@ def test_repeats_observed_disagreeing_cells_reports_minimum():
     assert summary["repeats_observed"] == 1
 
 
-# ===== statistical_confidence =====
-
-
-def test_statistical_confidence_single_sample():
-    """repeats_observed=1 -> statistical_confidence='single-sample'."""
-    records = [
-        _record("claude_code_goal_command", task_id="t1"),
-        _record("mission", task_id="t1"),
-    ]
-    summary = _summarize(records)
-    assert summary["statistical_confidence"] == "single-sample"
-
-
-def test_statistical_confidence_low_two_repeats():
-    """repeats_observed=2 -> statistical_confidence='low'."""
-    records = []
-    for i in range(2):
-        records.append(_record("claude_code_goal_command", task_id="t1", run_index=i))
-        records.append(_record("mission", task_id="t1", run_index=i))
-    summary = _summarize(records, tasks=[{"id": "t1"}])
-    assert summary["repeats_observed"] == 2
-    assert summary["statistical_confidence"] == "low"
-
-
-def test_statistical_confidence_adequate_three_repeats():
-    """repeats_observed=3 -> statistical_confidence='adequate'."""
-    records = []
-    for i in range(3):
-        records.append(_record("claude_code_goal_command", task_id="t1", run_index=i))
-        records.append(_record("mission", task_id="t1", run_index=i))
-    summary = _summarize(records, tasks=[{"id": "t1"}])
-    assert summary["repeats_observed"] == 3
-    assert summary["statistical_confidence"] == "adequate"
-
-
-def test_statistical_confidence_zero_records():
-    """Zero records -> repeats_observed=0, statistical_confidence='single-sample'."""
-    summary = _summarize([])
-    assert summary["repeats_observed"] == 0
-    assert summary["statistical_confidence"] == "single-sample"
-
-
 # ===== per-arm percentiles and stdev (3 repeats, varied values) =====
 
 
@@ -192,68 +140,21 @@ def _three_repeat_records() -> list[dict]:
     return records
 
 
-def test_three_repeats_elapsed_p50():
-    """Sorted [10, 20, 30]: nearest-rank p50 = ceil(0.5*3)=2nd = 20."""
-    records = _three_repeat_records()
-    summary = _summarize(records, tasks=[{"id": "t1"}])
+def test_three_repeat_statistics():
+    summary = _summarize(_three_repeat_records(), tasks=[{"id": "t1"}])
     mission = summary["arms"]["mission"]
-    assert mission["elapsed_minutes_p50"] == pytest.approx(20.0, abs=1e-3)
-
-
-def test_three_repeats_elapsed_p90():
-    """Sorted [10, 20, 30]: nearest-rank p90 = ceil(0.9*3)=3rd = 30."""
-    records = _three_repeat_records()
-    summary = _summarize(records, tasks=[{"id": "t1"}])
-    mission = summary["arms"]["mission"]
-    assert mission["elapsed_minutes_p90"] == pytest.approx(30.0, abs=1e-3)
-
-
-def test_three_repeats_cost_p50():
-    """Sorted [1, 2, 3]: nearest-rank p50 = 2nd = 2."""
-    records = _three_repeat_records()
-    summary = _summarize(records, tasks=[{"id": "t1"}])
-    mission = summary["arms"]["mission"]
-    assert mission["cost_usd_p50"] == pytest.approx(2.0, abs=1e-3)
-
-
-def test_three_repeats_cost_p90():
-    """Sorted [1, 2, 3]: nearest-rank p90 = 3rd = 3."""
-    records = _three_repeat_records()
-    summary = _summarize(records, tasks=[{"id": "t1"}])
-    mission = summary["arms"]["mission"]
-    assert mission["cost_usd_p90"] == pytest.approx(3.0, abs=1e-3)
-
-
-def test_three_repeats_marker_p50():
-    """Sorted [0.5, 0.7, 0.9]: nearest-rank p50 = 2nd = 0.7."""
-    records = _three_repeat_records()
-    summary = _summarize(records, tasks=[{"id": "t1"}])
-    mission = summary["arms"]["mission"]
-    assert mission["marker_score_p50"] == pytest.approx(0.7, abs=1e-3)
-
-
-def test_three_repeats_elapsed_stdev():
-    """Sample stdev of [10, 20, 30] = 10.0."""
-    records = _three_repeat_records()
-    summary = _summarize(records, tasks=[{"id": "t1"}])
-    mission = summary["arms"]["mission"]
-    assert mission["elapsed_minutes_stdev"] == pytest.approx(10.0, abs=1e-3)
-
-
-def test_three_repeats_cost_stdev():
-    """Sample stdev of [1, 2, 3] = 1.0."""
-    records = _three_repeat_records()
-    summary = _summarize(records, tasks=[{"id": "t1"}])
-    mission = summary["arms"]["mission"]
-    assert mission["cost_usd_stdev"] == pytest.approx(1.0, abs=1e-3)
-
-
-def test_three_repeats_marker_stdev():
-    """Sample stdev of [0.5, 0.7, 0.9] ≈ 0.2."""
-    records = _three_repeat_records()
-    summary = _summarize(records, tasks=[{"id": "t1"}])
-    mission = summary["arms"]["mission"]
-    assert mission["marker_score_stdev"] == pytest.approx(0.2, abs=1e-3)
+    expected = {
+        "elapsed_minutes_p50": 20.0,
+        "elapsed_minutes_p90": 30.0,
+        "cost_usd_p50": 2.0,
+        "cost_usd_p90": 3.0,
+        "marker_score_p50": 0.7,
+        "elapsed_minutes_stdev": 10.0,
+        "cost_usd_stdev": 1.0,
+        "marker_score_stdev": 0.2,
+    }
+    for field, value in expected.items():
+        assert mission[field] == pytest.approx(value, abs=1e-3), field
 
 
 # ===== n=1: percentiles return the single value, stdev=null =====

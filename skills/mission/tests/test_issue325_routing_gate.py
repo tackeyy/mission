@@ -18,6 +18,8 @@ import json
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 
 def _load(name: str, rel: str):
     path = Path(__file__).resolve().parents[1] / rel
@@ -45,50 +47,28 @@ def _data(**over):
     return d
 
 
-# ===== 1. gate 発火 =====
-
-def test_planning_simple_routes_to_goal():
-    result = MS._derive_next_action(_data())
-    assert result["next_action"] == "route-to-goal"
-    assert "routed-goal" in result["command_hint"]
+# ===== 1–2. gate decision table =====
 
 
-# ===== 2. 除外条件 =====
-
-def test_signals_keep_loop():
-    r = MS._derive_next_action(_data(review_tier_signals=["irreversible-keyword:deploy"],
-                                     review_tier="full"))
-    assert r["next_action"] == "run-planner"
-
-
-def test_issue_ref_keeps_loop():
-    r = MS._derive_next_action(_data(issue_ref="418"))
-    assert r["next_action"] == "run-planner"
-
-
-def test_force_mission_keeps_loop():
-    r = MS._derive_next_action(_data(force_mission=True))
-    assert r["next_action"] == "run-planner"
-
-
-def test_checker_role_keeps_loop():
-    r = MS._derive_next_action(_data(session_role="checker"))
-    assert r["next_action"] == "run-planner"
-
-
-def test_user_tier_keeps_loop():
-    r = MS._derive_next_action(_data(review_tier_source="user"))
-    assert r["next_action"] == "run-planner"
-
-
-def test_standard_keeps_loop():
-    r = MS._derive_next_action(_data(complexity="Standard", review_tier="standard"))
-    assert r["next_action"] == "plan-inline"  # #339: 非 routed のままループ継続 (inline 計画)
-
-
-def test_score_history_keeps_loop():
-    r = MS._derive_next_action(_data(score_history=[{"iteration": 1, "composite": 4.0}]))
-    assert r["next_action"] == "run-planner"
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({}, "route-to-goal"),
+        ({"review_tier_signals": ["irreversible-keyword:deploy"], "review_tier": "full"}, "run-planner"),
+        ({"issue_ref": "418"}, "run-planner"),
+        ({"force_mission": True}, "run-planner"),
+        ({"session_role": "checker"}, "run-planner"),
+        ({"review_tier_source": "user"}, "run-planner"),
+        ({"complexity": "Standard", "review_tier": "standard"}, "plan-inline"),
+        ({"score_history": [{"iteration": 1, "composite": 4.0}]}, "run-planner"),
+    ],
+    ids=("route", "signals", "issue-ref", "force", "checker", "user-tier", "standard", "history"),
+)
+def test_routing_decision_table(overrides, expected):
+    result = MS._derive_next_action(_data(**overrides))
+    assert result["next_action"] == expected
+    if expected == "route-to-goal":
+        assert "routed-goal" in result["command_hint"]
 
 
 # ===== 3. routed-goal カテゴリと統計除外 =====

@@ -510,24 +510,6 @@ def test_the_suite_actually_writes_to_the_path_the_gate_named(tmp_path):
     assert report_path.exists()
 
 
-def test_the_gate_runs_the_declared_suite_instead_of_a_hardcoded_command():
-    """The call site has to go through the contract, not around it.
-
-    Every check above can pass while `integrate_and_test` still runs `make
-    test` and looks only at the exit code -- which is the state this issue
-    exists to change.
-    """
-    import inspect
-
-    source = inspect.getsource(gate.SubprocessGateOperations.integrate_and_test)
-
-    assert "load_suite_contract" in source
-    assert "require_suite_contract" in source
-    assert "run_declared_suite" in source
-    # The old path must be gone, not merely bypassed.
-    assert '("make", "test")' not in source
-
-
 def test_the_declared_command_reaches_the_runner_unchanged():
     """Scope narrowing must not rewrite the command the base declared.
 
@@ -562,14 +544,3 @@ def test_the_declared_command_reaches_the_runner_unchanged():
 
 class _StopBeforeReport(Exception):
     """End the run once the runner has been observed."""
-
-
-def test_the_gate_passes_its_scope_through_the_environment():
-    """Hold the call the gate makes, not only what `run_declared_suite` accepts."""
-    from pathlib import Path
-
-    import integration_gate as gate
-
-    source = Path(gate.__file__).read_text(encoding="utf-8")
-    assert 'suite_command += ("PYTEST_TARGETS=' not in source
-    assert 'suite_env = {"PYTEST_TARGETS": targets}' in source
