@@ -31,7 +31,7 @@ E       AssertionError: assert '未達一覧' in 'guard-budget-exhausted'
 **10 秒は全ホスト共通の値ではない**（round 1 の Low）。Codex や利用者の設定では違いうる。
 対象ホストの限定は `docs/design/730-stop-guard-performance.md` の整理に合わせる。
 
-### 2. hook は 1 回の実行で CLI を最大 5 回起動する
+### 2. hook は 1 回の実行で CLI を複数回起動する
 
 `scripts/mission-stop-guard.sh` は `_mission_state_bounded` を通じて
 `stop-verdict` / `mark-halt` / `cleanup-stale` / `stop-guard-observe` / 再度の `stop-verdict`
@@ -188,7 +188,8 @@ stderr へ理由を出して非ゼロ終了し、shell はその stderr を rece
 ## 受け入れ条件
 
 1. `MISSION_STOP_GUARD_PER_COMMAND_BUDGET=1` のとき、`resolve_deadline` は
-   `DEADLINE_ENV_VAR` を読まず `now + budget` を返す
+   carried deadline を**予算の起点として採らず** `now + budget` を返す。
+   **読むこと自体はやめない**（条件 4 の検証に要る）
 2. 変数が無いとき、`resolve_deadline` の挙動は現状と同一である
 3. 変数が `1` 以外（空・`0`・`true`・未知の値）のときも現状と同一である
 4. **継続で予算を失ったときの `GuardBudgetLost` は、変数の有無に関わらず送出される**
@@ -232,7 +233,8 @@ cd skills/mission && python3 -m pytest tests/test_issue742_stop_guard_timeout.py
 ## 残る問題（本 Issue では解かない）
 
 **本番の hook も、負荷が高ければ同じく `guard-budget-exhausted` へ落ちる。**
-CLI 起動が 1 回あたり 1.3〜2.4 秒（load 24 で実測）で、hook は最大 5 回呼ぶ。
+CLI 起動が 1 回あたり 1.3〜2.4 秒（load 24 で実測）で、hook はそれを複数回呼ぶ
+（`docs/design/730-stop-guard-performance.md` によれば条件により 5〜7 回）。
 
 **これは #730（stop guard performance）の範囲である。** 本 Issue はテストが
 merge を止めることを解くもので、**本番の余裕そのものは別に扱う。**
