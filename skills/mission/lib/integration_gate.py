@@ -225,6 +225,13 @@ SUITE_REPORT_SCHEMA = "mission-suite-report/1"
 SUITE_REPORT_ENV = "MISSION_SUITE_REPORT"
 _SUITE_FAILURE_PREFIX = "[suite_failure] "
 _ASCII_PUNCTUATION = r'''!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~'''
+_MATCHED_FAILURE_TITLE = "matched failure lines:"
+_OUTPUT_TAIL_TITLE = "output tail:"
+_MIN_SUITE_FAILURE_EXCERPT_LIMIT = (
+    len(_SUITE_FAILURE_PREFIX + _MATCHED_FAILURE_TITLE)
+    + 1
+    + len(_SUITE_FAILURE_PREFIX + _OUTPUT_TAIL_TITLE)
+)
 
 
 def _sanitize_suite_output(value: str) -> str:
@@ -247,7 +254,6 @@ def _sanitize_suite_output(value: str) -> str:
 
 def _is_failure_line(line: str) -> bool:
     tokens = [token.strip(_ASCII_PUNCTUATION) for token in re.split(r"[ \t]+", line)]
-    tokens = [token for token in tokens if token]
     for index, token in enumerate(tokens):
         if token in {"FAILED", "FAIL", "ERROR"}:
             return True
@@ -257,36 +263,45 @@ def _is_failure_line(line: str) -> bool:
 
 
 def _bounded_failure_section(
-    title: str, lines: list[str], limit: int, *, from_end: bool = False
-) -> tuple[str, bool]:
+    title: str, entries: list[tuple[int, str]], limit: int, *, from_end: bool = False
+) -> tuple[str, bool, set[int]]:
     rendered = [_SUITE_FAILURE_PREFIX + title]
-    rendered.extend(_SUITE_FAILURE_PREFIX + line for line in lines)
+    rendered.extend(_SUITE_FAILURE_PREFIX + line for _, line in entries)
     full = "\n".join(rendered)
     if len(full) <= limit:
-        return full, False
+        return full, False, {index for index, _ in entries}
 
     marker = _SUITE_FAILURE_PREFIX + "output truncated"
-    selected = []
-    candidates = reversed(lines) if from_end else iter(lines)
-    for line in candidates:
-        candidate = _SUITE_FAILURE_PREFIX + line
-        chosen = selected + [candidate]
-        if from_end:
-            chosen = list(reversed(chosen))
+    selected: list[tuple[int, str]] = []
+    candidates = reversed(entries) if from_end else iter(entries)
+    for entry in candidates:
+        chosen_entries = [entry] + selected if from_end else selected + [entry]
+        chosen = [_SUITE_FAILURE_PREFIX + value for _, value in chosen_entries]
         proposed = "\n".join([_SUITE_FAILURE_PREFIX + title] + chosen + [marker])
-        if len(proposed) > limit:
-            break
-        selected.append(candidate)
-    if from_end:
-        selected.reverse()
-    rendered = [_SUITE_FAILURE_PREFIX + title] + selected
+        if len(proposed) <= limit:
+            selected = chosen_entries
+            continue
+        without_marker = "\n".join([_SUITE_FAILURE_PREFIX + title] + chosen)
+        if from_end and len(without_marker) <= limit:
+            selected = chosen_entries
+        break
+    rendered = [_SUITE_FAILURE_PREFIX + title] + [
+        _SUITE_FAILURE_PREFIX + line for _, line in selected
+    ]
     if len("\n".join(rendered + [marker])) <= limit:
         rendered.append(marker)
-    return "\n".join(rendered), True
+    return "\n".join(rendered), True, {index for index, _ in selected}
 
 
 def suite_failure_excerpt(stdout, stderr, *, limit):
     """Return a bounded diagnostic view of a failed declared suite."""
+    # Fixed section headers need 67 characters, so smaller limits cannot preserve this contract.
+    if limit < _MIN_SUITE_FAILURE_EXCERPT_LIMIT:
+        raise ValueError(
+            "suite failure excerpt limit must be at least {}".format(
+                _MIN_SUITE_FAILURE_EXCERPT_LIMIT
+            )
+        )
     streams = [stream for stream in (stdout or "", stderr or "") if stream]
     sanitized = _sanitize_suite_output("\n".join(streams))
     lines = sanitized.split("\n")
@@ -295,32 +310,36 @@ def suite_failure_excerpt(stdout, stderr, *, limit):
     if not any(lines):
         return _SUITE_FAILURE_PREFIX + "output unavailable"
 
-    matched_indices = {index for index, line in enumerate(lines) if _is_failure_line(line)}
-    matched = [line for index, line in enumerate(lines) if index in matched_indices]
-    tail = [line for index, line in enumerate(lines) if index not in matched_indices]
+    entries = list(enumerate(lines))
+    matched_indices = {index for index, line in entries if _is_failure_line(line)}
     # Runner-neutral matching deliberately permits ordinary prose to overmatch;
     # a runner-specific format would make diagnostics disappear for other runners.
     # Showing both matches and tail keeps that bounded false-positive cost useful.
-    matched_budget = (limit * 2) // 3 if matched else 0
-    separator_budget = 1 if matched else 0
-    tail_budget = limit - matched_budget - separator_budget
-    if matched:
-        matched_section, matched_truncated = _bounded_failure_section(
-            "matched failure lines:", matched, matched_budget
+    if matched_indices:
+        matched_header_size = len(_SUITE_FAILURE_PREFIX + _MATCHED_FAILURE_TITLE)
+        tail_header_size = len(_SUITE_FAILURE_PREFIX + _OUTPUT_TAIL_TITLE)
+        matched_budget = max(
+            matched_header_size,
+            min((limit * 2) // 3, limit - tail_header_size - 1),
         )
-        tail_section, tail_truncated = _bounded_failure_section(
-            "output tail:", tail, tail_budget, from_end=True
+        matched_entries = [
+            entry for entry in entries
+            if entry[0] in matched_indices
+        ]
+        matched_section, _, matched_selected_indices = _bounded_failure_section(
+            _MATCHED_FAILURE_TITLE, matched_entries, matched_budget
         )
-        if not matched_truncated:
-            tail_section, tail_truncated = _bounded_failure_section(
-                "output tail:", tail, limit - len(matched_section) - separator_budget, from_end=True
-            )
-        elif not tail_truncated:
-            matched_section, matched_truncated = _bounded_failure_section(
-                "matched failure lines:", matched, limit - len(tail_section) - separator_budget
-            )
+        tail_entries = [
+            entry for entry in entries if entry[0] not in matched_selected_indices
+        ]
+        tail_section, _, _ = _bounded_failure_section(
+            _OUTPUT_TAIL_TITLE,
+            tail_entries,
+            limit - len(matched_section) - 1,
+            from_end=True,
+        )
         return "\n".join((matched_section, tail_section))
-    tail_section, _ = _bounded_failure_section("output tail:", tail, limit, from_end=True)
+    tail_section, _, _ = _bounded_failure_section(_OUTPUT_TAIL_TITLE, entries, limit, from_end=True)
     return tail_section
 
 
