@@ -43,6 +43,27 @@ def test_excerpt_finds_decorated_and_tap_failure_words_in_both_streams():
         assert line in excerpt
 
 
+def test_excerpt_classifies_ascii_punctuation_wrapped_markers_as_matches():
+    """Decorated runner markers must not be demoted to ordinary tail output."""
+    excerpt = gate.suite_failure_excerpt(
+        "[ERROR] MavenCase\n--- FAIL: GoCase\nordinary tail\n", "", limit=4000
+    )
+
+    assert "[suite_failure] matched failure lines:" in excerpt
+    assert "[suite_failure] [ERROR] MavenCase" in excerpt
+    assert "[suite_failure] --- FAIL: GoCase" in excerpt
+
+
+def test_excerpt_classifies_tap_not_ok_as_a_match():
+    """TAP failures need the same priority as other runner failure markers."""
+    excerpt = gate.suite_failure_excerpt(
+        "not ok 3 - TAP case\nordinary tail\n", "", limit=4000
+    )
+
+    assert "[suite_failure] matched failure lines:" in excerpt
+    assert "[suite_failure] not ok 3 - TAP case" in excerpt
+
+
 def test_excerpt_keeps_stdout_and_stderr_failure_records_separate_without_newlines():
     """Stream boundaries must not turn two independently useful lines into one."""
     excerpt = gate.suite_failure_excerpt("FAILED stdout", "ERROR stderr", limit=4000)
@@ -136,6 +157,30 @@ def test_failed_suite_logs_exit_and_safe_failure_excerpt(tmp_path):
     assert "suite_exit=3" in logged
     assert any("FAILED from stdout" in line for line in logged)
     assert any("ERROR from stderr" in line for line in logged)
+
+
+def test_failed_suite_logs_an_excerpt_capped_at_the_declared_limit(tmp_path):
+    """The gate call site, not only the formatter, must enforce the 4,000-char cap."""
+    logged = []
+    noisy_output = "".join("FAILED marker-{}\n".format(index) for index in range(600))
+
+    def runner(command, cwd, env=None):
+        return gate.CommandResult(3, noisy_output, "")
+
+    with pytest.raises(gate.IntegrationGateError):
+        gate.run_declared_suite(
+            ("suite",),
+            runner=runner,
+            cwd=tmp_path,
+            report_path=tmp_path / "report.json",
+            expected_tree_sha="a" * 40,
+            step=4,
+            logger=logged.append,
+        )
+
+    assert len(logged) == 2
+    assert len(logged[1]) <= 4000
+    assert "output truncated" in logged[1]
 
 
 def test_successful_suite_does_not_add_logger_output(tmp_path):
