@@ -94,8 +94,18 @@ def test_every_recovery_method_opens_the_pinned_walk():
     for name in RECOVERY_METHODS:
         source = _source(name)
         if name == "_cleanup_one_projection_unlocked":
-            # It receives the pinned target rather than opening one.
-            assert "pinned: _PinnedProjectionTarget" in source
+            # It receives the pinned target rather than opening one itself.
+            import ast
+            import textwrap
+
+            function = ast.parse(textwrap.dedent(source)).body[0]
+            pinned = next(
+                argument
+                for argument in function.args.args
+                if argument.arg == "pinned"
+            )
+            assert "_PinnedProjectionTarget" in ast.unparse(pinned.annotation)
+            assert "os.open(" not in source
             continue
         assert "with self._pinned_projection_target(projection) as pinned:" in source, name
 
