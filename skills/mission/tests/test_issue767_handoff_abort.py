@@ -567,15 +567,28 @@ def test_abort_replay_does_not_read_the_rejection_back_as_a_failure():
         effects=(),
         result={"operation": "abort", "abort_reason": "operator-abort"},
     )
-    response = executor_handoff_response(abort_prepared, execution)
+    response = executor_handoff_response(
+        abort_prepared, execution, operation="abort"
+    )
 
     assert response["ok"] is True
     assert response["operation"] == "abort"
     assert response["executor_handoff"]["rejected_reason"] == "operator-abort"
 
-    # 対照: 同じ projection でも `begin` の replay なら失敗として報告される。
-    begin_prepared = PreparedTransitionOperation(
-        command=abort_prepared.command, effects=(), result={"operation": "begin"}
+    # 対照: 同じ形でも **canonical drift の理由**なら失敗として報告される。
+    # #773 で判定の軸が「どの operation か」から「どの理由か」へ移った。abort の理由は
+    # begin の replay に現れないので、operation で分けても意味を持たなかった。
+    drifted = freeze_json_value(
+        {"executor_handoff": dict(
+            _handoff_document(status="prepared")["executor_handoff"],
+            status="rejected",
+            rejected_reason="canonical-plan-digest-drift",
+        )}
     )
-    with pytest.raises(PlanningFailure, match="operator-abort"):
-        executor_handoff_response(begin_prepared, execution)
+    drift_execution = LegacyCommandExecutionResult(
+        None, drifted, replayed=True, replayed_state=drifted
+    )
+    with pytest.raises(PlanningFailure, match="canonical-plan-digest-drift"):
+        executor_handoff_response(
+            abort_prepared, drift_execution, operation="begin"
+        )
