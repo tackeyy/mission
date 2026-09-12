@@ -986,7 +986,9 @@ def commit_plan_evidence(
         publish(binding)
     except Exception as exc:
         raise PlanningFailure("plan-publication-failed") from exc
-    discard = _plan_binding_changes(state, plan) and state.get("executor_handoff") is not None
+    discard = _plan_binding_changes(state, plan) and not raw_handoff_is_absent(
+        state.get("executor_handoff")
+    )
     state["canonical_plan"] = dict(plan)
     if discard:
         # #767 D1.  The handoff belonged to the plan just replaced, and the

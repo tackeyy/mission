@@ -246,6 +246,36 @@ def test_a_consumed_handoff_no_longer_blocks_the_next_iteration(
     assert result.returncode == 0, result.stderr
 
 
+def test_advancing_to_reviewing_preserves_a_completed_handoffs_decisions(
+    raw_run_cli, tmp_path
+):
+    """同じ handoff のまま reviewing へ進んでも decision を消さない."""
+    session_id = "r767-reviewing-decisions"
+    _prepare_handoff(raw_run_cli, tmp_path, session_id)
+    for operation_id, command in [
+        ("op-begin", ("begin",)),
+        ("op-s1", ("record-step", "--step-id", "s1", "--result", "ok")),
+        ("op-s2", ("record-step", "--step-id", "s2", "--result", "ok")),
+        ("op-complete", ("complete",)),
+    ]:
+        assert raw_run_cli(
+            "executor-handoff", *command,
+            cwd=tmp_path, env_extra=_env(session_id, operation_id=operation_id),
+        ).returncode == 0, command
+    before = _public_state(raw_run_cli, tmp_path, session_id)["decisions"]
+    assert len(before) == 2, before
+
+    result = raw_run_cli(
+        "advance", "--phase", "reviewing",
+        cwd=tmp_path, env_extra=_env(session_id, operation_id="op-reviewing"),
+    )
+
+    assert result.returncode == 0, result.stderr
+    after = _public_state(raw_run_cli, tmp_path, session_id)
+    assert after["phase"] == "reviewing"
+    assert after["decisions"] == before
+
+
 def test_a_consuming_handoff_still_blocks_and_names_real_commands(
     raw_run_cli, tmp_path
 ):
@@ -673,6 +703,38 @@ def test_a_present_handoff_is_not_read_as_absent():
     assert raw_handoff_is_absent({"status": "prepared"}) is False
     assert raw_handoff_is_absent("") is False
     assert raw_handoff_is_absent(0) is False
+
+
+def test_an_unreadable_handoff_refuses_plan_adoption():
+    """読めない handoff は、adopt-core で捨てずに拒否する."""
+    from mission_application.planning import plan_adoption_handoff_refusal
+
+    assert plan_adoption_handoff_refusal(
+        {"executor_handoff": "broken"}, {}
+    ) == "handoff-status-unknown"
+
+
+def test_adopting_a_plan_keeps_an_empty_handoff_spelling():
+    """codec が absent と読む空 object は adopt-core でも削除しない."""
+    from mission_application.planning import commit_plan_evidence
+
+    state = {
+        "canonical_plan": {
+            "schema": "mission-plan/1", "path": "p.json",
+            "digest": "sha256:" + "a" * 64, "source": "core", "source_id": "s1",
+            "source_digest": "sha256:" + "b" * 64, "selection_source": "core",
+            "iteration": 0, "generation": 1, "validated_at": "2030-01-01T00:00:00Z",
+        },
+        "executor_handoff": {},
+        "decisions": [],
+    }
+    plan = dict(state["canonical_plan"], generation=2)
+
+    commit_plan_evidence(
+        state=state, plan=plan, lease_verified=True, publish=lambda _binding: None
+    )
+
+    assert state["executor_handoff"] == {}
 
 
 def test_the_adoption_refusal_keeps_a_machine_readable_code():
