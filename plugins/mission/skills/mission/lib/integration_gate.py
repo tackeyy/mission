@@ -324,11 +324,10 @@ def _select_failure_entries(
 
     # Reserve the final diagnostic before matching records consume the budget.
     # This also makes an all-matching log retain its actual final line as tail.
-    for entry in reversed(entries):
-        selected_tail.insert(0, entry)
-        if marked_size() > limit:
-            selected_tail.pop(0)
-        break
+    last_entry = entries[-1]
+    selected_tail.append(last_entry)
+    if marked_size() > limit:
+        selected_tail.pop()
 
     tail_indices = {index for index, _ in selected_tail}
     # Matching records retain their existing forward direction, but never take
@@ -344,13 +343,13 @@ def _select_failure_entries(
         content_budget -= marked_size() - before
 
     selected_indices = {index for index, _ in selected_matched}
-    # The tail retains its existing reverse selection direction.
-    tail_budget = limit - 1  # Reserve the inter-record separator before adding tail lines.
+    # The tail retains its existing reverse selection direction.  marked_size()
+    # includes the inter-record separator before the reserved truncation marker.
     for entry in reversed(entries):
         if entry[0] in selected_indices or entry[0] in tail_indices:
             continue
         selected_tail.insert(0, entry)
-        if marked_size() - 1 > tail_budget:
+        if marked_size() > limit:
             selected_tail.pop(0)
             break
 

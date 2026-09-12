@@ -284,6 +284,60 @@ def test_excerpt_accepts_a_full_excerpt_at_its_exact_limit():
     assert gate.suite_failure_excerpt("x\n", "", limit=len(expected)) == expected
 
 
+def test_excerpt_keeps_a_marked_section_at_its_exact_truncated_limit():
+    """An exactly fitting marked section must not collapse to the marker alone."""
+    output = "\n".join(
+        ["FAILED head " + "q" * 7]
+        + ["t" * 7 + "-{:03d}".format(index) for index in range(300)]
+    )
+
+    excerpt = gate.suite_failure_excerpt(output, "", limit=4000)
+
+    assert len(excerpt) == 4000
+    assert "[suite_failure] FAILED" in excerpt
+
+
+def test_excerpt_reserves_the_tail_share_when_matches_fill_the_limit():
+    """The two-thirds matching budget preserves substantial final context."""
+    matched = ["FAILED " + "m" * 23 for _ in range(100)]
+    tail = ["t" * 30 for _ in range(100)]
+
+    excerpt = gate.suite_failure_excerpt("\n".join(matched + tail), "", limit=4000)
+
+    assert excerpt.count("[suite_failure] FAILED " + "m" * 23) == 56
+    assert excerpt.count("[suite_failure] " + "t" * 30) >= 20
+
+
+def test_excerpt_deducts_the_marker_before_allocating_the_matching_share():
+    """The two-thirds share includes the marker reservation at its boundary."""
+    matched_line = "FAILED " + "m" * 3
+    output = "\n".join([matched_line] * 100 + ["t" * 30] * 100)
+
+    excerpt = gate.suite_failure_excerpt(output, "", limit=4000)
+
+    assert excerpt.count("[suite_failure] " + matched_line) == 97
+    assert excerpt.count("[suite_failure] " + "t" * 30) == 27
+
+
+def test_excerpt_selects_the_first_matching_line_when_only_one_fits():
+    """Matching records retain forward selection order under truncation."""
+    excerpt = gate.suite_failure_excerpt(
+        "FAILED first\nFAILED second\n" + "x" * 200 + "\n", "", limit=76
+    )
+
+    assert "[suite_failure] FAILED first" in excerpt
+    assert "[suite_failure] FAILED second" not in excerpt
+
+
+def test_excerpt_omits_headers_when_that_is_needed_to_keep_a_content_line():
+    """At the accepted lower band, headers yield before the sole tail line."""
+    excerpt = gate.suite_failure_excerpt("x\nx\n", "", limit=61)
+
+    assert "[suite_failure] x" in excerpt
+    assert "[suite_failure] output tail:" not in excerpt
+    assert "[suite_failure] output truncated" in excerpt
+
+
 @pytest.mark.parametrize("width", (5, 40, 150))
 def test_excerpt_never_silently_truncates_across_content_widths(width):
     """Changing line widths cannot move a silent-truncation band into a new limit."""
