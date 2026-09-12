@@ -426,15 +426,24 @@ _REPLAY_SUCCESS_REASONS = frozenset(member.value for member in HandoffAbortReaso
 UNKNOWN_REPLAY_REASON = "executor-handoff-replay-reason-unknown"
 
 
+MISSING_REPLAY_HANDOFF = "executor-handoff-replay-handoff-missing"
+
+
 def _replayed_handoff_failure(handoff: object) -> str | None:
     """Return the reason the replayed operation failed, or ``None`` if it did not."""
-    if not isinstance(handoff, Mapping) or handoff.get("status") != "rejected":
+    if not isinstance(handoff, Mapping):
+        # Every handoff command leaves a handoff behind, so its absence means
+        # the recorded state is not the one this operation wrote.  Answering
+        # ``ok`` with nothing in hand would be the same fail-open the unknown
+        # reason code is closed against.
+        return MISSING_REPLAY_HANDOFF
+    if handoff.get("status") != "rejected":
         return None
     reason = handoff.get("rejected_reason")
-    if reason in _REPLAY_SUCCESS_REASONS:
-        return None
     if isinstance(reason, str) and reason in _REPLAY_FAILURE_REASONS:
         return reason
+    if reason in _REPLAY_SUCCESS_REASONS:
+        return None
     # Neither vocabulary claims it, so what the operation did is unknown.
     return UNKNOWN_REPLAY_REASON
 

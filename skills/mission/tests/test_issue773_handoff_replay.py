@@ -102,6 +102,45 @@ def test_replay_of_begin_survives_an_abort_that_happened_after_it(
     assert _head(tmp_path, session_id) == head_before
 
 
+def test_replay_discards_a_prepare_failure_that_is_raised_not_converted(
+    raw_run_cli, tmp_path
+):
+    """受け入れ条件 1 の**本体**。保持した例外を replay で捨てること.
+
+    `begin` / `verify` の canonical 失敗は adapter が rejection transition へ変換するので、
+    **例外として抜ける経路を通らない**（そこを通さないと「replay なら捨てる」の分岐が
+    一度も実行されない）。`record-step` は変換の対象外なので、plan を消すと
+    `canonical-*` が例外のまま上がる。
+
+    異系統レビュー round 1 の High: この経路が無いと、`if held and not
+    execution.replayed:` を `if held:` に変える変異が通る。
+    """
+    session_id = "r773-held"
+    plan = _prepare_handoff(raw_run_cli, tmp_path, session_id)
+    assert raw_run_cli(
+        "executor-handoff", "begin",
+        cwd=tmp_path, env_extra=_env(session_id, operation_id="op-begin"),
+    ).returncode == 0
+    first = raw_run_cli(
+        "executor-handoff", "record-step", "--step-id", "s1", "--result", "ok",
+        cwd=tmp_path, env_extra=_env(session_id, operation_id="op-record"),
+    )
+    assert first.returncode == 0, first.stderr
+
+    # 以後 prepare は canonical plan を読めず、例外で抜ける。
+    plan.unlink()
+    head_before = _head(tmp_path, session_id)
+
+    replayed = raw_run_cli(
+        "executor-handoff", "record-step", "--step-id", "s1", "--result", "ok",
+        cwd=tmp_path, env_extra=_env(session_id, operation_id="op-record"),
+    )
+
+    assert replayed.returncode == 0, replayed.stderr
+    assert json.loads(replayed.stdout) == json.loads(first.stdout)
+    assert _head(tmp_path, session_id) == head_before
+
+
 def test_replay_of_a_drift_rejected_begin_reproduces_that_failure(
     raw_run_cli, tmp_path
 ):
@@ -355,23 +394,51 @@ def test_replay_ignores_a_rejection_produced_by_the_current_prepare():
     assert response["executor_handoff"]["status"] == "consuming"
 
 
+def test_the_reported_operation_comes_from_the_argument_not_from_prepare():
+    """D2 の `operation`。**引数が勝つこと**を、値を食い違わせて識別する.
+
+    production では両者が常に同じ値になるので、CLI 経由のテストでは
+    `prepared.result["operation"]` へ戻す変異を落とせない
+    （異系統レビュー round 1 の High）。
+    """
+    from mission_application.planning import executor_handoff_response
+
+    execution = _replay_execution(
+        {"status": "consuming", "handoff_id": "handoff_x", "begun_at": "2030-01-01T00:00:00Z"}
+    )
+
+    response = executor_handoff_response(
+        _prepared("begin"), execution, operation="record"
+    )
+
+    assert response["operation"] == "record"
+
+
+_UNKNOWN = "executor-handoff-replay-reason-unknown"
+
+
 @pytest.mark.parametrize(
-    ("status", "reason", "expected_ok"),
+    ("status", "reason", "expected_ok", "expected_failure"),
     [
-        ("consuming", None, True),
-        ("consumed", None, True),
-        ("prepared", None, True),
-        ("rejected", "canonical-plan-digest-drift", False),
-        ("rejected", "canonical-plan-generation-mismatch", False),
-        ("rejected", "operator-abort", True),
-        ("rejected", "plan-superseded", True),
-        ("rejected", "executor-abandoned", True),
-        ("rejected", "something-else", False),
-        ("rejected", None, False),
+        ("consuming", None, True, None),
+        ("consumed", None, True, None),
+        ("prepared", None, True, None),
+        ("rejected", "canonical-plan-digest-drift", False, "canonical-plan-digest-drift"),
+        (
+            "rejected",
+            "canonical-plan-generation-mismatch",
+            False,
+            "canonical-plan-generation-mismatch",
+        ),
+        ("rejected", "operator-abort", True, None),
+        ("rejected", "plan-superseded", True, None),
+        ("rejected", "executor-abandoned", True, None),
+        ("rejected", "something-else", False, _UNKNOWN),
+        ("rejected", None, False, _UNKNOWN),
         # 前置き判定へ退化した実装を落とすための境界。`canonical` で始まるが
         # `CanonicalPlanRejectionCode` には無い値。**どちらも失敗にはなるが、
         # 名乗る理由が違う**（下の assert で見分ける）。
-        ("rejected", "canonical-plan-made-up", False),
+        ("rejected", "canonical-plan-made-up", False, _UNKNOWN),
     ],
     ids=[
         "consuming", "consumed", "prepared",
@@ -381,7 +448,7 @@ def test_replay_ignores_a_rejection_produced_by_the_current_prepare():
     ],
 )
 def test_replay_success_is_decided_by_closed_membership_of_the_reason(
-    status, reason, expected_ok
+    status, reason, expected_ok, expected_failure
 ):
     """D2 の復元表。**前置き判定ではなく、閉じた集合への所属で決める.**
 
@@ -394,11 +461,6 @@ def test_replay_success_is_decided_by_closed_membership_of_the_reason(
         handoff["rejected_reason"] = reason
     execution = _replay_execution(handoff)
 
-    from mission_application.planning import (
-        UNKNOWN_REPLAY_REASON,
-        _REPLAY_FAILURE_REASONS,
-    )
-
     if expected_ok:
         response = executor_handoff_response(
             _prepared("begin"), execution, operation="begin"
@@ -410,11 +472,10 @@ def test_replay_success_is_decided_by_closed_membership_of_the_reason(
     with pytest.raises(PlanningFailure) as caught:
         executor_handoff_response(_prepared("begin"), execution, operation="begin")
 
-    # **名乗る理由まで固定する。** 閉じた集合に属する理由だけがそのまま出て、
-    # それ以外は「不明」と名乗る。ここを緩めると、前置きで判定する実装
-    # (`reason.startswith("canonical")`) が通ってしまう。
-    expected = reason if reason in _REPLAY_FAILURE_REASONS else UNKNOWN_REPLAY_REASON
-    assert str(caught.value) == expected
+    # **名乗る理由まで、リテラルで固定する。** 期待値を production の集合から
+    # 計算すると、集合から要素を削る変異で**期待値も同時に動いて通ってしまう**
+    # (異系統レビュー round 1 の Medium)。
+    assert str(caught.value) == expected_failure
 
 
 # **非 replay で rejection を読む経路**は production の CLI テストが押さえている
@@ -422,3 +483,110 @@ def test_replay_success_is_decided_by_closed_membership_of_the_reason(
 # rc=2 と drift のコードを assert する)。ここで unit として書き直さないのは、
 # `LegacyCommandExecutionResult` が「replayed でないなら decision は非 None」を不変条件に
 # しており、合成した execution ではその経路を正しく作れないため。
+
+
+def test_a_replay_without_a_recorded_handoff_fails_closed():
+    """記録された state に handoff が無ければ失敗として扱う.
+
+    理由コードの未知値は fail-closed にしているのに、**handoff 自体の欠落**が
+    fail-open だと、`ok: True` と `executor_handoff: None` を同時に返すことになる
+    （独立 Checker が指摘した）。どの handoff 命令も handoff を残すので、
+    無いということは「この operation が書いた state ではない」を意味する。
+    """
+    from mission_application.planning import (
+        MISSING_REPLAY_HANDOFF,
+        PlanningFailure,
+        executor_handoff_response,
+    )
+    from mission_application.ports import LegacyCommandExecutionResult
+    from mission_kernel.json_codec import freeze_json_value
+
+    empty = freeze_json_value({"iteration": 2})
+    execution = LegacyCommandExecutionResult(
+        None, empty, replayed=True, replayed_state=empty
+    )
+
+    with pytest.raises(PlanningFailure) as caught:
+        executor_handoff_response(_prepared("begin"), execution, operation="begin")
+
+    assert str(caught.value) == MISSING_REPLAY_HANDOFF
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["verify-step", "record-step", "", None, "BEGIN"],
+    ids=["cli-name", "cli-name-2", "empty", "none", "wrong-case"],
+)
+def test_the_operation_vocabulary_is_closed(operation):
+    """`operation` の語彙は閉じている.
+
+    production の呼び出し側はリテラルなので live の影響は無いが、**fail-closed の
+    guard に検査が無いと、丸ごと削る変異が通る**（独立 Checker が検出した）。
+    CLI のサブコマンド名（`verify-step`）と内部の operation 名（`verify`）は
+    別物なので、取り違えがここで止まる。
+    """
+    from mission_application.planning import PlanningFailure, executor_handoff_response
+
+    execution = _replay_execution(
+        {"status": "consuming", "handoff_id": "handoff_x", "begun_at": "2030-01-01T00:00:00Z"}
+    )
+
+    with pytest.raises(PlanningFailure, match="executor-handoff-execution-invalid"):
+        executor_handoff_response(_prepared("begin"), execution, operation=operation)
+
+
+def test_a_fenced_error_from_prepare_is_not_swallowed_by_the_hold(monkeypatch):
+    """`prepare` が passthrough の例外を上げたら、遅延に吸わせない.
+
+    `FencedCommitError` は `ValueError` の派生なので `rejected` にも当たる。
+    内側の `except passthrough: raise` を外すと **replay では握り潰されて
+    `ok: True` が返る**（独立 Checker が検出した）。CLI はこの例外のコードを
+    分類するので、届かないと lease / CAS の失敗が成功に見える。
+    """
+    from mission_application.planning import (
+        ExecutorHandoffRejected,
+        run_executor_handoff,
+    )
+    from mission_application.ports import LegacyCommandExecutionResult
+    from mission_kernel.json_codec import freeze_json_value
+    from mission_persistence.fenced_commit import FencedCommitError
+
+    state = freeze_json_value({"executor_handoff": {"status": "consuming"}})
+
+    class _Repository:
+        """prepare を呼んだあと replay を返す最小の repository."""
+
+        def execute_transition_effects(self, prepare):
+            prepared = prepare({})
+            return prepared, LegacyCommandExecutionResult(
+                None, state, replayed=True, replayed_state=state
+            )
+
+    def _prepare(_data):
+        raise FencedCommitError("lease-not-held", "the lease moved")
+
+    with pytest.raises(FencedCommitError) as caught:
+        run_executor_handoff(
+            _Repository(),
+            _prepare,
+            operation="begin",
+            passthrough=(FencedCommitError,),
+            rejected=(OSError, ValueError),
+        )
+
+    assert caught.value.code == "lease-not-held"
+
+    # 対照: passthrough でない失敗は遅延され、replay なら捨てられる。
+    def _rejected_prepare(_data):
+        raise ValueError("canonical-plan-digest-drift")
+
+    response = run_executor_handoff(
+        _Repository(),
+        _rejected_prepare,
+        operation="begin",
+        passthrough=(FencedCommitError,),
+        rejected=(OSError, ValueError),
+    )
+
+    assert response["ok"] is True
+    assert ExecutorHandoffRejected is not None
