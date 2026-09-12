@@ -64,6 +64,9 @@ V5_EXECUTOR_SURFACE = (
     "_callback_guard",
     "_effect_transaction",
     "_guarded_context",
+    # #747 3a: the executor names the command it prepared here, so the
+    # admission can authorise the in-root destination from the audit.
+    "_prepared_command_type",
     "_reject_reentrant_entry",
     "_replayed_state_document",
     "_repository",
@@ -84,6 +87,7 @@ V5_EXECUTOR_INSTANCE_STATE = (
     "_callback_depth",
     "_effect_transaction",
     "_observed_base",
+    "_prepared_command_type",
     "_replayed",
     "_repository",
 )
@@ -249,6 +253,9 @@ def in_memory_v5_repository(current, *, replayed=False, replayed_document=None, 
     # #711: the executor reads the base before it admits, so the double has
     # to carry what that read observed.
     repository._admitted = None
+    # #747 3a: the executor writes the command it prepared here before it
+    # admits, so the double carries the slot it writes into.
+    repository._prepared_command_type = None
     repository._observed_base = {
         "base_head_digest": ZERO_DIGEST,
         "base_generation": 0,
