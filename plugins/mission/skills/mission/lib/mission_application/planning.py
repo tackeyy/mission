@@ -388,6 +388,57 @@ class ExecutorHandoffRejected(TransitionRejected):
     """One executor handoff could not be executed; the message names why."""
 
 
+@dataclass(frozen=True)
+class UnpreparedOperation:
+    """Stands in for a prepare that failed, until admission says what it was (#773).
+
+    The v5 executor runs prepare before it can tell the caller whether the
+    operation is a replay, so a failure against the current state arrives too
+    early to act on.  This carries the transaction that far and nothing
+    further: it is deliberately absent from the kernel's decision table, so
+    ``decide`` answers ``unknown-command`` and nothing is committed.  The
+    caller then either discards the held failure (it was a replay) or raises
+    it in place of that rejection, so this type never reaches a user.
+    """
+
+
+def unprepared_operation() -> PreparedTransitionOperation:
+    """Return the prepared operation that stands in for a failed prepare.
+
+    The effects are empty so that the request carries the same (absent)
+    materialization as a real executor handoff; a generated blob here would
+    give ``_assert_replay_materializes`` something to disagree about.
+    """
+    return PreparedTransitionOperation(
+        command=UnpreparedOperation(), effects=(), result={}
+    )
+
+
+# #773 D2.  A replayed operation records only its state, never its response, so
+# success and failure are read back from the handoff it left behind.  The two
+# vocabularies are disjoint (fixed by #767), and membership is tested rather
+# than a prefix: a prefix test would silently misread a value whose spelling
+# changed, and these sets are the authority on what each one means.
+_REPLAY_FAILURE_REASONS = frozenset(
+    member.value for member in CanonicalPlanRejectionCode
+)
+_REPLAY_SUCCESS_REASONS = frozenset(member.value for member in HandoffAbortReason)
+UNKNOWN_REPLAY_REASON = "executor-handoff-replay-reason-unknown"
+
+
+def _replayed_handoff_failure(handoff: object) -> str | None:
+    """Return the reason the replayed operation failed, or ``None`` if it did not."""
+    if not isinstance(handoff, Mapping) or handoff.get("status") != "rejected":
+        return None
+    reason = handoff.get("rejected_reason")
+    if reason in _REPLAY_SUCCESS_REASONS:
+        return None
+    if isinstance(reason, str) and reason in _REPLAY_FAILURE_REASONS:
+        return reason
+    # Neither vocabulary claims it, so what the operation did is unknown.
+    return UNKNOWN_REPLAY_REASON
+
+
 def run_transition_effects(
     repository: object,
     prepare,
@@ -422,16 +473,44 @@ def run_executor_handoff(
     repository: object,
     prepare,
     *,
+    operation: str,
     passthrough: tuple,
     rejected: tuple = (OSError, ValueError),
 ) -> dict:
-    """Execute one handoff and close it into the stable CLI response."""
+    """Execute one handoff and close it into the stable CLI response.
+
+    ``operation`` is the subcommand this invocation ran.  It is passed rather
+    than read back from the state because a replayed operation's state does not
+    name it -- a ``consuming`` handoff looks the same after ``begin``,
+    ``verify-step`` and ``record-step``.  Taking it from the caller is sound
+    because the operation is folded into the command the intent digest covers,
+    so a different subcommand is a different operation, not a replay (#773).
+    """
+    held: list[BaseException] = []
+
+    def prepare_or_hold(data):
+        try:
+            return prepare(data)
+        except passthrough:
+            raise
+        except rejected as exc:
+            # Whether the current state admits this operation only matters if
+            # it is about to be committed, and that is not known until
+            # admission.  Hold the failure and answer once it is.
+            held.append(exc)
+            return unprepared_operation()
+
     prepared, execution = run_transition_effects(
-        repository, prepare, passthrough=passthrough, rejected=rejected,
+        repository, prepare_or_hold, passthrough=passthrough, rejected=rejected,
         rejection=ExecutorHandoffRejected,
     )
+    if held and not execution.replayed:
+        # Not a replay: the failure stands.  It is raised in place of the
+        # placeholder's ``unknown-command`` rejection, which says nothing about
+        # why the operation could not be prepared.
+        raise ExecutorHandoffRejected(str(held[0])) from held[0]
     try:
-        return executor_handoff_response(prepared, execution)
+        return executor_handoff_response(prepared, execution, operation=operation)
     except passthrough:
         raise
     except rejected as exc:
@@ -441,11 +520,21 @@ def run_executor_handoff(
 def executor_handoff_response(
     prepared: object,
     execution: object,
+    *,
+    operation: object,
 ) -> dict:
-    """Close one executor result into the stable CLI response or rejection."""
+    """Close one executor result into the stable CLI response or rejection.
+
+    On a replay nothing this transaction's prepare produced is read: it was
+    built against the current state, which the replayed operation never saw and
+    which nothing here is going to change.  The answer is the state that
+    operation committed (#773).
+    """
     if not isinstance(prepared, PreparedTransitionOperation) or not isinstance(
         execution, LegacyCommandExecutionResult
     ):
+        raise PlanningFailure("executor-handoff-execution-invalid")
+    if operation not in {"begin", "verify", "record", "complete", "abort"}:
         raise PlanningFailure("executor-handoff-execution-invalid")
     decision = execution.decision
     if decision is not None and not decision.accepted:
@@ -455,19 +544,25 @@ def executor_handoff_response(
             if reason is not None
             else "executor-handoff-transition-rejected"
         )
-    projection = execution.projection
-    handoff = projection.get("executor_handoff")
-    operation = prepared.result.get("operation")
-    if operation not in {"begin", "verify", "record", "complete", "abort"}:
-        raise PlanningFailure("executor-handoff-execution-invalid")
+    if execution.replayed:
+        replayed_state = execution.replayed_state
+        if replayed_state is None:
+            # Unreachable today: ``LegacyCommandExecutionResult`` refuses to be
+            # built with ``replayed`` set and no state.  Kept because reading a
+            # replay out of the current head is the defect this function exists
+            # to fix, and a loosened invariant must not restore it silently.
+            raise PlanningFailure("executor-handoff-execution-invalid")
+        handoff = replayed_state.thaw().get("executor_handoff")
+        failure = _replayed_handoff_failure(handoff)
+        if failure is not None:
+            raise PlanningFailure(failure)
+        return {"ok": True, "operation": operation, "executor_handoff": handoff}
+    handoff = execution.projection.get("executor_handoff")
     if operation != "abort":
-        # For every other operation a rejected handoff means the canonical plan
-        # drifted, which is a failure to report.  For abort, ``rejected`` is the
-        # outcome the caller asked for, so reading it back -- on a replay of the
-        # same operation id, say -- must not turn success into an error (#767).
+        # A rejected handoff means the canonical plan drifted, which is a
+        # failure to report.  For abort, ``rejected`` is the outcome the caller
+        # asked for, so it is not one (#767).
         rejection = prepared.result.get("rejection")
-        if rejection is None and execution.replayed and isinstance(handoff, Mapping):
-            rejection = handoff.get("rejected_reason")
         if isinstance(rejection, str):
             raise PlanningFailure(rejection)
     return {

@@ -13259,6 +13259,7 @@ def _cmd_executor_handoff(args, operation: str):
         response = run_executor_handoff(
             repository,
             prepare,
+            operation=operation,
             passthrough=(FencedCommitError,),
             rejected=(OSError, PlanningFailure, ValueError, PlanningLifecycleError),
         )

@@ -1045,7 +1045,9 @@ def test_handoff_application_maps_executor_result_to_cli_response():
         None, projection, replayed=True, replayed_state=projection  # #747 item 6
     )
 
-    assert executor_handoff_response(prepared, execution) == {
+    # #773: replay の応答は現在の invocation の subcommand を名乗る。historical state は
+    # 成功した begin / verify / record を区別しないので、state からは復元できない。
+    assert executor_handoff_response(prepared, execution, operation="begin") == {
         "ok": True,
         "operation": "begin",
         "executor_handoff": _handoff_document(status="consuming")[

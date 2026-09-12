@@ -1,4 +1,4 @@
-# 設計 v2: replay が元の operation の結果を再現しない（tackeyy/mission #773）
+# 設計 v3（実装済み）: replay が元の operation の結果を再現しない（tackeyy/mission #773）
 
 round 1 で 3 件の High が出て、**D1 の根拠・D3 の前提・D5 と D2 の関係**がいずれも誤りだと
 実装で示された。v2 はその 3 つを直したもので、**D3 は撤回した。**
@@ -254,6 +254,34 @@ D2 がこれを吸収するので、D5 で追加の機構は要らない。**た
 replay が現在の rejection を返す）。1 PR とする。
 
 D3 は撤回したので変更に含まれない。
+
+## 実装で確定したこと
+
+設計は決定だけを持ち、機構は実装で決めるとしていた部分の結果を残す。
+
+| 設計が保留した点 | 実装 |
+|---|---|
+| placeholder の形 | `mission_application.planning.UnpreparedOperation`。**kernel の決定表に載せない**ので `decide` が `unknown-command` で閉じた拒否を返し、commit へ進まない |
+| 遅延を置く層 | `run_executor_handoff`。共有 seam（`legacy_v4.py`）は触っていない |
+| `operation` の渡し方 | `run_executor_handoff` と `executor_handoff_response` の**必須キーワード引数**。省略できる形にすると、`prepared.result` から読む旧経路へ戻れてしまう |
+
+**`executor_handoff_response` の signature が変わった。** 直接呼んでいたテスト 2 本
+（#624 と #767）を新しい契約へ合わせた。#767 側は対照の組み立ても変えている:
+判定の軸が「どの operation か」から「どの理由か」へ移ったので、`begin` の replay で
+abort の理由を使う対照は成立しなくなった（そもそも `begin` は abort の理由を書かない）。
+canonical drift の理由に置き換えた。
+
+### 変異注入（15 種・14 件検出）
+
+生き残った 1 件は **到達不能な guard** である。`executor_handoff_response` の
+`replayed_state is None` 検査は、`LegacyCommandExecutionResult` が
+「`replayed` なら `replayed_state` は非 None」を構築時の不変条件として強制するため
+到達できない（実測: 該当する組み合わせで構築すると `legacy-command-replay-result-invalid`
+で拒否される）。
+
+**検査は残した。** replay を現在の head から読むことが本 Issue の欠陥そのものなので、
+不変条件が緩んだときに黙って戻らないようにする。**到達不能であることをコードのコメントに
+書いた**ので、読み手が実在する経路と取り違えない。
 
 ## 未確認
 
