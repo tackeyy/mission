@@ -440,6 +440,9 @@ def _replayed_handoff_failure(handoff: object) -> str | None:
     if handoff.get("status") != "rejected":
         return None
     reason = handoff.get("rejected_reason")
+    # Failure is tested first.  The two vocabularies are disjoint today (fixed by
+    # a test in #767), so the order does not change any answer -- but if that
+    # ever breaks, a value claimed by both should be read as the failure.
     if isinstance(reason, str) and reason in _REPLAY_FAILURE_REASONS:
         return reason
     if reason in _REPLAY_SUCCESS_REASONS:

@@ -543,10 +543,7 @@ def test_a_fenced_error_from_prepare_is_not_swallowed_by_the_hold(monkeypatch):
     `ok: True` が返る**（独立 Checker が検出した）。CLI はこの例外のコードを
     分類するので、届かないと lease / CAS の失敗が成功に見える。
     """
-    from mission_application.planning import (
-        ExecutorHandoffRejected,
-        run_executor_handoff,
-    )
+    from mission_application.planning import run_executor_handoff
     from mission_application.ports import LegacyCommandExecutionResult
     from mission_kernel.json_codec import freeze_json_value
     from mission_persistence.fenced_commit import FencedCommitError
@@ -589,7 +586,7 @@ def test_a_fenced_error_from_prepare_is_not_swallowed_by_the_hold(monkeypatch):
     )
 
     assert response["ok"] is True
-    assert ExecutorHandoffRejected is not None
+    assert response["operation"] == "begin"
 
 
 def test_every_handoff_command_leaves_a_handoff_behind(raw_run_cli, tmp_path):
