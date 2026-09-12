@@ -237,6 +237,25 @@ def test_excerpt_tail_is_a_contiguous_final_input_range():
     ]
 
 
+def test_excerpt_tail_is_contiguous_after_excluding_a_matched_middle_line():
+    """The tail omits a matched middle line without creating any other gap."""
+    output = "\n".join(
+        ["p-00", "p-01", "FAILED mid", "p-03", "p-04", "p-05", "p-06"]
+    )
+
+    excerpt = gate.suite_failure_excerpt(output, "", limit=220)
+    _, tail_section = excerpt.split("[suite_failure] output tail:\n", 1)
+
+    assert tail_section.splitlines() == [
+        "[suite_failure] p-00",
+        "[suite_failure] p-01",
+        "[suite_failure] p-03",
+        "[suite_failure] p-04",
+        "[suite_failure] p-05",
+        "[suite_failure] p-06",
+    ]
+
+
 def test_excerpt_removes_controls_and_every_emitted_line_has_the_fixed_prefix():
     """Only newline may separate records after untrusted suite output is surfaced."""
     controls = "\x00\x01\x1b\r\x7f\u0085\u009b\u009d\u2028\u2029"
