@@ -406,3 +406,192 @@ def test_adopting_a_new_plan_is_refused_while_a_handoff_is_in_flight(
     # plan も handoff も動いていない。
     assert after["canonical_plan"] == before["canonical_plan"]
     assert after["executor_handoff"] == before["executor_handoff"]
+
+
+# --- kernel を直接叩く（D4: 認可の正典は kernel） -------------------------------
+#
+# CLI 経由のテストだけだと、**application 層の早期拒否が先に効くので kernel の
+# ガードを外す変異が通る。** 受け入れ条件 9 が「kernel を直接叩くテスト」を
+# 求めているのはこのためである。
+
+
+def _kernel_states(tmp_path):
+    """planning の state と、そこから executing へ進む command を返す."""
+    from mission_kernel import decode_snapshot
+    from mission_kernel.commands import AdvancePhase
+    from mission_kernel.model import Phase, PreparedHandoff
+    from .mission_state_fixture_corpus import (
+        canonical_json_bytes,
+        generate_cli_state_corpus,
+    )
+
+    corpus = generate_cli_state_corpus(tmp_path.resolve())
+    planning = decode_snapshot(canonical_json_bytes(corpus["provider_plan"])).state
+    handoff = PreparedHandoff(
+        schema="mission-handoff/1",
+        handoff_id="handoff-767-lifetime",
+        plan=planning.plan,
+        ordered_step_ids=("execute",),
+    )
+    return planning, AdvancePhase(Phase.EXECUTING, handoff)
+
+
+def _with_handoff(state, kind, decisions=()):
+    """既存 handoff と decision を持つ state を組み立てる."""
+    from dataclasses import replace
+    from mission_kernel.a4 import ExecutorStepDecision
+    from mission_kernel.model import (
+        ConsumedHandoff,
+        ConsumingHandoff,
+        PreparedHandoff,
+        RejectedHandoff,
+    )
+
+    common = ("mission-handoff/1", "handoff-767-existing", state.plan, ("execute",))
+    existing = {
+        "prepared": lambda: PreparedHandoff(*common),
+        "consuming": lambda: ConsumingHandoff(*common, "2030-01-01T00:00:00Z"),
+        "consumed": lambda: ConsumedHandoff(
+            *common, "2030-01-01T00:00:00Z", "2030-01-01T00:00:01Z"
+        ),
+        "rejected": lambda: RejectedHandoff(*common, "operator-abort", None),
+    }[kind]()
+    recorded = tuple(
+        ExecutorStepDecision(
+            handoff_id="handoff-767-existing",
+            plan_digest=state.plan.digest,
+            plan_generation=state.plan.generation,
+            plan_source=state.plan.source.value,
+            source_id=state.plan.source_id,
+            selection_source=state.plan.selection_source,
+            iteration=state.plan.iteration,
+            step_id=step_id,
+            result="ok",
+        )
+        for step_id in decisions
+    )
+    return replace(
+        state,
+        handoff=existing,
+        a4=replace(state.a4, current_handoff_decisions=recorded),
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "decisions", "expected"),
+    [
+        ("prepared", (), None),
+        ("prepared", ("execute",), "handoff-has-recorded-steps"),
+        ("consuming", (), "handoff-in-flight"),
+        ("consumed", (), None),
+        ("rejected", (), None),
+    ],
+    ids=["prepared-clean", "prepared-with-step", "consuming", "consumed", "rejected"],
+)
+def test_the_kernel_itself_applies_the_table(tmp_path, kind, decisions, expected):
+    """受け入れ条件 9。**kernel が単独で D2 の表を適用する.**
+
+    application 層の早期拒否を外しても、ここが通る限り誤った advance は commit されない。
+    逆に kernel のガードだけを外す変異は、CLI 経由のテストでは落ちない。
+    """
+    from mission_kernel.transitions import decide
+
+    planning, command = _kernel_states(tmp_path)
+
+    result = decide(_with_handoff(planning, kind, decisions), command)
+
+    if expected is None:
+        assert result.accepted is True, result.rejection
+        return
+    assert result.accepted is False
+    assert result.rejection is not None
+    assert result.rejection.code == expected
+
+
+# --- binding 比較と decision の数え方（unit） ----------------------------------
+
+
+def test_re_adopting_identical_content_still_moves_the_binding():
+    """同じ内容の再採用でも generation が上がる（D1）.
+
+    **digest だけを見ると「変わっていない」と読める。** そこで no-op にすると、
+    旧 plan に束縛された handoff が新しい generation の plan と共に残り、
+    decode が落ちる。
+    """
+    from mission_application.planning import _plan_binding_changes
+
+    current = {
+        "path": ".mission-state/plans/p.json", "digest": "sha256:" + "a" * 64,
+        "generation": 1, "source": "core", "source_id": "s1",
+        "selection_source": "core", "iteration": 0,
+    }
+    same_content_next_generation = dict(current, generation=2)
+
+    assert _plan_binding_changes({"canonical_plan": current}, current) is False
+    assert _plan_binding_changes(
+        {"canonical_plan": current}, same_content_next_generation
+    ) is True
+
+
+@pytest.mark.parametrize(
+    "current",
+    [None, "plan", 3, [], {"digest": "sha256:" + "a" * 64}],
+    ids=["none", "str", "int", "list", "partial"],
+)
+def test_a_binding_that_cannot_be_read_counts_as_changed(current):
+    """読めない binding を「変わっていない」としない.
+
+    **変わっていないと読むと handoff が残り、codec の invariant に反する。**
+    何も示せないときは変わった側へ倒す。
+    """
+    from mission_application.planning import _plan_binding_changes
+
+    plan = {
+        "path": ".mission-state/plans/p.json", "digest": "sha256:" + "b" * 64,
+        "generation": 1, "source": "core", "source_id": "s1",
+        "selection_source": "core", "iteration": 0,
+    }
+
+    assert _plan_binding_changes({"canonical_plan": current}, plan) is True
+
+
+def test_only_this_handoffs_decisions_are_counted():
+    """decision は `handoff_id` で絞って数える.
+
+    **絞らないと、前の iteration の decision が残っているだけで
+    「完了済み step を持つ」と読み、破棄してよい handoff を拒否する。**
+    """
+    from mission_application.planning import recorded_handoff_steps
+
+    state = {
+        "decisions": [
+            {"handoff_id": "other", "step_id": "s1"},
+            {"handoff_id": "other", "step_id": "s2"},
+            {"handoff_id": "mine", "step_id": "s1"},
+        ]
+    }
+
+    assert recorded_handoff_steps(state, {"handoff_id": "mine"}) == 1
+    assert recorded_handoff_steps(state, {"handoff_id": "other"}) == 2
+    assert recorded_handoff_steps(state, {"handoff_id": "absent"}) == 0
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        {"decisions": None},
+        {"decisions": "s1"},
+        {"decisions": {"handoff_id": "mine"}},
+        {},
+    ],
+    ids=["none", "str", "dict", "missing"],
+)
+def test_decisions_that_cannot_be_counted_are_not_reported_as_zero(state):
+    """数えられない decision を 0 にしない.
+
+    **0 にすると、完了済み step を持つ handoff を破棄可と判定しうる。**
+    数えられないことを伝えて、共有の表に拒否させる。
+    """
+    from mission_application.planning import recorded_handoff_steps
+
+    assert recorded_handoff_steps(state, {"handoff_id": "mine"}) is None
