@@ -64,6 +64,23 @@ def test_excerpt_classifies_tap_not_ok_as_a_match():
     assert "[suite_failure] not ok 3 - TAP case" in excerpt
 
 
+@pytest.mark.parametrize(
+    ("output", "failure_line"),
+    (
+        ("[ERROR] MavenCase\nordinary tail\n", "[ERROR] MavenCase"),
+        ("--- FAIL: GoCase\nordinary tail\n", "--- FAIL: GoCase"),
+    ),
+)
+def test_excerpt_classifies_each_decorated_failure_word_in_the_matched_section(
+    output, failure_line
+):
+    """ERROR and FAIL must not be demoted to the tail section."""
+    excerpt = gate.suite_failure_excerpt(output, "", limit=4000)
+    matched_section = excerpt.split("[suite_failure] output tail:\n", 1)[0]
+
+    assert "[suite_failure] " + failure_line in matched_section
+
+
 def test_excerpt_does_not_treat_punctuation_between_tap_words_as_adjacent():
     """Only adjacent TAP words identify a TAP failure."""
     excerpt = gate.suite_failure_excerpt("not --- ok 3\n", "", limit=4000)
@@ -128,15 +145,13 @@ def test_excerpt_reserves_space_for_tail_and_marks_truncation():
 
 
 def test_excerpt_marks_truncation_in_the_matched_failure_section():
-    """A truncated matching section must identify its own omitted records."""
+    """A truncated matching excerpt must identify its omitted records."""
     output = "\n".join(
         "FAILED marker-{:03d} {}".format(index, "y" * 20) for index in range(400)
     )
 
     excerpt = gate.suite_failure_excerpt(output, "", limit=4000)
-    matched_section, _ = excerpt.split("[suite_failure] output tail:\n", 1)
-
-    assert "[suite_failure] output truncated" in matched_section
+    assert "[suite_failure] output truncated" in excerpt
 
 
 def test_excerpt_marks_truncation_at_the_declared_4000_character_limit():
@@ -199,20 +214,103 @@ def test_excerpt_marks_empty_output_as_unavailable():
     assert "output unavailable" in gate.suite_failure_excerpt("", "", limit=4000)
 
 
-def test_excerpt_rejects_limits_that_cannot_hold_both_required_headers():
-    """A matching excerpt always needs both section headings."""
+def test_excerpt_marks_blank_lines_only_output_as_unavailable():
+    assert "output unavailable" in gate.suite_failure_excerpt("\n\n\n", "", limit=4000)
+
+
+def test_excerpt_rejects_limits_that_cannot_report_truncation():
+    """A matching excerpt must always have room to surface truncation."""
     with pytest.raises(ValueError, match="at least"):
-        gate.suite_failure_excerpt("FAILED example\n", "", limit=60)
+        gate.suite_failure_excerpt(
+            "FAILED example\n", "", limit=gate._MIN_SUITE_FAILURE_EXCERPT_LIMIT - 1
+        )
 
 
 def test_excerpt_enforces_the_exact_minimum_limit_boundary():
-    """Both section headers fit at 67 characters, and no smaller limit does."""
+    """The minimum fits one marker; the preceding value is not accepted."""
+    minimum = gate._MIN_SUITE_FAILURE_EXCERPT_LIMIT
     with pytest.raises(ValueError, match="at least"):
-        gate.suite_failure_excerpt("FAILED example\n", "", limit=66)
+        gate.suite_failure_excerpt("FAILED example\n", "", limit=minimum - 1)
 
-    excerpt = gate.suite_failure_excerpt("FAILED example\n", "", limit=67)
+    excerpt = gate.suite_failure_excerpt(
+        "FAILED example\n" + "x" * 200 + "\n", "", limit=minimum
+    )
 
-    assert len(excerpt) <= 67
+    assert "output truncated" in excerpt
+
+
+@pytest.mark.parametrize("width", (1, 2, 3))
+def test_excerpt_marks_short_lines_near_the_derived_minimum(width):
+    """The marker must survive the width-sensitive band that headers used to create."""
+    output = "FAILED a\n" + ("x" * width + "\n") * 200
+
+    for limit in range(gate._MIN_SUITE_FAILURE_EXCERPT_LIMIT, gate._MIN_SUITE_FAILURE_EXCERPT_LIMIT + 4):
+        excerpt = gate.suite_failure_excerpt(output, "", limit=limit)
+        assert len(excerpt) <= limit
+        assert "output truncated" in excerpt
+
+
+def test_excerpt_emits_marker_when_no_content_line_fits():
+    """At the minimum, optional headers and all content yield to the marker."""
+    excerpt = gate.suite_failure_excerpt(
+        "FAILED " + "x" * 150 + "\n" + "y" * 150 + "\n",
+        "",
+        limit=gate._MIN_SUITE_FAILURE_EXCERPT_LIMIT,
+    )
+
+    assert excerpt == "[suite_failure] output truncated"
+
+
+def test_truncation_marker_outranks_headers_in_the_fallback():
+    """The final fallback cannot retain a header by silently losing the marker."""
+    header = "[suite_failure] matched failure lines:"
+
+    assert gate._with_truncation_marker(
+        header, True, gate._MIN_SUITE_FAILURE_EXCERPT_LIMIT
+    ) == "[suite_failure] output truncated"
+
+
+def test_excerpt_keeps_content_at_the_exact_tail_separator_budget():
+    """The final tail separator consumes one character of the common limit."""
+    excerpt = gate.suite_failure_excerpt("FAILED x\nFAILED x\n", "", limit=81)
+
+    assert excerpt == "[suite_failure] FAILED x\n[suite_failure] output truncated"
+
+
+def test_excerpt_accepts_a_full_excerpt_at_its_exact_limit():
+    """A full excerpt that exactly fits must not be treated as truncated."""
+    expected = "[suite_failure] output tail:\n[suite_failure] x"
+
+    assert gate.suite_failure_excerpt("x\n", "", limit=len(expected)) == expected
+
+
+@pytest.mark.parametrize("width", (5, 40, 150))
+def test_excerpt_never_silently_truncates_across_content_widths(width):
+    """Changing line widths cannot move a silent-truncation band into a new limit."""
+    lines = ["FAILED first"] + ["x" * width + "-{:03d}".format(index) for index in range(200)]
+    output = "\n".join(lines) + "\n"
+
+    for limit in (gate._MIN_SUITE_FAILURE_EXCERPT_LIMIT, 100, 180, 400):
+        excerpt = gate.suite_failure_excerpt(output, "", limit=limit)
+        emitted = sum("[suite_failure] " + line in excerpt for line in lines)
+        if emitted < len(lines):
+            assert "output truncated" in excerpt
+        assert len(excerpt) <= limit
+
+
+def test_excerpt_never_exceeds_limit_when_tail_budget_is_exact():
+    """The inter-section separator is part of the common excerpt limit."""
+    matched = "FAILED matched"
+    final_tail_line = "x" * 10
+    matched_section_size = len("[suite_failure] matched failure lines:\n[suite_failure] " + matched)
+    tail_budget = len("[suite_failure] output tail:\n[suite_failure] " + final_tail_line + "\n[suite_failure] output truncated") - 1
+    limit = matched_section_size + 1 + tail_budget
+
+    excerpt = gate.suite_failure_excerpt(
+        matched + "\n" + "y" * 200 + "\n" + final_tail_line + "\n", "", limit=limit
+    )
+
+    assert len(excerpt) <= limit
 
 
 def test_excerpt_preserves_stdout_before_stderr():
