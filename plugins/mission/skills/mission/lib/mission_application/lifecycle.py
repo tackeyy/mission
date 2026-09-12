@@ -7,7 +7,7 @@ import hashlib
 import json
 import math
 from dataclasses import dataclass, replace
-from typing import Callable
+from typing import Callable, Mapping
 
 from activity_segments import (
     ActivityTimingError,
@@ -40,7 +40,16 @@ from mission_kernel.commands import (
 )
 from mission_kernel.json_codec import freeze_json_value
 from mission_kernel.model import HaltCategory, Phase, PreparedHandoff
-from mission_kernel.transitions import Decision, decide
+from mission_application.planning import (
+    handoff_refusal_guidance,
+    raw_handoff_is_absent,
+    recorded_handoff_steps,
+)
+from mission_kernel.transitions import (
+    Decision,
+    decide,
+    handoff_discard_refusal,
+)
 from provider_public_contract import SpecialistPublicContractError
 from .compatibility import compatibility_delta
 from .ports import (
@@ -835,12 +844,23 @@ def advance(
                     guided=True,
                     state=state,
                 )
-            if state.get("executor_handoff") is not None:
-                raise LifecycleFailure(
-                    "executor handoff already exists; use handoff resume",
-                    reason="handoff-already-exists",
-                    state=state,
+            # #767 D2/D4.  The same table the kernel uses, read from the raw
+            # document so the refusal arrives before the transaction commits.
+            # This is an early answer, never a relaxation: anything the kernel
+            # would refuse is refused here too, and an unrecognised status is
+            # refused rather than assumed safe.
+            existing = state.get("executor_handoff")
+            if not raw_handoff_is_absent(existing):
+                refusal = handoff_discard_refusal(
+                    existing.get("status") if isinstance(existing, Mapping) else None,
+                    recorded_handoff_steps(state, existing),
                 )
+                if refusal is not None:
+                    raise LifecycleFailure(
+                        handoff_refusal_guidance(refusal),
+                        reason=refusal,
+                        state=state,
+                    )
             prepared_handoff = services.prepare_handoff(state)
         decision = None
         command = None
