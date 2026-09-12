@@ -42,6 +42,7 @@ from mission_kernel.json_codec import freeze_json_value
 from mission_kernel.model import HaltCategory, Phase, PreparedHandoff
 from mission_application.planning import (
     handoff_refusal_guidance,
+    raw_handoff_is_absent,
     recorded_handoff_steps,
 )
 from mission_kernel.transitions import (
@@ -849,7 +850,7 @@ def advance(
             # would refuse is refused here too, and an unrecognised status is
             # refused rather than assumed safe.
             existing = state.get("executor_handoff")
-            if existing is not None:
+            if not raw_handoff_is_absent(existing):
                 refusal = handoff_discard_refusal(
                     existing.get("status") if isinstance(existing, Mapping) else None,
                     recorded_handoff_steps(state, existing),

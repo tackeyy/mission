@@ -762,10 +762,19 @@ def _advance(state: MissionState, raw_command: object) -> Transition:
     elif command.prepared_handoff is not None:
         raise _Rejected("unexpected-prepared-handoff")
     new_control = replace(control, phase=command.target)
+    new_a4 = state.a4
+    if new_handoff is not state.handoff:
+        # #767.  The projection keeps every decision whose handoff id is not the
+        # new one as history, then writes the current set after it.  Carrying the
+        # previous handoff's decisions forward would therefore persist each of
+        # them twice -- once as history, once as current.  A replacement starts
+        # from none recorded.
+        new_a4 = replace(new_a4, current_handoff_decisions=())
     new_state = _unbound_state(
             state,
             control=new_control,
             handoff=new_handoff,
+            a4=new_a4,
         )
     new_state = _apply_compatibility(
         new_state,

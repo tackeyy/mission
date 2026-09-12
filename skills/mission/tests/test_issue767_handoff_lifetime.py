@@ -619,9 +619,8 @@ def test_only_this_handoffs_decisions_are_counted():
         {"decisions": None},
         {"decisions": "s1"},
         {"decisions": {"handoff_id": "mine"}},
-        {},
     ],
-    ids=["none", "str", "dict", "missing"],
+    ids=["none", "str", "dict"],
 )
 def test_decisions_that_cannot_be_counted_are_not_reported_as_zero(state):
     """数えられない decision を 0 にしない.
@@ -632,6 +631,79 @@ def test_decisions_that_cannot_be_counted_are_not_reported_as_zero(state):
     from mission_application.planning import recorded_handoff_steps
 
     assert recorded_handoff_steps(state, {"handoff_id": "mine"}) is None
+
+
+def test_a_missing_decisions_key_counts_as_none_recorded():
+    """`decisions` キーが無い場合は 0 件として数える.
+
+    **codec は欠落を空リストとして読む**（`decode_v4_a4_projection`）ので、
+    ここで「数えられない」と読むと **kernel が通す state を application が拒否する。**
+    異系統レビューが、2 層の答えが食い違うと指摘した。
+    """
+    from mission_application.planning import recorded_handoff_steps
+
+    assert recorded_handoff_steps({}, {"handoff_id": "mine"}) == 0
+
+
+@pytest.mark.parametrize(
+    "handoff", [None, {}], ids=["none", "empty-object"]
+)
+def test_the_absent_handoff_spellings_match_the_codec(handoff):
+    """codec が absent として読む綴りを、application も absent として読む.
+
+    codec は **キー欠落・`None`・空オブジェクト**を absent とする。
+    application がそのどれかを「読めない handoff」として拒否すると、
+    **kernel が通す state を application が止める。**
+    """
+    from mission_application.planning import (
+        plan_adoption_handoff_refusal,
+        raw_handoff_is_absent,
+    )
+
+    assert raw_handoff_is_absent(handoff) is True
+    assert plan_adoption_handoff_refusal({"executor_handoff": handoff}, {}) is None
+    # キー欠落も同じ。
+    assert plan_adoption_handoff_refusal({}, {}) is None
+
+
+def test_a_present_handoff_is_not_read_as_absent():
+    """対照。**空でない handoff は absent にしない.**"""
+    from mission_application.planning import raw_handoff_is_absent
+
+    assert raw_handoff_is_absent({"status": "prepared"}) is False
+    assert raw_handoff_is_absent("") is False
+    assert raw_handoff_is_absent(0) is False
+
+
+def test_the_adoption_refusal_keeps_a_machine_readable_code():
+    """拒否の理由が、案内文だけになって機械可読なコードを失わないこと.
+
+    adapter は例外の文字列をそのまま gate の理由コードへ入れる。
+    **案内文だけにすると、記録から `handoff-in-flight` のようなコードが消える。**
+    """
+    from mission_application.planning import PlanningFailure, commit_plan_evidence
+
+    state = {
+        "canonical_plan": {
+            "schema": "mission-plan/1", "path": "p.json",
+            "digest": "sha256:" + "a" * 64, "source": "core", "source_id": "s1",
+            "source_digest": "sha256:" + "b" * 64, "selection_source": "core",
+            "iteration": 0, "generation": 1, "validated_at": "2030-01-01T00:00:00Z",
+        },
+        "executor_handoff": {"status": "consuming", "handoff_id": "h1"},
+        "decisions": [],
+    }
+    plan = dict(state["canonical_plan"], generation=2)
+
+    with pytest.raises(PlanningFailure) as caught:
+        commit_plan_evidence(
+            state=state, plan=plan, lease_verified=True, publish=lambda _b: None
+        )
+
+    message = str(caught.value)
+    assert message.startswith("handoff-in-flight:")
+    # 案内文も残っている。
+    assert "executor-handoff abort" in message
 
 
 # --- #774 からの引き継ぎ: complete / verify の replay ---------------------------
@@ -733,3 +805,44 @@ def test_replaying_complete_survives_a_later_handoff_replacement(
     assert replayed.returncode == 0, replayed.stderr
     assert json.loads(replayed.stdout) == json.loads(first.stdout)
     assert json.loads(replayed.stdout)["executor_handoff"]["status"] == "consumed"
+
+
+def test_replacing_a_handoff_does_not_duplicate_the_recorded_decisions(
+    raw_run_cli, tmp_path
+):
+    """置き換え時に、前の handoff の decision が二重に保存されないこと.
+
+    **異系統レビューが見つけたデータ破損。** projection は「新しい handoff の id を
+    持たない decision」を historical として残し、そこへ current の decision を足す。
+    置き換えのときに current を引き継ぐと、**同じ decision が 2 回書かれる。**
+
+    受け入れ条件 8 を「新しい handoff の decision が 0 件」とだけ見ていると、
+    **古い decision が増えていることに気づけない。** 件数そのものを固定する。
+    """
+    session_id = "r767-no-dup"
+    _prepare_handoff(raw_run_cli, tmp_path, session_id)
+    for operation_id, command in [
+        ("op-begin", ("begin",)),
+        ("op-s1", ("record-step", "--step-id", "s1", "--result", "ok")),
+        ("op-s2", ("record-step", "--step-id", "s2", "--result", "ok")),
+        ("op-complete", ("complete",)),
+    ]:
+        assert raw_run_cli(
+            "executor-handoff", *command,
+            cwd=tmp_path, env_extra=_env(session_id, operation_id=operation_id),
+        ).returncode == 0, command
+    before = _public_state(raw_run_cli, tmp_path, session_id)["decisions"]
+    assert len(before) == 2, before
+
+    assert _back_to_planning(
+        raw_run_cli, tmp_path, session_id, "op-back"
+    ).returncode == 0
+    assert raw_run_cli(
+        "advance", "--phase", "executing",
+        cwd=tmp_path, env_extra=_env(session_id, operation_id="op-advance-2"),
+    ).returncode == 0
+
+    after = _public_state(raw_run_cli, tmp_path, session_id)["decisions"]
+
+    # 履歴は 1 回だけ残る。増えていたら二重保存である。
+    assert after == before, (len(before), len(after))

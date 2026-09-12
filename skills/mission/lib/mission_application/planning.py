@@ -871,16 +871,32 @@ def handoff_refusal_guidance(refusal: object) -> str:
     )
 
 
+def raw_handoff_is_absent(handoff: object) -> bool:
+    """Say whether the raw document carries no handoff at all.
+
+    The same three spellings the codec reads as absent: the key missing, an
+    explicit ``None``, and an empty object (``codec_v4._decode_legacy_handoff``).
+    Reading any of them as a present-but-unreadable handoff would refuse a state
+    the kernel admits, so the two layers have to spell this the same way.
+    """
+    return handoff is None or handoff == {}
+
+
 def recorded_handoff_steps(state: Mapping, handoff: object) -> object:
     """Count the decisions already recorded against this handoff.
 
     A non-int is returned when the document cannot be counted, so the shared
     table refuses rather than reading an unreadable document as "no steps".
+
+    A *missing* ``decisions`` key is not uncountable: the codec reads it as an
+    empty list, so treating it as unknown here would refuse a state the kernel
+    admits.  Only a present-but-not-a-list value is uncountable, and the codec
+    rejects that before any command runs.
     """
     if not isinstance(state, Mapping) or not isinstance(handoff, Mapping):
         return None
     handoff_id = handoff.get("handoff_id")
-    decisions = state.get("decisions")
+    decisions = state.get("decisions", [])
     if not isinstance(handoff_id, str) or not isinstance(decisions, list):
         return None
     return sum(
@@ -904,7 +920,7 @@ def plan_adoption_handoff_refusal(state: Mapping, plan: object) -> str | None:
     twice a no-op rather than a refusal.
     """
     handoff = state.get("executor_handoff")
-    if handoff is None:
+    if raw_handoff_is_absent(handoff):
         return None
     if not isinstance(handoff, Mapping):
         return "handoff-status-unknown"
@@ -958,11 +974,14 @@ def commit_plan_evidence(
         raise PlanningFailure("lease-rejected")
     refusal = plan_adoption_handoff_refusal(state, plan)
     if refusal is not None:
-        # The sentence, not the bare code: the adapter maps this failure the
-        # same way it maps a malformed candidate, so what it prints is whatever
-        # arrives here.  A code alone would leave the reader with no command to
-        # run, which is the shape #767 set out to remove.
-        raise PlanningFailure(handoff_refusal_guidance(refusal))
+        # Code first, sentence after.  The adapter maps this failure the same
+        # way it maps a malformed candidate, so whatever arrives here is what it
+        # prints and records as the reason.  A sentence alone would drop the
+        # machine-readable code from that record; a code alone would leave the
+        # reader with no command to run.
+        raise PlanningFailure(
+            "{}: {}".format(refusal, handoff_refusal_guidance(refusal))
+        )
     try:
         publish(binding)
     except Exception as exc:
