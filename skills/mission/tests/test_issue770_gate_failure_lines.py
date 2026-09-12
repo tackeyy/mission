@@ -117,6 +117,14 @@ def test_excerpt_labels_matches_and_tail_without_repeating_the_same_line():
     assert excerpt.count("FAILED only-line") == 1
 
 
+def test_excerpt_does_not_repeat_a_matched_final_line_under_truncation():
+    """A reserved tail record must not displace an earlier nonmatching line."""
+    excerpt = gate.suite_failure_excerpt("pppp\nFAILED f", "", limit=82)
+
+    assert excerpt.count("[suite_failure] FAILED f") == 1
+    assert "[suite_failure] pppp" in excerpt
+
+
 def test_excerpt_keeps_matches_in_the_match_section_when_the_full_output_fits():
     """Tail capacity must not consume the sole failure record before matching."""
     excerpt = gate.suite_failure_excerpt(
@@ -172,7 +180,7 @@ def test_excerpt_keeps_the_actual_final_line_when_every_line_matches():
         limit=4000,
     )
 
-    assert "FAILED marker-599" in excerpt
+    assert excerpt.count("FAILED marker-599") == 1
     assert "output tail:" in excerpt
 
 
@@ -195,6 +203,38 @@ def test_excerpt_uses_final_no_match_lines_for_its_tail():
 
     assert "診断行 39" in excerpt
     assert "診断行 00" not in excerpt
+
+
+def test_excerpt_keeps_tail_lines_in_input_order():
+    """A multi-line tail retains the order needed to read diagnostics forward."""
+    excerpt = gate.suite_failure_excerpt(
+        "x-000\nx-001\nx-002\nx-003\nx-004\nx-005\nx-006\n", "", limit=128
+    )
+
+    assert excerpt.index("x-004") < excerpt.index("x-005") < excerpt.index("x-006")
+
+
+def test_excerpt_tail_is_a_contiguous_final_input_range():
+    """A rejected wide line ends tail selection instead of creating a gap."""
+    output = "\n".join(
+        [
+            "x" * 100 + "-000",
+            "x" * 100 + "-001",
+            "x" * 100 + "-002",
+            "x" * 100 + "-003",
+            "4",
+            "x" * 30 + "-005",
+            "-006",
+        ]
+    )
+
+    excerpt = gate.suite_failure_excerpt(output, "", limit=120)
+
+    assert excerpt.splitlines() == [
+        "[suite_failure] output tail:",
+        "[suite_failure] -006",
+        "[suite_failure] output truncated",
+    ]
 
 
 def test_excerpt_removes_controls_and_every_emitted_line_has_the_fixed_prefix():
