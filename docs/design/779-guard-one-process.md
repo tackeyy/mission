@@ -28,8 +28,12 @@ Stop hook は判定 1 回のために `mission-state.py` を複数回起動し�
 
 **負荷 767 では 1 プロセスでも 8 秒の予算を超える。** これは本 Issue では解けない。
 
-**理由**: 19.4 秒の壁時間に対し **CPU 時間は 0.96 秒**で、**約 95% はスケジュール待ち**である。
-プロセス数を減らすと待ち時間の回数が減るが、1 回あたりの待ち時間は縮まない。
+**理由**: 19.4 秒の壁時間に対し **CPU 時間は 0.96 秒**である。
+プロセス数を減らすと**その差分を払う回数**が減るが、1 回あたりの差分は縮まない。
+
+**差分の内訳は確定していない。** CPU と壁時間の値だけからは、それがスケジュール待ちなのか、
+I/O 待ちなのか、その両方なのかを決められない。**言えるのは「CPU 以外の要因が支配的で、
+起動回数に比例する」ことまでである。**
 
 **したがって、負荷が極端なときに収まらないことは受け入れる。** そこは予算超過が
 `guard-budget-exhausted` という終端 verdict を出す既存の仕組みが扱う。
@@ -91,7 +95,28 @@ import は `-X importtime` の合計で 0.349 秒。**ただしこれは CPU 時
 | 命令集合の固定 | shell の `case` ラベル | **Python 側の dispatch 表** |
 
 **`analyze_guard_shell` は残す。** 検出する違反 12 種のうち、時刻・算術・JSON・動的実行の分類は
-**縮んだ hook にもそのまま効く**。消すのは dispatch に関する 3 つだけである。
+**縮んだ hook にもそのまま効く**。
+
+**dispatch に関する 3 検査のうち、shell 側から消してよいのは 1 つだけである。**
+
+| いまの検査 | 扱い | 理由 |
+|---|---|---|
+| `dispatch-set-mismatch`（`case` ラベルが 4 つと完全一致） | **shell 側から消す** | `case` block が無くなるため |
+| **`command-outside-dispatch`**（3 コマンドが dispatch の外に現れる） | **shell 側に残す。判定を変える** | **下記** |
+| **`command-not-allowlisted`**（`resume` / `reactivate` を呼ぶ） | **shell 側に残す。そのまま** | 同上 |
+
+**後ろ 2 つを Python 側では代替できない。** Python 側で命令集合の閉性を検査しても、
+**hook に `python3 ... mark-halt` や `python3 ... reactivate` を直接書き足す変更は検出できない。**
+守っているのは「**shell が副作用コマンドを直接実行できない**」ことであり、
+それは shell を見ないと分からない。
+
+**`command-outside-dispatch` の判定を、マーカーの外か内かではなく「存在するか」へ変える。**
+
+- 畳んだ後の hook が `mission-state.py` を呼ぶのは **`stop-verdict` の 1 回だけ**である
+- **それ以外の subcommand が 1 つでも現れたら落ちる**（`mark-halt` / `cleanup-stale` /
+  `stop-guard-observe` / `resume` / `reactivate` を含む、`stop-verdict` 以外のすべて）
+- **allowlist ではなく「`stop-verdict` 以外は全部だめ」**とする。allowlist だと、
+  新しい subcommand が増えたときに黙って通る
 
 **代わりに Python 側へ次を置く。**
 
@@ -102,8 +127,8 @@ import は `-X importtime` の合計で 0.349 秒。**ただしこれは CPU 時
    片方だけ検査される状態になる
 3. **hook に `case` block が無いことの検査。** 残っていれば、畳んだはずのループが戻っている
 
-**`analyze_guard_shell` から dispatch の 3 検査を消す変更と、Python 側の 3 検査を足す変更を、
-同じ PR で行う。** 片方だけ入れると、その間は保証が無い。
+**shell 側の判定を変える変更と、Python 側の 3 検査を足す変更を、同じ PR で行う。**
+片方だけ入れると、その間は保証が無い。
 
 ## D2. 4 つの結合をどう解くか
 
@@ -134,7 +159,26 @@ hook が `cd` を `$( )` の中で行っていたのは、**変更が漏れな�
 同一プロセスでは receipt を作らず **hook ごと落ちる。**
 
 **決定: 適用は decorator を通さない。** 予算は `stop-verdict` の 1 つが持ち、
-適用はその内側で**残り時間の中**で行う。**超過は receipt の失敗として表現し、`SystemExit` にしない。**
+適用はその内側で**残り時間の中**で行う。
+
+### `GuardTimeout` は receipt へ変換しない（**round 1 の Medium**）
+
+**当初「超過は receipt の失敗として表現する」と書いたが、これは誤りだった。**
+
+`GuardTimeout` は通常の例外捕捉を通過するための `BaseException` で、
+**外側の decorator が終端 verdict を出すためにある**（`guard_timeout.py`）。
+
+**receipt へ変換すると 2 つ壊れる。**
+
+1. **終端理由が変わる。** `mark-halt` / `cleanup-stale` の固定失敗、または observe の再試行として
+   解決され、`guard-budget-exhausted` が出なくなる
+2. **発火済みの alarm を飲み込んだ後、再試行が無制限になりうる**
+
+**決定: `GuardTimeout` は捕らえず、`cmd_stop_verdict` の decorator へ伝播させる。**
+**予算超過は従来どおり `guard-budget-exhausted` という終端 verdict になる。**
+
+**receipt へ変換するのは、適用が自分の理由で失敗した場合だけ**である
+（いまの子プロセスが `sys.exit(1/2)` で伝えていたもの）。**予算超過はそれに含めない。**
 
 ### D2-d. エラーの封じ込め
 
@@ -168,6 +212,10 @@ hook が `cd` を `$( )` の中で行っていたのは、**変更が漏れな�
 **ADR-006 に追記する**: プロセス境界は authority の要件ではないこと、および
 命令集合の閉性を Python 側で検査するようになったこと。
 
+**ADR-006 の Decision 1 は「fire from shell」と明示している。**
+追記では、**その配置要件を supersede すること**を書く。「論拠は変わらないが、配置は変わった」
+という形にする。**黙って読み替えない。**
+
 ## D4. thin-adapter ratchet
 
 `scripts/check-thin-adapter-ratchet.py` は関数ごとの違反予算を持ち、単調である。
@@ -185,10 +233,13 @@ hook が `cd` を `$( )` の中で行っていたのは、**変更が漏れな�
 2. **observe が 3 試行とも失敗する経路でも 1 回である**
 3. **孤児が複数ある経路でも 1 回である**
 4. **`stop-verdict` から見た receipt の形が変わらない**（`resolve_guard_command_receipt` を変更しない）
-5. **適用の失敗が `SystemExit` にならず、receipt の失敗として表現される**
+5. **適用が自分の理由で失敗したとき、`SystemExit` にならず receipt の失敗として表現される**
+5b. **予算超過（`GuardTimeout`）は receipt へ変換されず、`guard-budget-exhausted` の終端 verdict になる**
 6. **`MISSION_SESSION_ID` と cwd をプロセス全体で書き換えない**
 7. **命令集合が `{none, mark-halt, cleanup-stale, stop-guard-observe}` と完全一致することを
    Python 側が検査する。欠けても余っても落ちる**
+7b. **hook が `mission-state.py` を `stop-verdict` 以外の subcommand で呼んでいないことを
+   shell 側が検査する。`stop-verdict` 以外は allowlist を持たず、すべて落ちる**
 8. **その dispatch が 1 箇所しか無いことを検査する**
 9. **hook に `case` block が無いことを検査する**
 10. **`analyze_guard_shell` の残り 9 種の違反検査が、縮んだ hook に対して引き続き働く**
