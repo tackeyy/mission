@@ -67,15 +67,22 @@ def test_the_suite_command_comes_from_the_makefile():
         )
 
 
-def test_each_run_checks_how_many_tests_executed():
-    """`Makefile` says an exit code cannot tell a pass from a run that did nothing.
+def test_the_verdict_is_decided_where_a_test_can_reach_it():
+    """The classification must not live in the workflow's shell block.
 
-    The same holds one level up: a run that skips at runtime exits 0, and
-    counting that as a pass is how "0 failures" comes to mean "never measured".
+    It did, and two defects rode in with it: the snippet was indented in a way
+    the pinned 3.12 refuses, and it read the report before the exit status, so
+    a failing run (which never gets a report) would have counted as "nothing
+    ran". Neither was reachable by a test while it sat in YAML.
+
+    `test_issue782_probe_classify.py` exercises the rules themselves; this only
+    fixes that the workflow keeps delegating to them.
     """
+    assert "scripts/probe_classify.py" in PROBE
     assert "MISSION_SUITE_REPORT" in PROBE
-    assert '"executed"' in PROBE
-    assert "no_result" in PROBE
+    # A verdict the classifier did not produce must stop the probe rather than
+    # be counted as anything.
+    assert "the probe is broken" in PROBE
 
 
 def test_repeats_are_spread_over_several_runners():
@@ -96,26 +103,48 @@ def test_inputs_never_reach_the_shell_through_interpolation():
 
     Every input here is user-supplied, including the ones that arrive back
     through `matrix`, so they are passed as environment variables instead.
+
+    The body is delimited by indentation, not by what the lines look like: an
+    earlier version ended the block at the first line matching `key:`, which
+    the `try:` inside an embedded Python snippet satisfied -- and the ~70 lines
+    after it went unchecked. Two planted interpolations survived that version.
     """
-    in_run_block = False
+    lines = PROBE.splitlines()
     offenders: list[str] = []
-    for line in PROBE.splitlines():
+    body_indent: int | None = None
+    for line in lines:
         stripped = line.strip()
-        if re.match(r"^(run:|- run:)", stripped) or stripped.endswith("run: |"):
-            in_run_block = True
+        if not line.strip():
             continue
-        if in_run_block:
-            # A new key at step level ends the block.
-            if re.match(r"^- |^[a-z-]+:", stripped) and "${{" not in stripped:
-                in_run_block = False
+        indent = len(line) - len(line.lstrip())
+        if body_indent is not None:
+            if indent > body_indent:
+                if "${{" in line:
+                    offenders.append(stripped)
                 continue
-            if "${{" in line:
-                offenders.append(stripped)
+            body_indent = None  # dedented back to the step: the body ended
+        if re.match(r"^(- )?run: \|", stripped):
+            body_indent = indent
     assert not offenders, offenders
 
 
-def test_zero_failures_is_reported_as_a_bound_not_as_absence():
-    """Without this the reader takes two zeros as "the change is fine"."""
-    assert "does not mean the test is sound" in PROBE
-    assert "0.05 ** (1 / n)" in PROBE
-    assert "undetected, not absent" in PROBE
+def test_the_summary_is_computed_where_a_test_can_reach_it():
+    """The bound decides how the run is read, so it must be testable.
+
+    The first version computed it in the workflow from the inputs alone and
+    never read what the cells reported. `test_issue782_probe_summarise.py`
+    exercises the rules; this fixes that the workflow keeps delegating.
+    """
+    assert "scripts/probe_summarise.py" in PROBE
+    assert "download-artifact" in PROBE
+    assert "cell.json" in PROBE
+
+
+def test_artifact_names_survive_a_slash_in_the_ref():
+    """Artifact names reject `/`, and this repo's branches contain one.
+
+    Without the substitution the upload fails exactly when there is something
+    worth uploading.
+    """
+    assert 'safe_ref="${REF//\\//-}"' in PROBE
+    assert "cell-${{ steps.probe.outputs.safe_ref }}" in PROBE

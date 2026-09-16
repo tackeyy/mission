@@ -147,59 +147,91 @@ jobs:
         run: |
           set -uo pipefail
           mkdir -p /tmp/probe
-          failures=0
+          failed=0
           no_result=0
+          passed=0
           for i in $(seq 1 "$REPEATS"); do
             report="/tmp/probe/report-$i.json"
             log="/tmp/probe/run-$i.txt"
             # `make test` owns the flags (-n auto --dist loadfile) and builds
             # the venv, so the probe cannot drift from how CI runs the suite.
-            # A run that hangs is a result too, so it gets a bound of its own;
-            # without it the job's own timeout would discard every count.
+            # A run that hangs is a result too, so it gets a bound of its own.
             timeout 900 make test \
               PYTEST_TARGETS="$TEST_FILE" \
               MISSION_SUITE_REPORT="$report" > "$log" 2>&1
             status=$?
 
-            executed=$(python3 -c '
-            import json, sys
-            try:
-                print(json.load(open(sys.argv[1]))["executed"])
-            except Exception:
-                print(-1)
-            ' "$report")
-
-            if [ "$executed" -lt 1 ]; then
-              # Nothing ran, or the report is missing: not a pass and not a
-              # failure.  Counting it either way is how "0 failures" comes to
-              # mean "never measured".
-              printf '?'
-              no_result=$((no_result + 1))
-            elif [ "$status" -eq 0 ]; then
-              printf '.'
-            else
-              printf 'F'
-              failures=$((failures + 1))
-              if [ "$failures" -eq 1 ]; then cp "$log" /tmp/probe/first-failure.txt; fi
-            fi
+            # The verdict lives in scripts/probe_classify.py, where a test can
+            # reach it.  Deciding it here is how the previous version shipped
+            # a guard that the pinned interpreter refused to run.
+            verdict=$(python3 scripts/probe_classify.py --status "$status" --report "$report" 2>>"$log")
+            case "$verdict" in
+              failed)
+                printf 'F'
+                failed=$((failed + 1))
+                if [ "$failed" -eq 1 ]; then cp "$log" /tmp/probe/first-failure.txt; fi
+                ;;
+              no-result)
+                printf '?'
+                no_result=$((no_result + 1))
+                if [ "$no_result" -eq 1 ]; then cp "$log" /tmp/probe/first-no-result.txt; fi
+                ;;
+              passed)
+                printf '.'
+                passed=$((passed + 1))
+                ;;
+              *)
+                # The classifier itself did not answer.  Counting this as
+                # anything would put a number on a measurement that did not
+                # happen.
+                echo
+                echo "::error::probe_classify returned ${verdict@Q}; the probe is broken"
+                exit 1
+                ;;
+            esac
           done
           echo
-          echo "ref=$REF runner=$RUNNER_INDEX failures=$failures no_result=$no_result repeats=$REPEATS"
+          echo "ref=$REF runner=$RUNNER_INDEX failed=$failed no_result=$no_result passed=$passed"
+
+          # Artifact names reject `/`, and this repo's branches contain one.
+          # Without this the upload fails exactly when there is something to
+          # upload.
+          safe_ref="${REF//\//-}"
           {
-            echo "failures=$failures"
+            echo "failed=$failed"
             echo "no_result=$no_result"
-            echo "repeats=$REPEATS"
+            echo "passed=$passed"
+            echo "safe_ref=$safe_ref"
           } >> "$GITHUB_OUTPUT"
+
+          # The summary job adds these up rather than trusting the requested
+          # count: a cell that never ran must not inflate the denominator.
+          python3 - "$REF" "$RUNNER_INDEX" "$failed" "$no_result" "$passed" <<'PY' > "/tmp/probe/cell.json"
+          import json, sys
+          ref, runner, failed, no_result, passed = sys.argv[1:6]
+          json.dump(
+              {
+                  "ref": ref,
+                  "runner": int(runner),
+                  "failed": int(failed),
+                  "no_result": int(no_result),
+                  "passed": int(passed),
+              },
+              sys.stdout,
+          )
+          PY
+
           {
             echo "### ${REF} / runner ${RUNNER_INDEX}"
             echo
-            echo "| failed | no result | runs |"
+            echo "| failed | no result | passed |"
             echo "|---|---|---|"
-            echo "| ${failures} | ${no_result} | ${REPEATS} |"
+            echo "| ${failed} | ${no_result} | ${passed} |"
             if [ "$no_result" -gt 0 ]; then
               echo
               echo "**\`no result\` is not a pass.** Those runs executed no test case, so they"
-              echo "say nothing about the failure rate. Subtract them before comparing."
+              echo "say nothing about the failure rate. They are already excluded from the"
+              echo "totals below."
             fi
             if [ -f /tmp/probe/first-failure.txt ]; then
               echo
@@ -214,17 +246,26 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Keep the failing logs
-        if: always() && steps.probe.outputs.failures != '0'
+      - name: Keep this cell's counts
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: probe-${{ matrix.ref }}-runner-${{ matrix.runner }}
+          name: cell-${{ steps.probe.outputs.safe_ref }}-${{ matrix.runner }}
+          path: /tmp/probe/cell.json
+          if-no-files-found: ignore
+
+      - name: Keep the logs worth reading
+        if: always() && (steps.probe.outputs.failed != '0' || steps.probe.outputs.no_result != '0')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: logs-${{ steps.probe.outputs.safe_ref }}-${{ matrix.runner }}
           path: /tmp/probe/run-*.txt
           if-no-files-found: ignore
 
   # Reading the per-cell numbers by eye invites the reading this workflow
-  # exists to prevent ("both were zero, so the change is fine").  This says
-  # what zero means before anyone has to decide.
+  # exists to prevent ("both were zero, so the change is fine").  This adds up
+  # what the cells actually reported -- not what was requested -- and says what
+  # the total permits before anyone has to decide.
   summarise:
     name: Summarise
     needs: [plan, probe]
@@ -232,30 +273,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: How to read the numbers
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Collect the cells
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: cell-*
+          path: /tmp/cells
+          merge-multiple: false
+
+      - name: Say what the totals permit
         env:
+          REQUESTED_PER_REF: ${{ inputs.runners }}
           REPEATS: ${{ inputs.repeats_per_runner }}
-          RUNNERS: ${{ inputs.runners }}
+          PROBE_RESULT: ${{ needs.probe.result }}
         run: |
-          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
-          import os
-          n = int(os.environ["REPEATS"]) * int(os.environ["RUNNERS"])
-          # With no failures in n runs, the 95% one-sided upper bound on the
-          # true rate is 1 - 0.05**(1/n).
-          bound = 1 - 0.05 ** (1 / n)
-          print("## Reading this run")
-          print()
-          print(f"Each ref got **{n} runs** ({os.environ['RUNNERS']} runners x "
-                f"{os.environ['REPEATS']}).")
-          print()
-          print(f"**Zero failures in {n} runs does not mean the test is sound.** "
-                f"It puts the true failure rate below about **{bound:.1%}** "
-                "(95% one-sided). A rate under that is invisible here.")
-          print()
-          print("- **Both refs zero** -> undetected, not absent. Raise the counts "
-                "or move the investigation to another axis.")
-          print("- **Only one ref fails** -> compare per-runner counts before "
-                "attributing it to the ref; one hot runner can carry a cell.")
-          print("- **Any `no result`** -> those runs measured nothing. Subtract "
-                "them from the denominator.")
-          PY
+          # The arithmetic lives in scripts/probe_summarise.py, where
+          # test_issue782_probe_summarise.py can hand it the cases that decide
+          # whether a bound is honest: cells that never reported, runs that
+          # executed nothing, a probe that partly failed.
+          python3 scripts/probe_summarise.py \
+            --cells /tmp/cells \
+            --requested-per-ref "$(( REQUESTED_PER_REF * REPEATS ))" \
+            --probe-result "$PROBE_RESULT" >> "$GITHUB_STEP_SUMMARY"
