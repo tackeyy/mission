@@ -127,6 +127,31 @@ python3 scripts/pr_size.py --base origin/main # against a local range
 script and put the number in the PR body when you land in the accountability
 band or above. Wiring it into CI is not implemented.
 
+## Deciding whether a flaky CI failure came from the change
+
+A test that fails once in CI and passes on re-run has not been explained. The
+re-run records that the failure was not seen again, which is not the same as
+its being absent, and local repetition does not stand in for CI (the failure
+that prompted this never reproduced on a developer machine in 24 runs under
+load).
+
+`.github/workflows/flaky-probe.yml` repeats one test file the way CI runs the
+suite, across both the change and its base. It is `workflow_dispatch` only, so
+it costs nothing until someone asks for it, and it must be dispatched from the
+default branch.
+
+```
+gh workflow run flaky-probe.yml \
+  -f test_file=skills/mission/tests/test_issue767_handoff_lifetime.py \
+  -f refs=main,<the branch> \
+  -f runners=4 -f repeats_per_runner=10
+```
+
+**Two zeros do not clear the change.** 40 runs with no failure put the true
+rate below roughly 7%; anything rarer is invisible at that count. The run's
+summary states the bound it actually achieved -- read that before concluding
+anything, and treat `no result` rows as unmeasured rather than as passes.
+
 ## Distribution Release Rule
 
 - A version bump is not a completed distribution release until the matching `vX.Y.Z` git tag exists on the remote and the GitHub Release for that tag exists.

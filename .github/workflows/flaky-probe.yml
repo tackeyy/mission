@@ -1,77 +1,130 @@
 # A test that fails once in CI and passes on re-run tells us nothing on its own.
-# Re-running is not a measurement: it records that the failure was not observed
-# again, which is not the same as the failure being absent.  Deciding whether a
-# change introduced the flake needs the same test run many times, in the same
-# environment, against both the change and its base -- and a local machine is
-# not that environment (the failure this workflow was written for never
-# reproduced locally in 24 runs under load).
+# Re-running records that the failure was not observed again, which is not the
+# same as the failure being absent.  Deciding whether a change introduced the
+# flake needs the same test run many times **under the same conditions as CI**,
+# against both the change and its base.  A developer machine is not those
+# conditions: the failure this was written for never reproduced locally in 24
+# runs under load.
 #
-# This runs on workflow_dispatch only.  It costs nothing until someone asks for
-# it, and it is deliberately kept out of ci.yml: `test_actions_cost_guard.py`
-# pins the shape of that file, and a probe that runs on every push would be the
-# opposite of what the cost guard protects.
+# Three things this gets wrong if written carelessly, all of which it did in
+# review:
+#
+#   * Building the pytest command here instead of taking it from the Makefile.
+#     CI runs the suite with `-n auto --dist loadfile`; a probe that runs the
+#     test alone measures a different system than the one that failed.  So this
+#     calls `make test`, and the flags live where they already lived.
+#   * Counting an exit code.  A run that skips at runtime, or selects nothing,
+#     exits 0 and would be counted as a pass -- `Makefile` says as much itself:
+#     "an exit code alone cannot distinguish a passing suite from one that ran
+#     nothing".  So each run writes a suite report and the executed count is
+#     read back from it.
+#   * Giving each ref its own runner.  That isolates the refs from each other
+#     and confounds them with the machine: every repeat of a ref shares one
+#     host, so host-to-host variation arrives as a difference between refs.
+#     Repeats are spread over several runners per ref instead.
+#
+# workflow_dispatch only: it costs nothing until someone asks for it, and a
+# probe that ran on every push would be the opposite of what
+# `test_actions_cost_guard.py` protects in ci.yml.
 name: Flaky probe
 
 on:
   workflow_dispatch:
     inputs:
-      test_id:
-        description: 'pytest node id (file::test or file::Class::test)'
+      test_file:
+        description: 'Test file to repeat, e.g. skills/mission/tests/test_issue767_handoff_lifetime.py'
         required: true
         type: string
-      repeats:
-        description: 'How many times to run it per ref'
+      repeats_per_runner:
+        description: 'Runs per runner (total runs per ref = this x runners)'
         required: false
-        default: '20'
+        default: '10'
+        type: string
+      runners:
+        description: 'Runners per ref. More than one is what separates ref from host.'
+        required: false
+        default: '4'
         type: string
       refs:
-        description: 'Comma-separated refs to compare (the change and its base)'
-        required: false
-        default: 'main'
+        description: 'Comma-separated refs to compare. Two or more, or it is not a comparison.'
+        required: true
         type: string
 
 permissions:
   contents: read
 
+concurrency:
+  group: flaky-probe-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  # One job per ref so the two runs get separate runners.  Sharing a runner
-  # would let one ref's load shape the other's failure rate, which is the
-  # comparison this workflow exists to make.
   plan:
     name: Plan
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 5
     outputs:
-      refs: ${{ steps.split.outputs.refs }}
+      matrix: ${{ steps.build.outputs.matrix }}
     steps:
-      - name: Split refs into a matrix
-        id: split
+      - name: Build the ref x runner matrix
+        id: build
         env:
           REFS: ${{ inputs.refs }}
+          RUNNERS: ${{ inputs.runners }}
+          REPEATS: ${{ inputs.repeats_per_runner }}
+          TEST_FILE: ${{ inputs.test_file }}
         run: |
-          set -euo pipefail
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          import json, os
-          raw = os.environ["REFS"]
-          refs = [r.strip() for r in raw.split(",") if r.strip()]
-          if not refs:
-              raise SystemExit("refs is empty")
-          print("refs=" + json.dumps(refs))
+          import json, os, re, sys
+
+          def die(msg):
+              print(f"::error::{msg}", file=sys.stderr)
+              raise SystemExit(2)
+
+          # A ref name may contain characters a shell would act on, so it is
+          # checked here rather than quoted later: the value reaches
+          # actions/checkout, and a rejected input is cheaper than a trusted one.
+          refs = [r.strip() for r in os.environ["REFS"].split(",") if r.strip()]
+          if len(refs) < 2:
+              die("refs needs two or more entries; one ref is not a comparison")
+          for r in refs:
+              if not re.fullmatch(r"[A-Za-z0-9._/-]{1,255}", r) or ".." in r:
+                  die(f"ref is not a plain ref name: {r!r}")
+
+          # The file is interpolated into a make variable, so anything that is
+          # not a test file under the suite is refused.  Without this, a value
+          # like `--collect-only` turns every run into a collection that exits
+          # 0, and the probe reports `0 failed` having measured nothing.
+          test_file = os.environ["TEST_FILE"].strip()
+          if not re.fullmatch(r"skills/mission/tests/[A-Za-z0-9_]+\.py", test_file):
+              die(f"test_file must be a file under skills/mission/tests: {test_file!r}")
+
+          def positive(name):
+              raw = os.environ[name].strip()
+              if not raw.isdigit() or int(raw) < 1:
+                  die(f"{name} must be a positive integer, got {raw!r}")
+              return int(raw)
+
+          runners = positive("RUNNERS")
+          repeats = positive("REPEATS")
+          if runners * repeats < 20:
+              die(f"runners x repeats = {runners * repeats}; too few to say anything")
+
+          include = [{"ref": r, "runner": i} for r in refs for i in range(1, runners + 1)]
+          print("matrix=" + json.dumps({"include": include}))
           PY
 
   probe:
-    name: Probe ${{ matrix.ref }}
+    name: ${{ matrix.ref }} / runner ${{ matrix.runner }}
     needs: plan
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
-      # Both refs report independently: a red one must not hide the other's
-      # count, because the comparison needs both numbers.
+      # Every cell reports on its own: one red cell must not hide the counts in
+      # the others, because the comparison needs all of them.
       fail-fast: false
-      matrix:
-        ref: ${{ fromJSON(needs.plan.outputs.refs) }}
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
-      - name: Checkout ${{ matrix.ref }}
+      - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ matrix.ref }}
@@ -83,68 +136,126 @@ jobs:
           cache: pip
           cache-dependency-path: .github/requirements-ci.txt
 
-      - name: Install test requirements
-        run: python -m pip install --require-hashes -r .github/requirements-ci.txt
-
-      - name: Repeat the test
+      - name: Repeat the suite as CI runs it
         id: probe
+        shell: bash {0}
         env:
-          TEST_ID: ${{ inputs.test_id }}
-          REPEATS: ${{ inputs.repeats }}
+          TEST_FILE: ${{ inputs.test_file }}
+          REPEATS: ${{ inputs.repeats_per_runner }}
+          REF: ${{ matrix.ref }}
+          RUNNER_INDEX: ${{ matrix.runner }}
         run: |
           set -uo pipefail
-          case "$REPEATS" in
-            ''|*[!0-9]*) echo "repeats must be a positive integer: $REPEATS" >&2; exit 2 ;;
-          esac
-          [ "$REPEATS" -gt 0 ] || { echo "repeats must be > 0" >&2; exit 2; }
-
-          # Fail once up front if the id selects nothing.  Without this a typo
-          # reports "0 failures out of 20", which reads like a clean result.
-          if ! python -m pytest --collect-only -q "$TEST_ID" > /tmp/collect.txt 2>&1; then
-            echo "the test id did not collect; not a result:" >&2
-            tail -20 /tmp/collect.txt >&2
-            exit 2
-          fi
-
+          mkdir -p /tmp/probe
           failures=0
+          no_result=0
           for i in $(seq 1 "$REPEATS"); do
-            if python -m pytest -q -p no:cacheprovider "$TEST_ID" > "/tmp/run-$i.txt" 2>&1; then
+            report="/tmp/probe/report-$i.json"
+            log="/tmp/probe/run-$i.txt"
+            # `make test` owns the flags (-n auto --dist loadfile) and builds
+            # the venv, so the probe cannot drift from how CI runs the suite.
+            # A run that hangs is a result too, so it gets a bound of its own;
+            # without it the job's own timeout would discard every count.
+            timeout 900 make test \
+              PYTEST_TARGETS="$TEST_FILE" \
+              MISSION_SUITE_REPORT="$report" > "$log" 2>&1
+            status=$?
+
+            executed=$(python3 -c '
+            import json, sys
+            try:
+                print(json.load(open(sys.argv[1]))["executed"])
+            except Exception:
+                print(-1)
+            ' "$report")
+
+            if [ "$executed" -lt 1 ]; then
+              # Nothing ran, or the report is missing: not a pass and not a
+              # failure.  Counting it either way is how "0 failures" comes to
+              # mean "never measured".
+              printf '?'
+              no_result=$((no_result + 1))
+            elif [ "$status" -eq 0 ]; then
               printf '.'
             else
               printf 'F'
               failures=$((failures + 1))
-              # Keep the first failure whole: the counts say how often, this
-              # says what broke.
-              if [ "$failures" -eq 1 ]; then cp "/tmp/run-$i.txt" /tmp/first-failure.txt; fi
+              if [ "$failures" -eq 1 ]; then cp "$log" /tmp/probe/first-failure.txt; fi
             fi
           done
           echo
-          echo "ref=${{ matrix.ref }} failures=$failures repeats=$REPEATS"
+          echo "ref=$REF runner=$RUNNER_INDEX failures=$failures no_result=$no_result repeats=$REPEATS"
           {
             echo "failures=$failures"
+            echo "no_result=$no_result"
             echo "repeats=$REPEATS"
           } >> "$GITHUB_OUTPUT"
           {
-            echo "### ${{ matrix.ref }}"
+            echo "### ${REF} / runner ${RUNNER_INDEX}"
             echo
-            echo "**$failures / $REPEATS failed**"
-            if [ -f /tmp/first-failure.txt ]; then
+            echo "| failed | no result | runs |"
+            echo "|---|---|---|"
+            echo "| ${failures} | ${no_result} | ${REPEATS} |"
+            if [ "$no_result" -gt 0 ]; then
+              echo
+              echo "**\`no result\` is not a pass.** Those runs executed no test case, so they"
+              echo "say nothing about the failure rate. Subtract them before comparing."
+            fi
+            if [ -f /tmp/probe/first-failure.txt ]; then
               echo
               echo '<details><summary>First failure</summary>'
               echo
               echo '```'
-              tail -60 /tmp/first-failure.txt
+              tail -80 /tmp/probe/first-failure.txt
+              echo
               echo '```'
               echo
               echo '</details>'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # The probe's own exit status must not depend on whether the test failed:
-      # a ref where the test fails 8 times out of 20 is a successful
-      # measurement, not a broken job.  Reporting it as a failed job would make
-      # people re-run the probe, which is the habit this workflow replaces.
-      - name: Report
-        if: always()
+      - name: Keep the failing logs
+        if: always() && steps.probe.outputs.failures != '0'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: probe-${{ matrix.ref }}-runner-${{ matrix.runner }}
+          path: /tmp/probe/run-*.txt
+          if-no-files-found: ignore
+
+  # Reading the per-cell numbers by eye invites the reading this workflow
+  # exists to prevent ("both were zero, so the change is fine").  This says
+  # what zero means before anyone has to decide.
+  summarise:
+    name: Summarise
+    needs: [plan, probe]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: How to read the numbers
+        env:
+          REPEATS: ${{ inputs.repeats_per_runner }}
+          RUNNERS: ${{ inputs.runners }}
         run: |
-          echo "${{ matrix.ref }}: ${{ steps.probe.outputs.failures }} / ${{ steps.probe.outputs.repeats }} failed"
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import os
+          n = int(os.environ["REPEATS"]) * int(os.environ["RUNNERS"])
+          # With no failures in n runs, the 95% one-sided upper bound on the
+          # true rate is 1 - 0.05**(1/n).
+          bound = 1 - 0.05 ** (1 / n)
+          print("## Reading this run")
+          print()
+          print(f"Each ref got **{n} runs** ({os.environ['RUNNERS']} runners x "
+                f"{os.environ['REPEATS']}).")
+          print()
+          print(f"**Zero failures in {n} runs does not mean the test is sound.** "
+                f"It puts the true failure rate below about **{bound:.1%}** "
+                "(95% one-sided). A rate under that is invisible here.")
+          print()
+          print("- **Both refs zero** -> undetected, not absent. Raise the counts "
+                "or move the investigation to another axis.")
+          print("- **Only one ref fails** -> compare per-runner counts before "
+                "attributing it to the ref; one hot runner can carry a cell.")
+          print("- **Any `no result`** -> those runs measured nothing. Subtract "
+                "them from the denominator.")
+          PY
