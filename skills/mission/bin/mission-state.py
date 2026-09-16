@@ -112,6 +112,7 @@ from activity_segments import (  # noqa: E402
     transition_activity_phase,
     validate_activity,
 )
+from mission_application.evidence_publication import progress_mission_segment  # noqa: E402
 from mission_application.lifecycle import (  # noqa: E402
     ActivityEndRequest,
     ActivityStartRequest,
@@ -6714,35 +6715,8 @@ def cmd_artifact_publish(args):
     print(run_artifact_publish_cli(args, Path.cwd(), _ARTIFACT_CLI_SERVICES))
 
 
-_PROGRESS_MISSION_SEGMENT_RE = re.compile(r"\A[0-9a-f]{1,8}\Z")
-
-
-def _progress_mission_segment(mission_id) -> str:
-    """Give the progress rule a segment it accepts, for any state it can read.
-
-    Every state ``init`` writes carries a sha256 digest, and the generic
-    ``set`` refuses to replace the field, so the first eight characters are
-    hex on every path this CLI can reach.  The v5 decoder is wider: it admits
-    any non-empty string, so a state from an older version, a migration, or
-    one placed by hand can carry something else.  Such a state used to receive
-    its progress file from the legacy publisher, and refusing it here would
-    take that away from its owner -- the regression cross-model review round 1
-    and 2 both named.
-
-    Deriving a digest, rather than escaping per character, keeps one mission
-    to one file name: escaping would map two ids onto the same name only by
-    accident, and would change the name whenever the escaping did.
-    """
-    if not mission_id:
-        return "unknown"
-    head = str(mission_id)[:8]
-    if _PROGRESS_MISSION_SEGMENT_RE.match(head):
-        return head
-    return hashlib.sha256(str(mission_id).encode("utf-8")).hexdigest()[:8]
-
-
 def _progress_archive_path(cwd: Path, data: dict, iteration: int) -> str:
-    gid = _progress_mission_segment(data.get("mission_id"))
+    gid = progress_mission_segment(data.get("mission_id"))
     return _state_relative_path(
         cwd, str(state_dir(cwd) / "archive" / f"iter-{iteration}-{gid}-progress.md")
     )

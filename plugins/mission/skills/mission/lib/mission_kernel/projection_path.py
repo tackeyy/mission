@@ -16,6 +16,7 @@ each caller raises.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -23,6 +24,7 @@ from typing import Union
 
 __all__ = [
     "ProjectionRejection",
+    "progress_mission_segment",
     "resolve_internal_archive_path",
     "resolve_projection_path",
 ]
@@ -40,6 +42,33 @@ _ARCHIVE_DIRECTORY = "archive"
 _PROGRESS_BASENAME_RE = re.compile(
     r"\Aiter-[0-9]+-(?:[0-9a-f]{1,8}|unknown)-progress\.md\Z"
 )
+
+_PROGRESS_MISSION_SEGMENT_RE = re.compile(r"\A[0-9a-f]{1,8}\Z")
+_PROGRESS_ABSENT_MISSION_SEGMENT = "unknown"
+
+
+def progress_mission_segment(mission_id: object) -> str:
+    """Give the rule above a segment it accepts, for any state that can exist.
+
+    The rule and its generator live together so that neither can move
+    without the other.  Every state ``init`` writes carries a sha256 digest
+    and the generic ``set`` refuses to replace the field, so the leading
+    eight characters are hex on every path the CLI reaches.  The v5 decoder
+    is wider -- it admits any non-empty string -- so a state from an older
+    version, a migration, or one placed by hand can carry something else.
+    Those states received their progress file from the legacy publisher, and
+    refusing them here would take that away from their owner.
+
+    Deriving a digest, rather than escaping per character, keeps one mission
+    to one file name: an escape maps two ids onto one name only by accident,
+    and changes the name whenever the escaping does.
+    """
+    if not mission_id:
+        return _PROGRESS_ABSENT_MISSION_SEGMENT
+    head = str(mission_id)[:8]
+    if _PROGRESS_MISSION_SEGMENT_RE.match(head):
+        return head
+    return hashlib.sha256(str(mission_id).encode("utf-8")).hexdigest()[:8]
 
 
 @dataclass(frozen=True)

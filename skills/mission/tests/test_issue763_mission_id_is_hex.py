@@ -30,6 +30,7 @@ if str(LIB) not in sys.path:
 
 from mission_application.evidence_publication import (  # noqa: E402
     canonical_generated_path,
+    progress_mission_segment,
 )
 from mission_kernel.commands import GENERIC_SET_FROZEN_FIELDS  # noqa: E402
 
@@ -92,9 +93,8 @@ def test_a_state_carrying_a_non_hex_mission_id_still_gets_a_path():
     publisher used to write its progress file.  Refusing it here would be a
     regression for that state's owner, so the segment is derived instead.
     """
-    module = _load()
     for stored in ("Mission-1", "ABCDEF0123456789", "../../etc/passwd", "🙂", "ZZ"):
-        segment = module._progress_mission_segment(stored)
+        segment = progress_mission_segment(stored)
         canonical_generated_path(
             f"{ROOT_NAME}/archive/iter-7-{segment}-progress.md",
             repository_root_name=ROOT_NAME,
@@ -128,23 +128,27 @@ def test_the_production_path_builder_keeps_a_hex_id_unchanged(tmp_path):
 def test_the_derived_segment_is_stable_for_one_mission_id():
     # One mission keeps one file name across runs; the checkpoints written
     # under the previous name would not be found otherwise.
-    module = _load()
-    first = module._progress_mission_segment("Mission-1")
-    assert first == module._progress_mission_segment("Mission-1")
-    assert first != module._progress_mission_segment("Mission-2")
+    first = progress_mission_segment("Mission-1")
+    assert first == progress_mission_segment("Mission-1")
+    assert first != progress_mission_segment("Mission-2")
 
 
 def test_a_hex_mission_id_is_passed_through_unchanged():
     # Deriving unconditionally would move every existing progress file.
+    assert progress_mission_segment("abcdef0123456789") == "abcdef01"
+
+
+def test_the_absent_mission_id_reaches_the_literal_through_the_builder(tmp_path):
+    """Drive the absent-id branch through the builder, like the other two.
+
+    Review of the previous round found this branch fixed only by handing a
+    hard-coded string to the rule: replacing the generator's ``unknown`` with
+    another hex-shaped literal left 109 tests passing.  ``unknown`` is also
+    the name the legacy publisher wrote, so a different literal loses the
+    existing progress files of every state without a mission id.
+    """
     module = _load()
-    assert module._progress_mission_segment("abcdef0123456789") == "abcdef01"
-
-
-def test_the_absent_mission_id_still_reaches_the_literal_the_rule_admits():
-    # `_progress_archive_path` substitutes "unknown" when the state carries no
-    # id.  The rule admits that literal; this fixes the pair together so that
-    # removing it from either side fails here.
-    canonical_generated_path(
-        f"{ROOT_NAME}/archive/iter-3-unknown-progress.md",
-        repository_root_name=ROOT_NAME,
-    )
+    for state in ({"mission_id": None}, {}, {"mission_id": ""}):
+        built = module._progress_archive_path(tmp_path, state, 3)
+        assert built == f"{ROOT_NAME}/archive/iter-3-unknown-progress.md", built
+        canonical_generated_path(built, repository_root_name=ROOT_NAME)
