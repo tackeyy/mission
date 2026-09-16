@@ -1,0 +1,150 @@
+# A test that fails once in CI and passes on re-run tells us nothing on its own.
+# Re-running is not a measurement: it records that the failure was not observed
+# again, which is not the same as the failure being absent.  Deciding whether a
+# change introduced the flake needs the same test run many times, in the same
+# environment, against both the change and its base -- and a local machine is
+# not that environment (the failure this workflow was written for never
+# reproduced locally in 24 runs under load).
+#
+# This runs on workflow_dispatch only.  It costs nothing until someone asks for
+# it, and it is deliberately kept out of ci.yml: `test_actions_cost_guard.py`
+# pins the shape of that file, and a probe that runs on every push would be the
+# opposite of what the cost guard protects.
+name: Flaky probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_id:
+        description: 'pytest node id (file::test or file::Class::test)'
+        required: true
+        type: string
+      repeats:
+        description: 'How many times to run it per ref'
+        required: false
+        default: '20'
+        type: string
+      refs:
+        description: 'Comma-separated refs to compare (the change and its base)'
+        required: false
+        default: 'main'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  # One job per ref so the two runs get separate runners.  Sharing a runner
+  # would let one ref's load shape the other's failure rate, which is the
+  # comparison this workflow exists to make.
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      refs: ${{ steps.split.outputs.refs }}
+    steps:
+      - name: Split refs into a matrix
+        id: split
+        env:
+          REFS: ${{ inputs.refs }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          raw = os.environ["REFS"]
+          refs = [r.strip() for r in raw.split(",") if r.strip()]
+          if not refs:
+              raise SystemExit("refs is empty")
+          print("refs=" + json.dumps(refs))
+          PY
+
+  probe:
+    name: Probe ${{ matrix.ref }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      # Both refs report independently: a red one must not hide the other's
+      # count, because the comparison needs both numbers.
+      fail-fast: false
+      matrix:
+        ref: ${{ fromJSON(needs.plan.outputs.refs) }}
+    steps:
+      - name: Checkout ${{ matrix.ref }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ matrix.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: .github/requirements-ci.txt
+
+      - name: Install test requirements
+        run: python -m pip install --require-hashes -r .github/requirements-ci.txt
+
+      - name: Repeat the test
+        id: probe
+        env:
+          TEST_ID: ${{ inputs.test_id }}
+          REPEATS: ${{ inputs.repeats }}
+        run: |
+          set -uo pipefail
+          case "$REPEATS" in
+            ''|*[!0-9]*) echo "repeats must be a positive integer: $REPEATS" >&2; exit 2 ;;
+          esac
+          [ "$REPEATS" -gt 0 ] || { echo "repeats must be > 0" >&2; exit 2; }
+
+          # Fail once up front if the id selects nothing.  Without this a typo
+          # reports "0 failures out of 20", which reads like a clean result.
+          if ! python -m pytest --collect-only -q "$TEST_ID" > /tmp/collect.txt 2>&1; then
+            echo "the test id did not collect; not a result:" >&2
+            tail -20 /tmp/collect.txt >&2
+            exit 2
+          fi
+
+          failures=0
+          for i in $(seq 1 "$REPEATS"); do
+            if python -m pytest -q -p no:cacheprovider "$TEST_ID" > "/tmp/run-$i.txt" 2>&1; then
+              printf '.'
+            else
+              printf 'F'
+              failures=$((failures + 1))
+              # Keep the first failure whole: the counts say how often, this
+              # says what broke.
+              if [ "$failures" -eq 1 ]; then cp "/tmp/run-$i.txt" /tmp/first-failure.txt; fi
+            fi
+          done
+          echo
+          echo "ref=${{ matrix.ref }} failures=$failures repeats=$REPEATS"
+          {
+            echo "failures=$failures"
+            echo "repeats=$REPEATS"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### ${{ matrix.ref }}"
+            echo
+            echo "**$failures / $REPEATS failed**"
+            if [ -f /tmp/first-failure.txt ]; then
+              echo
+              echo '<details><summary>First failure</summary>'
+              echo
+              echo '```'
+              tail -60 /tmp/first-failure.txt
+              echo '```'
+              echo
+              echo '</details>'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The probe's own exit status must not depend on whether the test failed:
+      # a ref where the test fails 8 times out of 20 is a successful
+      # measurement, not a broken job.  Reporting it as a failed job would make
+      # people re-run the probe, which is the habit this workflow replaces.
+      - name: Report
+        if: always()
+        run: |
+          echo "${{ matrix.ref }}: ${{ steps.probe.outputs.failures }} / ${{ steps.probe.outputs.repeats }} failed"
