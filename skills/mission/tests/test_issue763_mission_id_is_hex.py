@@ -101,6 +101,30 @@ def test_a_state_carrying_a_non_hex_mission_id_still_gets_a_path():
         )
 
 
+def test_the_production_path_builder_is_wired_to_the_derivation(tmp_path):
+    """Drive the helper the CLI actually calls, not the derivation alone.
+
+    Cross-model review round 3: testing ``_progress_mission_segment`` on its
+    own and feeding the result to the rule by hand leaves the wiring free --
+    ``_progress_archive_path`` could go back to slicing the raw id and these
+    tests would still pass.  This one asks the production builder for the
+    path and hands *its* answer to the rule.
+    """
+    module = _load()
+    for stored in ("Mission-1", "ABCDEF0123456789", "../../etc/passwd", "🙂"):
+        built = module._progress_archive_path(tmp_path, {"mission_id": stored}, 3)
+        assert built.startswith(f"{ROOT_NAME}/archive/"), built
+        canonical_generated_path(built, repository_root_name=ROOT_NAME)
+
+
+def test_the_production_path_builder_keeps_a_hex_id_unchanged(tmp_path):
+    # The wiring must not rewrite ids that already fit: existing progress
+    # files are found by name.
+    module = _load()
+    built = module._progress_archive_path(tmp_path, {"mission_id": "abcdef0123456789"}, 3)
+    assert built == f"{ROOT_NAME}/archive/iter-3-abcdef01-progress.md", built
+
+
 def test_the_derived_segment_is_stable_for_one_mission_id():
     # One mission keeps one file name across runs; the checkpoints written
     # under the previous name would not be found otherwise.
