@@ -1,0 +1,369 @@
+# A test that fails once in CI and passes on re-run tells us nothing on its own.
+# Re-running records that the failure was not observed again, which is not the
+# same as the failure being absent.  Deciding whether a change introduced the
+# flake needs the same test run many times **under the same conditions as CI**,
+# against both the change and its base.  A developer machine is not those
+# conditions: the failure this was written for never reproduced locally in 24
+# runs under load.
+#
+# Three things this gets wrong if written carelessly, all of which it did in
+# review:
+#
+#   * Building the pytest command here instead of taking it from the Makefile.
+#     CI runs the suite with `-n auto --dist loadfile`; a probe that runs the
+#     test alone measures a different system than the one that failed.  So this
+#     calls `make test`, and the flags live where they already lived.
+#   * Counting an exit code.  A run that skips every test at runtime exits 0
+#     and would be counted as a pass -- `Makefile` says as much itself: "an
+#     exit code alone cannot distinguish a passing suite from one that ran
+#     nothing".  So each run writes a suite report and the executed count is
+#     read back from it.  (An *empty selection* is a different case: the
+#     recipe runs under `set -eu` and pytest exits 5, so it lands in `failed`,
+#     which is why the ref is checked for the file before the loop starts.)
+#   * Giving each ref its own runner.  That isolates the refs from each other
+#     and confounds them with the machine: every repeat of a ref shares one
+#     host, so host-to-host variation arrives as a difference between refs.
+#     Repeats are spread over several runners per ref instead.
+#
+# workflow_dispatch only: it costs nothing until someone asks for it, and a
+# probe that ran on every push would be the opposite of what
+# `test_actions_cost_guard.py` protects in ci.yml.
+name: Flaky probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_file:
+        description: 'Test file to repeat, e.g. skills/mission/tests/test_issue767_handoff_lifetime.py'
+        required: true
+        type: string
+      repeats_per_runner:
+        description: 'Runs per runner (total runs per ref = this x runners)'
+        required: false
+        default: '10'
+        type: string
+      runners:
+        description: 'Runners per ref. More than one is what separates ref from host.'
+        required: false
+        default: '4'
+        type: string
+      refs:
+        description: 'Comma-separated refs to compare. Two or more, or it is not a comparison.'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flaky-probe-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - name: Build the ref x runner matrix
+        id: build
+        env:
+          REFS: ${{ inputs.refs }}
+          RUNNERS: ${{ inputs.runners }}
+          REPEATS: ${{ inputs.repeats_per_runner }}
+          TEST_FILE: ${{ inputs.test_file }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os, re, sys
+
+          def die(msg):
+              print(f"::error::{msg}", file=sys.stderr)
+              raise SystemExit(2)
+
+          # A ref name may contain characters a shell would act on, so it is
+          # checked here rather than quoted later: the value reaches
+          # actions/checkout, and a rejected input is cheaper than a trusted one.
+          refs = [r.strip() for r in os.environ["REFS"].split(",") if r.strip()]
+          if len(refs) < 2:
+              die("refs needs two or more entries; one ref is not a comparison")
+          # `main,main` used to pass the count check and produce a run that
+          # compared a ref with itself.  Both arms reported, so nothing was
+          # missing, and the summary printed a clean bound for a comparison
+          # that never happened -- the exact sentence this probe exists to
+          # prevent.  Spelling catches only the literal case: `main` against
+          # `origin/main` resolves to one commit and is not caught here.
+          if len(set(refs)) != len(refs):
+              die(f"refs repeats an entry: {refs}; a ref compared with itself is not a comparison")
+          for r in refs:
+              if not re.fullmatch(r"[A-Za-z0-9._/-]{1,255}", r) or ".." in r:
+                  die(f"ref is not a plain ref name: {r!r}")
+              # A pull request ref is code from anyone who can open a PR, and
+              # this workflow runs it on a trusted trigger.  The comparison
+              # this probe exists for is branch against branch anyway.
+              #
+              # This closes the spelling, not the capability: a PR head *SHA*
+              # is plain hex, passes the pattern above, and is fetchable from
+              # the base repo.  Dispatching already requires write access, so
+              # the guard is a guard rail for that person, not a boundary
+              # against an outsider.
+              if r.startswith("refs/pull/"):
+                  die(f"refs/pull/* is untrusted code on a trusted trigger: {r!r}")
+
+          # The file is interpolated into a make variable, so anything that is
+          # not a test file under the suite is refused.  Without this, a value
+          # like `--collect-only` turns every run into a collection that exits
+          # 0, and the probe reports `0 failed` having measured nothing.
+          test_file = os.environ["TEST_FILE"].strip()
+          if not re.fullmatch(r"skills/mission/tests/[A-Za-z0-9_]+\.py", test_file):
+              die(f"test_file must be a file under skills/mission/tests: {test_file!r}")
+
+          def positive(name):
+              # `str.isdigit()` accepts non-ASCII digits, and `int()` then
+              # either accepts them too or raises -- killing this job with a
+              # traceback instead of the `::error::` line.  Pin ASCII.
+              raw = os.environ[name].strip()
+              if not re.fullmatch(r"[0-9]+", raw) or int(raw) < 1:
+                  die(f"{name} must be a positive integer, got {raw!r}")
+              return int(raw)
+
+          runners = positive("RUNNERS")
+          repeats = positive("REPEATS")
+          # One runner per ref is the confounding this workflow's header
+          # names: every repeat of a ref would share one host, so
+          # host-to-host variation would arrive as a difference between refs.
+          if runners < 2:
+              die(f"runners must be 2 or more, got {runners}; one runner per ref confounds ref with host")
+          if runners * repeats < 20:
+              die(f"runners x repeats = {runners * repeats}; too few to say anything")
+
+          include = [{"ref": r, "runner": i} for r in refs for i in range(1, runners + 1)]
+          print("matrix=" + json.dumps({"include": include}))
+          PY
+
+  probe:
+    name: ${{ matrix.ref }} / runner ${{ matrix.runner }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      # Every cell reports on its own: one red cell must not hide the counts in
+      # the others, because the comparison needs all of them.
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ matrix.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          # No `cache: pip` here, deliberately.  This job checks out an
+          # arbitrary ref and runs its code, and `workflow_dispatch` is a
+          # trusted trigger whose cache writes land in the default branch's
+          # scope -- the same key space `ci.yml` reads from.  Caching here
+          # would make this workflow a way to poison every later CI run.
+          python-version: '3.12'
+
+      - name: Repeat the suite as CI runs it
+        id: probe
+        shell: bash {0}
+        env:
+          TEST_FILE: ${{ inputs.test_file }}
+          REPEATS: ${{ inputs.repeats_per_runner }}
+          REF: ${{ matrix.ref }}
+          RUNNER_INDEX: ${{ matrix.runner }}
+        run: |
+          set -uo pipefail
+          mkdir -p /tmp/probe
+
+          # Written before anything can fail.  An early exit used to leave this
+          # empty, and both arms then collided on the artifact name
+          # `logs--<runner>` -- losing the logs in exactly the situation worth
+          # a log.
+          safe_ref="${REF//\//-}"
+          echo "safe_ref=$safe_ref" >> "$GITHUB_OUTPUT"
+
+          # A ref that does not carry the probed file cannot be measured, and
+          # the failure mode is silent: `make test` runs its recipe under
+          # `set -eu`, pytest exits 5 on a path that does not exist, the run
+          # never reaches write_suite_report, and every repeat is classified
+          # `failed`.  The summary then prints `10 of 10 failed (100.0%)` for
+          # a file that was never there.
+          #
+          # That is the documented comparison, not a corner case: the probed
+          # test is usually the one the branch just added.  Failing the cell
+          # here makes the ref report nothing, which suppresses the bounds and
+          # says so, instead of inventing a rate.
+          if [ ! -f "$TEST_FILE" ]; then
+            echo "::error::${REF} does not contain ${TEST_FILE}; this ref cannot be measured"
+            exit 1
+          fi
+
+          failed=0
+          no_result=0
+          passed=0
+          started=$SECONDS
+          # The job is capped at 90 minutes and each run at 15, so the
+          # documented 10 repeats can outlast the job.  Stopping short leaves
+          # the counts observed so far; being killed used to leave nothing.
+          budget=4500
+          for i in $(seq 1 "$REPEATS"); do
+            # Each run gets its own directory: `make` derives the junit path
+            # from the report's dirname, so a shared one is reused every time.
+            mkdir -p "/tmp/probe/run-$i"
+            report="/tmp/probe/run-$i/report.json"
+            log="/tmp/probe/run-$i.txt"
+            # `make test` owns the flags (-n auto --dist loadfile) and builds
+            # the venv, so the probe cannot drift from how CI runs the suite.
+            # A run that hangs is a result too, so it gets a bound of its own.
+            timeout 900 make test \
+              PYTEST_TARGETS="$TEST_FILE" \
+              MISSION_SUITE_REPORT="$report" > "$log" 2>&1
+            status=$?
+
+            # The verdict lives in scripts/probe_classify.py, where a test can
+            # reach it.  Deciding it here is how the previous version shipped
+            # a guard that the pinned interpreter refused to run.
+            verdict=$(python3 scripts/probe_classify.py --status "$status" --report "$report" 2>>"$log")
+            case "$verdict" in
+              failed)
+                printf 'F'
+                failed=$((failed + 1))
+                if [ "$failed" -eq 1 ]; then cp "$log" /tmp/probe/first-failure.txt; fi
+                ;;
+              no-result)
+                printf '?'
+                no_result=$((no_result + 1))
+                if [ "$no_result" -eq 1 ]; then cp "$log" /tmp/probe/first-no-result.txt; fi
+                ;;
+              passed)
+                printf '.'
+                passed=$((passed + 1))
+                ;;
+              *)
+                # The classifier itself did not answer.  Counting this as
+                # anything would put a number on a measurement that did not
+                # happen.
+                echo
+                echo "::error::probe_classify returned ${verdict@Q}; the probe is broken"
+                exit 1
+                ;;
+            esac
+
+            # Rewritten after every run, not once at the end: a cell the job
+            # timeout cuts off still carries what it observed.
+            python3 scripts/probe_cell.py \
+              --out /tmp/probe/cell.json \
+              --ref "$REF" --runner "$RUNNER_INDEX" \
+              --failed "$failed" --no-result "$no_result" --passed "$passed" || {
+                echo
+                echo "::error::probe_cell failed to record run $i; the probe is broken"
+                exit 1
+              }
+
+            if [ "$((SECONDS - started))" -ge "$budget" ] && [ "$i" -lt "$REPEATS" ]; then
+              echo
+              echo "::warning::stopping after $i of $REPEATS runs; the job budget is nearly spent."
+              echo "::warning::The summary counts what ran; measured will be below requested."
+              break
+            fi
+          done
+          echo
+          echo "ref=$REF runner=$RUNNER_INDEX failed=$failed no_result=$no_result passed=$passed"
+
+          {
+            echo "failed=$failed"
+            echo "no_result=$no_result"
+            echo "passed=$passed"
+          } >> "$GITHUB_OUTPUT"
+
+
+          {
+            echo "### ${REF} / runner ${RUNNER_INDEX}"
+            echo
+            echo "| failed | no result | passed |"
+            echo "|---|---|---|"
+            echo "| ${failed} | ${no_result} | ${passed} |"
+            if [ "$no_result" -gt 0 ]; then
+              echo
+              echo "**\`no result\` is not a pass.** Those runs executed no test case, so they"
+              echo "say nothing about the failure rate. They are already excluded from the"
+              echo "totals below."
+            fi
+            if [ -f /tmp/probe/first-failure.txt ]; then
+              echo
+              echo '<details><summary>First failure</summary>'
+              echo
+              echo '```'
+              tail -80 /tmp/probe/first-failure.txt
+              echo
+              echo '```'
+              echo
+              echo '</details>'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep this cell's counts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cell-${{ steps.probe.outputs.safe_ref }}-${{ matrix.runner }}
+          path: /tmp/probe/cell.json
+          if-no-files-found: ignore
+
+      - name: Keep the logs worth reading
+        if: always() && (steps.probe.outputs.failed != '0' || steps.probe.outputs.no_result != '0')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: logs-${{ steps.probe.outputs.safe_ref }}-${{ matrix.runner }}
+          path: /tmp/probe/run-*.txt
+          if-no-files-found: ignore
+
+  # Reading the per-cell numbers by eye invites the reading this workflow
+  # exists to prevent ("both were zero, so the change is fine").  This adds up
+  # what the cells actually reported -- not what was requested -- and says what
+  # the total permits before anyone has to decide.
+  summarise:
+    name: Summarise
+    needs: [plan, probe]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Collect the cells
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: cell-*
+          path: /tmp/cells
+          merge-multiple: false
+
+      - name: Say what the totals permit
+        env:
+          REQUESTED_PER_REF: ${{ inputs.runners }}
+          REPEATS: ${{ inputs.repeats_per_runner }}
+          PROBE_RESULT: ${{ needs.probe.result }}
+          REFS: ${{ inputs.refs }}
+        run: |
+          # The arithmetic lives in scripts/probe_summarise.py, where
+          # test_issue782_probe_summarise.py can hand it the cases that decide
+          # whether a bound is honest: cells that never reported, runs that
+          # executed nothing, a probe that partly failed.
+          #
+          # `--refs` is what the dispatch asked to compare.  Without it the
+          # summary can only describe the refs that reported, and a run where
+          # one arm never started -- which is what happens on the first
+          # dispatch, because the base ref does not carry these scripts yet --
+          # would print the other arm's clean bound as if it were the answer.
+          python3 scripts/probe_summarise.py \
+            --cells /tmp/cells \
+            --runners "$REQUESTED_PER_REF" \
+            --repeats "$REPEATS" \
+            --probe-result "$PROBE_RESULT" \
+            --refs "$REFS" >> "$GITHUB_STEP_SUMMARY"
