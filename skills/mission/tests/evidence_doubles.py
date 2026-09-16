@@ -231,7 +231,14 @@ class FakeFencedRepository:
         self.commits.append(json.loads(prepared.state_bytes))
 
 
-def in_memory_v5_repository(current, *, replayed=False, replayed_document=None, read_calls=None):
+def in_memory_v5_repository(
+    current,
+    *,
+    replayed=False,
+    replayed_document=None,
+    read_calls=None,
+    operation_command_type=None,
+):
     """Return a ``V5CompatibilityRepository`` that never reaches a backend.
 
     It is built without ``__init__`` and given just the private state the
@@ -245,6 +252,14 @@ def in_memory_v5_repository(current, *, replayed=False, replayed_document=None, 
     admitted request's identity, so a replaying double carries a stub backend
     that answers ``replayed_document`` (``current`` by default) and a
     ``_replay_request``.  ``read_calls``, when given, records each read.
+
+    ``operation_command_type``, when given, makes ``load`` admit with a
+    declared audit naming that command -- independent of whatever the
+    executor itself computes from the prepared command.  The two are only
+    the same value by construction in production; a test driving the
+    audit-binding guard (#747 3a) needs to set them apart, and the stubbed
+    ``load`` below never consults ``self._prepared_command_type`` the way
+    the real one does, so this is the only way to pick the declared side.
     """
     from mission_persistence.legacy_v4 import V5CompatibilityRepository
 
@@ -314,11 +329,30 @@ def in_memory_v5_repository(current, *, replayed=False, replayed_document=None, 
             repository._transaction_active = False
 
     repository.transaction = transaction
-    # #711: the executor admits with the blobs prepare produced, so ``load``
-    # accepts them; it reads before admitting, so ``read_snapshot`` answers
-    # the same document.  Returning the same object keeps what these tests
-    # observe.
-    repository.load = lambda **_kwargs: current
+
+    def _load(**_kwargs):
+        # #711: the executor admits with the blobs prepare produced, so
+        # ``load`` accepts them; it reads before admitting, so
+        # ``read_snapshot`` answers the same document.  Returning the same
+        # object keeps what these tests observe.
+        #
+        # #747 3a: when a declared command type was asked for, ``_admitted``
+        # is populated with just enough shape for the audit-binding guard
+        # (``admitted.request.audit.command_type``) and the base-agreement
+        # check right after it (``admitted.precondition``) to run without an
+        # AttributeError.
+        if operation_command_type is not None:
+            repository._admitted = types.SimpleNamespace(
+                request=types.SimpleNamespace(
+                    audit=types.SimpleNamespace(command_type=operation_command_type)
+                ),
+                precondition=types.SimpleNamespace(
+                    base_head_digest=ZERO_DIGEST, base_generation=0
+                ),
+            )
+        return current
+
+    repository.load = _load
     repository.read_snapshot = lambda: current
     repository.execute = lambda _command: (_ for _ in ()).throw(
         AssertionError("rejected or replayed evidence must not execute")

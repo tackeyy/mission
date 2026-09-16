@@ -293,3 +293,85 @@ def test_the_audit_is_validated_before_it_is_read():
     assert source.index("_audit_record(request.audit)") < source.index(
         "refuse_unauthorized_generated_blobs("
     )
+
+
+def _prepared_verification(state):
+    """The same shape ``test_issue680`` drives the v5 executor with.
+
+    Empty effects and no blobs, so the run this test cares about never
+    reaches ``execute`` unless a test explicitly wants it to: with nothing
+    to publish and a decision that goes either way, the audit-binding guard
+    is what decides whether the run gets that far at all.
+    """
+    from mission_application.evidence import prepare_verification_record
+    from mission_kernel.commands import VerificationCheck
+
+    return prepare_verification_record(
+        state,
+        now="2030-01-01T00:00:01Z",
+        iteration=1,
+        checks=(VerificationCheck("tests", True, None),),
+    )
+
+
+def _executing_state():
+    return {
+        "phase": "executing",
+        "loop_active": True,
+        "session_id": "portable",
+        "score_history": [],
+    }
+
+
+def test_the_guard_fires_when_the_admitted_audit_names_another_command():
+    """Behavioural pin for the guard #747 3a added (Medium A-1).
+
+    Before this test, ``inspect.getsource`` pins were the only coverage: a
+    mutant that replaced ``actual`` with ``declared`` right before the
+    comparison (keeping every string literal intact) survived, because
+    nothing ever drove the double's admitted audit to disagree with the
+    command the executor actually prepared.
+    """
+    from mission_persistence.fenced_commit import FencedCommitError
+
+    from .evidence_doubles import in_memory_v5_repository
+
+    repository = in_memory_v5_repository(
+        _executing_state(), operation_command_type="update-progress"
+    )
+
+    with pytest.raises(FencedCommitError) as caught:
+        repository.execute_evidence_transition_effects(_prepared_verification)
+    assert caught.value.code == "audit-binding-mismatch"
+
+
+def test_the_guard_is_silent_when_the_admitted_audit_names_the_same_command():
+    """The contrast case: matching audit and prepared command must not raise.
+
+    Without this, an implementation that always raises
+    ``audit-binding-mismatch`` regardless of the two values would also pass
+    the mismatch test above.
+    """
+    from mission_application.ports import LegacyCommandExecutionResult
+    from mission_kernel.json_codec import freeze_json_value
+    from mission_kernel.transitions import Decision
+
+    from .evidence_doubles import in_memory_v5_repository
+
+    state = _executing_state()
+    repository = in_memory_v5_repository(
+        state, operation_command_type="record-verification"
+    )
+    # ``execute`` is reached only once the guard and the decision both let
+    # the run through; this test is not about what happens after, so it
+    # answers with a minimally valid, closed result instead of exercising
+    # the double's default refusal.
+    repository.execute = lambda _command: LegacyCommandExecutionResult(
+        Decision(True, None, None), freeze_json_value(state)
+    )
+
+    prepared, execution = repository.execute_evidence_transition_effects(
+        _prepared_verification
+    )
+    assert prepared.command.__class__.__name__ == "RecordVerification"
+    assert execution.decision.accepted is True
