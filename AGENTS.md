@@ -152,6 +152,13 @@ rate below roughly 7%; anything rarer is invisible at that count. The run's
 summary states the bound it actually achieved -- read that before concluding
 anything, and treat `no result` rows as unmeasured rather than as passes.
 
+**Both refs must carry the test file.** A test the branch just added does not
+exist on `main`, and that arm cannot be measured. The probe refuses those cells
+rather than running them, the summary reports the ref as unmeasured, and it
+withholds the bounds for *both* refs -- one arm alone is not a comparison. To
+compare a new test against a base, put the file on the base first (or probe a
+ref that has it).
+
 ## Distribution Release Rule
 
 - A version bump is not a completed distribution release until the matching `vX.Y.Z` git tag exists on the remote and the GitHub Release for that tag exists.

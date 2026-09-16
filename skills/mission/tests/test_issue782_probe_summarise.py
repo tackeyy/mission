@@ -139,7 +139,7 @@ def test_a_bound_with_no_runs_is_refused():
 def test_it_runs_under_the_interpreter_ci_pins(tmp_path):
     _cells(tmp_path, {"ref": "main", "failed": 0, "no_result": 0, "passed": 20})
     result = subprocess.run(
-        ["python3.12", str(SCRIPT), "--cells", str(tmp_path), "--requested-per-ref", "20"],
+        ["python3.12", str(SCRIPT), "--cells", str(tmp_path), "--runners", "4", "--repeats", "5"],
         capture_output=True,
         text=True,
     )
@@ -164,7 +164,7 @@ def test_a_requested_ref_that_never_reported_still_appears():
         requested_refs=["main", "topic"],
     )
     assert "| `main` | 0 | 0 | 0 | 40 |" in out
-    assert "No cell reported for `main`" in out
+    assert "Nothing was measured for `main`" in out
 
 
 def test_a_missing_arm_suppresses_the_surviving_arms_bound():
@@ -192,7 +192,7 @@ def test_both_refs_reporting_keeps_the_bound():
         requested_refs=["main", "topic"],
     )
     assert f"{upper_bound(40):.1%}" in out
-    assert "No cell reported for" not in out
+    assert "Nothing was measured for" not in out
 
 
 def test_failure_counts_survive_a_missing_arm():
@@ -214,8 +214,10 @@ def test_the_cli_takes_the_requested_refs(tmp_path):
             str(SCRIPT),
             "--cells",
             str(tmp_path),
-            "--requested-per-ref",
-            "20",
+            "--runners",
+            "4",
+            "--repeats",
+            "5",
             "--refs",
             "main, topic",
         ],
@@ -223,5 +225,61 @@ def test_the_cli_takes_the_requested_refs(tmp_path):
         text=True,
         check=True,
     )
-    assert "No cell reported for `main`" in result.stdout
+    assert "Nothing was measured for `main`" in result.stdout
     assert f"{upper_bound(20):.1%}" not in result.stdout
+
+
+# --- An arm that reported, but measured nothing ------------------------------
+#
+# Keying the suppression on "no cell reported" left this case out: a ref whose
+# every run executed nothing still appears in the table, so it was not silent,
+# and the other arm printed a clean bound beside an empty column.
+
+
+def test_an_all_no_result_arm_also_suppresses_the_other_arms_bound():
+    out = render(
+        [
+            {"ref": "main", "failed": 0, "no_result": 40, "passed": 0},
+            {"ref": "topic", "failed": 0, "no_result": 0, "passed": 40},
+        ],
+        requested_per_ref=40,
+        probe_result="success",
+        requested_refs=["main", "topic"],
+    )
+    assert f"{upper_bound(40):.1%}" not in out, "a bound was printed beside an empty arm"
+    assert "Nothing was measured for `main`" in out
+    assert "40 measured runs" in out
+
+
+def test_an_all_no_result_arm_without_requested_refs_keeps_the_old_reading():
+    """Not being told what was requested must not invent a suppression."""
+    out = render(
+        [{"ref": "main", "failed": 0, "no_result": 40, "passed": 0}],
+        requested_per_ref=40,
+        probe_result="success",
+    )
+    assert "nothing was measured" in out
+    assert "%" not in out
+
+
+def test_the_cli_multiplies_runners_by_repeats(tmp_path):
+    _cells(tmp_path, {"ref": "main", "failed": 0, "no_result": 0, "passed": 6})
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--cells", str(tmp_path), "--runners", "3", "--repeats", "7"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "| 6 | 21 |" in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize("bad", ["3x", "$(echo hi)", "", "2 3"])
+def test_the_cli_refuses_counts_that_are_not_integers(tmp_path, bad):
+    """The summary job runs with `if: always()`, so the plan job's validation
+    does not gate these values. argparse has to."""
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--cells", str(tmp_path), "--runners", bad, "--repeats", "5"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0, f"{bad!r} was accepted"

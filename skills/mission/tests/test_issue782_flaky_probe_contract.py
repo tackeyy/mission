@@ -192,3 +192,78 @@ def test_the_summary_is_told_which_refs_were_asked_for():
     )
     assert "--refs" in executable, "the summary is no longer told what was requested"
     assert "REFS: ${{ inputs.refs }}" in executable
+
+
+def test_a_ref_without_the_probed_file_never_starts_a_loop():
+    """Otherwise the arm reports a rate for a file that was never there.
+
+    `make test` runs its recipe under `set -eu` and pytest exits 5 on a path
+    that matches nothing, so every repeat lands in `failed` and the summary
+    prints `10 of 10 failed (100.0%)`. That is the documented comparison --
+    the probed test is usually the one the branch just added.
+    """
+    executable = "\n".join(
+        line for line in PROBE.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert '[ ! -f "$TEST_FILE" ]' in executable, (
+        "a cell will run against a ref that does not carry the test file"
+    )
+    assert "cannot be measured" in PROBE
+
+
+def test_the_cell_report_is_written_inside_the_loop():
+    """A cell the job timeout cuts off must keep what it already observed."""
+    lines = PROBE.splitlines()
+    loop_starts = [i for i, line in enumerate(lines) if 'for i in $(seq 1 "$REPEATS")' in line]
+    assert len(loop_starts) == 1, loop_starts
+    loop_ends = [i for i, line in enumerate(lines) if line.strip() == "done"]
+    assert loop_ends, "the repeat loop no longer closes with `done`"
+    end = min(i for i in loop_ends if i > loop_starts[0])
+    body = "\n".join(lines[loop_starts[0] : end])
+    # Pin the invocation, not the name. Swapping `python3` for `true` left the
+    # path in the body and kept a name-only check green -- the same shape that
+    # let a deleted `--refs` flag survive, because its comment still spelled it.
+    assert "python3 scripts/probe_cell.py" in body, (
+        "the cell report is not written inside the loop; a truncated cell loses its counts"
+    )
+
+
+def test_the_loop_stops_before_the_job_budget_runs_out():
+    """10 repeats x a 15-minute cap exceeds the 90-minute job."""
+    assert "budget=" in PROBE
+    assert "SECONDS - started" in PROBE
+    assert "timeout-minutes: 90" in PROBE
+
+
+def test_the_artifact_name_is_fixed_before_anything_can_fail():
+    """An early exit used to leave `safe_ref` empty, colliding both arms."""
+    lines = [line.strip() for line in PROBE.splitlines()]
+    assign = lines.index('safe_ref="${REF//\\//-}"')
+    emit = lines.index('echo "safe_ref=$safe_ref" >> "$GITHUB_OUTPUT"')
+    loop = next(i for i, line in enumerate(lines) if 'for i in $(seq 1 "$REPEATS")' in line)
+    assert assign < loop and emit < loop, "safe_ref is set after the loop can exit"
+
+
+def test_a_ref_repeated_twice_is_refused():
+    """`main,main` passed the count check and compared a ref with itself."""
+    assert "len(set(refs)) != len(refs)" in PROBE
+
+
+def test_the_summary_job_does_no_shell_arithmetic_on_its_inputs():
+    """It runs with `if: always()`, so the plan job's validation does not gate it.
+
+    Bash performs command substitution inside `$(( ))`, so multiplying the two
+    raw inputs there put an unvalidated value in an evaluated position.
+    """
+    executable = "\n".join(
+        line for line in PROBE.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "$((" not in executable.split("Say what the totals permit")[-1], (
+        "the summary job multiplies its inputs in the shell"
+    )
+    assert "--runners" in executable and "--repeats" in executable
+
+
+def test_each_run_gets_its_own_report_directory():
+    """`make` derives the junit path from the report's dirname."""
+    assert '/tmp/probe/run-$i/report.json' in PROBE
