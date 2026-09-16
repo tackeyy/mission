@@ -84,6 +84,38 @@ def test_the_generated_path_is_accepted_for_every_mission_id_produced():
             )
 
 
+def test_a_state_carrying_a_non_hex_mission_id_still_gets_a_path():
+    """The decoder is wider than the generator, so the segment is derived.
+
+    ``codec_v5`` admits any non-empty ``mission_id``.  A state from an older
+    version or a migration can therefore carry ``Mission-1``, and the legacy
+    publisher used to write its progress file.  Refusing it here would be a
+    regression for that state's owner, so the segment is derived instead.
+    """
+    module = _load()
+    for stored in ("Mission-1", "ABCDEF0123456789", "../../etc/passwd", "🙂", "ZZ"):
+        segment = module._progress_mission_segment(stored)
+        canonical_generated_path(
+            f"{ROOT_NAME}/archive/iter-7-{segment}-progress.md",
+            repository_root_name=ROOT_NAME,
+        )
+
+
+def test_the_derived_segment_is_stable_for_one_mission_id():
+    # One mission keeps one file name across runs; the checkpoints written
+    # under the previous name would not be found otherwise.
+    module = _load()
+    first = module._progress_mission_segment("Mission-1")
+    assert first == module._progress_mission_segment("Mission-1")
+    assert first != module._progress_mission_segment("Mission-2")
+
+
+def test_a_hex_mission_id_is_passed_through_unchanged():
+    # Deriving unconditionally would move every existing progress file.
+    module = _load()
+    assert module._progress_mission_segment("abcdef0123456789") == "abcdef01"
+
+
 def test_the_absent_mission_id_still_reaches_the_literal_the_rule_admits():
     # `_progress_archive_path` substitutes "unknown" when the state carries no
     # id.  The rule admits that literal; this fixes the pair together so that
