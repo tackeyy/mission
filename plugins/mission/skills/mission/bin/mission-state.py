@@ -112,6 +112,7 @@ from activity_segments import (  # noqa: E402
     transition_activity_phase,
     validate_activity,
 )
+from mission_application.evidence_publication import progress_mission_segment  # noqa: E402
 from mission_application.lifecycle import (  # noqa: E402
     ActivityEndRequest,
     ActivityStartRequest,
@@ -6715,7 +6716,7 @@ def cmd_artifact_publish(args):
 
 
 def _progress_archive_path(cwd: Path, data: dict, iteration: int) -> str:
-    gid = (data.get("mission_id") or "unknown")[:8]
+    gid = progress_mission_segment(data.get("mission_id"))
     return _state_relative_path(
         cwd, str(state_dir(cwd) / "archive" / f"iter-{iteration}-{gid}-progress.md")
     )

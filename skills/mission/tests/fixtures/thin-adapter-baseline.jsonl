@@ -187,7 +187,7 @@
 {"path":"skills/mission/bin/mission-state.py","function":"_probe_directory_write","rules":{"call.non-allowlisted":7,"control.branch":1,"io.direct":2,"logic.compare":1}}
 {"path":"skills/mission/bin/mission-state.py","function":"_probe_file_write","rules":{"call.non-allowlisted":9,"control.branch":1,"io.direct":2,"logic.threshold-literal":3}}
 {"path":"skills/mission/bin/mission-state.py","function":"_process_identity_is_live","rules":{"call.non-allowlisted":4,"control.branch":1,"io.direct":1,"logic.boolean":1,"logic.compare":2,"logic.threshold-literal":2}}
-{"path":"skills/mission/bin/mission-state.py","function":"_progress_archive_path","rules":{"call.non-allowlisted":3,"logic.arithmetic":2,"logic.boolean":1,"logic.threshold-literal":1,"state.raw-access":1}}
+{"path":"skills/mission/bin/mission-state.py","function":"_progress_archive_path","rules":{"call.non-allowlisted":3,"logic.arithmetic":2,"state.raw-access":1}}
 {"path":"skills/mission/bin/mission-state.py","function":"_project_root_of","rules":{"call.non-allowlisted":1,"control.branch":2,"logic.boolean":2,"logic.compare":4}}
 {"path":"skills/mission/bin/mission-state.py","function":"_provider_for_skill","rules":{"call.non-allowlisted":4,"control.branch":2,"control.loop":1,"logic.arithmetic":3,"logic.boolean":4,"logic.compare":1,"state.raw-access":2}}
 {"path":"skills/mission/bin/mission-state.py","function":"_provider_gate","rules":{"call.non-allowlisted":1,"logic.threshold-literal":1}}

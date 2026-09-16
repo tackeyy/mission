@@ -42,8 +42,21 @@ def _relative_target(value: object, code: str) -> str:
 
 
 def _progress_bytes(state: Mapping[str, object], progress: dict, iteration: int) -> bytes:
+    """Render one checkpoint from what identifies the operation, and nothing else.
+
+    #747 3a: the checkpoint is published by the unit of work now, so a retry
+    of the same operation has to produce the same bytes -- the operation's
+    identity excludes the semantic time on purpose, and the commit's
+    materialization is compared against what the retry prepares.  A timestamp
+    in the rendered text made the same operation produce different content
+    every second, and the retry was refused as though it were a different one.
+
+    ``updated_at`` therefore stays out of the file.  It is still recorded in
+    the state's ``progress`` record, which is where a reader that wants the
+    time looks; nothing parses it back out of this text.
+    """
     lines = [
-        f"<!-- mission-progress-meta: session_id={state.get('session_id')} mission_id={state.get('mission_id')} iteration={iteration} updated_at={progress.get('updated_at')} -->",
+        f"<!-- mission-progress-meta: session_id={state.get('session_id')} mission_id={state.get('mission_id')} iteration={iteration} -->",
         "",
         "# Mission Progress Checkpoint",
         "",
