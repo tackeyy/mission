@@ -145,3 +145,83 @@ def test_it_runs_under_the_interpreter_ci_pins(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert "20 measured runs" in result.stdout
+
+
+# --- A ref that reported nothing at all -------------------------------------
+#
+# The case that made the first dispatch dangerous: `origin/main` does not carry
+# these scripts, so every cell on that arm dies before writing `cell.json`.
+# Summarising only what reported left the topic branch alone in the table with
+# `measured 40 / requested 40` and a 7.2% bound -- a sentence that reads as a
+# finished comparison when no comparison happened.
+
+
+def test_a_requested_ref_that_never_reported_still_appears():
+    out = render(
+        [{"ref": "topic", "failed": 0, "no_result": 0, "passed": 40}],
+        requested_per_ref=40,
+        probe_result="success",
+        requested_refs=["main", "topic"],
+    )
+    assert "| `main` | 0 | 0 | 0 | 40 |" in out
+    assert "No cell reported for `main`" in out
+
+
+def test_a_missing_arm_suppresses_the_surviving_arms_bound():
+    """One arm's bound is not the answer to a comparison that never ran."""
+    out = render(
+        [{"ref": "topic", "failed": 0, "no_result": 0, "passed": 40}],
+        requested_per_ref=40,
+        probe_result="success",
+        requested_refs=["main", "topic"],
+    )
+    assert f"{upper_bound(40):.1%}" not in out
+    assert "40 measured runs" in out, "the count itself is still worth printing"
+    assert "missing an arm" in out
+
+
+def test_both_refs_reporting_keeps_the_bound():
+    """The suppression must not fire when the comparison is whole."""
+    out = render(
+        [
+            {"ref": "main", "failed": 0, "no_result": 0, "passed": 40},
+            {"ref": "topic", "failed": 0, "no_result": 0, "passed": 40},
+        ],
+        requested_per_ref=40,
+        probe_result="success",
+        requested_refs=["main", "topic"],
+    )
+    assert f"{upper_bound(40):.1%}" in out
+    assert "No cell reported for" not in out
+
+
+def test_failure_counts_survive_a_missing_arm():
+    """Suppressing the bound must not suppress an observed failure."""
+    out = render(
+        [{"ref": "topic", "failed": 3, "no_result": 0, "passed": 17}],
+        requested_per_ref=20,
+        probe_result="success",
+        requested_refs=["main", "topic"],
+    )
+    assert "3 of 20 failed" in out
+
+
+def test_the_cli_takes_the_requested_refs(tmp_path):
+    _cells(tmp_path, {"ref": "topic", "failed": 0, "no_result": 0, "passed": 20})
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--cells",
+            str(tmp_path),
+            "--requested-per-ref",
+            "20",
+            "--refs",
+            "main, topic",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "No cell reported for `main`" in result.stdout
+    assert f"{upper_bound(20):.1%}" not in result.stdout

@@ -148,3 +148,47 @@ def test_artifact_names_survive_a_slash_in_the_ref():
     """
     assert 'safe_ref="${REF//\\//-}"' in PROBE
     assert "cell-${{ steps.probe.outputs.safe_ref }}" in PROBE
+
+
+def test_the_probe_writes_no_dependency_cache():
+    """This job runs an arbitrary ref's code on a trusted trigger.
+
+    `workflow_dispatch` is a trusted write trigger, so a cache saved here
+    lands in the default branch's scope -- the same key space `ci.yml`
+    restores from. Caching under those two facts turns the probe into a way
+    to poison every later CI run, which merging it would be what opens.
+    """
+    executable = "\n".join(
+        line for line in PROBE.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "cache:" not in executable, "the probe caches on a trusted trigger"
+    assert "cache-dependency-path" not in executable
+
+
+def test_pull_request_refs_are_refused():
+    """`refs/pull/*` is code from anyone who can open a PR."""
+    assert 'r.startswith("refs/pull/")' in PROBE
+
+
+def test_one_runner_per_ref_is_refused():
+    """The confounding the header names must be refused, not just described."""
+    assert re.search(r"if runners < 2:", PROBE), "runners: 1 passes validation"
+
+
+def test_the_summary_is_told_which_refs_were_asked_for():
+    """Without it, a ref whose cells all died leaves the table silently.
+
+    The surviving ref then prints `measured == requested` with a clean bound,
+    which reads as the answer to a comparison that never happened. It is the
+    guaranteed shape of the first dispatch: the base ref does not carry these
+    scripts yet.
+    """
+    # Read the executable lines only. The comment above the call explains why
+    # `--refs` is passed, and a check over the whole file would be satisfied by
+    # that explanation alone: deleting the flag from the call survived this
+    # test until the comments were excluded.
+    executable = "\n".join(
+        line for line in PROBE.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "--refs" in executable, "the summary is no longer told what was requested"
+    assert "REFS: ${{ inputs.refs }}" in executable

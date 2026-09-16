@@ -9,7 +9,12 @@ here rather than in the workflow:
     that never reported, and runs that executed no test case, would then be
     counted as evidence of absence;
   * printing a bound at all when nothing was measured.  "0 failures" with an
-    empty denominator reads exactly like a clean result.
+    empty denominator reads exactly like a clean result;
+  * summarising only the refs that reported.  A ref whose every cell failed to
+    start vanishes from the table, and the surviving ref then prints a bound
+    that looks like a finished comparison.  The refs that were *asked for* are
+    therefore passed in, and a missing arm suppresses the bound entirely --
+    there is nothing to compare it against.
 
 Living in a file is the point: the previous version computed this inside the
 workflow from the inputs alone, never reading what the cells reported, and no
@@ -63,7 +68,19 @@ def upper_bound(measured: int) -> float:
     return 1 - 0.05 ** (1 / measured)
 
 
-def render(cells: list[dict], requested_per_ref: int, probe_result: str) -> str:
+def render(
+    cells: list[dict],
+    requested_per_ref: int,
+    probe_result: str,
+    requested_refs: list[str] | None = None,
+) -> str:
+    """Render the summary.
+
+    ``requested_refs`` is what the dispatch asked to compare.  Passing it is
+    what lets a ref that reported nothing appear as ``measured 0`` instead of
+    silently leaving the table -- and what stops the other ref's bound from
+    being read as the answer to a comparison that never happened.
+    """
     lines = ["## Reading this run", ""]
 
     if not cells:
@@ -77,6 +94,14 @@ def render(cells: list[dict], requested_per_ref: int, probe_result: str) -> str:
         return "\n".join(lines) + "\n"
 
     by_ref = totals(cells)
+    asked = list(requested_refs or [])
+    # A requested ref with no cell at all still gets a row: its absence is the
+    # datum.  `origin/main` lacking this workflow's scripts is exactly how the
+    # first dispatch produces a one-armed comparison.
+    silent = [ref for ref in asked if ref not in by_ref]
+    for ref in silent:
+        by_ref[ref] = {"failed": 0, "no_result": 0, "passed": 0}
+
     lines += ["| ref | failed | no result | measured | requested |", "|---|---|---|---|---|"]
     for ref, counts in sorted(by_ref.items()):
         # `measured` excludes no-result runs: they executed no test case, so
@@ -87,6 +112,17 @@ def render(cells: list[dict], requested_per_ref: int, probe_result: str) -> str:
             f"{measured} | {requested_per_ref} |"
         )
     lines.append("")
+
+    if silent:
+        lines += [
+            "**No cell reported for "
+            + ", ".join(f"`{ref}`" for ref in sorted(silent))
+            + ".** There is no comparison here: one arm is missing, so the other",
+            "arm's count says nothing about whether the change introduced the failure.",
+            "Bounds are withheld below for that reason. Check those probe jobs first --",
+            "a ref that does not carry this workflow's scripts cannot report.",
+            "",
+        ]
 
     if probe_result != "success":
         lines += [
@@ -100,11 +136,22 @@ def render(cells: list[dict], requested_per_ref: int, probe_result: str) -> str:
         if counts["failed"]:
             rate = counts["failed"] / measured
             lines.append(f"- `{ref}`: **{counts['failed']} of {measured} failed** ({rate:.1%}).")
+        elif measured and silent:
+            lines.append(
+                f"- `{ref}`: no failure in **{measured} measured runs**. No bound is given: "
+                "the comparison is missing an arm, and a bound on one ref alone would read "
+                "as a result it is not."
+            )
         elif measured:
             lines.append(
                 f"- `{ref}`: no failure in **{measured} measured runs**. That puts the true "
                 f"rate below about **{upper_bound(measured):.1%}** (95% one-sided). A rarer "
                 "failure is invisible at this count."
+            )
+        elif ref in silent:
+            lines.append(
+                f"- `{ref}`: **no cell reported**. Nothing ran, or nothing survived to upload "
+                "its counts. This ref contributes nothing to the comparison."
             )
         else:
             lines.append(
@@ -129,9 +176,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cells", type=Path, required=True, help="directory of cell reports")
     parser.add_argument("--requested-per-ref", type=int, required=True)
     parser.add_argument("--probe-result", default="success")
+    parser.add_argument(
+        "--refs",
+        default="",
+        help="comma-separated refs the dispatch asked to compare; a ref absent "
+        "from the cells is reported as measured 0 and suppresses the bounds",
+    )
     args = parser.parse_args(argv)
 
-    print(render(load_cells(args.cells), args.requested_per_ref, args.probe_result), end="")
+    requested_refs = [ref.strip() for ref in args.refs.split(",") if ref.strip()]
+    print(
+        render(
+            load_cells(args.cells),
+            args.requested_per_ref,
+            args.probe_result,
+            requested_refs,
+        ),
+        end="",
+    )
     return 0
 
 

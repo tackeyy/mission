@@ -89,6 +89,11 @@ jobs:
           for r in refs:
               if not re.fullmatch(r"[A-Za-z0-9._/-]{1,255}", r) or ".." in r:
                   die(f"ref is not a plain ref name: {r!r}")
+              # A pull request ref is code from anyone who can open a PR, and
+              # this workflow runs it on a trusted trigger.  The comparison
+              # this probe exists for is branch against branch anyway.
+              if r.startswith("refs/pull/"):
+                  die(f"refs/pull/* is untrusted code on a trusted trigger: {r!r}")
 
           # The file is interpolated into a make variable, so anything that is
           # not a test file under the suite is refused.  Without this, a value
@@ -106,6 +111,11 @@ jobs:
 
           runners = positive("RUNNERS")
           repeats = positive("REPEATS")
+          # One runner per ref is the confounding this workflow's header
+          # names: every repeat of a ref would share one host, so
+          # host-to-host variation would arrive as a difference between refs.
+          if runners < 2:
+              die(f"runners must be 2 or more, got {runners}; one runner per ref confounds ref with host")
           if runners * repeats < 20:
               die(f"runners x repeats = {runners * repeats}; too few to say anything")
 
@@ -132,9 +142,12 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
+          # No `cache: pip` here, deliberately.  This job checks out an
+          # arbitrary ref and runs its code, and `workflow_dispatch` is a
+          # trusted trigger whose cache writes land in the default branch's
+          # scope -- the same key space `ci.yml` reads from.  Caching here
+          # would make this workflow a way to poison every later CI run.
           python-version: '3.12'
-          cache: pip
-          cache-dependency-path: .github/requirements-ci.txt
 
       - name: Repeat the suite as CI runs it
         id: probe
@@ -288,12 +301,20 @@ jobs:
           REQUESTED_PER_REF: ${{ inputs.runners }}
           REPEATS: ${{ inputs.repeats_per_runner }}
           PROBE_RESULT: ${{ needs.probe.result }}
+          REFS: ${{ inputs.refs }}
         run: |
           # The arithmetic lives in scripts/probe_summarise.py, where
           # test_issue782_probe_summarise.py can hand it the cases that decide
           # whether a bound is honest: cells that never reported, runs that
           # executed nothing, a probe that partly failed.
+          #
+          # `--refs` is what the dispatch asked to compare.  Without it the
+          # summary can only describe the refs that reported, and a run where
+          # one arm never started -- which is what happens on the first
+          # dispatch, because the base ref does not carry these scripts yet --
+          # would print the other arm's clean bound as if it were the answer.
           python3 scripts/probe_summarise.py \
             --cells /tmp/cells \
             --requested-per-ref "$(( REQUESTED_PER_REF * REPEATS ))" \
-            --probe-result "$PROBE_RESULT" >> "$GITHUB_STEP_SUMMARY"
+            --probe-result "$PROBE_RESULT" \
+            --refs "$REFS" >> "$GITHUB_STEP_SUMMARY"
