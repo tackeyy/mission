@@ -231,12 +231,18 @@ jobs:
           fi
 
           # The classifier reads the executed count from the suite report, and
-          # `MISSION_SUITE_REPORT` only arrived in #740.  A Makefile before it
-          # exits 0 and writes nothing, so every run would be a no-result --
-          # a complete `make test` spent per repeat to learn nothing.  Refuse
-          # the cell before the first run instead.
-          if ! grep -q 'MISSION_SUITE_REPORT' Makefile 2>/dev/null; then
-            echo "::error::${REF} has a Makefile that does not write a suite report (added in #740); this ref cannot be measured"
+          # the report writer only arrived in #740.  A Makefile before it exits
+          # 0 and writes nothing, so every run would be a no-result -- a
+          # complete `make test` spent per repeat to learn nothing.  Refuse the
+          # cell before the first run instead.
+          #
+          # Asked of the recipe, not of the file.  `make -n` prints what
+          # `make test` would run without running it, and leaves out comments.
+          # Searching the Makefile itself accepted one that only *mentioned*
+          # MISSION_SUITE_REPORT in a comment -- and then spent every repeat on
+          # a run that could never report.
+          if ! make -n test PYTEST_TARGETS="$TEST_FILE" 2>/dev/null | grep -q 'write_suite_report'; then
+            echo "::error::${REF} has a test recipe that does not write a suite report (added in #740); this ref cannot be measured"
             exit 1
           fi
 
