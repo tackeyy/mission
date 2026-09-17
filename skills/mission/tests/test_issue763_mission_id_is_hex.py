@@ -133,6 +133,30 @@ def test_the_derived_segment_is_stable_for_one_mission_id():
     assert first != progress_mission_segment("Mission-2")
 
 
+def test_the_derived_segment_is_pinned_to_its_value():
+    """Pin the derived name itself, not only its agreement with itself.
+
+    Issue #781: the check above compares two calls within one run, so
+    shortening the digest slice from eight characters to seven left every
+    test passing.  A checkpoint written under the previous name would still
+    not be found, which is what the stability claim is about.
+    """
+    assert progress_mission_segment("Mission-1") == "d792c8ca"
+    assert progress_mission_segment("zzzzzzzz-1") == "caf961dd"
+
+
+def test_the_application_module_does_not_declare_a_partial_public_surface():
+    """``__all__`` names the whole public surface or is left out.
+
+    Issue #781: listing only the re-exported generator declared every other
+    public name of the module private.
+    """
+    import mission_application.evidence_publication as publication
+
+    assert not hasattr(publication, "__all__")
+    assert publication.progress_mission_segment is progress_mission_segment
+
+
 def test_a_hex_mission_id_is_passed_through_unchanged():
     # Deriving unconditionally would move every existing progress file.
     assert progress_mission_segment("abcdef0123456789") == "abcdef01"
