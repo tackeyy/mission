@@ -61,8 +61,32 @@ def test_a_successful_run_that_executed_nothing_is_not_a_pass(tmp_path):
     assert verdict == "no-result", reason
 
 
-def test_a_successful_run_with_no_report_is_not_a_pass(tmp_path):
-    verdict, _ = classify(status=0, report_path=tmp_path / "absent.json")
+def test_a_successful_run_with_no_report_cannot_be_measured(tmp_path):
+    """Exit 0 with no report means the recipe does not write one -- not "nothing ran".
+
+    `make test` runs under `set -eu`, so a writer that failed would have made
+    the run fail.  A run that succeeded without a report therefore used a
+    recipe that never calls the writer.  Calling that a no-result let the
+    probe spend every remaining repeat on it; calling it `unsupported` lets
+    the probe stop after one.
+
+    (The workflow refuses a ref with no writer at all before the first run;
+    this verdict is what catches a writer the recipe does not call.)
+    """
+    verdict, reason = classify(status=0, report_path=tmp_path / "absent.json")
+    assert verdict == "unsupported", reason
+    assert "does not call the report writer" in reason, reason
+
+
+def test_a_failed_run_with_no_report_is_still_a_failure(tmp_path):
+    """The distinction above must not swallow real failures, which never get a report."""
+    verdict, _ = classify(status=2, report_path=tmp_path / "absent.json")
+    assert verdict == "failed"
+
+
+def test_a_successful_run_whose_report_says_zero_is_still_a_no_result(tmp_path):
+    """A report that exists but counts nothing is a runtime skip, not an old recipe."""
+    verdict, _ = classify(status=0, report_path=_report(tmp_path, {"executed": 0}))
     assert verdict == "no-result"
 
 

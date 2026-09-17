@@ -180,8 +180,8 @@ def test_the_summary_is_told_which_refs_were_asked_for():
 
     The surviving ref then prints `measured == requested` with a clean bound,
     which reads as the answer to a comparison that never happened. It is the
-    guaranteed shape of the first dispatch: the base ref does not carry these
-    scripts yet.
+    shape of an ordinary dispatch: the probed test is usually new on the
+    branch, so the base arm is refused and reports nothing.
     """
     # Read the executable lines only. The comment above the call explains why
     # `--refs` is passed, and a check over the whole file would be satisfied by
@@ -223,7 +223,7 @@ def test_the_cell_report_is_written_inside_the_loop():
     # Pin the invocation, not the name. Swapping `python3` for `true` left the
     # path in the body and kept a name-only check green -- the same shape that
     # let a deleted `--refs` flag survive, because its comment still spelled it.
-    assert "python3 scripts/probe_cell.py" in body, (
+    assert 'python3 "$PROBE_TOOLS/scripts/probe_cell.py"' in body, (
         "the cell report is not written inside the loop; a truncated cell loses its counts"
     )
 
@@ -266,4 +266,56 @@ def test_the_summary_job_does_no_shell_arithmetic_on_its_inputs():
 
 def test_each_run_gets_its_own_report_directory():
     """`make` derives the junit path from the report's dirname."""
-    assert '/tmp/probe/run-$i/report.json' in PROBE
+    assert '"$PROBE_DIR/run-$i/report.json"' in PROBE
+
+
+# --- #784: the instrument is checked out apart from the ref it measures ------
+
+
+def _executable_lines() -> list[str]:
+    return [line for line in PROBE.splitlines() if not line.lstrip().startswith("#")]
+
+
+def test_the_probe_is_checked_out_apart_from_the_ref_under_test():
+    """One checkout meant a ref older than the scripts could not be measured.
+
+    It also meant two refs were measured with two instruments whenever their
+    classifiers differed.  `test_issue784_probe_tool_checkout.py` runs the
+    step to prove which classifier is used; this fixes the checkout that
+    makes that possible.
+    """
+    text = "\n".join(_executable_lines())
+    assert "ref: ${{ matrix.ref }}\n          path: subject" in text, "the subject is not checked out apart"
+    assert "ref: ${{ github.sha }}\n          path: probe-tools" in text, "the probe is not checked out apart"
+    assert "working-directory: subject" in text, "the suite no longer runs in the subject"
+
+
+def test_no_script_is_read_from_the_ref_under_test():
+    """A bare `scripts/probe_*` path resolves inside the subject checkout."""
+    bare = [
+        line.strip()
+        for line in _executable_lines()
+        if ("scripts/probe_classify.py" in line or "scripts/probe_cell.py" in line)
+        and "$PROBE_TOOLS/" not in line
+    ]
+    assert not bare, bare
+
+
+def test_the_upload_paths_match_the_directory_the_step_writes_to():
+    """`path:` in an upload step is YAML, not shell, so it cannot read PROBE_DIR.
+
+    If the two drift apart the upload finds nothing, and
+    `if-no-files-found: ignore` hides it -- the cell reports nothing.
+    """
+    lines = PROBE.splitlines()
+    probe_dir = next(l.split(":", 1)[1].strip() for l in lines if l.strip().startswith("PROBE_DIR:"))
+    # Only upload steps: the summary job *downloads* into its own directory,
+    # which has nothing to do with where the probe step writes.
+    uploads = []
+    for i, line in enumerate(lines):
+        if "uses: actions/upload-artifact@" in line:
+            path = next(l for l in lines[i + 1 :] if l.strip().startswith("path:"))
+            uploads.append(path.split(":", 1)[1].strip())
+    assert len(uploads) == 2, f"expected the counts and the logs uploads, got {uploads}"
+    for path in uploads:
+        assert path.startswith(probe_dir + "/"), f"{path} is outside PROBE_DIR={probe_dir}"

@@ -32,7 +32,7 @@ import sys
 from pathlib import Path
 from typing import Literal
 
-Verdict = Literal["failed", "passed", "no-result"]
+Verdict = Literal["failed", "passed", "no-result", "unsupported"]
 
 # Exit status from `timeout(1)` when it killed the command.  A run that never
 # finished is a failure of the test, not of the measurement: dropping it would
@@ -51,7 +51,22 @@ def classify(status: int, report_path: Path) -> tuple[Verdict, str]:
         return "failed", f"make test exited {status}"
 
     if not report_path.exists():
-        return "no-result", "the run reported success but wrote no report"
+        # Success without a report is not "nothing ran".  The recipe runs
+        # under `set -eu`, so a report writer that failed would have failed
+        # the run; a run that succeeded and left no report used a recipe that
+        # never calls the writer.  That is a property of the ref, not of this
+        # run, so every further repeat would say the same thing -- the probe
+        # stops on this verdict rather than spending them.
+        #
+        # Observed rather than predicted.  Asking `make -n` whether the recipe
+        # mentions the writer was tried and failed twice in review: recipe
+        # comments and unrelated `echo`s matched, and `grep -q` closing the
+        # pipe early made `make` die of SIGPIPE on a ref that *does* report.
+        return (
+            "unsupported",
+            "the run succeeded but wrote no suite report; the ref's test recipe "
+            "does not call the report writer, so the ref cannot be measured",
+        )
 
     try:
         executed = json.loads(report_path.read_text(encoding="utf-8"))["executed"]

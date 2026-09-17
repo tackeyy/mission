@@ -149,8 +149,8 @@ def test_it_runs_under_the_interpreter_ci_pins(tmp_path):
 
 # --- A ref that reported nothing at all -------------------------------------
 #
-# The case that made the first dispatch dangerous: `origin/main` does not carry
-# these scripts, so every cell on that arm dies before writing `cell.json`.
+# The case that makes an ordinary dispatch dangerous: a base ref without the
+# probed test file is refused, so every cell on that arm writes no `cell.json`.
 # Summarising only what reported left the topic branch alone in the table with
 # `measured 40 / requested 40` and a 7.2% bound -- a sentence that reads as a
 # finished comparison when no comparison happened.
