@@ -65,7 +65,7 @@ def classify(status: int, report_path: Path) -> tuple[Verdict, str]:
         return (
             "unsupported",
             "the run succeeded but wrote no suite report; the ref's test recipe "
-            "predates the report writer (#740) and cannot be measured",
+            "does not call the report writer, so the ref cannot be measured",
         )
 
     try:

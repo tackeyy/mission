@@ -66,13 +66,16 @@ def test_a_successful_run_with_no_report_cannot_be_measured(tmp_path):
 
     `make test` runs under `set -eu`, so a writer that failed would have made
     the run fail.  A run that succeeded without a report therefore used a
-    recipe that never calls the writer (a ref older than #740).  Calling that
-    a no-result let the probe spend every remaining repeat on it; calling it
-    `unsupported` lets the probe stop after one.
+    recipe that never calls the writer.  Calling that a no-result let the
+    probe spend every remaining repeat on it; calling it `unsupported` lets
+    the probe stop after one.
+
+    (The workflow refuses a ref with no writer at all before the first run;
+    this verdict is what catches a writer the recipe does not call.)
     """
     verdict, reason = classify(status=0, report_path=tmp_path / "absent.json")
     assert verdict == "unsupported", reason
-    assert "#740" in reason, reason
+    assert "does not call the report writer" in reason, reason
 
 
 def test_a_failed_run_with_no_report_is_still_a_failure(tmp_path):

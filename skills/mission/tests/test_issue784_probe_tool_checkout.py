@@ -33,6 +33,8 @@ import subprocess
 import textwrap
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[3]
 PROBE = (ROOT / ".github/workflows/flaky-probe.yml").read_text(encoding="utf-8")
 TEST_FILE = "skills/mission/tests/test_example.py"
@@ -84,7 +86,14 @@ def _executable(path: Path, text: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
-def _harness(tmp_path: Path, *, recipe_reports: bool, has_test_file: bool, subject_scripts: bool):
+def _harness(
+    tmp_path: Path,
+    *,
+    recipe_reports: bool,
+    has_test_file: bool,
+    subject_scripts: bool,
+    has_writer: bool = True,
+):
     subject = tmp_path / "subject"
     tools = tmp_path / "probe-tools"
     bindir = tmp_path / "bin"
@@ -99,8 +108,13 @@ def _harness(tmp_path: Path, *, recipe_reports: bool, has_test_file: bool, subje
     if has_test_file:
         (subject / TEST_FILE).parent.mkdir(parents=True)
         (subject / TEST_FILE).write_text("def test_x():\n    pass\n", encoding="utf-8")
+    if has_writer:
+        # The report writer #740 added.  Its presence is what the probe checks
+        # before running anything; its contents are never executed here.
+        (subject / "scripts").mkdir(exist_ok=True)
+        (subject / "scripts" / "write_suite_report.py").write_text("# stand-in\n", encoding="utf-8")
     if subject_scripts:
-        (subject / "scripts").mkdir()
+        (subject / "scripts").mkdir(exist_ok=True)
         (subject / "scripts" / "probe_classify.py").write_text(LYING_CLASSIFIER, encoding="utf-8")
         shutil.copy(ROOT / "scripts" / "probe_cell.py", subject / "scripts" / "probe_cell.py")
 
@@ -195,10 +209,11 @@ def test_make_runs_in_the_subject_not_in_the_tools(tmp_path):
 
 
 def test_a_recipe_that_writes_no_report_stops_after_one_run(tmp_path):
-    """A ref before #740 exits 0 and writes nothing, on every repeat alike.
+    """The second line: the writer exists, but the recipe never calls it.
 
-    Without a stop, each repeat is a no-result and the probe spends the whole
-    budget learning nothing.  The first such run is enough to know.
+    The file check below cannot see this -- only a run can.  A run that
+    succeeds without a report is enough to know, so the probe stops there
+    instead of spending the budget on no-results.
     """
     subject, env, script, make_log, probe_dir = _harness(
         tmp_path, recipe_reports=False, has_test_file=True, subject_scripts=False
@@ -214,8 +229,8 @@ def test_an_earlier_failure_does_not_survive_an_unsupported_verdict(tmp_path):
     """Counts from a ref that cannot report are not a sample of anything.
 
     A recipe that never writes a report can never produce a pass, so whatever
-    it recorded before the verdict -- here, one failure -- is biased toward
-    failing.  The cell must report nothing, so the summary withholds bounds.
+    it recorded before the verdict -- here, one failure -- is not a sample of
+    the rate.  The cell must report nothing, so the summary withholds bounds.
     """
     subject, env, script, make_log, probe_dir = _harness(
         tmp_path, recipe_reports=False, has_test_file=True, subject_scripts=False
@@ -270,3 +285,32 @@ def test_a_classifier_that_does_not_answer_stops_the_probe(tmp_path):
     assert "the probe is broken" in result.stdout, result.stdout + result.stderr
     assert "bad substitution" not in result.stderr, result.stderr
     assert not (probe_dir / "cell.json").exists(), "a run with no verdict was recorded"
+
+
+@pytest.mark.parametrize("statuses", ["2", "0"], ids=["every-run-fails", "every-run-succeeds"])
+def test_a_ref_without_the_report_writer_is_refused_before_make_runs(tmp_path, statuses):
+    """The case the observed verdict alone cannot catch.
+
+    `unsupported` fires only on a run that *succeeds* without a report.  A ref
+    before #740 whose runs all fail never produces one, so every repeat was
+    counted `failed` and the cell reported `N of N failed (100.0%)`.  Worse, it
+    was selective: cells that succeeded once were discarded, cells that failed
+    every time were kept -- a true 90% rate reads as 100% about a third of the
+    time at 10 repeats.
+
+    Whether a ref can report is a property of the ref, so it is decided from
+    the ref -- does the writer exist -- before any run, not from how the runs
+    happened to turn out.
+    """
+    subject, env, script, make_log, probe_dir = _harness(
+        tmp_path,
+        recipe_reports=False,
+        has_test_file=True,
+        subject_scripts=False,
+        has_writer=False,
+    )
+    result = _run(subject, env, script, STUB_MAKE_STATUSES=statuses)
+    assert result.returncode != 0, f"an unmeasurable ref finished: {result.stdout}"
+    assert "cannot be measured" in result.stdout, result.stdout
+    assert _runs(make_log) == [], f"make ran before the refusal: {_runs(make_log)}"
+    assert not (probe_dir / "cell.json").exists(), "an unmeasurable ref reported counts"

@@ -96,10 +96,10 @@ def render(
     by_ref = totals(cells)
     asked = list(requested_refs or [])
     # A requested ref with no cell at all still gets a row: its absence is the
-    # datum.  A ref without the probed test file is refused before it runs,
-    # and one whose recipe predates the suite report is stopped after its
-    # first run; both report nothing -- which is how an ordinary dispatch
-    # produces a one-armed comparison.
+    # datum.  A ref without the probed test file or the report writer is
+    # refused before it runs, and one whose recipe skips the writer is
+    # stopped on its first successful run; all of them report nothing --
+    # which is how an ordinary dispatch produces a one-armed comparison.
     silent = [ref for ref in asked if ref not in by_ref]
     for ref in silent:
         by_ref[ref] = {"failed": 0, "no_result": 0, "passed": 0}
@@ -132,7 +132,7 @@ def render(
             "missing, so the other arm's count says nothing about whether the change",
             "introduced the failure. Bounds are withheld below for that reason. Check",
             "those probe jobs first -- a ref that does not carry the probed test file,",
-            "or whose Makefile predates the suite report, cannot report.",
+            "or the suite report writer (#740), cannot report.",
             "",
         ]
 

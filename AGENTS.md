@@ -163,8 +163,8 @@ ref that has it).
 the commit the workflow was dispatched at and the suite from the ref under
 test, so a ref older than `scripts/probe_*.py` is still measured -- with the
 same instrument as every other ref in the run. The one requirement on the ref
-is a Makefile that writes the suite report (`MISSION_SUITE_REPORT`, added in
-#740); a ref older than that is stopped after its first run, and reports nothing.
+is the suite report writer (`scripts/write_suite_report.py`, added in #740); a
+ref without it is refused before it runs, and reports nothing.
 
 ## Distribution Release Rule
 
