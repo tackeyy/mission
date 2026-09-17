@@ -100,23 +100,36 @@ artifact のパスへ書けてしまう。
 blob 集合だけである。`BlobBinding`（`local_uow.py`）に effect フィールドは無く、足すと
 intent digest の対象が変わって記録済みの identity が動く。**したがってフィールドは運ばない。**
 
-代わりに、入口は**コマンド単位**の表で検査する。
+代わりに、入口は**コマンドごとの generated blob 集合の形**を検査する。
+入口ではどの blob がどのフィールド由来かを判別できないので、**判別できなくても結果が正規の
+実行と同じになる形**だけを受理する。
 
-| コマンド | repository 内で許す規則 | repository 内の blob の上限 |
-|---|---|---|
-| `update-progress` | progress | 1 |
-| `initialize-artifact` / `render-artifact` / `record-artifact-publication` | artifact | 1 |
-| `export-artifact` | artifact | **1** |
-| 上記以外 | なし | 0 |
+| コマンド | generated blob の数 | repository 内の blob | それ以外の条件 |
+|---|---|---|---|
+| `update-progress` | 1 | ちょうど 1（progress 規則） | — |
+| `initialize-artifact` / `render-artifact` / `record-artifact-publication` | 1 | ちょうど 1（artifact 規則） | — |
+| `export-artifact` | **ちょうど 2** | **ちょうど 1**（artifact 規則）。もう 1 個は projection | **2 個の digest と size が一致する** |
+| 上記以外 | — | 0 | — |
 
-**上限 1 が `export_effect` を塞ぐ。** export の 2 effect は target が必ず異なり
-（`validate_effects` の `effect-target-duplicated`）、`artifact_effect` は artifact の規則に当たる。
-手で組み立てた binding で `export_effect` を repository 内へ向けると、repository 内の blob が 2 個になり、
-入口が拒否する。規則が artifact 以外（progress など）なら、規則の不一致で拒否する。
+**export の形がなぜ十分か。** 正規の export は、`artifact_effect`（artifact のパス）と
+`export_effect`（projection）に同じ内容を書く（`docs/design/633-artifact-kernel-commands.md` のテスト 8）。
+上の形を満たす blob 集合は、フィールドの割り当てをどう入れ替えても「artifact のパス 1 個と
+projection 1 個に同じバイト列を書く」ことになり、正規の export と区別がつかない結果しか起こせない。
 
-**2 つの表は同じモジュール（`evidence_publication.py`）に置き、一方からもう一方を導出する。**
-フィールド単位の表を正とし、コマンド単位の表は「そのコマンドの全フィールドの規則の和集合」と
-「repository 内に書けるフィールドの数」から作る。手で 2 つ書くと食い違う。
+- `artifact_effect` を欠いた 1 blob の export（round 2 の反例）は、**数が 2 でない**ので拒否する
+- 2 blob を両方 repository 内に置く形は、**repository 内がちょうど 1 でない**ので拒否する
+- 内容の違う 2 blob は、**digest / size の不一致**で拒否する
+
+**入口で塞がないもの（範囲外）**: repository 内の artifact のパスが**別のセッションの**
+`<segment>` を指す binding。これは export に限らず、1 blob の render でも同じで、
+入口が typed command もセッションとの対応も持たないことに由来する。#747 の持ち越し 1
+（`ExecutionRequest` に typed command を通す）で扱う。正規の CLI 経路では、blob は
+state の `artifact.path` から組み立てられ、kernel の effect binding（kind / target / digest / size）
+がそれを検査する。
+
+**表は同じモジュール（`evidence_publication.py`）に置く。** 入口の表の「許す規則」は、
+フィールド単位の表からそのコマンドの規則の和集合として導出する。手で 2 つ書くと食い違う。
+数と内容一致の条件はコマンド単位の表だけが持つ。
 
 ### D3. claim のパス読み出し表に 4 コマンドを足す
 
@@ -228,9 +241,11 @@ export が旧 publisher に残る。その状態は #764 の受け入れ条件�
    property 的に固定（任意の文字列 → `_sanitize_sid` → 受理）
 2. `(command, field)` 認可表: 4 コマンドの `effect` と export の `artifact_effect` は artifact 規則だけを受理し、
    export の `export_effect` と progress のコマンドは artifact のパスを拒否する
-2b. 入口（`refuse_unauthorized_generated_blobs`）: 手で組み立てた binding で、export の 2 blob を
-   両方 repository 内に置くと拒否される。progress のコマンドが artifact のパスを持つと拒否される。
-   コマンド単位の表がフィールド単位の表から導出されていること（片方を書き換えると落ちる）
+2b. 入口（`refuse_unauthorized_generated_blobs`）に手で組み立てた binding を渡す。次がそれぞれ拒否される:
+   export の blob が artifact のパス 1 個だけ / export の 2 blob が両方 repository 内 /
+   export の 2 blob の digest か size が異なる / progress のコマンドが artifact のパスを持つ /
+   artifact のコマンドが progress のパスを持つ。正規の形（export の 2 blob・同一内容・1 個だけ
+   repository 内）は通る。「許す規則」がフィールド単位の表から導出されていること（片方を書き換えると落ちる）
 3. 4 コマンドで旧 publisher の spy が呼ばれない（D6）。表の網羅性の検査
 4. 同じ operation identity の retry が同じバイト列を出す（D4）
 5. `--to .mission-state/...` と `--to <artifact 自身>` が、v4・v5 の両方で書き込み前に拒否される（D5）。
