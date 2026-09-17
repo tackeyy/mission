@@ -153,10 +153,31 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
-      - name: Checkout
+      # The ref under test and the probe that measures it are checked out
+      # apart.  They used to be one checkout, with the scripts read from the
+      # ref being measured, which had two consequences:
+      #
+      #   * a ref older than the scripts could not be measured at all -- the
+      #     classifier was missing, every run died after a full `make test`,
+      #     and both arms reported nothing;
+      #   * two refs carrying different classifiers were measured with two
+      #     different instruments, so a difference between refs could be a
+      #     difference between classifiers.  That is the confounding this
+      #     file's header forbids for hosts, arriving through the tool.
+      #
+      # So the suite comes from the ref, and the instrument from the commit
+      # this workflow was dispatched at.
+      - name: Checkout the ref under test
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ matrix.ref }}
+          path: subject
+
+      - name: Checkout the probe
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: probe-tools
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
@@ -171,14 +192,20 @@ jobs:
       - name: Repeat the suite as CI runs it
         id: probe
         shell: bash {0}
+        working-directory: subject
         env:
           TEST_FILE: ${{ inputs.test_file }}
           REPEATS: ${{ inputs.repeats_per_runner }}
           REF: ${{ matrix.ref }}
           RUNNER_INDEX: ${{ matrix.runner }}
+          # The instrument.  Named here rather than derived inside the step so
+          # the step never has to guess where it lives relative to the subject.
+          PROBE_TOOLS: ${{ github.workspace }}/probe-tools
+          # Must match the `path:` of the two upload steps below.
+          PROBE_DIR: /tmp/probe
         run: |
           set -uo pipefail
-          mkdir -p /tmp/probe
+          mkdir -p "$PROBE_DIR"
 
           # Written before anything can fail.  An early exit used to leave this
           # empty, and both arms then collided on the artifact name
@@ -203,6 +230,16 @@ jobs:
             exit 1
           fi
 
+          # The classifier reads the executed count from the suite report, and
+          # `MISSION_SUITE_REPORT` only arrived in #740.  A Makefile before it
+          # exits 0 and writes nothing, so every run would be a no-result --
+          # a complete `make test` spent per repeat to learn nothing.  Refuse
+          # the cell before the first run instead.
+          if ! grep -q 'MISSION_SUITE_REPORT' Makefile 2>/dev/null; then
+            echo "::error::${REF} has a Makefile that does not write a suite report (added in #740); this ref cannot be measured"
+            exit 1
+          fi
+
           failed=0
           no_result=0
           passed=0
@@ -214,9 +251,9 @@ jobs:
           for i in $(seq 1 "$REPEATS"); do
             # Each run gets its own directory: `make` derives the junit path
             # from the report's dirname, so a shared one is reused every time.
-            mkdir -p "/tmp/probe/run-$i"
-            report="/tmp/probe/run-$i/report.json"
-            log="/tmp/probe/run-$i.txt"
+            mkdir -p "$PROBE_DIR/run-$i"
+            report="$PROBE_DIR/run-$i/report.json"
+            log="$PROBE_DIR/run-$i.txt"
             # `make test` owns the flags (-n auto --dist loadfile) and builds
             # the venv, so the probe cannot drift from how CI runs the suite.
             # A run that hangs is a result too, so it gets a bound of its own.
@@ -228,17 +265,17 @@ jobs:
             # The verdict lives in scripts/probe_classify.py, where a test can
             # reach it.  Deciding it here is how the previous version shipped
             # a guard that the pinned interpreter refused to run.
-            verdict=$(python3 scripts/probe_classify.py --status "$status" --report "$report" 2>>"$log")
+            verdict=$(python3 "$PROBE_TOOLS/scripts/probe_classify.py" --status "$status" --report "$report" 2>>"$log")
             case "$verdict" in
               failed)
                 printf 'F'
                 failed=$((failed + 1))
-                if [ "$failed" -eq 1 ]; then cp "$log" /tmp/probe/first-failure.txt; fi
+                if [ "$failed" -eq 1 ]; then cp "$log" "$PROBE_DIR/first-failure.txt"; fi
                 ;;
               no-result)
                 printf '?'
                 no_result=$((no_result + 1))
-                if [ "$no_result" -eq 1 ]; then cp "$log" /tmp/probe/first-no-result.txt; fi
+                if [ "$no_result" -eq 1 ]; then cp "$log" "$PROBE_DIR/first-no-result.txt"; fi
                 ;;
               passed)
                 printf '.'
@@ -249,15 +286,15 @@ jobs:
                 # anything would put a number on a measurement that did not
                 # happen.
                 echo
-                echo "::error::probe_classify returned ${verdict@Q}; the probe is broken"
+                printf '::error::probe_classify returned %q; the probe is broken\n' "$verdict"
                 exit 1
                 ;;
             esac
 
             # Rewritten after every run, not once at the end: a cell the job
             # timeout cuts off still carries what it observed.
-            python3 scripts/probe_cell.py \
-              --out /tmp/probe/cell.json \
+            python3 "$PROBE_TOOLS/scripts/probe_cell.py" \
+              --out "$PROBE_DIR/cell.json" \
               --ref "$REF" --runner "$RUNNER_INDEX" \
               --failed "$failed" --no-result "$no_result" --passed "$passed" || {
                 echo
@@ -294,12 +331,12 @@ jobs:
               echo "say nothing about the failure rate. They are already excluded from the"
               echo "totals below."
             fi
-            if [ -f /tmp/probe/first-failure.txt ]; then
+            if [ -f "$PROBE_DIR/first-failure.txt" ]; then
               echo
               echo '<details><summary>First failure</summary>'
               echo
               echo '```'
-              tail -80 /tmp/probe/first-failure.txt
+              tail -80 "$PROBE_DIR/first-failure.txt"
               echo
               echo '```'
               echo
@@ -358,9 +395,9 @@ jobs:
           #
           # `--refs` is what the dispatch asked to compare.  Without it the
           # summary can only describe the refs that reported, and a run where
-          # one arm never started -- which is what happens on the first
-          # dispatch, because the base ref does not carry these scripts yet --
-          # would print the other arm's clean bound as if it were the answer.
+          # one arm never started -- a ref without the probed test file, or
+          # one older than the suite report (#740) -- would print the other
+          # arm's clean bound as if it were the answer.
           python3 scripts/probe_summarise.py \
             --cells /tmp/cells \
             --runners "$REQUESTED_PER_REF" \

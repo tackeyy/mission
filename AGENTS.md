@@ -159,6 +159,13 @@ withholds the bounds for *both* refs -- one arm alone is not a comparison. To
 compare a new test against a base, put the file on the base first (or probe a
 ref that has it).
 
+**A ref does not need to carry the probe.** The job checks out the probe from
+the commit the workflow was dispatched at and the suite from the ref under
+test, so a ref older than `scripts/probe_*.py` is still measured -- with the
+same instrument as every other ref in the run. The one requirement on the ref
+is a Makefile that writes the suite report (`MISSION_SUITE_REPORT`, added in
+#740); a ref older than that is refused before it runs.
+
 ## Distribution Release Rule
 
 - A version bump is not a completed distribution release until the matching `vX.Y.Z` git tag exists on the remote and the GitHub Release for that tag exists.
