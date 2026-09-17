@@ -230,22 +230,6 @@ jobs:
             exit 1
           fi
 
-          # The classifier reads the executed count from the suite report, and
-          # the report writer only arrived in #740.  A Makefile before it exits
-          # 0 and writes nothing, so every run would be a no-result -- a
-          # complete `make test` spent per repeat to learn nothing.  Refuse the
-          # cell before the first run instead.
-          #
-          # Asked of the recipe, not of the file.  `make -n` prints what
-          # `make test` would run without running it, and leaves out comments.
-          # Searching the Makefile itself accepted one that only *mentioned*
-          # MISSION_SUITE_REPORT in a comment -- and then spent every repeat on
-          # a run that could never report.
-          if ! make -n test PYTEST_TARGETS="$TEST_FILE" 2>/dev/null | grep -q 'write_suite_report'; then
-            echo "::error::${REF} has a test recipe that does not write a suite report (added in #740); this ref cannot be measured"
-            exit 1
-          fi
-
           failed=0
           no_result=0
           passed=0
@@ -286,6 +270,23 @@ jobs:
               passed)
                 printf '.'
                 passed=$((passed + 1))
+                ;;
+              unsupported)
+                # The ref's recipe cannot write a suite report (it predates
+                # #740), which is true of every repeat alike.  Whatever this
+                # cell counted before now is not a sample -- a recipe that can
+                # never report can never pass -- so it is discarded, and the
+                # ref reports nothing.  The summary then withholds bounds.
+                #
+                # Observed on the first run that succeeds, not predicted from
+                # the Makefile.  Predicting it from `make -n` output was tried:
+                # recipe comments and unrelated `echo`s matched, and `grep -q`
+                # closing the pipe early killed `make` with SIGPIPE on a ref
+                # that does report.
+                echo
+                echo "::error::${REF} cannot be measured: its test recipe wrote no suite report (added in #740)"
+                rm -f "$PROBE_DIR/cell.json"
+                exit 1
                 ;;
               *)
                 # The classifier itself did not answer.  Counting this as
