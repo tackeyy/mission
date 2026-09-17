@@ -14,7 +14,6 @@ from typing import Optional
 
 from mission_kernel.projection_path import (
     ProjectionRejection,
-    progress_mission_segment,
     resolve_internal_artifact_path,
     resolve_internal_archive_path,
     resolve_projection_path,
@@ -22,8 +21,12 @@ from mission_kernel.projection_path import (
 
 # Re-exported so the adapter reaches the generator through the application
 # layer, the way it reaches every other published-path decision.  The rule and
-# the generator stay together in the kernel module.
-__all__ = ["progress_mission_segment"]
+# the generator stay together in the kernel module.  The ``as`` form marks the
+# re-export without ``__all__``, which would have to name every public name of
+# this module.
+from mission_kernel.projection_path import (  # noqa: E402
+    progress_mission_segment as progress_mission_segment,
+)
 
 REPOSITORY_ROOT_NAME = ".mission-state"
 BLOB_ID_PREFIX = "evidence:"
