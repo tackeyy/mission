@@ -104,20 +104,24 @@ intent digest の対象が変わって記録済みの identity が動く。**し
 入口ではどの blob がどのフィールド由来かを判別できないので、**判別できなくても結果が正規の
 実行と同じになる形**だけを受理する。
 
-| コマンド | generated blob の数 | repository 内の blob | それ以外の条件 |
-|---|---|---|---|
-| `update-progress` | 1 | ちょうど 1（progress 規則） | — |
-| `initialize-artifact` / `render-artifact` / `record-artifact-publication` | 1 | ちょうど 1（artifact 規則） | — |
-| `export-artifact` | **ちょうど 2** | **ちょうど 1**（artifact 規則）。もう 1 個は projection | **2 個の digest と size が一致する** |
-| 上記以外 | — | 0 | — |
+全コマンドに共通の条件と、export だけの条件がある。
+
+- generated blob を「progress 規則 / artifact 規則 / projection」に分類する
+- **repository 内の blob（progress か artifact）は、そのコマンドに許された規則でなければ拒否する**。
+  許す規則は D2 のフィールド単位の表から、そのコマンドの全フィールドの和集合として導出する
+- **repository 内の blob は 1 個まで**
+- projection の blob の数は制限しない。**generated blob 0 個は許す**（変更前の入口と同じ。
+  projection へ書く progress、例えば `evidence_path="progress.json"` は正規の形）
+- **`export-artifact` だけ**: generated blob が 1 個以上あるなら、**ちょうど 2 個で、digest と size が一致する**
 
 **export の形がなぜ十分か。** 正規の export は、`artifact_effect`（artifact のパス）と
 `export_effect`（projection）に同じ内容を書く（`docs/design/633-artifact-kernel-commands.md` のテスト 8）。
-上の形を満たす blob 集合は、フィールドの割り当てをどう入れ替えても「artifact のパス 1 個と
-projection 1 個に同じバイト列を書く」ことになり、正規の export と区別がつかない結果しか起こせない。
+上の条件を満たす export の blob 集合は、フィールドの割り当てをどう入れ替えても
+「同じバイト列を 2 か所に書き、そのうち repository 内は多くても artifact のパス 1 個」になる。
+正規の export（または repository 内に触れない export）と区別がつかない結果しか起こせない。
 
 - `artifact_effect` を欠いた 1 blob の export（round 2 の反例）は、**数が 2 でない**ので拒否する
-- 2 blob を両方 repository 内に置く形は、**repository 内がちょうど 1 でない**ので拒否する
+- 2 blob を両方 repository 内に置く形は、**repository 内が 1 個を超える**ので拒否する
 - 内容の違う 2 blob は、**digest / size の不一致**で拒否する
 
 **入口で塞がないもの（範囲外）**: repository 内の artifact のパスが**別のセッションの**

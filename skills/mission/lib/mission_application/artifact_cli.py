@@ -15,6 +15,7 @@ turning a refusal into a message and an exit code.  Those arrive as
 from __future__ import annotations
 
 import json
+from pathlib import PurePosixPath
 
 from mission_application.artifact import (
     ArtifactAppendRequest,
@@ -35,6 +36,10 @@ from mission_application.artifact import (
     run_artifact_render,
 )
 from mission_application.cli_operation import CliOperationRejected
+from mission_application.evidence_publication import (
+    EvidencePublicationError,
+    REPOSITORY_ROOT_NAME,
+)
 from mission_kernel.artifact import (
     ARTIFACT_PUBLISH_PROVIDERS,
     ARTIFACT_REDACTION_STATUSES,
@@ -128,7 +133,7 @@ def run_artifact_init_cli(args, cwd, services) -> str:
             _repository(services, cwd, state_file, identity),
             services.render_markdown,
         )
-    except EvidenceFailure as exc:
+    except (EvidenceFailure, EvidencePublicationError) as exc:
         _refuse(services, exc.code)
     return _rendered(result, args)
 
@@ -153,7 +158,7 @@ def run_artifact_append_cli(args, cwd, services) -> str:
             ),
             _repository(services, cwd, state_file, identity),
         )
-    except EvidenceFailure as exc:
+    except (EvidenceFailure, EvidencePublicationError) as exc:
         _refuse(services, exc.code)
     return _rendered(result, args)
 
@@ -179,7 +184,7 @@ def run_artifact_render_cli(args, cwd, services) -> str:
             _repository(services, cwd, state_file, identity),
             services.render_markdown,
         )
-    except EvidenceFailure as exc:
+    except (EvidenceFailure, EvidencePublicationError) as exc:
         _refuse(services, exc.code)
     return _rendered(result, args)
 
@@ -191,6 +196,8 @@ def run_artifact_export_cli(args, cwd, services) -> str:
     destination = services.state_relative_path(
         cwd, str(services.resolve_output_path(cwd, getattr(args, "to")))
     )
+    if PurePosixPath(destination).parts[:1] == (REPOSITORY_ROOT_NAME,):
+        _refuse(services, "publication-path-invalid")
     identity = _identity_or_refusal(services, lambda: prepare_artifact_export_operation(
         destination,
         getattr(args, "redaction_status"),
@@ -206,7 +213,7 @@ def run_artifact_export_cli(args, cwd, services) -> str:
             _repository(services, cwd, state_file, identity),
             services.render_markdown,
         )
-    except EvidenceFailure as exc:
+    except (EvidenceFailure, EvidencePublicationError) as exc:
         _refuse(services, exc.code)
     return _rendered(result, args)
 
@@ -237,6 +244,6 @@ def run_artifact_publish_cli(args, cwd, services) -> str:
             _repository(services, cwd, state_file, identity),
             services.render_markdown,
         )
-    except EvidenceFailure as exc:
+    except (EvidenceFailure, EvidencePublicationError) as exc:
         _refuse(services, exc.code)
     return _rendered(result, args)

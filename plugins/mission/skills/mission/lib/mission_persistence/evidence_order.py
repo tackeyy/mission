@@ -118,15 +118,16 @@ def blob_set_from_effects(effects, command, *, repository_root_name=None):
     claims = _publication_claims(command, command_type)
     if not claims or not effects:
         return VerifiedBlobSet(())
-    by_target = {claim.target: claim for claim in claims}
+    by_target = {claim.target: (field, claim) for field, claim in claims}
     blobs = []
     for effect in effects:
-        claim = by_target.get(effect.target)
-        if claim is None:
+        claimed = by_target.get(effect.target)
+        if claimed is None:
             raise EvidencePublicationError(
                 "effect-claim-invalid",
                 "no publication claim names the effect target %r" % (effect.target,),
             )
+        field, claim = claimed
         canonical = canonical_generated_path(
             _claim_publication_path(claim, command_type), repository_root_name=root
         )
@@ -134,7 +135,7 @@ def blob_set_from_effects(effects, command, *, repository_root_name=None):
         # this is the one place that knows both.  The path alone cannot say
         # who asked for it.
         authorize_generated_destinations(
-            (canonical,), command_type=command_type, repository_root_name=root
+            (canonical,), command_type=command_type, field=field, repository_root_name=root
         )
         blobs.append(
             VerifiedBlob(
@@ -165,7 +166,7 @@ def _publication_claims(command, command_type):
     if command_type not in PUBLICATION_PATH_FIELD_BY_COMMAND_TYPE:
         return ()
     return tuple(
-        getattr(command, field)
+        (field, getattr(command, field))
         for field in EFFECT_FIELDS_BY_COMMAND_TYPE.get(command_type, ())
     )
 

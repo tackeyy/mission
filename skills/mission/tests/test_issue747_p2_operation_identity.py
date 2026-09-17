@@ -636,26 +636,21 @@ class TestGeneratedContentCoverage:
         render = lambda _state, _artifact: b"# report\n"
         initialised = prepare_artifact_init(
             {"mission": "m", "phase": "executing", "session_id": "test", "loop_active": True},
-            now=AT, artifact_path="artifact.md", format="markdown", title="t",
+            now=AT, artifact_path=".mission-state/artifacts/test/mission-artifact.md", format="markdown", title="t",
             redaction_status="unchecked", required_for_pass=False, render=render,
         )
         return initialised
 
-    def test_an_artifact_operation_carries_no_generated_binding_yet(self):
-        """Items 3a / 3b move these onto the blob route; until then the digest is null.
-
-        Pinning it here keeps the boundary visible: a replay of an artifact
-        operation is not asked to prove its produced bytes, which is the
-        same coverage the route had before the materialization existed.
-        """
+    def test_an_artifact_operation_carries_a_generated_binding(self):
+        """#764 records artifact bytes in the operation materialization."""
         from mission_application.evidence_publication import binding_records, generated_blobs_digest
         from mission_persistence.evidence_order import blob_set_from_effects
 
         prepared = self._artifact_state()
         blobs = blob_set_from_effects(prepared.effects, prepared.command)
         assert prepared.effects, "the artifact operation does produce an effect"
-        assert blobs.blobs == (), "but it is not a binding the request carries yet"
-        assert generated_blobs_digest(binding_records(blobs)) is None
+        assert len(blobs.blobs) == 1
+        assert generated_blobs_digest(binding_records(blobs)) is not None
 
     def test_a_route_that_does_carry_bindings_is_compared(self):
         from mission_application.evidence_publication import binding_records, generated_blobs_digest

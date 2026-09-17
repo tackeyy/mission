@@ -87,7 +87,7 @@ def test_a_command_nobody_listed_is_refused():
 
 @pytest.mark.parametrize(
     "command_type",
-    ["update-progress", "generate-context-manifest", "some-future-command", None],
+    ["generate-context-manifest", "some-future-command", None],
 )
 def test_external_bindings_pass_for_every_command(command_type):
     from mission_persistence.fenced_commit import refuse_unauthorized_generated_blobs

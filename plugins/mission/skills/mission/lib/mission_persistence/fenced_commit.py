@@ -28,6 +28,7 @@ from mission_kernel.json_codec import (
 from mission_kernel.projection_path import (
     ProjectionRejection,
     resolve_internal_archive_path,
+    resolve_internal_artifact_path,
     resolve_projection_path,
 )
 from mission_kernel.model import (
@@ -1301,28 +1302,46 @@ def refuse_unauthorized_generated_blobs(
     """
     from mission_application.evidence_publication import (
         EvidencePublicationError,
-        authorize_generated_destinations,
+        REPOSITORY_ROOT_NAME,
+        canonical_generated_path,
+        internal_destination_rules_by_command_type,
     )
 
-    paths = tuple(
-        blob.binding.relative_path
+    generated = tuple(
+        blob
         for blob in getattr(blobs, "blobs", ())
         if getattr(blob.binding, "origin", "captured") == "generated"
     )
-    if not paths:
-        return
-    from mission_application.evidence_publication import REPOSITORY_ROOT_NAME
-
+    root = REPOSITORY_ROOT_NAME if repository_root_name is None else repository_root_name
     try:
-        authorize_generated_destinations(
-            paths,
-            command_type=command_type,
-            repository_root_name=(
-                REPOSITORY_ROOT_NAME
-                if repository_root_name is None
-                else repository_root_name
-            ),
-        )
+        classified = []
+        for blob in generated:
+            path = canonical_generated_path(
+                blob.binding.relative_path, repository_root_name=root
+            )
+            candidate = PurePosixPath(path)
+            if not isinstance(resolve_internal_archive_path(candidate, root_name=root), ProjectionRejection):
+                classified.append(("progress", blob))
+            elif not isinstance(resolve_internal_artifact_path(candidate, root_name=root), ProjectionRejection):
+                classified.append(("artifact", blob))
+            else:
+                classified.append(("projection", blob))
+        internal = tuple((kind, blob) for kind, blob in classified if kind != "projection")
+        permitted = internal_destination_rules_by_command_type().get(command_type, frozenset())
+        valid = len(internal) <= 1 and all(kind in permitted for kind, _blob in internal)
+        if valid and command_type == "export-artifact" and generated:
+            valid = len(generated) == 2
+            if valid:
+                first, second = generated
+                valid = (first.binding.digest, first.binding.size) == (
+                    second.binding.digest,
+                    second.binding.size,
+                )
+        if not valid:
+            raise EvidencePublicationError(
+                "publication-destination-unauthorized",
+                "%s has an unauthorised generated blob shape" % (command_type,),
+            )
     except EvidencePublicationError as exc:
         raise FencedCommitError("request-invalid", str(exc)) from exc
 
@@ -2825,6 +2844,9 @@ class LocalFencedRepository:
         internal = resolve_internal_archive_path(candidate, root_name=self.root.name)
         if not isinstance(internal, ProjectionRejection):
             return internal, True
+        artifact = resolve_internal_artifact_path(candidate, root_name=self.root.name)
+        if not isinstance(artifact, ProjectionRejection):
+            return artifact, True
         # The unit of work answers with one refusal whatever the reason;
         # the reasons themselves are the application layer's to explain.
         raise FencedCommitError(
