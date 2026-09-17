@@ -33,11 +33,17 @@ state に載らない公開ファイルが残る。
 ```
 
 `<segment>` の条件は **`_sanitize_sid`（`skills/mission/bin/mission-state.py`）の値域と一致させる**。
+`_sanitize_sid` は `re.sub(r"[/\\]", "_", sid).strip().lstrip(".")` で、空なら `"default"` を返す。
+この順序から値域は次のとおりになる。
 
 - 空でない
 - `/` と `\` を含まない
 - `.` で始まらない
-- 前後に空白が無い
+- **末尾に空白が無い**（`str.strip()` が落とす文字。`lstrip(".")` は末尾に触れない）
+- **先頭の空白は許す。** `". foo"` は `strip()` の後に `lstrip(".")` が走るため `" foo"` になる
+
+**`_sanitize_sid` は変えない。** 変えると既存の artifact ディレクトリ名が変わり、保存済みの
+`artifact.path` と食い違う。
 
 **生成規則（`_sanitize_sid`）と受理規則を食い違わせない。** #763 では、生成された名前を受理規則が
 拒否する形を作りかけた。値域より狭く受理すると、既存の artifact がまた書けなくなる。
@@ -48,9 +54,14 @@ state に載らない公開ファイルが残る。
 state を手で書き換えない限り、render / record-publication が保存済みの `artifact.path` から
 読むパスもこの形になる。
 
-**規則に合わない保存済みパスは拒否する**（`publication-path-inside-root`。書き込みの前に失敗させる）。
+**v5 では、規則に合わない保存済みパスを拒否する。** blob 化の段階で
+`canonical_generated_path` が `publication-path-invalid` か `publication-destination-unauthorized` を
+返し、D5 の捕捉で exit 2 になる。commit より前なので書き込みは起きない。
 **旧 publisher へは戻さない。** 戻すと窓がまた開く。拒否されるのは手で書き換えた state だけで、
 その扱いは「影響」節に書く。
+
+**v4 は変えない。** v4 には UoW が無く、publisher が唯一の書き手である（progress も #763 で
+v4 は変えていない）。
 
 `canonical_generated_path` は、progress の規則・artifact の規則・projection 規則の 3 つを
 順に当てる。**progress と artifact の規則は重ならない**（`archive/` と `artifacts/`）。
@@ -80,6 +91,32 @@ artifact のパスへ書けてしまう。
 **表に無い組は、repository 内のどの規則にも書けない**（fail-closed）。
 
 `_publication_claims` は `(field, claim)` の組を返すように変え、フィールド名が認可まで届くようにする。
+**フィールドを知っているのは、blob を組み立てるこの 1 箇所だけ**である。
+
+#### 永続化の入口（`refuse_unauthorized_generated_blobs`）ではフィールドを運ばない
+
+入口（`skills/mission/lib/mission_persistence/fenced_commit.py` の
+`refuse_unauthorized_generated_blobs`。#763 で実装済み）が受け取るのは、audit の `command_type` と
+blob 集合だけである。`BlobBinding`（`local_uow.py`）に effect フィールドは無く、足すと
+intent digest の対象が変わって記録済みの identity が動く。**したがってフィールドは運ばない。**
+
+代わりに、入口は**コマンド単位**の表で検査する。
+
+| コマンド | repository 内で許す規則 | repository 内の blob の上限 |
+|---|---|---|
+| `update-progress` | progress | 1 |
+| `initialize-artifact` / `render-artifact` / `record-artifact-publication` | artifact | 1 |
+| `export-artifact` | artifact | **1** |
+| 上記以外 | なし | 0 |
+
+**上限 1 が `export_effect` を塞ぐ。** export の 2 effect は target が必ず異なり
+（`validate_effects` の `effect-target-duplicated`）、`artifact_effect` は artifact の規則に当たる。
+手で組み立てた binding で `export_effect` を repository 内へ向けると、repository 内の blob が 2 個になり、
+入口が拒否する。規則が artifact 以外（progress など）なら、規則の不一致で拒否する。
+
+**2 つの表は同じモジュール（`evidence_publication.py`）に置き、一方からもう一方を導出する。**
+フィールド単位の表を正とし、コマンド単位の表は「そのコマンドの全フィールドの規則の和集合」と
+「repository 内に書けるフィールドの数」から作る。手で 2 つ書くと食い違う。
 
 ### D3. claim のパス読み出し表に 4 コマンドを足す
 
@@ -114,9 +151,20 @@ block の `timestamp=` は、commit 済みの append 履歴の値であって今
 
 - 現行では、`_resolve_evidence_output_path` が「親ディレクトリが cwd の中にあること」しか
   見ていないので通る
-- UoW では、`export_effect` は projection 規則でしか書けない（D2）。repository 内のパスは
-  `publication-path-inside-root` になる
-- **書き込みの前に拒否する。** artifact ファイルも state も変化しないことをテストで固定する
+- **拒否する場所は CLI の入口 1 箇所**: `run_artifact_export_cli`
+  （`skills/mission/lib/mission_application/artifact_cli.py`）で `destination` を
+  state 相対パスへ直した直後、`prepare_artifact_export_operation` より前。先頭の部品が
+  `.mission-state` なら `_refuse(services, "publication-path-invalid")`（exit 2、stderr
+  `ERROR: publication-path-invalid`）
+- **v4 と v5 の両方がこの入口を通る。** v4 には blob 化も認可も無いので
+  （`legacy_v4.py` の v4 経路は `validate_effects` の後そのまま publisher に入る）、
+  repository 層では v4 の拒否を書き込み前に置けない。入口で止めれば、prepare も
+  publisher も走らない
+- v5 では D2 の認可も同じ宛先を拒否する（二重の防御）。そのとき出る `EvidencePublicationError`
+  は、いまは artifact CLI で捕捉されていない。4 コマンドの `run_artifact_*` 呼び出しで
+  `EvidencePublicationError` を捕捉し、`_refuse(services, exc.code)` で exit 2 にする
+- **書き込みの前に拒否する。** artifact ファイル・export 先・state が実行前の byte と一致することを、
+  v4 と v5 の両方でテストする
 - export 先を state の中に置く用途は、文書（`docs/MISSION_ARTIFACTS.md` とその日本語版）にも
   テストにも無い（`--to` を使う例はすべて `docs/` 配下）
 
@@ -162,14 +210,16 @@ blob を持つので、この分岐には到達しない**。
 export が旧 publisher に残る。その状態は #764 の受け入れ条件を満たさない。
 
 人がレビューする行数は実装 300〜450 行、テスト 500〜700 行と見積もる。
-**1,000 行を超えたら、PR 本文に理由を書き、owner の承認を取る**（`pr-size-and-scope.md` 層 2）。
+この repo の閾値（`AGENTS.md` の Thresholds）は、600 行超で「分割しない理由」を PR 本文に書き、
+1,400 行超で分割または例外の記録が要る。**600 行を超える見込みなので、PR 本文に上の理由を書く。**
 
 ## やらないこと
 
 - `verification` 経路。`RecordVerification` は `EFFECT_FIELDS_BY_COMMAND_TYPE` に無く、
   公開ファイルを持たない（`transitions.py` で Transition の effect は空）。窓が無いので対象外。
   #747 に記録して閉じる
-- `ExecutionRequest` 入口での internal 宛先の認可（#747 の持ち越し 1）
+- `ExecutionRequest` に typed command を通すこと（#747 の持ち越し 1）。入口の認可そのものは #763 で
+  実装済みで、本設計は D2 の表をそこへ広げるだけにとどめる
 - `elif effects:` 分岐のコード削除（到達しないことを固定するだけにする）
 
 ## テスト
@@ -178,9 +228,13 @@ export が旧 publisher に残る。その状態は #764 の受け入れ条件�
    property 的に固定（任意の文字列 → `_sanitize_sid` → 受理）
 2. `(command, field)` 認可表: 4 コマンドの `effect` と export の `artifact_effect` は artifact 規則だけを受理し、
    export の `export_effect` と progress のコマンドは artifact のパスを拒否する
+2b. 入口（`refuse_unauthorized_generated_blobs`）: 手で組み立てた binding で、export の 2 blob を
+   両方 repository 内に置くと拒否される。progress のコマンドが artifact のパスを持つと拒否される。
+   コマンド単位の表がフィールド単位の表から導出されていること（片方を書き換えると落ちる）
 3. 4 コマンドで旧 publisher の spy が呼ばれない（D6）。表の網羅性の検査
 4. 同じ operation identity の retry が同じバイト列を出す（D4）
-5. `--to .mission-state/...` と `--to <artifact 自身>` が、書き込み前に拒否される（D5）
+5. `--to .mission-state/...` と `--to <artifact 自身>` が、v4・v5 の両方で書き込み前に拒否される（D5）。
+   v5 で保存済みの `artifact.path` が規則外のとき、render が exit 2 で拒否し、ファイルと state が変わらない
 6. 既存の progress / projection の blob ID が変わらない（固定値）
 7. 変異: 認可表から `export_effect` の除外を外す、`updated_at` 行を戻す、表から 1 コマンドを外す。
    それぞれで上のテストが落ちること
