@@ -319,37 +319,21 @@ from mission_application.guard_timeout import (  # noqa: E402
 )
 from mission_application.runtime_guard import (  # noqa: E402
     CleanupStaleExecuteCommand,
-    FreshnessEvidence,
-    GuardCommandReceipt,
-    GuardContinuation,
-    GuardDecision,
-    GuardEvidence,
-    GuardFindingKind,
-    GuardHaltCategory,
-    GuardCommandKind,
     GuardRequest,
     GuardSessionFact,
-    HookReply,
-    LeaseEvidence,
-    LeaseStatus,
     MarkHaltCommand,
     NoCommand,
-    OrphanEvidence,
     PermissionHaltRejected,
     PermissionObservationRequest,
     PermissionProbe,
     ProviderConsentRequest,
     RegisteredEntryPointDistributionObservation,
     ResolvedProviderConsentPathObservation,
-    SessionSelection,
-    SessionSelectionReason,
     StopGuardObserveCommand,
     StopObservationRequest,
-    RuntimeGuardFailure,
     decide_stop_guard,
     observe_stop_guard,
     record_permission_observation,
-    resolve_guard_command_receipt,
     validate_provider_consent_request,
     validate_registered_approval_entry_point_distribution,
 )
@@ -16178,13 +16162,6 @@ def _add_queue_parsers(subparsers) -> None:
     p_queue_mark.set_defaults(func=cmd_queue)
 
 
-# ``GuardCommandKind`` へメンバーが増えたら choices も追随させる。明示列挙に
-# するとその追随が静かに失われるため、導出を残したまま関数外へ置く。
-_RECEIPT_KIND_CHOICES = tuple(
-    item.value for item in GuardCommandKind if item is not GuardCommandKind.NONE
-)
-
-
 def _add_hook_parsers(subparsers) -> None:
     sub = subparsers
 
@@ -16215,11 +16192,6 @@ def _add_hook_parsers(subparsers) -> None:
     p_stop_verdict.add_argument("--hook-pid", type=int, default=None)
     p_stop_verdict.add_argument("--hook-session-id-from-pid", action="store_true")
     p_stop_verdict.add_argument("--planning-warn-iterations", type=int, default=3)
-    p_stop_verdict.add_argument(
-        "--receipt-kind",
-        choices=_RECEIPT_KIND_CHOICES,
-        default=None,
-    )
     p_stop_verdict.set_defaults(func=cmd_stop_verdict)
     p_freshness = sub.add_parser("freshness", help="state の freshness 判定を JSON で返す (read-only)")
     p_freshness.add_argument("--state-file", required=True, help="判定対象の session state JSON")

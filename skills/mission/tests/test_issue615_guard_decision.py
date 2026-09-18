@@ -628,6 +628,55 @@ _POLICY_NAMES = re.compile(
 _COMMANDS = {"mark-halt", "cleanup-stale", "stop-guard-observe"}
 
 
+# `function name {` and `name()` are both definitions, and the brace may sit on
+# the next line.  Recognising only `name() {` let a wrapper hide behind either
+# of the other two spellings.
+_FUNCTION_OPEN = re.compile(
+    r"^\s*(?:function\s+(?P<kw>[A-Za-z_][A-Za-z0-9_]*)\s*(?:\(\s*\))?"
+    r"|(?P<paren>[A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\))\s*(?P<rest>.*)$"
+)
+
+
+def _function_bodies(source: str) -> dict[str, str]:
+    """Map each shell function to its body, however the definition is spelled."""
+    lines = source.splitlines()
+    bodies: dict[str, str] = {}
+    index = 0
+    while index < len(lines):
+        opened = _FUNCTION_OPEN.match(lines[index])
+        if not opened:
+            index += 1
+            continue
+        name = opened.group("kw") or opened.group("paren")
+        rest = opened.group("rest").lstrip()
+        if not rest.startswith("{"):
+            # The brace is on a later line, or this was not a definition.
+            probe = index + 1
+            while probe < len(lines) and not lines[probe].strip():
+                probe += 1
+            if probe >= len(lines) or not lines[probe].strip().startswith("{"):
+                index += 1
+                continue
+            rest = lines[probe].strip()
+            index = probe
+        after = rest[1:]
+        if after.rstrip().endswith("}"):
+            # `_w() { ...; }` on one line.  The previous shape matched this as a
+            # definition and then skipped the line, so a one-line wrapper was
+            # never read at all.
+            bodies[name] = after.rstrip()[:-1]
+            index += 1
+            continue
+        body = [after]
+        index += 1
+        while index < len(lines) and lines[index].strip() != "}":
+            body.append(lines[index])
+            index += 1
+        bodies[name] = "\n".join(body)
+        index += 1
+    return bodies
+
+
 def _state_cli_callers(source: str) -> set[str]:
     """Names that reach `mission-state.py`: the path itself and any wrapper.
 
@@ -635,19 +684,23 @@ def _state_cli_callers(source: str) -> set[str]:
     the timeout and calls through it.  A check that only looks for `python3`
     on the line therefore sees nothing -- `_mission_state_bounded resume` was
     accepted by exactly that gap.
+
+    Both spellings of the variable count, and wrappers are followed to a fixed
+    point.  A wrapper of a wrapper reaches the CLI just as directly, and it was
+    the shape that defeated the "more than one invocation" rule -- the only
+    check that catches the loop this change removed coming back by another name.
     """
-    callers = {"$MISSION_STATE_PY"}
-    current: str | None = None
-    for line in source.splitlines():
-        opened = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{", line)
-        if opened:
-            current = opened.group(1)
-            continue
-        if current and line.strip() == "}":
-            current = None
-            continue
-        if current and "$MISSION_STATE_PY" in line:
-            callers.add(current)
+    callers = {"$MISSION_STATE_PY", "${MISSION_STATE_PY}"}
+    bodies = _function_bodies(source)
+    growing = True
+    while growing:
+        growing = False
+        for name, body in bodies.items():
+            if name in callers:
+                continue
+            if any(caller in body for caller in callers):
+                callers.add(name)
+                growing = True
     return callers
 
 
@@ -866,13 +919,69 @@ def test_the_hook_may_not_call_the_verdict_twice():
     assert "command-not-allowlisted" in codes
 
 
+def test_a_one_line_helper_does_not_swallow_the_rest_of_the_file():
+    """A body that opens and closes on one line ends there.
+
+    Collecting until a line that is just `}` never finds one for
+    `_helper() { ...; }`, so the body runs to the end of the file and every
+    later function is read as part of it.  That direction is over-detection,
+    not a bypass -- which is worse in practice: the check starts reporting a
+    clean hook, and a check that fails for the wrong reason gets relaxed.
+    """
+    source = (
+        '_unrelated() { echo hi; }\n'
+        '_bounded() { python3 "$MISSION_STATE_PY" "$@"; }\n'
+    )
+
+    bodies = _function_bodies(source)
+
+    assert bodies["_unrelated"].strip() == "echo hi;", bodies
+    assert "_unrelated" not in _state_cli_callers(source)
+
+
+def test_a_wrapper_of_a_wrapper_cannot_hide_a_second_verdict_call():
+    """The count rule is what catches the removed loop returning by another name.
+
+    Every other row in the table below fires on "not allowlisted", so none of
+    them exercises `len(invocations) > 1`.  A second `stop-verdict` is
+    allowlisted by name; only the count rejects it.  Reaching it through a
+    wrapper of a wrapper defeated that rule until the caller set was closed
+    over wrappers.
+    """
+    source = HOOK.read_text(encoding="utf-8").replace(
+        'printf \'%s\' "$SHELL_TEXT"',
+        '_w2() { _mission_state_bounded "$@"; }\n'
+        '_w2 stop-verdict --hook-input - --json\n'
+        'printf \'%s\' "$SHELL_TEXT"',
+    )
+    codes = [violation.code for violation in analyze_guard_shell(source)]
+    assert "command-not-allowlisted" in codes
+
+
+def test_defining_a_wrapper_without_calling_it_is_not_a_violation():
+    """The closure must widen what counts as a caller, not what counts as a call.
+
+    Without this, making the caller set transitive could be "satisfied" by
+    reporting every definition, which would reject the hook itself.
+    """
+    source = HOOK.read_text(encoding="utf-8").replace(
+        'printf \'%s\' "$SHELL_TEXT"',
+        '_w7() { _mission_state_bounded "$@"; }\n'
+        'printf \'%s\' "$SHELL_TEXT"',
+    )
+    assert analyze_guard_shell(source) == []
+
+
 def test_the_wrapper_definition_is_not_itself_a_call():
     """It forwards `"$@"`; counting it would report the hook as violating itself."""
     assert analyze_guard_shell(HOOK.read_text(encoding="utf-8")) == []
 
 
-# The shapes the first fix still let through (#779 review round 2).  Each was
-# reported as passing a check whose purpose is to reject it.
+# The shapes a previous fix still let through.  Each was reported as passing a
+# check whose purpose is to reject it.  The last four came from the independent
+# checker: the caller set was seeded with one spelling of the variable, read
+# only `name() {` as a definition, skipped a one-line body, and did not follow a
+# wrapper of a wrapper.
 @pytest.mark.parametrize(
     "label,inserted",
     [
@@ -880,6 +989,12 @@ def test_the_wrapper_definition_is_not_itself_a_call():
         ("a continuation line", "_mission_state_bounded \\\n    resume"),
         ("hidden in another helper", "_other() {\n  _mission_state_bounded resume\n}"),
         ("hidden in another helper, direct", '_other() {\n  python3 "$MISSION_STATE_PY" resume\n}'),
+        ("a wrapper of a wrapper", '_w2() { _mission_state_bounded "$@"; }\n_w2 resume'),
+        ("the braced spelling of the variable", 'python3 "${MISSION_STATE_PY}" resume'),
+        ("a function defined with the keyword",
+         'function _w3 { python3 "$MISSION_STATE_PY" "$@"; }\n_w3 resume'),
+        ("a function whose brace is on the next line",
+         '_w4()\n{\n  python3 "$MISSION_STATE_PY" "$@"\n}\n_w4 resume'),
     ],
 )
 def test_the_hook_may_not_reach_the_cli_by_any_other_shape(label, inserted):
