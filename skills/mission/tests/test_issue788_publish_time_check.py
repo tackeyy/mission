@@ -279,6 +279,42 @@ def test_case_alias_of_repository_is_refused_when_the_filesystem_has_one(tmp_pat
             pytest.fail("case alias must resolve to the repository identity")
 
 
+def test_the_write_goes_through_the_pinned_descriptor_not_the_name(tmp_path, monkeypatch):
+    """The descriptor is what the write uses, after the walk has chosen it.
+
+    Independent Checker of #788: the earlier tests swap the name *before* the
+    walk, where ``O_NOFOLLOW`` refuses it, so they pass even when the publish
+    resolves the name again instead of using the descriptor.  This one swaps
+    in the window between the two.  Resolving the name there would write into
+    ``elsewhere`` first and undo it afterwards; using the descriptor never
+    touches it.
+    """
+    module = _state_module()
+    (tmp_path / ".mission-state").mkdir()
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "elsewhere").mkdir()
+    original = module._publish_output_transaction
+
+    def swap_then_publish(*args, **kwargs):
+        docs = tmp_path / "docs"
+        if docs.is_dir() and not docs.is_symlink():
+            docs.rmdir()
+            docs.symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_publish_output_transaction", swap_then_publish)
+    # The directory's own timestamp is the oracle: resolving the name writes a
+    # temporary entry into ``elsewhere`` and removes it when the later checks
+    # refuse, so the file is gone by the time the call returns but the
+    # directory has changed.  Using the descriptor never enters it.
+    before = (tmp_path / "elsewhere").stat().st_mtime_ns
+    with contextlib.suppress(ValueError):
+        _publish(module, tmp_path, "docs/out.md")
+
+    assert not (tmp_path / "elsewhere" / "out.md").exists()
+    assert (tmp_path / "elsewhere").stat().st_mtime_ns == before
+
+
 def test_external_effect_uses_descriptor_resolution_while_in_root_effects_keep_legacy_route(
     tmp_path, monkeypatch
 ):

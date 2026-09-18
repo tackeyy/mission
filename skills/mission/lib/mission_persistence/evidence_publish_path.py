@@ -83,6 +83,13 @@ def open_evidence_publish_directory(
                     "evidence repository cannot be opened"
                 ) from exc
             descriptors.append(repository_fd)
+            # Read once from the descriptor that stays open.  A repository
+            # replaced during the walk does not change what this descriptor
+            # points at, so reading it again at every step would give the same
+            # answer -- the protection is the descriptor being held, not the
+            # re-reading.  A repository that takes a component's name is
+            # refused because that component then opens this same directory.
+            repository_identity = _identity(os.fstat(repository_fd))
 
             for part in parts[:-1]:
                 if part.casefold() == ".mission-state":
@@ -113,10 +120,6 @@ def open_evidence_publish_directory(
                     ) from exc
                 descriptors.insert(-1, child_fd)
                 metadata = os.fstat(child_fd)
-                # Taken again at every step: a repository replaced during the
-                # walk would otherwise be compared against the one that is
-                # gone.
-                repository_identity = _identity(os.fstat(descriptors[-1]))
                 if (
                     not stat.S_ISDIR(metadata.st_mode)
                     or _identity(metadata) == repository_identity
