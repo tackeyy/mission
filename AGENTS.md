@@ -56,7 +56,7 @@ extend an existing test when it can expose the defect.
    Keep diagnostic measurements outside the normal regression suite unless
    they enforce a meaningful contract.
 
-In the PR's **Test value** section, briefly record the failure detected, the
+In the PR's **Test value** / **テストの検出価値** section, briefly record the failure detected, the
 difference from existing tests (including what was consolidated), and the
 execution/maintenance cost. One explanation per group with the same rationale
 is enough. For subprocess-heavy, sleep-based, flaky, or heavily mocked tests,

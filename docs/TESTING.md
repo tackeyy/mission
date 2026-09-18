@@ -59,7 +59,11 @@ shellcheck scripts/mission-stop-guard.sh scripts/sync-codex-plugin-wrapper.sh sc
 
 ## What to Test
 
-Add tests when changing:
+For changes to the areas below, check that realistic regressions are protected
+under the [Test Value Policy](../AGENTS.md#test-value-policy). Name sufficient
+existing tests in the PR; add or extend tests only for a failure they do not
+already detect. Documentation changes need appropriate consistency checks,
+not tests that merely pin prose.
 
 - `mission-state.py` commands, schema fields, or session routing
 - Stop hook ownership checks or blocking conditions
