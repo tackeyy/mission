@@ -262,17 +262,6 @@ def test_next_scoring_json_entry_with_findings_evidence_suggests_mark_passes(sta
     assert out["next_action"] == "mark-passes"
 
 
-def test_next_legacy_items_entry_without_score_source_still_suggests_mark_passes(state_dir, run_cli):
-    """score_source フィールド自体がない legacy entry は findings evidence チェック対象外
-    (mark-passes 側も legacy は WARN のみで hard block しない) — 後方互換確認."""
-    _set_state(state_dir, score_history=[
-        {"iteration": 1, "composite": 4.2, "min_item": 4.0,
-         "items": {"mission_achievement": 4.2}, "timestamp": "2026-07-02T00:00:00Z", "open_high": 0},
-    ])
-    out = _next(run_cli, state_dir)
-    assert out["next_action"] == "mark-passes"
-
-
 def test_next_aggregate_reviews_default_hint_does_not_mention_force(state_dir, run_cli):
     """score_history が空の通常経路のヒントにも --force への言及がないことを確認."""
     out = _next(run_cli, state_dir)

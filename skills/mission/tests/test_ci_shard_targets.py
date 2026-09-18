@@ -32,10 +32,6 @@ def run_shard(index, total, targets, cwd=None):
     return result
 
 
-def test_script_exists():
-    assert SCRIPT.exists()
-
-
 def test_directory_target_expands_to_tracked_test_files():
     result = run_shard(1, 1, "skills/mission")
     assert result.returncode == 0, result.stderr
