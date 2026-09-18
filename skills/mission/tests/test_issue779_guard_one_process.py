@@ -101,26 +101,6 @@ def test_the_dispatch_is_defined_once_and_the_hook_has_no_case_block():
     assert "GUARD_DECISION_DISPATCH_BEGIN" not in hook
 
 
-def test_the_hook_starts_mission_state_once_for_each_guard_path(tmp_path):
-    recorder = tmp_path / "calls"
-    fake_state = tmp_path / "state.py"
-    fake_state.write_text(
-        "from pathlib import Path\n"
-        "import os\n"
-        "Path(os.environ['ISSUE779_RECORDER']).write_text('called\\n', encoding='utf-8')\n"
-        "print('{\\\"shell_text\\\": \\\"{\\\\\\\"decision\\\\\\\": \\\\\\\"skip\\\\\\\", \\\\\\\"reason\\\\\\\": \\\\\\\"ok\\\\\\\", \\\\\\\"outcome_kind\\\\\\\": \\\\\\\"expected-gate\\\\\\\"}\\\\n\\\"}')\n",
-        encoding="utf-8",
-    )
-    for path in ("missing", "halted", "active", "stale", "lease-expired", "observe-failed", "multiple-orphans"):
-        recorder.unlink(missing_ok=True)
-        result = subprocess.run(
-            ["/bin/bash", str(HOOK)], input="{}", text=True, capture_output=True,
-            env={**__import__("os").environ, "MISSION_STATE_PY": str(fake_state), "ISSUE779_RECORDER": str(recorder)},
-        )
-        assert result.returncode == 0, (path, result.stderr)
-        assert recorder.read_text(encoding="utf-8").splitlines() == ["called"], path
-
-
 # --- The count that is the point of #779 ------------------------------------
 #
 # The guard used to spend one process per command: decide, run `mark-halt`,
@@ -198,38 +178,42 @@ def _write_state(root, **fields):
     return path
 
 
-def test_an_active_session_costs_one_launch(tmp_path):
-    """The path that used to cost three: decide, observe, decide again."""
+# Each row builds the state that puts the guard on that path, then counts the
+# launches.  The first version looped over these names while running the same
+# fake against the same input `{}`: `path` reached the assertion message and
+# nothing else, so a path that started a second process could not have been
+# seen.  The three paths that used to be covered are the three with a real
+# state file; the rest exist because they are where a second launch would
+# come back.
+_GUARD_PATHS = {
+    "missing": None,
+    "halted": {"loop_active": False, "halt_reason": "done by hand"},
+    "active": {},
+    "stale": {"updated_at": "2020-01-01T00:00:00Z"},
+    "lease-expired": {
+        "lease_id": "abc",
+        "lease_expires_at": "2020-01-01T00:00:00Z",
+        "lease_owner": "someone-else",
+    },
+    "orphan-pid": {"pid": 999999, "orphan_pid": 999999},
+    "awaiting-user": {"awaiting_user": True},
+}
+
+
+@pytest.mark.parametrize("path", sorted(_GUARD_PATHS))
+def test_the_hook_starts_mission_state_once_for_each_guard_path(tmp_path, path):
     root = tmp_path / "repo"
     root.mkdir()
-    _write_state(root)
+    fields = _GUARD_PATHS[path]
+    if fields is None:
+        (root / ".mission-state" / "sessions").mkdir(parents=True)
+    else:
+        _write_state(root, **fields)
 
     result, launches = _run_hook(tmp_path, root)
 
-    assert result.returncode == 0, result.stderr
-    assert len(launches) == 1, launches
-
-
-def test_a_session_with_no_state_costs_one_launch(tmp_path):
-    root = tmp_path / "repo"
-    root.mkdir()
-    (root / ".mission-state" / "sessions").mkdir(parents=True)
-
-    result, launches = _run_hook(tmp_path, root)
-
-    assert result.returncode == 0, result.stderr
-    assert len(launches) == 1, launches
-
-
-def test_a_halted_session_costs_one_launch(tmp_path):
-    root = tmp_path / "repo"
-    root.mkdir()
-    _write_state(root, loop_active=False, halt_reason="done by hand")
-
-    result, launches = _run_hook(tmp_path, root)
-
-    assert result.returncode == 0, result.stderr
-    assert len(launches) == 1, launches
+    assert result.returncode == 0, (path, result.stderr)
+    assert len(launches) == 1, (path, launches)
 
 
 # --- Condition 5b: the budget's exhaustion is not a failed command ----------
@@ -336,3 +320,100 @@ def test_the_session_falls_back_to_the_environment_for_the_cli():
     assert state_file_of(
         args, "/root", lambda *_: "named", lambda root: f"process:{root}"
     ) == "process:/root"
+
+
+# --- Progress, not a count (#779 review) ------------------------------------
+#
+# The walk was bounded by a fixed ceiling of 16.  Sixteen distinct orphans
+# processed in a row is progress, not a cycle, and the ceiling rejected it --
+# failing on exactly the busy host the guard exists to protect.
+
+
+class _FakeKind:
+    def __init__(self, value):
+        self.value = value
+
+
+class _FakeCommand:
+    def __init__(self, kind, **fields):
+        self.kind = _FakeKind(kind)
+        for name, value in fields.items():
+            setattr(self, name, value)
+
+
+class _FakeDecision:
+    def __init__(self, command):
+        self.command = command
+
+
+def _walk(decisions, *, limit=64):
+    """Drive the loop over a scripted sequence of decisions."""
+    from mission_application.guard_application import resolve_with_applications
+
+    remaining = list(decisions)
+    applied = []
+
+    def apply(decision):
+        applied.append(decision.command)
+        return (0, "")
+
+    def receipt(prior, kind, exit_code, stdout, *, request_for_orphan, hook_input):
+        return remaining.pop(0)
+
+    import mission_application.guard_application as ga
+
+    original = ga.receipt_decision
+    ga.receipt_decision = receipt
+    try:
+        settled = resolve_with_applications(
+            remaining.pop(0),
+            appliers={
+                "none": ga.no_application,
+                "mark-halt": apply,
+                "cleanup-stale": apply,
+                "stop-guard-observe": apply,
+            },
+            request_for_orphan=lambda _hook_input: None,
+            hook_input={},
+            limit=limit,
+        )
+    finally:
+        ga.receipt_decision = original
+    return settled, applied
+
+
+def test_many_distinct_orphans_are_progress_not_a_cycle():
+    """Sixteen different subjects in a row must settle, not raise."""
+    decisions = [
+        _FakeDecision(_FakeCommand("mark-halt", cwd=f"/repo/{index}", session_id=f"s{index}"))
+        for index in range(16)
+    ]
+    decisions.append(_FakeDecision(_FakeCommand("none")))
+
+    settled, applied = _walk(decisions)
+
+    assert settled.command.kind.value == "none"
+    assert len(applied) == 16
+
+
+def test_the_same_command_on_the_same_subject_twice_is_refused():
+    """A decision that keeps asking for one thing is a cycle, at any count."""
+    repeated = _FakeDecision(_FakeCommand("mark-halt", cwd="/repo", session_id="s"))
+    decisions = [repeated, repeated, repeated]
+
+    with pytest.raises(ValueError, match="did-not-settle"):
+        _walk(decisions)
+
+
+def test_a_retried_observation_is_progress():
+    """The attempt counter distinguishes a retry from re-issuing the same one."""
+    decisions = [
+        _FakeDecision(_FakeCommand("stop-guard-observe", session_id="s", attempt=attempt))
+        for attempt in (1, 2, 3)
+    ]
+    decisions.append(_FakeDecision(_FakeCommand("none")))
+
+    settled, applied = _walk(decisions)
+
+    assert settled.command.kind.value == "none"
+    assert [command.attempt for command in applied] == [1, 2, 3]

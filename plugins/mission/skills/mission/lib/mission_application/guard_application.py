@@ -144,12 +144,18 @@ def resolve_with_applications(
 ):
     """Apply commands until the guard asks for none, and return that decision.
 
-    This is the loop the hook used to run with one process per step.  `limit`
-    bounds the walk so a decision cycle cannot spin: the budget already bounds
-    wall time, but a cycle would spend all of it here and report exhaustion
-    rather than the cycle.
+    The walk is bounded by *progress*, not by a count.  A fixed ceiling looked
+    equivalent and was not: processing sixteen distinct orphans in a row is
+    progress, and a ceiling of sixteen rejected it as a cycle -- the guard would
+    have failed on exactly the busy host it exists to protect.
+
+    What is not progress is applying the same command to the same subject
+    twice.  That is recorded and refused, so a decision that keeps asking for
+    one thing cannot spin.  `limit` stays as a backstop for a cycle the key
+    does not capture, and is deliberately far above any real walk.
     """
     validate_guard_command_dispatch(appliers)
+    seen = set()
     for _ in range(limit):
         kind = decision.command.kind.value
         if kind == "none":
@@ -157,6 +163,10 @@ def resolve_with_applications(
         applier = appliers.get(kind)
         if applier is None:
             raise ValueError(_DISPATCH_MISMATCH)
+        step = (kind, _command_subject(decision.command))
+        if step in seen:
+            raise ValueError("guard-command-application-did-not-settle")
+        seen.add(step)
         exit_code, stdout = applier(decision)
         decision = receipt_decision(
             decision,
@@ -167,6 +177,20 @@ def resolve_with_applications(
             hook_input=hook_input,
         )
     raise ValueError("guard-command-application-did-not-settle")
+
+
+def _command_subject(command):
+    """What the command acts on, so repeating it can be told from progressing.
+
+    Each kind names its subject differently, and the observe command's attempt
+    counter is part of it: retrying an observation is progress, while
+    re-issuing the same attempt is not.
+    """
+    for field in ("cwd", "root", "session_id"):
+        value = getattr(command, field, None)
+        if value is not None:
+            return (field, value, getattr(command, "attempt", None))
+    return (None, None, getattr(command, "attempt", None))
 
 
 def project_root_of(args, current_root, path_factory):

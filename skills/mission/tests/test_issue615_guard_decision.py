@@ -628,25 +628,56 @@ _POLICY_NAMES = re.compile(
 _COMMANDS = {"mark-halt", "cleanup-stale", "stop-guard-observe"}
 
 
-def _all_state_subcommands() -> frozenset[str]:
-    """Read the CLI's subcommands from the CLI, not from a list kept here.
+def _state_cli_callers(source: str) -> set[str]:
+    """Names that reach `mission-state.py`: the path itself and any wrapper.
 
-    A hand-written list is an allowlist wearing a different hat: a subcommand
-    added tomorrow would be absent from it, and the hook could call it without
-    tripping anything.
+    The hook does not call the CLI directly; it defines a function that applies
+    the timeout and calls through it.  A check that only looks for `python3`
+    on the line therefore sees nothing -- `_mission_state_bounded resume` was
+    accepted by exactly that gap.
     """
-    source = (
-        Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
-    ).read_text(encoding="utf-8")
-    return frozenset(re.findall(r'add_parser\(\s*"([a-z][a-z0-9-]*)"', source))
+    callers = {"$MISSION_STATE_PY"}
+    current: str | None = None
+    for line in source.splitlines():
+        opened = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{", line)
+        if opened:
+            current = opened.group(1)
+            continue
+        if current and line.strip() == "}":
+            current = None
+            continue
+        if current and "$MISSION_STATE_PY" in line:
+            callers.add(current)
+    return callers
 
 
-# Every subcommand the CLI has, minus the one the hook may call.  Deny by
-# default: a new subcommand is forbidden here the moment it exists, without
-# anyone remembering to add it (#779).
-_STATE_SUBCOMMANDS_FORBIDDEN_IN_HOOK = frozenset(
-    name for name in _all_state_subcommands() if name != "stop-verdict"
-)
+def _state_cli_invocations(source: str, callers: set[str]) -> list[tuple[str, str]]:
+    """Return (line, first argument) for every call of the state CLI.
+
+    The body of a wrapper is where it forwards `"$@"`, not a call site, so it
+    is skipped: counting it would report the wrapper itself as a violation.
+    """
+    invocations: list[tuple[str, str]] = []
+    inside_wrapper = False
+    for line in source.splitlines():
+        if re.match(r"^\s*[A-Za-z_][A-Za-z0-9_]*\s*\(\)\s*\{", line):
+            inside_wrapper = True
+            continue
+        if inside_wrapper and line.strip() == "}":
+            inside_wrapper = False
+            continue
+        if inside_wrapper:
+            continue
+        for caller in callers:
+            # The path is written `"$MISSION_STATE_PY"`, so the closing quote
+            # sits between the caller and its first argument.  Matching only
+            # whitespace after the name let `python3 "$MISSION_STATE_PY" resume`
+            # through -- the one shape the hook would use if it called the CLI
+            # directly.
+            pattern = re.escape(caller) + r"\"?\s+([A-Za-z0-9][A-Za-z0-9-]*)"
+            for match in re.finditer(pattern, line):
+                invocations.append((line, match.group(1)))
+    return invocations
 
 
 def analyze_guard_shell(source: str) -> list[Violation]:
@@ -711,10 +742,19 @@ def analyze_guard_shell(source: str) -> list[Violation]:
         for command in _COMMANDS:
             if re.search(r"(?<![A-Za-z0-9-])" + re.escape(command) + r"(?![A-Za-z0-9-])", line):
                 violations.append(Violation("command-outside-dispatch", line))
-        if tokens and "python3" in tokens:
-            for token in tokens:
-                if token in _STATE_SUBCOMMANDS_FORBIDDEN_IN_HOOK:
-                    violations.append(Violation("command-not-allowlisted", line))
+
+    # Deny by default, at the call sites rather than by name.  Enumerating the
+    # subcommands and forbidding all but one looked equivalent, but it read only
+    # lines containing `python3` -- and the hook calls through a wrapper, so
+    # `_mission_state_bounded resume` passed.  Asking "what does each call of
+    # the CLI ask for" has no such gap, and needs no list to keep in step.
+    callers = _state_cli_callers(source)
+    invocations = _state_cli_invocations(source, callers)
+    for line, subcommand in invocations:
+        if subcommand != "stop-verdict":
+            violations.append(Violation("command-not-allowlisted", line))
+    if len(invocations) > 1:
+        violations.append(Violation("command-not-allowlisted", source))
 
     # The dispatch block is gone, and its absence is the property now: if it
     # returns, the loop it belonged to has returned with it.
@@ -781,3 +821,46 @@ def test_canonical_hook_is_judgment_free_and_dispatches_the_closed_command_set()
     violations = analyze_guard_shell(HOOK.read_text(encoding="utf-8"))
 
     assert violations == []
+
+
+# --- The shapes the hook would actually use (#779 review) -------------------
+#
+# The first version of this check read only lines containing `python3`, and
+# enumerated the CLI's subcommands to forbid all but one.  Both halves were
+# wrong in the same direction: the hook calls through `_mission_state_bounded`,
+# so no line it uses contains `python3`, and `_mission_state_bounded resume`
+# passed a check whose whole purpose was to reject it.
+#
+# These mutate the *real* hook rather than a synthetic line, because the gap was
+# in how a call is written there, not in the rule.
+@pytest.mark.parametrize(
+    "label,inserted",
+    [
+        ("through the wrapper", "_mission_state_bounded resume"),
+        ("a subcommand nobody listed", "_mission_state_bounded closeout"),
+        ("bypassing the wrapper", 'python3 "$MISSION_STATE_PY" resume'),
+        ("the path with no quotes", "python3 $MISSION_STATE_PY reactivate"),
+    ],
+)
+def test_the_hook_may_not_call_any_other_subcommand(label, inserted):
+    source = HOOK.read_text(encoding="utf-8").replace(
+        'printf \'%s\' "$SHELL_TEXT"', inserted + '\nprintf \'%s\' "$SHELL_TEXT"'
+    )
+    codes = [violation.code for violation in analyze_guard_shell(source)]
+    assert "command-not-allowlisted" in codes, label
+
+
+def test_the_hook_may_not_call_the_verdict_twice():
+    """Two calls is the loop coming back by another name."""
+    source = HOOK.read_text(encoding="utf-8").replace(
+        'printf \'%s\' "$SHELL_TEXT"',
+        '_mission_state_bounded stop-verdict --hook-input - --json\n'
+        'printf \'%s\' "$SHELL_TEXT"',
+    )
+    codes = [violation.code for violation in analyze_guard_shell(source)]
+    assert "command-not-allowlisted" in codes
+
+
+def test_the_wrapper_definition_is_not_itself_a_call():
+    """It forwards `"$@"`; counting it would report the hook as violating itself."""
+    assert analyze_guard_shell(HOOK.read_text(encoding="utf-8")) == []
