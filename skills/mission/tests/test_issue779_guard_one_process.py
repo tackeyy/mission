@@ -876,6 +876,48 @@ def test_writing_the_state_directly_is_seen_even_though_the_count_is_one(tmp_pat
     assert not untouched
 
 
+def test_a_path_built_from_pieces_is_not_detected_and_that_is_where_this_stops(
+    tmp_path,
+):
+    """The known limit, pinned with evidence rather than left to be rediscovered.
+
+    A hook that assembles the CLI's path out of fragments reaches it without
+    naming it and without passing the recorder:
+
+        _dir=<repo>/skills/mission/bin
+        _base=mission ; _suf=-state.py
+        python3 "$_dir/$_base$_suf" stop-verdict ...
+
+    All three observations pass while a second `stop-verdict` really runs.
+    Nothing here can close it: a test in the same filesystem cannot stop a hook
+    from addressing the file directly, and chasing the spellings (`printf`,
+    `basename`, an encoding) is the losing game twice over -- rounds 1-5 chased
+    ways of writing a call, rounds 6-8 chased ways of hiding from the
+    measurement.
+
+    **This is out of scope on purpose.**  What these tests defend against is
+    the loop of #779 coming back by accident: an edit that calls the CLI again
+    without meaning to.  Every shape of that -- eleven reported ones, other
+    interpreters, `exec`, writing the state directly -- is caught.  A change
+    written to evade the instrument is a matter for review, not for the
+    instrument.
+
+    Closing it would need process-level observation (what actually got
+    spawned), which is a different mechanism with different costs on macOS and
+    on CI.  **If that arrives, this test fails -- delete it and say so.**
+    """
+    directory = STATE_PY.parent
+    subcommands, untouched = _run_shapes_hook(
+        tmp_path,
+        f"_dir={directory}\n_base=mission\n_suf=-state.py\n"
+        'printf \'%s\' "$INPUT" | python3 "$_dir/$_base$_suf" stop-verdict'
+        " --hook-input - --json >/dev/null",
+    )
+
+    assert subcommands == ["stop-verdict"], subcommands
+    assert untouched
+
+
 # The one shape that looked like the others and is not.  `\\ ` escapes the
 # space, so bash looks for a command named `_mission_state_bounded resume`,
 # finds none, and the wrapper is never entered.  The static check let it
