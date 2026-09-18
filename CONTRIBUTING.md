@@ -65,7 +65,8 @@ Python:
 - Keep the state file schema backwards-compatible unless the migration path is explicit
 - Prefer structured JSON operations over string parsing
 - Preserve the threshold gate in `mark-passes`
-- Add tests for scoring, session routing, and lifecycle changes
+- Protect scoring, session routing, and lifecycle behavior under the
+  [Test Value Policy](AGENTS.md#test-value-policy); reuse or extend sufficient tests
 
 Shell:
 
@@ -99,7 +100,9 @@ Before opening a pull request:
 - Run `make test`
 - Run `shellcheck scripts/mission-stop-guard.sh` if the hook changed
 - Update README or reference docs for user-visible behavior
-- Add or update tests for behavior changes
+- Complete the PR Test value section under the [Test Value Policy](AGENTS.md#test-value-policy):
+  failure detected, difference from existing tests, and execution/maintenance cost.
+  Name sufficient existing tests or explain why the change is unrelated to tests.
 - Explain any orchestration-rule changes clearly in the PR description
 - Redact agent output before pasting it into the PR description (see below)
 

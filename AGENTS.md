@@ -28,6 +28,51 @@ This repository is OSS. Keep public behavior portable across users, machines, an
 - External specialists are evidence providers only. `mission` owns state, scoring, pass/fail gates, and final reporting.
 - Broad orchestrator skills must be bounded to a single evidence artifact such as a plan, review, or synthesis note. Do not nest a second autonomous completion loop inside `/mission`.
 
+## Test Value Policy
+
+For each test added, changed, or removed, ask: **what realistic regression would
+we miss without it?** Test counts and coverage percentages are not acceptance
+goals. New or changed behavior still needs regression protection; reuse or
+extend an existing test when it can expose the defect.
+
+1. **Name the failure.** Describe the concrete broken behavior that makes the
+   test fail. Implementation copies, mock self-checks, and rechecks of type or
+   library guarantees need an application-specific failure to justify them.
+2. **Compare existing coverage.** Check the production entry point, input,
+   observable result, side effects, and trust boundary. Consolidate equivalent
+   coverage. Different authorization boundaries or persistence stages can catch
+   different failures even when assertions look alike; preserve those defenses.
+3. **Test a contract.** Prefer observable results over private call order or
+   implementation-shaped expected values. Internal invariants, immutability,
+   and executable skill instructions are valid targets when violating them has
+   a concrete effect; explain that effect.
+4. **Justify each distinct case.** Keep cases that expose different failures.
+   Put shared validation input tables at the shared logic and retain meaningful
+   wiring/rejection checks at each entry point. Do not multiply the entire
+   table across every entry point without a distinct reason.
+5. **Prune while changing.** Remove or merge tests made redundant by the change.
+   For deletions, identify the retained protection and its CI route, or explain
+   the detection deliberately given up and why its cost exceeds its value.
+   Keep diagnostic measurements outside the normal regression suite unless
+   they enforce a meaningful contract.
+
+In the PR's **Test value** section, briefly record the failure detected, the
+difference from existing tests (including what was consolidated), and the
+execution/maintenance cost. One explanation per group with the same rationale
+is enough. For subprocess-heavy, sleep-based, flaky, or heavily mocked tests,
+compare a cheaper or more reliable alternative. Use measured times when
+available; otherwise label the cost as unmeasured. Do not require a benchmark
+or a mutation campaign for every test. Unrelated changes may state N/A with a
+reason; an existing sufficient test should be named, not counted as missing work.
+
+The reviewer checks these claims against the implementation, retained tests,
+and CI wiring; a completed template is not proof of detection value. Where
+practical, use a failing-before/passing-after result or a targeted fault to
+resolve doubts about whether the test can detect the claimed defect. Any future
+automated PR-text check should check completeness only, not infer test quality
+from keywords, counts, or coverage. This policy is reviewed manually; it does
+not add a required CI check.
+
 ## PR Size Calibration
 
 The shared PR-size rule ships pre-calibration defaults of 400 and 1,000 lines and

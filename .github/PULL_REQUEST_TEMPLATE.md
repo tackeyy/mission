@@ -7,6 +7,18 @@
 <!-- Bullet the notable changes. -->
 -
 
+## Test value
+
+Decision criteria: [Test Value Policy](https://github.com/tackeyy/mission/blob/main/AGENTS.md#test-value-policy).
+
+<!-- One short explanation
+per group with the same rationale; for unrelated changes, replace the bullets
+with N/A and a reason. Name sufficient existing tests when no new test is needed. -->
+
+- Failure detected:
+- Difference from existing tests / retained protection after consolidation or deletion:
+- Execution and maintenance cost (measured if available; otherwise unmeasured):
+
 ## Validation
 
 <!-- How did you verify the change? Check all that apply. -->
