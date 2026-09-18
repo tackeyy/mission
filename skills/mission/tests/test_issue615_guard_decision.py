@@ -7,6 +7,8 @@ import json
 import os
 import re
 import shlex
+import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -628,12 +630,18 @@ _POLICY_NAMES = re.compile(
 _COMMANDS = {"mark-halt", "cleanup-stale", "stop-guard-observe"}
 
 
-# `function name {`, `name() {`, and `name()` with the brace on a later line are
-# all definitions.  Only the header is read; see `_state_cli_callers`.
+# bash accepts far more in a function name than an identifier: `_q-x` is legal.
+# Restricting the name to `[A-Za-z0-9_]` let a wrapper hide behind a hyphen, so
+# the name runs to the next character that would end a word in shell.
+_NAME = r"[^\s;&|()<>{}'\"$`\\=]+"
 _FUNCTION_HEADER = re.compile(
-    r"(?m)^[ \t]*(?:function[ \t]+(?P<kw>[A-Za-z_][A-Za-z0-9_]*)[ \t]*(?:\([ \t]*\))?"
-    r"|(?P<paren>[A-Za-z_][A-Za-z0-9_]*)[ \t]*\([ \t]*\))"
+    r"(?m)^[ \t]*(?:function[ \t]+(?P<kw>" + _NAME + r")[ \t]*(?:\([ \t]*\))?"
+    r"|(?P<paren>" + _NAME + r")[ \t]*\([ \t]*\))"
 )
+
+# `alias _al=_bounded` and `_q=_bounded` both make a second name reach the CLI.
+_ALIAS = re.compile(r"(?m)^[ \t]*alias[ \t]+(?P<name>" + _NAME + r")=(?P<value>\S+)")
+_ASSIGNMENT = re.compile(r"(?m)^[ \t]*(?P<name>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>\S+)")
 
 
 def _state_cli_callers(source: str) -> set[str]:
@@ -659,13 +667,37 @@ def _state_cli_callers(source: str) -> set[str]:
     one function, and its shape is "call the CLI once and print what comes
     back", so this costs nothing here and closes the whole class.
 
-    It errs toward reporting.  A hook that grew a helper called more than once
-    would be reported, and that is the direction to fail in -- CI says so on
-    the first push, rather than a bypass sitting unnoticed.
+    Aliases and assignments give a name a second name (#796), so they are
+    followed to a fixed point: `alias _al=_bounded` and `_q=_bounded` each let
+    the CLI be reached under a spelling the definitions alone do not show.
+
+    It errs toward reporting.  A helper called with a literal argument is
+    reported even when it never touches the CLI, and that is the direction to
+    fail in -- CI says so on the first push, rather than a bypass sitting
+    unnoticed.
     """
     callers = {"$MISSION_STATE_PY", "${MISSION_STATE_PY}"}
     for header in _FUNCTION_HEADER.finditer(source):
         callers.add(header.group("kw") or header.group("paren"))
+    growing = True
+    while growing:
+        growing = False
+        for pattern in (_ALIAS, _ASSIGNMENT):
+            for match in pattern.finditer(source):
+                value = match.group("value").strip("\"'")
+                if value not in callers:
+                    continue
+                name = match.group("name")
+                # An assignment is reached through the variable, an alias by
+                # its own name.
+                spellings = (
+                    {name} if pattern is _ALIAS
+                    else {"$" + name, "${" + name + "}"}
+                )
+                if spellings <= callers:
+                    continue
+                callers |= spellings
+                growing = True
     return callers
 
 
@@ -673,28 +705,37 @@ def _state_cli_invocations(source: str, callers: set[str]) -> list[tuple[str, st
     """Return (line, first argument) for every call of the state CLI.
 
     The forwarding call inside a wrapper -- the one whose argument is `"$@"` --
-    is what makes it a wrapper, so it is the only thing exempt.  Skipping the
-    whole *line* was the previous shape and let the rest of that line hide a
-    call:
+    is what makes it a wrapper, so it is exempt.  **Only the CLI path itself
+    may forward.**  A function name followed by `"$@"` is counted, because
+    `"$@"` says nothing about what is being passed:
 
-        python3 "$MISSION_STATE_PY" "$@"; _mission_state_bounded resume
+        set -- resume
+        _mission_state_bounded "$@"
 
-    Continuations are joined first, and an argument that is not a literal is
-    reported rather than ignored: `helper "$CMD"` asks for something this check
-    cannot read, and deny-by-default means refusing what it cannot read.
+    That reaches the CLI with `resume` and used to be exempt under the same
+    rule that exempts the wrapper's own line (#796).  The hook forwards only
+    through `python3 "$MISSION_STATE_PY" "$@"`, so narrowing the exemption
+    costs it nothing.
+
+    A name may be quoted at the call site (`'_q' resume`), so quotes around it
+    are stripped.  Continuations are joined first, and an argument that is not
+    a literal is reported rather than ignored: `helper "$CMD"` asks for
+    something this check cannot read, and deny-by-default means refusing what
+    it cannot read.
     """
+    forwarding = {"$MISSION_STATE_PY", "${MISSION_STATE_PY}"}
     joined = re.sub(r"\\\n\s*", " ", source)
     invocations: list[tuple[str, str]] = []
     for line in joined.splitlines():
         for caller in callers:
-            pattern = re.escape(caller) + r"\"?\s+(\S+)"
+            pattern = r"['\"]?" + re.escape(caller) + r"['\"]?\s+(\S+)"
             for match in re.finditer(pattern, line):
                 # `;` and `&` end the command, so they are not part of the
                 # argument.  Without stripping them the forwarding call is
                 # only recognised when nothing follows it on the line.
                 argument = match.group(1).rstrip(";&|").strip('"\'')
-                if argument == "$@":
-                    # The wrapper forwarding its own arguments.
+                if argument == "$@" and caller in forwarding:
+                    # The wrapper forwarding its own arguments to the CLI.
                     continue
                 if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*", argument):
                     invocations.append((line, "<not-a-literal>"))
@@ -949,18 +990,68 @@ def test_a_wrapper_of_a_wrapper_cannot_hide_a_second_verdict_call():
     assert "command-not-allowlisted" in codes
 
 
-def test_defining_a_wrapper_without_calling_it_is_not_a_violation():
-    """The closure must widen what counts as a caller, not what counts as a call.
+def test_defining_a_helper_without_calling_it_is_not_a_violation():
+    """The caller set widens what counts as a caller, not what counts as a call.
 
-    Without this, making the caller set transitive could be "satisfied" by
-    reporting every definition, which would reject the hook itself.
+    Without this, making every definition a caller could be "satisfied" by
+    reporting the definitions themselves, which would reject the hook.
     """
     source = HOOK.read_text(encoding="utf-8").replace(
         'printf \'%s\' "$SHELL_TEXT"',
-        '_w7() { _mission_state_bounded "$@"; }\n'
+        "_w7() { printf '%s' hi; }\n"
         'printf \'%s\' "$SHELL_TEXT"',
     )
     assert analyze_guard_shell(source) == []
+
+
+def test_an_escaped_space_is_not_a_call_so_it_needs_no_rule():
+    """`_bounded\\ resume` reads as one word, and that word is not a command.
+
+    The static check lets it through, and it was reported as a bypass.  Running
+    it says otherwise: `\\ ` escapes the space, so bash looks for a command
+    named `_mission_state_bounded resume`, finds none, and exits 127.  The
+    wrapper is never entered, so the contract is not broken and there is
+    nothing here to close.
+
+    Kept as a test because the shape looks like the ones above, and without a
+    record the next reader spends the same time re-deriving that it is inert.
+    """
+    script = (
+        '_mission_state_bounded() { printf "INVOKED:%s" "$*"; }\n'
+        "_mission_state_bounded\\ resume\n"
+    )
+    path = tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False)
+    try:
+        path.write(script)
+        path.close()
+        syntax = subprocess.run(["bash", "-n", path.name], capture_output=True, text=True)
+        run = subprocess.run(["bash", path.name], capture_output=True, text=True)
+    finally:
+        os.unlink(path.name)
+
+    assert syntax.returncode == 0, syntax.stderr
+    assert run.returncode == 127, (run.returncode, run.stdout, run.stderr)
+    assert "INVOKED" not in run.stdout, run.stdout
+
+
+def test_a_second_wrapper_is_reported_even_before_it_is_called():
+    """Only the CLI path may forward `"$@"`; a function name doing so counts.
+
+    This is the cost of closing `set -- resume` + `_bounded "$@"` (#796):
+    `"$@"` says nothing about what is being passed, so exempting it for
+    function names exempts whatever the positional parameters were set to.
+    The hook forwards only through `python3 "$MISSION_STATE_PY" "$@"`, so it
+    pays nothing -- but a second wrapper is now reported on sight, before
+    anyone calls it.  That is the direction to fail in, and writing it down
+    keeps the next reader from filing it as a false positive.
+    """
+    source = HOOK.read_text(encoding="utf-8").replace(
+        'printf \'%s\' "$SHELL_TEXT"',
+        '_w8() { _mission_state_bounded "$@"; }\n'
+        'printf \'%s\' "$SHELL_TEXT"',
+    )
+    codes = [violation.code for violation in analyze_guard_shell(source)]
+    assert "command-not-allowlisted" in codes
 
 
 def test_the_wrapper_definition_is_not_itself_a_call():
@@ -1009,6 +1100,38 @@ def test_the_wrapper_definition_is_not_itself_a_call():
         ("a brace escaped with a backslash",
          '_w12() {\n  printf \'%s\' \\}\n'
          '  _mission_state_bounded "$@"\n}\n_w12 resume'),
+        # #796: names and call sites the matching missed.  Each of these was
+        # checked by running it under `bash` with a stub wrapper: all five
+        # actually invoke the wrapper with `resume`, so each is a real hole and
+        # not just a shape the matching reads differently.
+        # These forward through `"$MISSION_STATE_PY"`, not through the hook's
+        # wrapper, so the definition line stays exempt and only the *call* can
+        # trip the check.  Written the other way, the definition itself is
+        # reported (a function name may not forward `"$@"`), which passes the
+        # row while leaving the name matching untested.
+        ("a name containing a hyphen",
+         'function _q-x { python3 "$MISSION_STATE_PY" "$@"; }\n_q-x resume'),
+        ("a call whose name is quoted",
+         '_q() { python3 "$MISSION_STATE_PY" "$@"; }\n\'_q\' resume'),
+        ("a call through a variable",
+         '_q=_mission_state_bounded\n"$_q" resume'),
+        ("a call through the braced spelling of a variable",
+         '_q=_mission_state_bounded\n"${_q}" resume'),
+        ("a variable assigned from another variable",
+         '_q=_mission_state_bounded\n_r=$_q\n"$_r" resume'),
+        # Aliases are scanned before assignments, so this one needs a second
+        # pass: `$_q` is not a caller yet when the alias line is read.  It runs
+        # (bash expands `$_q` when the alias is defined), so the fixed point is
+        # not theoretical.
+        ("an alias whose value is quoted",
+         "shopt -s expand_aliases\nalias _al='_mission_state_bounded'\n_al resume"),
+        ("an alias whose value is a variable",
+         'shopt -s expand_aliases\n_q=_mission_state_bounded\n'
+         'alias _al=$_q\n_al resume'),
+        ("a call through an alias",
+         'shopt -s expand_aliases\nalias _al=_mission_state_bounded\n_al resume'),
+        ("positional parameters replaced before forwarding",
+         'set -- resume\n_mission_state_bounded "$@"'),
         ("a brace inside a comment",
          '_w10() {\n  # }\n  _mission_state_bounded "$@"\n}\n_w10 resume'),
     ],
