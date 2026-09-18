@@ -64,7 +64,10 @@ def test_the_adapter_has_one_closed_dispatch_table():
     assert len(module._GUARD_COMMAND_APPLIERS) == 4
 
 
-@pytest.mark.parametrize("removed", EXPECTED_KINDS)
+# Sorted, not the set itself: parametrising over a set gives each process a
+# different order, and xdist rejects the run because the workers collected
+# different tests.  A full suite would fail every time.
+@pytest.mark.parametrize("removed", sorted(EXPECTED_KINDS))
 def test_the_closed_dispatch_rejects_a_missing_or_unknown_kind(monkeypatch, removed):
     module = _module()
     table = dict(module._GUARD_COMMAND_APPLIERS)
