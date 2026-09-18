@@ -114,6 +114,11 @@ from activity_segments import (  # noqa: E402
 )
 from mission_application import guard_application  # noqa: E402
 from mission_application.evidence_publication import progress_mission_segment  # noqa: E402
+from mission_persistence.evidence_publish_path import (  # noqa: E402
+    open_publication_directory,
+    open_publication_parent,
+    publication_parent_mismatch,
+)
 from mission_application.lifecycle import (  # noqa: E402
     ActivityEndRequest,
     ActivityStartRequest,
@@ -6651,11 +6656,16 @@ def _publish_evidence_effects(
     with _PublishedFilesTransaction() as transaction:
         published = []
         for effect, publication_path in zip(effects, publication_paths):
-            item = transaction.add(
-                _publish_output_transaction(
-                    _resolve_evidence_output_path(cwd, publication_path), effect.content
+            with open_publication_directory(
+                cwd, publication_path, _resolve_evidence_output_path
+            ) as destination:
+                item = transaction.add(
+                    _publish_output_transaction(
+                        destination.path,
+                        effect.content,
+                        directory_fd=destination.directory_fd,
+                    )
                 )
-            )
             published.append(item)
         _bind_artifact_publication(cwd, effects, publication_paths, published)
         yield effects
@@ -12073,11 +12083,16 @@ def _publish_output_transaction(
     content: bytes,
     *,
     forbidden_targets: tuple[tuple[tuple[int, int, int], str], ...] = (),
+    # The type is spelled in the library that supplies it; naming it here
+    # would add an expression to a function the ratchet keeps thin.
+    directory_fd=None,
 ) -> _PublishedFile:
     if not path.name or path.name in {".", ".."}:
         raise ValueError("output filename is invalid")
-    directory_path = path.parent.resolve()
-    directory_fd, directory_identity = _open_publish_directory(directory_path)
+    parent = open_publication_parent(path, directory_fd, _open_publish_directory)
+    directory_path = parent.directory_path
+    directory_fd = parent.directory_fd
+    directory_identity = parent.directory_identity
     temporary = ""
     temporary_stat: os.stat_result | None = None
     created = False
@@ -12089,12 +12104,9 @@ def _publish_output_transaction(
             raise ValueError("output target conflicts with an immutable archive")
         previous_entry = _read_review_archive_at(directory_fd, path.name)
         temporary, temporary_stat = _write_temp_at(directory_fd, path.name, content)
-        opened_parent = os.fstat(directory_fd)
-        named_parent = directory_path.lstat()
-        opened_identity = _directory_identity(opened_parent)
-        named_identity = _directory_identity(named_parent)
-        if opened_identity != directory_identity or named_identity != directory_identity:
-            reason = "directory-opened" if opened_identity != directory_identity else "directory-named"
+        mismatch = publication_parent_mismatch(parent)
+        if mismatch is not None:
+            reason, opened_parent, named_parent = mismatch
             raise ValueError(
                 f"publish directory changed: {_publish_directory_detail(directory_identity, opened_parent, named_parent, reason=reason)}",
             )
