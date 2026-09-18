@@ -654,24 +654,30 @@ def _state_cli_callers(source: str) -> set[str]:
 def _state_cli_invocations(source: str, callers: set[str]) -> list[tuple[str, str]]:
     """Return (line, first argument) for every call of the state CLI.
 
-    Only the *forwarding* line of a wrapper is exempt -- the `"$@"` that makes
-    it a wrapper.  Skipping whole function bodies let a second helper hide a
-    call inside itself, which is the same bypass as the wrapper it replaced.
+    The forwarding call inside a wrapper -- the one whose argument is `"$@"` --
+    is what makes it a wrapper, so it is the only thing exempt.  Skipping the
+    whole *line* was the previous shape and let the rest of that line hide a
+    call:
+
+        python3 "$MISSION_STATE_PY" "$@"; _mission_state_bounded resume
 
     Continuations are joined first, and an argument that is not a literal is
-    reported rather than ignored: `CMD=resume; helper "$CMD"` asks for
-    something this check cannot read, and deny-by-default means refusing what
-    it cannot read.
+    reported rather than ignored: `helper "$CMD"` asks for something this check
+    cannot read, and deny-by-default means refusing what it cannot read.
     """
     joined = re.sub(r"\\\n\s*", " ", source)
     invocations: list[tuple[str, str]] = []
     for line in joined.splitlines():
-        if '"$@"' in line:
-            continue
         for caller in callers:
             pattern = re.escape(caller) + r"\"?\s+(\S+)"
             for match in re.finditer(pattern, line):
-                argument = match.group(1).strip('"\'')
+                # `;` and `&` end the command, so they are not part of the
+                # argument.  Without stripping them the forwarding call is
+                # only recognised when nothing follows it on the line.
+                argument = match.group(1).rstrip(";&|").strip('"\'')
+                if argument == "$@":
+                    # The wrapper forwarding its own arguments.
+                    continue
                 if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*", argument):
                     invocations.append((line, "<not-a-literal>"))
                     continue
@@ -903,6 +909,25 @@ def test_an_unreadable_subcommand_is_refused_rather_than_ignored():
     )
     codes = [violation.code for violation in analyze_guard_shell(source)]
     assert "command-not-allowlisted" in codes
+
+
+def test_a_call_sharing_a_line_with_the_forwarding_call_is_still_read():
+    """Only the forwarding call is exempt, not the line it sits on.
+
+    The wrapper is recognised by forwarding `"$@"`, so that one call has to be
+    skipped.  Skipping the whole *line* let anything after the `;` through, and
+    a wrapper definition is exactly where such a line is plausible.  Asserting
+    through the hook cannot show this: the hook has no such line, so the rule
+    would look satisfied while the extraction dropped the call.
+    """
+    source = 'python3 "$MISSION_STATE_PY" "$@"; _mission_state_bounded resume\n'
+    callers = _state_cli_callers(
+        '_mission_state_bounded() {\n  python3 "$MISSION_STATE_PY" "$@"\n}\n'
+    )
+
+    invocations = _state_cli_invocations(source, callers)
+
+    assert [subcommand for _line, subcommand in invocations] == ["resume"], invocations
 
 
 def test_a_continuation_line_is_read_as_one_command():

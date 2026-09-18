@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+from typing import NamedTuple
 from pathlib import Path
 
 import pytest
@@ -114,6 +115,39 @@ def test_the_dispatch_is_defined_once_and_the_hook_has_no_case_block():
 # that have nothing to do with this change (#771 closed exactly that).
 
 
+_GUARD_ENV = {
+    "CLAUDE_CODE_SESSION_ID": "own",
+    "MISSION_STATE_NOW": "2026-08-23T01:00:00Z",
+    "MISSION_STOP_GUARD_NOW_EPOCH": "1000",
+    "MISSION_SESSION_ID": None,
+}
+
+
+def _apply_env(env, overrides=None):
+    """Apply an override map in place; `None` removes the variable.
+
+    Removal has to be expressible: the orphan branch is only reachable with no
+    hook session id at all, and an empty string is not the same as unset.
+    """
+    for name, value in {**_GUARD_ENV, **(overrides or {})}.items():
+        if value is None:
+            env.pop(name, None)
+        else:
+            env[name] = value
+    return env
+
+
+class _Row(NamedTuple):
+    """One guard path: the state, the branch, and what the branch leaves."""
+
+    fields: dict | None
+    finding: str
+    reason: str
+    halt: str | None = None
+    orphan_processed: bool = False
+    env: dict | None = None
+
+
 def _counting_python(tmp_path):
     """A `python3` that records every launch and then execs the real one."""
     log = tmp_path / "launches.log"
@@ -130,17 +164,11 @@ def _counting_python(tmp_path):
     return shim_dir, log
 
 
-def _run_hook(tmp_path, state_dir, *, stop_hook_active=False):
+def _run_hook(tmp_path, state_dir, *, stop_hook_active=False, env_overrides=None):
     shim_dir, log = _counting_python(tmp_path)
-    env = {
-        **os.environ,
-        "PATH": f"{shim_dir}{os.pathsep}{os.environ['PATH']}",
-        "MISSION_STATE_PY": str(STATE_PY),
-        "CLAUDE_CODE_SESSION_ID": "own",
-        "MISSION_STATE_NOW": "2026-08-23T01:00:00Z",
-        "MISSION_STOP_GUARD_NOW_EPOCH": "1000",
-    }
-    env.pop("MISSION_SESSION_ID", None)
+    env = {**os.environ, **_GUARD_ENV, "PATH": f"{shim_dir}{os.pathsep}{os.environ['PATH']}",
+           "MISSION_STATE_PY": str(STATE_PY)}
+    _apply_env(env, env_overrides)
     result = subprocess.run(
         ["bash", str(HOOK)],
         input=json.dumps({"stop_hook_active": stop_hook_active, "cwd": str(state_dir)}),
@@ -178,15 +206,17 @@ def _write_state(root, **fields):
     return path
 
 
-def _verdict(root):
-    """The decision itself, so a row can assert the branch it reaches."""
-    env = {
-        **os.environ,
-        "CLAUDE_CODE_SESSION_ID": "own",
-        "MISSION_STATE_NOW": "2026-08-23T01:00:00Z",
-        "MISSION_STOP_GUARD_NOW_EPOCH": "1000",
-    }
-    env.pop("MISSION_SESSION_ID", None)
+def _verdict(root, env_overrides=None):
+    """The decision itself, so a row can assert the branch it reaches.
+
+    This resolves the decision *and applies its command*, which rewrites the
+    state it just read.  So it must never run against the state the launch
+    count is measured on: the first version shared one directory, the halt
+    landed before the hook started, and every row measured the settled state
+    instead of the path named in its name.  Callers build a second directory.
+    """
+    env = {**os.environ, **_GUARD_ENV}
+    _apply_env(env, env_overrides)
     result = subprocess.run(
         [sys.executable, str(STATE_PY), "stop-verdict", "--hook-input", "-", "--json"],
         input=json.dumps({"stop_hook_active": False, "cwd": str(root)}),
@@ -196,56 +226,114 @@ def _verdict(root):
     return json.loads(result.stdout)
 
 
+# A lease is only read when all four of its fields are present and well typed
+# (`authoritative_reader.py`): owner, id, a non-negative integer epoch, and an
+# expiry.  Writing the expiry alone leaves the lease `absent`, which is how the
+# first version's `lease-expired` row silently took the ordinary stale path.
+def _lease(expires_at):
+    return {
+        "owner_session_id": "cc-own",
+        "lease_id": "L1",
+        "fencing_epoch": 1,
+        "lease_expires_at": expires_at,
+    }
+
+
+# The orphan branch requires *no* hook session at all: with a session id it is
+# the session's own state, and with neither id nor pid override the guard falls
+# back to the process pid and reports `pid-owner-mismatch`.  Both have to go.
+_NO_HOOK_SESSION = {"CLAUDE_CODE_SESSION_ID": None, "MISSION_HOOK_AGENT_PID": "0"}
+
+
 # Each row is a state, the branch it must reach, and the launch count.
 #
-# The branch is asserted because the first version asserted only the count:
-# three of its seven rows (`lease-expired`, `orphan-pid`, `awaiting-user`) were
-# in fact taking the ordinary active path, so the table looked like seven paths
-# and exercised four.  A row that does not reach its branch tests nothing that
-# the row above it did not.
+# `finding` and `reason` alone do not separate the rows -- `missing` and
+# `orphan` both settle to `none` / `no-eligible-session`, because processing
+# the orphan removes the only candidate.  So a row also says what it left
+# behind: the halt it wrote, and whether an orphan was processed.  Without
+# that, two rows on different paths look identical and the control below
+# cannot tell a real table from one that collapsed.
 #
-# `stale` settles to `command=none` with the halt already applied -- which is
+# `stale` settles to `finding=stale` with the halt already applied -- which is
 # the point of #779: the application happened inside the same process, so the
 # hook sees a settled verdict rather than an instruction.
 _GUARD_PATHS = {
-    "missing": (None, "none", "no-eligible-session"),
-    "halted": ({"loop_active": False, "halt_reason": "done by hand"}, "none", "halt-reason"),
-    "active": ({}, "none", "active-unfinished"),
-    "stale": ({"updated_at": "2020-01-01T00:00:00Z"}, "stale", "stale-auto-halt-complete"),
-    "awaiting-user": (
+    "missing": _Row(None, "none", "no-eligible-session"),
+    "halted": _Row(
+        {"loop_active": False, "halt_reason": "done by hand"},
+        "none", "halt-reason", halt="done by hand",
+    ),
+    "active": _Row({}, "none", "active-unfinished"),
+    "stale": _Row(
+        {"updated_at": "2020-01-01T00:00:00Z"},
+        "stale", "stale-auto-halt-complete", halt="stale: auto-halted",
+    ),
+    "awaiting-user": _Row(
         {"updated_at": "2020-01-01T00:00:00Z", "awaiting_user": True},
-        "awaiting-user",
-        "active-unfinished",
+        "awaiting-user", "active-unfinished",
     ),
-    "lease-expired": (
-        {
-            "updated_at": "2020-01-01T00:00:00Z",
-            "lease_id": "abc",
-            "lease_expires_at": "2020-01-02T00:00:00Z",
-            "lease_owner": "other",
-        },
-        "stale",
-        "stale-auto-halt-complete",
+    "lease-expired": _Row(
+        {"updated_at": "2020-01-01T00:00:00Z", **_lease("2020-01-02T00:00:00Z")},
+        "lease-expired", "stale-auto-halt-complete", halt="(cleanup-stale)",
     ),
-    "orphan": ({"pid": 999999, "updated_at": "2020-01-01T00:00:00Z"}, "stale", "stale-auto-halt-complete"),
+    "lease-held": _Row(
+        {"updated_at": "2020-01-01T00:00:00Z", **_lease("2099-01-02T00:00:00Z")},
+        "stale", "active-unfinished",
+    ),
+    "orphan": _Row(
+        {"pid": 999999, "updated_at": "2020-01-01T00:00:00Z"},
+        "none", "no-eligible-session",
+        halt="orphan: pid 999999 dead", orphan_processed=True,
+        env=_NO_HOOK_SESSION,
+    ),
 }
 
 
-@pytest.mark.parametrize("path", sorted(_GUARD_PATHS))
-def test_the_hook_starts_mission_state_once_for_each_guard_path(tmp_path, path):
-    fields, expected_finding, expected_reason = _GUARD_PATHS[path]
-    root = tmp_path / "repo"
+def _populate(root, fields):
     root.mkdir()
     if fields is None:
         (root / ".mission-state" / "sessions").mkdir(parents=True)
     else:
         _write_state(root, **fields)
 
-    verdict = _verdict(root)
-    assert verdict["finding"] == expected_finding, (path, verdict["reason"])
-    assert verdict["reason"] == expected_reason, path
 
-    result, launches = _run_hook(tmp_path, root)
+@pytest.mark.parametrize("path", sorted(_GUARD_PATHS))
+def test_the_hook_starts_mission_state_once_for_each_guard_path(tmp_path, path):
+    row = _GUARD_PATHS[path]
+
+    # Two directories, because asserting the branch changes the state.
+    judged = tmp_path / "judged"
+    _populate(judged, row.fields)
+    measured = tmp_path / "measured"
+    _populate(measured, row.fields)
+
+    verdict = _verdict(judged, row.env)
+    assert verdict["finding"] == row.finding, (path, verdict["reason"])
+    assert verdict["reason"] == row.reason, path
+    processed = verdict["continuation"]["processed_orphan_state_files"]
+    assert bool(processed) is row.orphan_processed, (path, processed)
+
+    state_file = judged / ".mission-state" / "sessions" / "cc-own.json"
+    halt = (
+        json.loads(state_file.read_text(encoding="utf-8")).get("halt_reason")
+        if state_file.exists() else None
+    )
+    if row.halt is None:
+        assert not halt, (path, halt)
+    else:
+        assert halt and row.halt in halt, (path, halt)
+
+    # The measured state must still be the one the row describes.  Sharing
+    # one directory with the assertion above would hand the hook a state the
+    # decision had already settled, and every row would measure that instead
+    # of its own path -- which is what the first version did.
+    measured_file = measured / ".mission-state" / "sessions" / "cc-own.json"
+    if row.fields is not None:
+        assert measured_file.exists(), path
+        before = json.loads(measured_file.read_text(encoding="utf-8"))
+        assert before.get("halt_reason", "") == row.fields.get("halt_reason", ""), path
+
+    result, launches = _run_hook(tmp_path, measured, env_overrides=row.env)
 
     assert result.returncode == 0, (path, result.stderr)
     assert len(launches) == 1, (path, launches)
@@ -253,9 +341,18 @@ def test_the_hook_starts_mission_state_once_for_each_guard_path(tmp_path, path):
 
 def test_the_rows_reach_more_than_one_branch():
     """A control: if every row collapsed onto one branch, the table would still
-    pass its per-row assertions while testing a single path seven times."""
-    findings = {finding for _fields, finding, _reason in _GUARD_PATHS.values()}
-    assert len(findings) >= 3, findings
+    pass its per-row assertions while testing a single path many times.
+
+    Counting distinct findings is not enough -- eight rows can share three
+    findings and still be six copies of one path.  Every row has to differ from
+    every other in the whole outcome it claims.
+    """
+    outcomes = [
+        (row.finding, row.reason, row.halt, row.orphan_processed)
+        for row in _GUARD_PATHS.values()
+    ]
+    assert len(set(outcomes)) == len(_GUARD_PATHS), outcomes
+    assert len({row.finding for row in _GUARD_PATHS.values()}) >= 4, outcomes
 
 
 
