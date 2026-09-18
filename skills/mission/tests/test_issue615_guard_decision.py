@@ -701,6 +701,69 @@ def _state_cli_callers(source: str) -> set[str]:
     return callers
 
 
+def _command_fragments(line: str) -> list[str]:
+    """Split a line wherever bash can start a new command.
+
+    `shlex` alone reads `x=$(_bounded resume)` as the words `x=$(_bounded` and
+    `resume)`, so the caller never appears as a word and the call is missed
+    (#796 review round 3).  Command substitution, backticks, and the operators
+    `;` `|` `&` all begin a command, and each fragment is read as its own line.
+    `$(` needs no case of its own: the `(` ends the fragment either way, and a
+    branch no mutation can distinguish is a branch that rots.
+
+    **Single quotes are the one thing that stops it.**  `'$(_bounded resume)'`
+    is data and runs nothing, while `"$(_bounded resume)"` runs -- the same
+    characters, told apart only by which quote encloses them.  The scan tracks
+    that, so neither is guessed.
+    """
+    fragments: list[str] = []
+    buffer: list[str] = []
+    in_single = False
+    in_double = False
+    index = 0
+    end = len(line)
+
+    def cut() -> None:
+        fragments.append("".join(buffer))
+        buffer.clear()
+
+    while index < end:
+        char = line[index]
+        if in_single:
+            buffer.append(char)
+            if char == "'":
+                in_single = False
+            index += 1
+            continue
+        if char == "\\" and index + 1 < end:
+            buffer.append(char)
+            buffer.append(line[index + 1])
+            index += 2
+            continue
+        if char == "'":
+            in_single = True
+            buffer.append(char)
+            index += 1
+            continue
+        if char == '"':
+            in_double = not in_double
+            buffer.append(char)
+            index += 1
+            continue
+        if char == "`":
+            cut()
+            index += 1
+            continue
+        if char in "()" or (not in_double and char in ";|&"):
+            cut()
+            index += 1
+            continue
+        buffer.append(char)
+        index += 1
+    cut()
+    return [fragment for fragment in fragments if fragment.strip()]
+
+
 def _state_cli_invocations(source: str, callers: set[str]) -> list[tuple[str, str]]:
     """Return (line, first argument) for every call of the state CLI.
 
@@ -733,13 +796,14 @@ def _state_cli_invocations(source: str, callers: set[str]) -> list[tuple[str, st
     joined = re.sub(r"\\\n\s*", " ", source)
     invocations: list[tuple[str, str]] = []
     for raw_line in joined.splitlines():
+      for fragment in _command_fragments(raw_line):
         try:
-            words = shlex.split(raw_line)
+            words = shlex.split(fragment)
         except ValueError:
             # An unbalanced quote: the line cannot be read as words.  Fall back
             # to the raw split rather than skipping it, so an unreadable line
             # cannot be used to hide a call.
-            words = raw_line.split()
+            words = fragment.split()
         for index, word in enumerate(words):
             if word not in callers:
                 continue
@@ -1076,6 +1140,38 @@ def test_a_line_shlex_cannot_read_is_still_searched():
     assert [subcommand for _line, subcommand in invocations] == ["resume"], invocations
 
 
+def test_an_operator_inside_double_quotes_is_not_a_call():
+    """`;` ends a command only outside quotes.
+
+    `printf "%s" "a; _bounded resume"` prints the text and runs nothing.
+    Ending the fragment at every `;` would report it -- a clean hook failing,
+    which is how a check gets relaxed.  This pins the quote tracking that the
+    operator rows above rely on.
+    """
+    source = HOOK.read_text(encoding="utf-8").replace(
+        'printf \'%s\' "$SHELL_TEXT"',
+        'printf "%s" "a; _mission_state_bounded resume"\n'
+        'printf \'%s\' "$SHELL_TEXT"',
+    )
+    assert analyze_guard_shell(source) == []
+
+
+def test_a_substitution_inside_single_quotes_is_not_a_call():
+    """Which quote encloses it is the whole difference.
+
+    `"$(_bounded resume)"` runs; `'$(_bounded resume)'` is data.  The
+    characters are identical, so splitting at `$(` without tracking quotes
+    would report the second -- a clean hook failing, which is how a check gets
+    relaxed.  This pins the control for the rows above.
+    """
+    source = HOOK.read_text(encoding="utf-8").replace(
+        'printf \'%s\' "$SHELL_TEXT"',
+        "printf '%s' '$(_mission_state_bounded resume)'\n"
+        'printf \'%s\' "$SHELL_TEXT"',
+    )
+    assert analyze_guard_shell(source) == []
+
+
 def test_the_same_characters_inside_a_string_are_not_a_call():
     """Words are what bash runs; characters inside a string are data.
 
@@ -1199,6 +1295,28 @@ def test_the_wrapper_definition_is_not_itself_a_call():
         # pass: `$_q` is not a caller yet when the alias line is read.  It runs
         # (bash expands `$_q` when the alias is defined), so the fixed point is
         # not theoretical.
+        # A command can begin inside a substitution or after an operator, and
+        # `shlex` alone joins the caller to the punctuation before it.
+        ("a call inside a command substitution",
+         'x=$(_mission_state_bounded resume)'),
+        ("a call inside backticks",
+         'x=`_mission_state_bounded resume`'),
+        ("a substitution inside double quotes",
+         'printf \'%s\' "$(_mission_state_bounded resume)"'),
+        ("a call after a semicolon", 'true; _mission_state_bounded resume'),
+        # No space: `shlex` alone yields `true;_mission_state_bounded` as one
+        # word, so the operator has to end the fragment.  Both of these run.
+        ("a call after a semicolon with no space",
+         'true;_mission_state_bounded resume'),
+        ("a call after a pipe with no space",
+         'true|_mission_state_bounded resume'),
+        # `\"` is a literal quote, not the start of a string.  Reading it as
+        # one leaves the rest of the line "inside quotes", so the operators
+        # stop ending fragments and the call joins the punctuation before it.
+        ("an escaped quote before the operators",
+         'printf \'%s\' \\";true;_mission_state_bounded resume'),
+        ("a call after a pipe", 'true | _mission_state_bounded resume'),
+        ("a call after &&", 'true && _mission_state_bounded resume'),
         ("a brace passed as the argument of a real call",
          "_mission_state_bounded {"),
         ("a name quoted in the middle",
