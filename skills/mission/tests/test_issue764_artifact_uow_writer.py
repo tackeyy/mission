@@ -285,6 +285,24 @@ def test_entry_refuses_export_projection_target_redirected_to_another_path():
     _entry_refuses("export-artifact", artifact, projection)
 
 
+def test_entry_refuses_captured_progress_target_redirected_to_projection():
+    blob = _generated_blob("docs/victim-progress.md")
+    blob = blob.__class__(blob.binding.__class__(**{
+        **blob.binding.__dict__, "origin": "captured",
+        "target": ".mission-state/archive/iter-1-abcdef01-progress.md",
+    }), blob.content)
+    _entry_refuses("update-progress", blob)
+
+
+def test_entry_refuses_captured_export_target_redirected_to_projection():
+    artifact = _generated_blob(".mission-state/artifacts/test/mission-artifact.md")
+    projection = _generated_blob("docs/victim-export.md")
+    projection = projection.__class__(projection.binding.__class__(**{
+        **projection.binding.__dict__, "origin": "captured", "target": "docs/intended.md",
+    }), projection.content)
+    _entry_refuses("export-artifact", artifact, projection)
+
+
 def test_entry_allows_render_when_target_matches_its_canonical_path():
     from mission_persistence.fenced_commit import refuse_unauthorized_published_blobs
     path = ".mission-state/artifacts/test/mission-artifact.md"
