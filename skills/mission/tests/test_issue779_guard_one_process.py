@@ -701,7 +701,19 @@ def _run_shapes_hook(tmp_path, inserted):
     before = _state_tree(root)
     shim, log = _recording_state_py(tmp_path)
     hook = _hook_with(tmp_path, inserted)
-    _run_hook(tmp_path, root, hook=hook, env_overrides={"MISSION_STATE_PY": str(shim)})
+    _run_hook(
+        tmp_path, root, hook=hook,
+        env_overrides={
+            "MISSION_STATE_PY": str(shim),
+            # Named here rather than written into the shapes: `python3.14` and
+            # `$TMPDIR` exist on the machine this was written on and not on the
+            # CI runner, so shapes that used them ran nothing there and the
+            # rows passed for the wrong reason.  Both are properties of the
+            # environment, so the environment supplies them.
+            "MISSION_TEST_PYTHON": sys.executable,
+            "MISSION_TEST_OUTSIDE": str(tmp_path / "outside-target"),
+        },
+    )
     return _subcommands(log), _state_tree(root) == before
 
 
@@ -788,10 +800,11 @@ _BYPASS_SHAPES = {
     # the shell -- which is why the recorder sits in the CLI instead.
     "a second call through another interpreter":
         '_state=$MISSION_STATE_PY\n'
-        'printf \'%s\' "$INPUT" | python3.14 "$_state" stop-verdict'
+        'printf \'%s\' "$INPUT" | "$MISSION_TEST_PYTHON" "$_state" stop-verdict'
         ' --hook-input - --json >/dev/null',
     "a call that replaces the process":
-        '( exec python3.14 "$MISSION_STATE_PY" resume >/dev/null 2>&1 ) || true',
+        '( exec "$MISSION_TEST_PYTHON" "$MISSION_STATE_PY" resume'
+        ' >/dev/null 2>&1 ) || true',
 }
 
 
@@ -822,15 +835,15 @@ _SILENT_STATE_CHANGES = {
     # target tells these apart, and where the target points decides where a
     # later write lands.
     "a symlink repointed outside the state directory":
-        'ln -sfn "$TMPDIR/outside-target" "$PWD/.mission-state/link"',
+        'ln -sfn "$MISSION_TEST_OUTSIDE" "$PWD/.mission-state/link"',
     # `stat` follows the link and raises on this one, which would end the test
     # in an error instead of a report.  `lstat` describes the link itself.
     "a dangling symlink":
         'ln -s /nonexistent/target "$PWD/.mission-state/dangling"',
     "a symlink in place of a file with the same contents":
-        'cp "$PWD/.mission-state/marker" "$TMPDIR/outside-marker"'
+        'cp "$PWD/.mission-state/marker" "$MISSION_TEST_OUTSIDE"'
         ' && rm "$PWD/.mission-state/marker"'
-        ' && ln -s "$TMPDIR/outside-marker" "$PWD/.mission-state/marker"',
+        ' && ln -s "$MISSION_TEST_OUTSIDE" "$PWD/.mission-state/marker"',
 }
 
 
@@ -910,8 +923,8 @@ def test_a_path_built_from_pieces_is_not_detected_and_that_is_where_this_stops(
     subcommands, untouched = _run_shapes_hook(
         tmp_path,
         f"_dir={directory}\n_base=mission\n_suf=-state.py\n"
-        'printf \'%s\' "$INPUT" | python3 "$_dir/$_base$_suf" stop-verdict'
-        " --hook-input - --json >/dev/null",
+        'printf \'%s\' "$INPUT" | "$MISSION_TEST_PYTHON" "$_dir/$_base$_suf"'
+        " stop-verdict --hook-input - --json >/dev/null",
     )
 
     assert subcommands == ["stop-verdict"], subcommands
