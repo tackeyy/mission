@@ -32,11 +32,3 @@ def test_run_cli_env_extra_overrides_outer_pollution(tmp_path, run_cli, monkeypa
     assert r.returncode == 0, f"stderr: {r.stderr}"
     assert (tmp_path / ".mission-state" / "sessions" / "sess-good.json").exists()
     assert not (tmp_path / ".mission-state" / "sessions" / "outer-bad.json").exists()
-
-
-def test_run_cli_env_extra_injects_session_id(tmp_path, run_cli):
-    """MISSION_SESSION_ID の env_extra 注入で sessions/<sid>.json になる (常時 multi)."""
-    r = run_cli("init", "multi via env mission", cwd=tmp_path,
-                env_extra={"MISSION_SESSION_ID": "sess-env"})
-    assert r.returncode == 0, f"stderr: {r.stderr}"
-    assert (tmp_path / ".mission-state" / "sessions" / "sess-env.json").exists()
