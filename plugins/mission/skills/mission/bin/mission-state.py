@@ -112,6 +112,7 @@ from activity_segments import (  # noqa: E402
     transition_activity_phase,
     validate_activity,
 )
+from mission_application import guard_application  # noqa: E402
 from mission_application.evidence_publication import progress_mission_segment  # noqa: E402
 from mission_application.lifecycle import (  # noqa: E402
     ActivityEndRequest,
@@ -8035,7 +8036,9 @@ def cmd_stop_guard_observe(args):
     """Adapt one closed block observation to the A5 use case."""
     try:
         result = observe_stop_guard(
-            _LegacyStopObservationRepository(Path.cwd()),
+            _LegacyStopObservationRepository(
+                guard_application.project_root_of(args, Path.cwd, Path)
+            ),
             StopObservationRequest(
                 session_id=args.session_id,
                 digest=args.digest,
@@ -9097,179 +9100,62 @@ def _guard_decision_payload(decision) -> dict:
     return finish_guard_verdict(payload)
 
 
-def _guard_decision_from_payload(payload: object) -> GuardDecision:
-    """Decode only the typed decision emitted by this adapter for a receipt."""
-    if not isinstance(payload, dict) or payload.get("schema") != "mission-stop-verdict/1":
-        raise ValueError("guard-prior-decision-invalid")
-    try:
-        selection_payload = payload["selection"]
-        evidence_payload = payload["evidence"]
-        command_payload = payload["command"]
-        continuation_payload = payload["continuation"]
-        reply_payload = payload["reply"]
-        if not all(
-            isinstance(item, dict)
-            for item in (
-                selection_payload,
-                evidence_payload,
-                command_payload,
-                continuation_payload,
-                reply_payload,
-            )
-        ):
-            raise ValueError
+def _guard_apply_mark_halt(decision):
+    """Halt the session the decision names, in this process.
 
-        freshness_payload = evidence_payload.get("freshness")
-        freshness = None
-        if freshness_payload is not None:
-            if not isinstance(freshness_payload, dict):
-                raise ValueError
-            freshness = FreshnessEvidence(
-                timestamp_field=freshness_payload.get("timestamp_field"),
-                timestamp_value=freshness_payload.get("timestamp_value"),
-                observed_at=freshness_payload["observed_at"],
-                age_sec=freshness_payload.get("age_sec"),
-                warn_after_sec=freshness_payload["warn_after_sec"],
-                halt_after_sec=freshness_payload["halt_after_sec"],
-            )
-        lease_payload = evidence_payload["lease"]
-        orphan_payload = evidence_payload["orphan"]
-        if not isinstance(lease_payload, dict) or not isinstance(orphan_payload, dict):
-            raise ValueError
-        evidence = GuardEvidence(
-            freshness=freshness,
-            awaiting_user=evidence_payload["awaiting_user"],
-            lease=LeaseEvidence(
-                LeaseStatus(lease_payload["status"]),
-                lease_payload.get("expires_at"),
-                lease_payload["observed_at"],
-            ),
-            orphan=OrphanEvidence(
-                orphan_payload.get("pid"),
-                orphan_payload.get("pid_alive"),
-                orphan_payload["check_applicable"],
-            ),
-            planning_warn_iterations=evidence_payload[
-                "planning_warn_iterations"
-            ],
-            pending_digest=evidence_payload["pending_digest"],
-        )
-
-        command_kind = GuardCommandKind(command_payload["kind"])
-        if command_kind is GuardCommandKind.NONE:
-            command = NoCommand()
-        elif command_kind is GuardCommandKind.MARK_HALT:
-            command = MarkHaltCommand(
-                cwd=command_payload["cwd"],
-                session_id=command_payload["session_id"],
-                reason=command_payload["reason"],
-                category=GuardHaltCategory(command_payload["category"]),
-                origin=GuardFindingKind(command_payload["origin"]),
-            )
-        elif command_kind is GuardCommandKind.CLEANUP_STALE:
-            command = CleanupStaleExecuteCommand(
-                root=command_payload["root"],
-                expected_state_file=command_payload["expected_state_file"],
-                execute=command_payload["execute"],
-            )
-        elif command_kind is GuardCommandKind.STOP_GUARD_OBSERVE:
-            command = StopGuardObserveCommand(
-                session_id=command_payload["session_id"],
-                digest=command_payload["digest"],
-                now_epoch=command_payload["now_epoch"],
-                ttl_seconds=command_payload["ttl_seconds"],
-                attempt=command_payload["attempt"],
-                max_attempts=command_payload["max_attempts"],
-            )
-        else:
-            # 未知の command kind を暗黙に observe へ縮退させない（closed set の維持）
-            raise ValueError(
-                "guard-command-unknown-kind-%s" % getattr(command_kind, "value", command_kind)
-            )
-
-        return GuardDecision(
-            decision_id=payload["decision_id"],
-            host_decision=payload["decision"],
-            reason_code=payload["reason"],
-            outcome_kind=payload["outcome_kind"],
-            selection=SessionSelection(
-                state_file=selection_payload.get("state_file"),
-                session_id=selection_payload.get("session_id"),
-                reason=SessionSelectionReason(selection_payload["reason"]),
-                considered_state_files=tuple(
-                    selection_payload["considered_state_files"]
-                ),
-            ),
-            finding=GuardFindingKind(payload["finding"]),
-            evidence=evidence,
-            command=command,
-            continuation=GuardContinuation(
-                project_root=continuation_payload["project_root"],
-                hook_session_id=continuation_payload.get("hook_session_id"),
-                hook_session_id_source=continuation_payload[
-                    "hook_session_id_source"
-                ],
-                hook_pid=continuation_payload.get("hook_pid"),
-                processed_orphan_state_files=tuple(
-                    continuation_payload["processed_orphan_state_files"]
-                ),
-            ),
-            reply=HookReply(
-                emit=reply_payload["emit"],
-                decision=reply_payload["decision"],
-                reason=reply_payload["reason"],
-                outcome_kind=reply_payload["outcome_kind"],
-            ),
-            display_reason=payload["display_reason"],
-            planning_warning=payload["planning_warning"],
-            session_id=payload["session_id"],
-            pending_digest=payload["pending_digest"],
-        )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError("guard-prior-decision-invalid") from exc
-
-
-def _guard_receipt_decision(args, hook_input: object) -> GuardDecision:
-    if (
-        args.prior_decision_fd is None
-        or args.receipt_stdout_fd is None
-        or args.receipt_kind is None
-        or args.receipt_exit_code is None
-    ):
-        raise ValueError("guard-receipt-incomplete")
-    with os.fdopen(args.prior_decision_fd, "r", encoding="utf-8") as stream:
-        prior = _guard_decision_from_payload(json.load(stream))
-    with os.fdopen(args.receipt_stdout_fd, "r", encoding="utf-8") as stream:
-        command_stdout = stream.read()
-    receipt = GuardCommandReceipt(
-        decision_id=prior.decision_id,
-        kind=GuardCommandKind(args.receipt_kind),
-        exit_code=args.receipt_exit_code,
-        stdout=command_stdout,
+    The undecorated body is called on purpose (`__wrapped__`): the guard's
+    budget belongs to `cmd_stop_verdict`, and a nested bound would report
+    exhaustion as `SystemExit(2)` -- a failed receipt rather than the terminal
+    `guard-budget-exhausted` the alarm exists to produce (#779 D2-c).
+    """
+    return guard_application.apply_command(
+        "mark-halt",
+        decision,
+        cmd_mark_halt.__wrapped__,
+        redirect_stdout=contextlib.redirect_stdout,
+        buffer_factory=io.StringIO,
     )
-    resolved = resolve_guard_command_receipt(prior, receipt)
-    if resolved.reason_code != "orphan-processed":
-        return resolved
-    request = _guard_root_request(hook_input)
-    return decide_stop_guard(GuardRequest(
-        project_root=request.project_root,
-        stop_hook_active=request.stop_hook_active,
-        mission_session_id=request.mission_session_id,
-        claude_session_id=request.claude_session_id,
-        codex_thread_id=request.codex_thread_id,
-        hook_pid=request.hook_pid,
-        candidates=request.candidates,
-        observed_at=request.observed_at,
-        observed_epoch=request.observed_epoch,
-        stale_halt_seconds_raw=request.stale_halt_seconds_raw,
-        planning_warn_iterations_raw=request.planning_warn_iterations_raw,
-        observe_ttl_seconds_raw=request.observe_ttl_seconds_raw,
-        pending_breakdown=request.pending_breakdown,
-        pending_digest=request.pending_digest,
-        processed_orphan_state_files=(
-            resolved.continuation.processed_orphan_state_files
-        ),
-    ))
+
+
+def _guard_apply_cleanup_stale(decision):
+    return guard_application.apply_command(
+        "cleanup-stale",
+        decision,
+        cmd_cleanup_stale.__wrapped__,
+        redirect_stdout=contextlib.redirect_stdout,
+        buffer_factory=io.StringIO,
+    )
+
+
+def _guard_apply_stop_guard_observe(decision):
+    return guard_application.apply_command(
+        "stop-guard-observe",
+        decision,
+        cmd_stop_guard_observe.__wrapped__,
+        redirect_stdout=contextlib.redirect_stdout,
+        buffer_factory=io.StringIO,
+    )
+
+
+# The closed command set, in one place.  It is a table rather than a chain of
+# branches so that the set can be checked for exactly the kinds the guard emits
+# -- the property the hook's `case` labels used to carry (#779).
+# One decision applies at most this many commands.  The observe path retries a
+# bounded number of times and each orphan is processed once, so a walk longer
+# than this is a cycle, not progress.
+_GUARD_APPLICATION_LIMIT = 16
+
+_GUARD_COMMAND_APPLIERS = {
+    "none": guard_application.no_application,
+    "mark-halt": _guard_apply_mark_halt,
+    "cleanup-stale": _guard_apply_cleanup_stale,
+    "stop-guard-observe": _guard_apply_stop_guard_observe,
+}
+
+
+def _validate_guard_command_dispatch():
+    """Fail unless the table is exactly the kinds the guard can emit."""
+    return guard_application.validate_guard_command_dispatch(_GUARD_COMMAND_APPLIERS)
 
 
 @bounded_by_guard_timeout
@@ -9286,10 +9172,14 @@ def cmd_stop_verdict(args):
             if args.hook_input != "-":
                 raise ValueError("guard-hook-input-must-be-stdin")
             hook_input = json.loads(sys.stdin.read())
-            if args.prior_decision_fd is None:
-                decision = decide_stop_guard(_guard_root_request(hook_input))
-            else:
-                decision = _guard_receipt_decision(args, hook_input)
+            decision = decide_stop_guard(_guard_root_request(hook_input))
+            decision = guard_application.resolve_with_applications(
+                decision,
+                appliers=_GUARD_COMMAND_APPLIERS,
+                request_for_orphan=_guard_root_request,
+                hook_input=hook_input,
+                limit=_GUARD_APPLICATION_LIMIT,
+            )
             print(json.dumps(_guard_decision_payload(decision), ensure_ascii=False))
             return
         except Exception as exc:
@@ -14404,8 +14294,8 @@ def _supersede_reviews_locked(args, cwd: Path):
 
 @bounded_by_guard_timeout
 def cmd_mark_halt(args):
-    cwd = Path.cwd()
-    sf = resolve_state_file(cwd)
+    cwd = guard_application.project_root_of(args, Path.cwd, Path)
+    sf = guard_application.state_file_of(args, cwd, session_file, resolve_state_file)
     if not sf.exists():
         print("ERROR: state file が見つかりません。先に init してください。", file=sys.stderr)
         sys.exit(1)
@@ -16324,14 +16214,11 @@ def _add_hook_parsers(subparsers) -> None:
     p_stop_verdict.add_argument("--hook-pid", type=int, default=None)
     p_stop_verdict.add_argument("--hook-session-id-from-pid", action="store_true")
     p_stop_verdict.add_argument("--planning-warn-iterations", type=int, default=3)
-    p_stop_verdict.add_argument("--prior-decision-fd", type=int, default=None)
-    p_stop_verdict.add_argument("--receipt-stdout-fd", type=int, default=None)
     p_stop_verdict.add_argument(
         "--receipt-kind",
         choices=_RECEIPT_KIND_CHOICES,
         default=None,
     )
-    p_stop_verdict.add_argument("--receipt-exit-code", type=int, default=None)
     p_stop_verdict.set_defaults(func=cmd_stop_verdict)
     p_freshness = sub.add_parser("freshness", help="state の freshness 判定を JSON で返す (read-only)")
     p_freshness.add_argument("--state-file", required=True, help="判定対象の session state JSON")

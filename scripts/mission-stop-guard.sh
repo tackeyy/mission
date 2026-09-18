@@ -61,109 +61,18 @@ if ! GUARD_DECISION=$(printf '%s' "$INPUT" | _mission_state_bounded stop-verdict
   exit 0
 fi
 
-# 予算は hook 全体で 1 つ（#742 の決定 D3 改訂版）。呼び出しごとに上限を張り直すと、ループの回数だけ
-# 予算が増えてホスト側の期限を超え、出力ごと破棄されて block の理由が残らない。
+# 1 回で終わる。以前はここに dispatch の `case` block があり、判定が返す命令を
+# hook が `mission-state.py` の別 subcommand で実行し、その receipt を渡して
+# 判定を取り直す、というループを回していた。1 回の判定に最大 7 プロセスかかり、
+# それらが 8 秒の予算を共有するため、負荷が上がると予算が起動時間で尽きて
+# `guard-budget-exhausted` になった（1 セッションで 5 回観測している）。
 #
-# 期限を決めるのは stop-verdict 側で、ここはその文字列を環境へ移すだけである。
-# hook は時刻を読まず算術もしない。#615 の検査はそれらを policy 判断として拒否する
-# （検査はソースの文字列一致なので、コメントに書いただけでも発火する）。
-#
-# 取り出しに失敗しても hook を止めない。判定が壊れている場合の応答は既存の経路が持ち
-# （不正な判定は次段で block になる）、ここで `set -e` に落とすと **block そのものが
-# 出力されなくなる**。期限が空なら後続の呼び出しが自前で確立する。
-MISSION_GUARD_DEADLINE=$(printf '%s' "$GUARD_DECISION" | jq -r '.guard_deadline // empty' 2>/dev/null || true)
-export MISSION_GUARD_DEADLINE
-
-# ここから先は継続呼び出しである。期限が失われたまま次を走らせると、呼び出しごとに
-# 予算が張り直されてホスト側の期限を超える。**判定の中身から導出しない**: 導出すると、
-# 期限の取り出しが失敗したときにフラグも一緒に欠落し、守るべき場面で守れない。
-export MISSION_GUARD_CONTINUATION=1
-
-while :; do
-  if ! COMMAND_KIND=$(printf '%s' "$GUARD_DECISION" | jq -er '.command.kind'); then
-    printf '%s\n' '{"decision":"block","reason":"mission Stop guard decision is invalid","outcome_kind":"expected-gate"}'
-    exit 0
-  fi
-
-  COMMAND_STDOUT=""
-  COMMAND_EXIT_CODE=""
-
-  # GUARD_DECISION_DISPATCH_BEGIN
-  case "$COMMAND_KIND" in
-    none)
-      if ! SHELL_TEXT=$(printf '%s' "$GUARD_DECISION" | jq -er '.shell_text'); then
-        printf '%s\n' '{"decision":"block","reason":"mission Stop guard decision is invalid","outcome_kind":"expected-gate"}'
-        exit 0
-      fi
-      printf '%s' "$SHELL_TEXT"
-      exit 0
-      ;;
-    mark-halt)
-      if ! COMMAND_CWD=$(printf '%s' "$GUARD_DECISION" | jq -er '.command.cwd') ||
-         ! COMMAND_SESSION_ID=$(printf '%s' "$GUARD_DECISION" | jq -er '.command.session_id') ||
-         ! COMMAND_REASON=$(printf '%s' "$GUARD_DECISION" | jq -er '.command.reason') ||
-         ! COMMAND_CATEGORY=$(printf '%s' "$GUARD_DECISION" | jq -er '.command.category'); then
-        printf '%s\n' '{"decision":"block","reason":"mission Stop guard decision is invalid","outcome_kind":"expected-gate"}'
-        exit 0
-      fi
-      set +e
-      COMMAND_STDOUT=$(
-        cd "$COMMAND_CWD" 2>/dev/null &&
-        MISSION_SESSION_ID="$COMMAND_SESSION_ID" _mission_state_bounded mark-halt \
-          --reason "$COMMAND_REASON" --category "$COMMAND_CATEGORY"
-      )
-      COMMAND_EXIT_CODE=$?
-      set -e
-      ;;
-    cleanup-stale)
-      if ! COMMAND_ROOT=$(printf '%s' "$GUARD_DECISION" | jq -er '.command.root'); then
-        printf '%s\n' '{"decision":"block","reason":"mission Stop guard decision is invalid","outcome_kind":"expected-gate"}'
-        exit 0
-      fi
-      set +e
-      COMMAND_STDOUT=$(
-        cd "$COMMAND_ROOT" 2>/dev/null &&
-        _mission_state_bounded cleanup-stale --root "$COMMAND_ROOT" --execute
-      )
-      COMMAND_EXIT_CODE=$?
-      set -e
-      ;;
-    stop-guard-observe)
-      if ! COMMAND_CWD=$(printf '%s' "$GUARD_DECISION" | jq -er '.continuation.project_root') ||
-         ! COMMAND_SESSION_ID=$(printf '%s' "$GUARD_DECISION" | jq -er '.command.session_id') ||
-         ! COMMAND_DIGEST=$(printf '%s' "$GUARD_DECISION" | jq -er '.command.digest') ||
-         ! COMMAND_NOW=$(printf '%s' "$GUARD_DECISION" | jq -er '.command.now_epoch') ||
-         ! COMMAND_TTL=$(printf '%s' "$GUARD_DECISION" | jq -er '.command.ttl_seconds'); then
-        printf '%s\n' '{"decision":"block","reason":"mission Stop guard decision is invalid","outcome_kind":"expected-gate"}'
-        exit 0
-      fi
-      set +e
-      COMMAND_STDOUT=$(
-        cd "$COMMAND_CWD" 2>/dev/null &&
-        _mission_state_bounded stop-guard-observe \
-          --session-id "$COMMAND_SESSION_ID" --digest "$COMMAND_DIGEST" \
-          --now-epoch "$COMMAND_NOW" --ttl-seconds "$COMMAND_TTL" 2>/dev/null
-      )
-      COMMAND_EXIT_CODE=$?
-      set -e
-      ;;
-    *)
-      printf '%s\n' '{"decision":"block","reason":"mission Stop guard command is not allowed","outcome_kind":"expected-gate"}'
-      exit 0
-      ;;
-  esac
-  # GUARD_DECISION_DISPATCH_END
-
-  if ! NEXT_GUARD_DECISION=$(
-    printf '%s' "$INPUT" |
-      _mission_state_bounded stop-verdict --hook-input - --json \
-        --prior-decision-fd 3 --receipt-stdout-fd 4 \
-        --receipt-kind "$COMMAND_KIND" --receipt-exit-code "$COMMAND_EXIT_CODE" \
-        3< <(printf '%s' "$GUARD_DECISION") \
-        4< <(printf '%s' "$COMMAND_STDOUT")
-  ); then
-    printf '%s\n' '{"decision":"block","reason":"mission Stop guard receipt is unavailable","outcome_kind":"expected-gate"}'
-    exit 0
-  fi
-  GUARD_DECISION="$NEXT_GUARD_DECISION"
-done
+# 命令の適用は `stop-verdict` の中（同一プロセス）へ移した（#779）。
+# したがって hook が持つ副作用は無く、**`stop-verdict` 以外の subcommand を
+# 呼ばないこと**が hook 側の契約になる。`analyze_guard_shell` はそれを
+# allowlist ではなく「`stop-verdict` 以外は全部だめ」として検査する。
+if ! SHELL_TEXT=$(printf '%s' "$GUARD_DECISION" | jq -er '.shell_text'); then
+  printf '%s\n' '{"decision":"block","reason":"mission Stop guard decision is invalid","outcome_kind":"expected-gate"}'
+  exit 0
+fi
+printf '%s' "$SHELL_TEXT"

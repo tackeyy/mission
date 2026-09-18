@@ -226,6 +226,31 @@ hook が `cd` を `$( )` の中で行っていたのは、**変更が漏れな�
 
 **予算を増やす変更を同じ PR に混ぜない。** 増やす必要が出たら、それは設計が誤っている合図として扱う。
 
+### D4 の改訂 (#779, 実装時に判明)
+
+**「dispatch を adapter へ入れる」は成立しなかった。** 上の決定は予算の増加だけを懸念していたが、
+`compare_baselines` は**新しい違反関数を無条件で拒否する**（`new function ...`）。CI は
+`THIN_ADAPTER_BASE_SHA` を PR の base に設定してこの比較を有効にしているので、適用のための
+関数を adapter へ足すと必ず落ちる。**違反の総量が増えなくても落ちる** — 実際、切り出しでは
+`cmd_mark_halt` の違反は 7 → 3 に減り、それでも拒否された。
+
+**決定: 適用のループと receipt の解決は `mission_application/guard_application.py` に置く。**
+
+- ratchet が走査するのは `mission-state.py` と `mission_adapter/**` だけで、application 層は対象外
+- allowlist が `mission_application.*` への呼び出しを許していることが、この repo の分層の意図を示す。
+  **adapter は呼ぶだけ、ロジックは application 層**
+- adapter に残るのは、命令の表（module 直下）と、`mission_application.*` を 1 回呼ぶだけの窓口。
+  違反はゼロで、baseline には現れない
+
+**適用の実体は既存の `cmd_*` をそのまま使う。** 新しい関数を作らないので、新規違反関数にならない。
+decorator は `__wrapped__` で外して呼ぶ（D2-c のとおり、入れ子の予算は receipt を壊す）。
+
+**実測: baseline は新規 0・増加 0・削除 2・減少 1。** 削除は fd 経由の受け取り直しが不要になった
+2 関数、減少は `cmd_stop_verdict`（分岐 4 → 3、比較 3 → 2）。
+
+**allowlist された呼び出しの引数に、もう 1 つ呼び出しを書けない。** adapter に合成をさせない規則で、
+args の組み立ても application 層へ寄せる必要がある（実装時に 1 度踏んだ）。
+
 ## 受け入れ条件
 
 1. **通常経路（state 無し / halted / active / stale / lease 期限切れ）で `mission-state.py` の

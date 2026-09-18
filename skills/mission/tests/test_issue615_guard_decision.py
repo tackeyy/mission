@@ -557,7 +557,12 @@ def test_stop_verdict_root_mode_serializes_typed_decision_and_keeps_legacy_proje
         "reason": "exact-session-id",
         "considered_state_files": [str(state_file)],
     }
-    assert payload["command"]["kind"] == "stop-guard-observe"
+    # The verdict is settled before it is printed (#779): the guard applies the
+    # observation in its own process, so what reaches the hook is the decision
+    # after the command, not an instruction to run one.  A `stop-guard-observe`
+    # here would mean the hook is expected to apply it -- the loop this change
+    # removed.
+    assert payload["command"]["kind"] == "none"
     assert payload["evidence"]["freshness"]["timestamp_field"] == "updated_at"
     assert payload["evidence"]["freshness"]["age_sec"] == 60
     assert payload["shell_text"].startswith('{"decision": "block"')
@@ -623,6 +628,27 @@ _POLICY_NAMES = re.compile(
 _COMMANDS = {"mark-halt", "cleanup-stale", "stop-guard-observe"}
 
 
+def _all_state_subcommands() -> frozenset[str]:
+    """Read the CLI's subcommands from the CLI, not from a list kept here.
+
+    A hand-written list is an allowlist wearing a different hat: a subcommand
+    added tomorrow would be absent from it, and the hook could call it without
+    tripping anything.
+    """
+    source = (
+        Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
+    ).read_text(encoding="utf-8")
+    return frozenset(re.findall(r'add_parser\(\s*"([a-z][a-z0-9-]*)"', source))
+
+
+# Every subcommand the CLI has, minus the one the hook may call.  Deny by
+# default: a new subcommand is forbidden here the moment it exists, without
+# anyone remembering to add it (#779).
+_STATE_SUBCOMMANDS_FORBIDDEN_IN_HOOK = frozenset(
+    name for name in _all_state_subcommands() if name != "stop-verdict"
+)
+
+
 def analyze_guard_shell(source: str) -> list[Violation]:
     """Conservative detector for policy or open command execution in the hook."""
     violations = []
@@ -674,42 +700,49 @@ def analyze_guard_shell(source: str) -> list[Violation]:
             tokens = shlex.split(line, comments=True, posix=True)
         except ValueError:
             pass
+        # The hook applies nothing now (#779): the commands are applied inside
+        # `stop-verdict`.  So the question is no longer "is this command inside
+        # the dispatch block" but "is any subcommand other than `stop-verdict`
+        # here at all".
+        #
+        # Deny by default rather than by allowlist.  An allowlist passes a
+        # subcommand nobody has added to it yet, which is exactly the shape a
+        # future change would take.
         for command in _COMMANDS:
-            if re.search(r"(?<![A-Za-z0-9-])" + re.escape(command) + r"(?![A-Za-z0-9-])", line) and not (
-                in_dispatch and dispatch_start <= source.find(line) < dispatch_end
-            ):
+            if re.search(r"(?<![A-Za-z0-9-])" + re.escape(command) + r"(?![A-Za-z0-9-])", line):
                 violations.append(Violation("command-outside-dispatch", line))
         if tokens and "python3" in tokens:
             for token in tokens:
-                if token in {"resume", "reactivate"}:
+                if token in _STATE_SUBCOMMANDS_FORBIDDEN_IN_HOOK:
                     violations.append(Violation("command-not-allowlisted", line))
 
-    labels = set(re.findall(r"^\s{4}(none|mark-halt|cleanup-stale|stop-guard-observe)\)\s*$", dispatch, re.MULTILINE))
-    if in_dispatch and labels != EXPECTED_COMMAND_KINDS:
-        violations.append(Violation("dispatch-set-mismatch", dispatch))
-    if not in_dispatch:
-        violations.append(Violation("dispatch-set-mismatch", source))
+    # The dispatch block is gone, and its absence is the property now: if it
+    # returns, the loop it belonged to has returned with it.
+    #
+    # Narrow to branching on the *decision's command*.  The hook still has an
+    # unrelated `case` that validates the timeout string, and forbidding every
+    # `case` would forbid that too -- a check that fails for the wrong reason
+    # gets relaxed, and then it stops checking the right one.
+    if (
+        "GUARD_DECISION_DISPATCH_BEGIN" in source
+        or "COMMAND_KIND" in source
+        or re.search(r"case\s+\"?\$\{?(?:COMMAND|GUARD)", source)
+    ):
+        violations.append(Violation("dispatch-block-returned", source))
     return violations
 
 
+# What the hook looks like now: one call, and the text it returns (#779).
 _POSITIVE_DISPATCH = """
-# GUARD_DECISION_DISPATCH_BEGIN
-case "$COMMAND_KIND" in
-    none)
-        printf '%s' "$SHELL_TEXT"
-        ;;
-    mark-halt)
-        MISSION_SESSION_ID="$COMMAND_SESSION_ID" python3 "$MISSION_STATE_PY" mark-halt --reason "$COMMAND_REASON" --category stale
-        ;;
-    cleanup-stale)
-        python3 "$MISSION_STATE_PY" cleanup-stale --root "$COMMAND_ROOT" --execute
-        ;;
-    stop-guard-observe)
-        python3 "$MISSION_STATE_PY" stop-guard-observe --session-id "$COMMAND_SESSION_ID" --digest "$COMMAND_DIGEST" --now-epoch "$COMMAND_NOW" --ttl-seconds "$COMMAND_TTL"
-        ;;
-    *) exit 0 ;;
-esac
-# GUARD_DECISION_DISPATCH_END
+if ! GUARD_DECISION=$(printf '%s' "$INPUT" | _mission_state_bounded stop-verdict --hook-input - --json); then
+    printf '%s\\n' '{"decision":"block"}'
+    exit 0
+fi
+if ! SHELL_TEXT=$(printf '%s' "$GUARD_DECISION" | jq -er '.shell_text'); then
+    printf '%s\\n' '{"decision":"block"}'
+    exit 0
+fi
+printf '%s' "$SHELL_TEXT"
 """
 
 
@@ -719,13 +752,21 @@ _SYNTHETIC_GUARD_VIOLATIONS = {
     "arithmetic-minutes": ("MINS=$((AGE_SEC / 60))", "shell-arithmetic"),
     "timestamp-compare": ('[[ "$LEASE_EXPIRES_AT" > "$NOW" ]]', "timestamp-comparison"),
     "date-epoch": ("NOW=$(date +%s)", "timestamp-calculation"),
+    # The hook applies nothing now, so naming a command at all is the
+    # violation -- inside a branch or not.
     "branch-selects-command": ("if true; then python3 tool mark-halt; fi", "command-outside-dispatch"),
-    "unexpected-command": (_POSITIVE_DISPATCH.replace("python3 \"$MISSION_STATE_PY\" cleanup-stale", "python3 \"$MISSION_STATE_PY\" resume"), "command-not-allowlisted"),
+    "command-at-top-level": ('python3 "$MISSION_STATE_PY" cleanup-stale --root "$ROOT" --execute', "command-outside-dispatch"),
+    # Deny-by-default: `resume` was named before, but so is every other
+    # subcommand that is not `stop-verdict`, including ones added later.
+    "unexpected-command": ('python3 "$MISSION_STATE_PY" resume', "command-not-allowlisted"),
+    "unlisted-subcommand": ('python3 "$MISSION_STATE_PY" closeout', "command-not-allowlisted"),
     "dynamic-command": ('eval "$COMMAND"', "dynamic-command-execution"),
-    "jq-state-file": ('jq -r \'.updated_at\' "$sf"', "authoritative-jq-read"),
-    "jq-input": ('printf \'%s\' "$INPUT" | jq -r \'.cwd\'', "jq-input-not-guard-decision"),
+    "jq-state-file": ("jq -r '.updated_at' \"$sf\"", "authoritative-jq-read"),
+    "jq-input": ("printf '%s' \"$INPUT\" | jq -r '.cwd'", "jq-input-not-guard-decision"),
     "jq-construction": ("jq -n '{decision:\"block\"}'", "jq-construction"),
-    "missing-arm": (_POSITIVE_DISPATCH.replace("    none)\n        printf '%s' \"$SHELL_TEXT\"\n        ;;\n", ""), "dispatch-set-mismatch"),
+    # The loop coming back is itself the violation now.
+    "dispatch-block-returned": ('case "$COMMAND_KIND" in\n    none) ;;\nesac', "dispatch-block-returned"),
+    "dispatch-marker-returned": ("# GUARD_DECISION_DISPATCH_BEGIN", "dispatch-block-returned"),
 }
 
 
