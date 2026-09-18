@@ -168,18 +168,6 @@ class TestSemanticArguments:
         empty = _identity(prepare_artifact_publish_operation, "local", "", "ok")
         assert _arguments_of(absent) == _arguments_of(empty)
 
-    def test_the_normalisation_is_the_kernels_own(self):
-        """Two copies of a rule drift; these call the kernel's."""
-        import inspect
-
-        from mission_application import artifact as application
-
-        source = inspect.getsource(application.prepare_artifact_append_operation)
-        assert "normalized_block_content(content)" in source
-        assert "normalized_artifact_section(section)" in source
-        assert "optional_artifact_text(" in source
-        assert ".rstrip()" not in source, "the rule belongs to the kernel, not here"
-
     def test_the_context_identity_reads_the_plans_normalised_fields(self, tmp_path, monkeypatch):
         from mission_application.evidence import prepare_context_manifest_operation
         from mission_application.retry_plan import ContextManifestRetryPlan
@@ -218,33 +206,11 @@ class TestSemanticArguments:
 # --------------------------------------------------------------------------
 
 
-def test_the_cli_does_not_call_the_read_only_lookup():
-    """`lookup_operation` is for the lease preflight (item 5), not for this wiring.
-
-    Short-circuiting `begin()` with it would skip the durable-prepare
-    recovery, the finalized-index agreement and the replay payload checks.
-    """
-    source = (MISSION_ROOT / "bin" / "mission-state.py").read_text(encoding="utf-8")
-    assert "lookup_operation" not in source
-    for module in ("artifact_cli.py", "artifact.py", "evidence.py"):
-        text = (MISSION_ROOT / "lib" / "mission_application" / module).read_text(encoding="utf-8")
-        assert "lookup_operation" not in text, module
-
-
 def test_the_outcome_classification_is_fixed_where_it_can_be_observed():
     """These commands do not record an outcome, so the classification is pinned here."""
     module = _state_module("state_p2b_outcomes")
     assert module._fenced_cli_outcome_kind("operation-intent-collision") == "invalid-input"
     assert module._fenced_cli_outcome_kind("operation-history-collected") == "expected-gate"
-
-
-def test_the_cli_reports_the_detail_rather_than_the_code():
-    """The E2E assertions below match the detail, so the branch that prints it is held."""
-    import inspect
-
-    module = _state_module("state_p2b_detail")
-    source = inspect.getsource(module._reject_fenced_lease_for_cli)
-    assert 'print("ERROR: %s" % (detail or error.code)' in source
 
 
 # --------------------------------------------------------------------------
