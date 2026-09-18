@@ -422,24 +422,45 @@ class TestSideEffectCommandsAreInsideTheBudget:
             "a direct python3 call bypasses the budget"
         )
 
-    def test_the_hook_carries_the_deadline_to_later_calls(self):
-        source = GUARD_SH.read_text(encoding="utf-8")
-        assert "MISSION_GUARD_DEADLINE" in source
-        assert "export MISSION_GUARD_DEADLINE" in source
-        assert "guard_deadline" in source, "the deadline comes from the verdict output"
+    def test_the_hook_makes_exactly_one_call(self):
+        """The deadline is no longer carried, because there is nowhere to carry it.
 
-    def test_extracting_the_deadline_cannot_swallow_the_block(self):
-        """A broken verdict must still produce a block, not an empty stdout.
+        The hook used to extract `guard_deadline` from the verdict and export it
+        so the *next* call would inherit the remaining budget.  There is no next
+        call now (#779): the commands are applied inside `stop-verdict`, so one
+        process holds the whole budget from start to finish.
 
-        The extraction runs under `set -e`, so a jq parse error on malformed JSON would
-        abort the hook before anything is printed -- turning a fail-closed path into
-        silence. The existing contract (#714 and the malformed-JSON cases in
-        test_stop_hook.py) requires the block to survive.
+        Asserting the absence is the point.  If the continuation variables come
+        back, the loop came back with them.
         """
         source = GUARD_SH.read_text(encoding="utf-8")
-        line = [l for l in source.splitlines() if "guard_deadline" in l and "jq" in l]
-        assert line, "the deadline is extracted with jq"
-        assert "|| true" in line[0], "a parse error must not abort the hook"
+        assert source.count("_mission_state_bounded stop-verdict") == 1
+        assert "MISSION_GUARD_DEADLINE" not in source, (
+            "the hook carries a deadline again, so something runs after the verdict"
+        )
+        assert "MISSION_GUARD_CONTINUATION" not in source, (
+            "the hook marks a continuation again, so something runs after the verdict"
+        )
+
+    def test_a_broken_verdict_still_produces_a_block(self):
+        """The fail-closed path the deadline extraction used to threaten.
+
+        That extraction ran under `set -e`, so a jq parse error would have
+        aborted the hook before printing anything -- silence instead of a
+        block.  The extraction is gone, but the property it endangered is the
+        one that matters, so it is checked directly: every jq read of the
+        verdict is guarded, and each guard prints a block.
+        """
+        source = GUARD_SH.read_text(encoding="utf-8")
+        jq_reads = [line for line in source.splitlines() if "jq -" in line]
+        assert jq_reads, "the hook reads the verdict with jq"
+        for line in jq_reads:
+            assert line.lstrip().startswith("if ! "), (
+                "an unguarded jq read can abort the hook under set -e: " + line.strip()
+            )
+        assert source.count('"decision":"block"') >= 2, (
+            "each failure path must still print a block"
+        )
 
     @pytest.mark.parametrize(
         "command", ["cmd_stop_verdict", "cmd_mark_halt", "cmd_cleanup_stale",
@@ -515,11 +536,16 @@ class TestAContinuationCannotReissueTheBudget:
             self.NOW + int(configured)
         )
 
-    def test_the_hook_sets_the_flag_without_reading_the_verdict(self):
-        """Deriving the flag from the JSON would lose it exactly when it is needed."""
+    def test_the_hook_has_no_continuation_to_flag(self):
+        """The flag existed for the second call. There is no second call (#779).
+
+        `resolve_deadline` still refuses to issue a fresh budget when the flag
+        says a continuation is running -- the tests above fix that behaviour and
+        it is unchanged.  What changed is that the hook never sets it, because
+        the guard applies its commands inside the process that already holds the
+        budget.
+        """
         source = GUARD_SH.read_text(encoding="utf-8")
-        line = [l for l in source.splitlines() if "MISSION_GUARD_CONTINUATION" in l
-                and "export" in l]
-        assert line, "the hook must set the continuation flag"
-        assert "jq" not in line[0], "the flag must not be derived from the verdict"
-        assert "=1" in line[0], "set unconditionally, not from a computed value"
+        assert "MISSION_GUARD_CONTINUATION" not in source, (
+            "the hook flags a continuation again, so something runs after the verdict"
+        )

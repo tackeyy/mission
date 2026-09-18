@@ -1,0 +1,592 @@
+"""Issue #779: the Stop guard applies its closed command set in one process."""
+
+from __future__ import annotations
+
+import ast
+import importlib.util
+import types
+import json
+import os
+import subprocess
+import sys
+from typing import NamedTuple
+from pathlib import Path
+
+import pytest
+
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+STATE_PY = REPO_ROOT / "skills" / "mission" / "bin" / "mission-state.py"
+HOOK = REPO_ROOT / "scripts" / "mission-stop-guard.sh"
+EXPECTED_KINDS = {"none", "mark-halt", "cleanup-stale", "stop-guard-observe"}
+
+
+class _Buffer:
+    """A stand-in for `io.StringIO`, so the unit tests need no real stdout."""
+
+    def __init__(self):
+        self._text = ""
+
+    def getvalue(self):
+        return self._text
+
+
+class _no_redirect:
+    """A stand-in for `contextlib.redirect_stdout`."""
+
+    def __init__(self, _buffer):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+def project_root_of_for_test(args):
+    from mission_application.guard_application import project_root_of
+
+    return project_root_of(args, lambda: "/the/process/cwd", str)
+
+
+def _module():
+    spec = importlib.util.spec_from_file_location("mission_state_issue779", STATE_PY)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_adapter_has_one_closed_dispatch_table():
+    module = _module()
+
+    assert set(module._GUARD_COMMAND_APPLIERS) == EXPECTED_KINDS
+    assert len(module._GUARD_COMMAND_APPLIERS) == 4
+
+
+# Sorted, not the set itself: parametrising over a set gives each process a
+# different order, and xdist rejects the run because the workers collected
+# different tests.  A full suite would fail every time.
+@pytest.mark.parametrize("removed", sorted(EXPECTED_KINDS))
+def test_the_closed_dispatch_rejects_a_missing_or_unknown_kind(monkeypatch, removed):
+    module = _module()
+    table = dict(module._GUARD_COMMAND_APPLIERS)
+    del table[removed]
+    monkeypatch.setattr(module, "_GUARD_COMMAND_APPLIERS", table)
+
+    with pytest.raises(ValueError, match="guard-command-dispatch-mismatch"):
+        module._validate_guard_command_dispatch()
+
+    table = dict(module._GUARD_COMMAND_APPLIERS)
+    table["unknown"] = lambda _command: (0, "")
+    monkeypatch.setattr(module, "_GUARD_COMMAND_APPLIERS", table)
+    with pytest.raises(ValueError, match="guard-command-dispatch-mismatch"):
+        module._validate_guard_command_dispatch()
+
+
+def test_the_dispatch_is_defined_once_and_the_hook_has_no_case_block():
+    tree = ast.parse(STATE_PY.read_text(encoding="utf-8"))
+    tables = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "_GUARD_COMMAND_APPLIERS" for target in node.targets)
+    ]
+    assert len(tables) == 1
+    # Narrow to branching on the decision's command.  The hook keeps an
+    # unrelated `case` that validates the timeout string, and forbidding every
+    # `case` would forbid that too -- a check that fails for the wrong reason
+    # gets relaxed, and then it stops checking the right one.
+    hook = HOOK.read_text(encoding="utf-8")
+    assert "COMMAND_KIND" not in hook
+    assert "GUARD_DECISION_DISPATCH_BEGIN" not in hook
+
+
+# --- The count that is the point of #779 ------------------------------------
+#
+# The guard used to spend one process per command: decide, run `mark-halt`,
+# decide again from the receipt, and so on, up to seven for one decision.  All
+# of them shared one 8-second budget, so on a loaded host the budget went to
+# process startup and the guard returned `guard-budget-exhausted` -- five times
+# in one session.
+#
+# The measurement is the launch count, not the duration.  A duration is a
+# property of the host's load, and a test written against it fails for reasons
+# that have nothing to do with this change (#771 closed exactly that).
+
+
+_GUARD_ENV = {
+    "CLAUDE_CODE_SESSION_ID": "own",
+    "MISSION_STATE_NOW": "2026-08-23T01:00:00Z",
+    "MISSION_STOP_GUARD_NOW_EPOCH": "1000",
+    "MISSION_SESSION_ID": None,
+}
+
+
+def _apply_env(env, overrides=None):
+    """Apply an override map in place; `None` removes the variable.
+
+    Removal has to be expressible: the orphan branch is only reachable with no
+    hook session id at all, and an empty string is not the same as unset.
+    """
+    for name, value in {**_GUARD_ENV, **(overrides or {})}.items():
+        if value is None:
+            env.pop(name, None)
+        else:
+            env[name] = value
+    return env
+
+
+class _Row(NamedTuple):
+    """One guard path: the state, the branch, and what the branch leaves."""
+
+    fields: dict | None
+    finding: str
+    reason: str
+    halt: str | None = None
+    orphan_processed: bool = False
+    env: dict | None = None
+
+
+def _counting_python(tmp_path):
+    """A `python3` that records every launch and then execs the real one."""
+    log = tmp_path / "launches.log"
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "python3"
+    shim.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$*" >> "{log}"\n'
+        f'exec "{sys.executable}" "$@"\n',
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    return shim_dir, log
+
+
+def _run_hook(tmp_path, state_dir, *, stop_hook_active=False, env_overrides=None):
+    shim_dir, log = _counting_python(tmp_path)
+    env = {**os.environ, **_GUARD_ENV, "PATH": f"{shim_dir}{os.pathsep}{os.environ['PATH']}",
+           "MISSION_STATE_PY": str(STATE_PY)}
+    _apply_env(env, env_overrides)
+    result = subprocess.run(
+        ["bash", str(HOOK)],
+        input=json.dumps({"stop_hook_active": stop_hook_active, "cwd": str(state_dir)}),
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(state_dir),
+        timeout=120,
+    )
+    launches = [
+        line for line in log.read_text(encoding="utf-8").splitlines()
+        if "mission-state.py" in line
+    ] if log.exists() else []
+    return result, launches
+
+
+def _write_state(root, **fields):
+    sessions = root / ".mission-state" / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "mission": "m",
+        "mission_id": "abcdef12",
+        "loop_active": True,
+        "passes": False,
+        "halt_reason": "",
+        "phase": "executing",
+        "iteration": 1,
+        "project_root": str(root),
+        "updated_at": "2026-08-23T00:00:00Z",
+        "pid": 1,
+    }
+    payload.update(fields)
+    path = sessions / "cc-own.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def _verdict(root, env_overrides=None):
+    """The decision itself, so a row can assert the branch it reaches.
+
+    This resolves the decision *and applies its command*, which rewrites the
+    state it just read.  So it must never run against the state the launch
+    count is measured on: the first version shared one directory, the halt
+    landed before the hook started, and every row measured the settled state
+    instead of the path named in its name.  Callers build a second directory.
+    """
+    env = {**os.environ, **_GUARD_ENV}
+    _apply_env(env, env_overrides)
+    result = subprocess.run(
+        [sys.executable, str(STATE_PY), "stop-verdict", "--hook-input", "-", "--json"],
+        input=json.dumps({"stop_hook_active": False, "cwd": str(root)}),
+        capture_output=True, text=True, env=env, cwd=str(root), timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+# A lease is only read when all four of its fields are present and well typed
+# (`authoritative_reader.py`): owner, id, a non-negative integer epoch, and an
+# expiry.  Writing the expiry alone leaves the lease `absent`, which is how the
+# first version's `lease-expired` row silently took the ordinary stale path.
+def _lease(expires_at):
+    return {
+        "owner_session_id": "cc-own",
+        "lease_id": "L1",
+        "fencing_epoch": 1,
+        "lease_expires_at": expires_at,
+    }
+
+
+# The orphan branch requires *no* hook session at all: with a session id it is
+# the session's own state, and with neither id nor pid override the guard falls
+# back to the process pid and reports `pid-owner-mismatch`.  Both have to go.
+_NO_HOOK_SESSION = {"CLAUDE_CODE_SESSION_ID": None, "MISSION_HOOK_AGENT_PID": "0"}
+
+
+# Each row is a state, the branch it must reach, and the launch count.
+#
+# `finding` and `reason` alone do not separate the rows -- `missing` and
+# `orphan` both settle to `none` / `no-eligible-session`, because processing
+# the orphan removes the only candidate.  So a row also says what it left
+# behind: the halt it wrote, and whether an orphan was processed.  Without
+# that, two rows on different paths look identical and the control below
+# cannot tell a real table from one that collapsed.
+#
+# `stale` settles to `finding=stale` with the halt already applied -- which is
+# the point of #779: the application happened inside the same process, so the
+# hook sees a settled verdict rather than an instruction.
+_GUARD_PATHS = {
+    "missing": _Row(None, "none", "no-eligible-session"),
+    "halted": _Row(
+        {"loop_active": False, "halt_reason": "done by hand"},
+        "none", "halt-reason", halt="done by hand",
+    ),
+    "active": _Row({}, "none", "active-unfinished"),
+    "stale": _Row(
+        {"updated_at": "2020-01-01T00:00:00Z"},
+        "stale", "stale-auto-halt-complete", halt="stale: auto-halted",
+    ),
+    "awaiting-user": _Row(
+        {"updated_at": "2020-01-01T00:00:00Z", "awaiting_user": True},
+        "awaiting-user", "active-unfinished",
+    ),
+    "lease-expired": _Row(
+        {"updated_at": "2020-01-01T00:00:00Z", **_lease("2020-01-02T00:00:00Z")},
+        "lease-expired", "stale-auto-halt-complete", halt="(cleanup-stale)",
+    ),
+    "lease-held": _Row(
+        {"updated_at": "2020-01-01T00:00:00Z", **_lease("2099-01-02T00:00:00Z")},
+        "stale", "active-unfinished",
+    ),
+    "orphan": _Row(
+        {"pid": 999999, "updated_at": "2020-01-01T00:00:00Z"},
+        "none", "no-eligible-session",
+        halt="orphan: pid 999999 dead", orphan_processed=True,
+        env=_NO_HOOK_SESSION,
+    ),
+}
+
+
+def _populate(root, fields):
+    root.mkdir()
+    if fields is None:
+        (root / ".mission-state" / "sessions").mkdir(parents=True)
+    else:
+        _write_state(root, **fields)
+
+
+@pytest.mark.parametrize("path", sorted(_GUARD_PATHS))
+def test_the_hook_starts_mission_state_once_for_each_guard_path(tmp_path, path):
+    row = _GUARD_PATHS[path]
+
+    # Two directories, because asserting the branch changes the state.
+    judged = tmp_path / "judged"
+    _populate(judged, row.fields)
+    measured = tmp_path / "measured"
+    _populate(measured, row.fields)
+
+    verdict = _verdict(judged, row.env)
+    assert verdict["finding"] == row.finding, (path, verdict["reason"])
+    assert verdict["reason"] == row.reason, path
+    processed = verdict["continuation"]["processed_orphan_state_files"]
+    assert bool(processed) is row.orphan_processed, (path, processed)
+
+    state_file = judged / ".mission-state" / "sessions" / "cc-own.json"
+    halt = (
+        json.loads(state_file.read_text(encoding="utf-8")).get("halt_reason")
+        if state_file.exists() else None
+    )
+    if row.halt is None:
+        assert not halt, (path, halt)
+    else:
+        assert halt and row.halt in halt, (path, halt)
+
+    # The measured state must still be the one the row describes.  Sharing
+    # one directory with the assertion above would hand the hook a state the
+    # decision had already settled, and every row would measure that instead
+    # of its own path -- which is what the first version did.
+    measured_file = measured / ".mission-state" / "sessions" / "cc-own.json"
+    if row.fields is not None:
+        assert measured_file.exists(), path
+        before = json.loads(measured_file.read_text(encoding="utf-8"))
+        assert before.get("halt_reason", "") == row.fields.get("halt_reason", ""), path
+
+    result, launches = _run_hook(tmp_path, measured, env_overrides=row.env)
+
+    assert result.returncode == 0, (path, result.stderr)
+    assert len(launches) == 1, (path, launches)
+
+
+def test_the_rows_reach_more_than_one_branch():
+    """A control: if every row collapsed onto one branch, the table would still
+    pass its per-row assertions while testing a single path many times.
+
+    Counting distinct findings is not enough -- eight rows can share three
+    findings and still be six copies of one path.  Every row has to differ from
+    every other in the whole outcome it claims.
+    """
+    outcomes = [
+        (row.finding, row.reason, row.halt, row.orphan_processed)
+        for row in _GUARD_PATHS.values()
+    ]
+    assert len(set(outcomes)) == len(_GUARD_PATHS), outcomes
+    assert len({row.finding for row in _GUARD_PATHS.values()}) >= 4, outcomes
+
+
+
+# --- Condition 5b: the budget's exhaustion is not a failed command ----------
+#
+# `GuardTimeout` is a `BaseException` raised by the alarm so the outermost
+# decorator can emit `guard-budget-exhausted`.  Converting it into a receipt
+# would resolve it as an ordinary command failure: the terminal reason would
+# change, and a fired alarm would be swallowed, so a retry could run unbounded.
+
+
+def test_the_budget_running_out_is_not_turned_into_a_receipt():
+    from mission_application.guard_application import capture_application
+    from mission_application.guard_timeout import GuardTimeout
+
+    def apply(_args):
+        raise GuardTimeout("budget spent")
+
+    with pytest.raises(GuardTimeout):
+        capture_application(
+            apply, object(), redirect_stdout=_no_redirect, buffer_factory=_Buffer
+        )
+
+
+def test_a_command_failing_on_its_own_terms_is_a_receipt():
+    """The other half: without this, refusing to catch anything would pass."""
+    from mission_application.guard_application import capture_application
+
+    def apply(_args):
+        raise SystemExit(2)
+
+    assert capture_application(
+        apply, object(), redirect_stdout=_no_redirect, buffer_factory=_Buffer
+    ) == (2, "")
+
+
+def test_the_appliers_call_the_command_without_its_own_budget():
+    """A nested bound reports exhaustion as `SystemExit(2)` -- a failed receipt.
+
+    The budget belongs to `cmd_stop_verdict`; applying through the decorated
+    command would put a second one inside it, and `_report_exhaustion` turns
+    that into an exit for every command except `stop-verdict`.
+    """
+    source = STATE_PY.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    appliers = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("_guard_apply_")
+    ]
+    assert appliers, "the appliers were renamed"
+    for applier in appliers:
+        unwrapped = [
+            node for node in ast.walk(applier)
+            if isinstance(node, ast.Attribute) and node.attr == "__wrapped__"
+        ]
+        assert unwrapped, f"{applier.name} applies through the decorated command"
+
+
+# --- Condition 6: the command's own root and session, not the process's -----
+
+
+def test_the_root_comes_from_the_command_not_the_process():
+    """`os.chdir` was rejected by the design: it would move ~40 other lookups.
+
+    Passing the root is what replaces it, so a command that names a root must
+    reach that root even when the process sits somewhere else entirely.
+    """
+    from mission_application.guard_application import project_root_of
+
+    args = types.SimpleNamespace(guard_project_root="/named/by/command")
+    assert project_root_of(args, lambda: "/the/process/cwd", str) == "/named/by/command"
+
+
+def test_the_root_falls_back_to_the_process_for_the_cli():
+    args = types.SimpleNamespace()
+    assert project_root_of_for_test(args) == "/the/process/cwd"
+
+
+def test_the_session_comes_from_the_command_not_the_environment():
+    """`MISSION_SESSION_ID` is the guard's own session, not the one being halted.
+
+    Writing it into the process was rejected for that reason: a lost restore
+    changes which session the *next* decision treats as its own.
+    """
+    from mission_application.guard_application import state_file_of
+
+    args = types.SimpleNamespace(guard_session_id="cc-target")
+    seen = {}
+
+    def session_file(root, session_id):
+        seen["root"], seen["session_id"] = root, session_id
+        return "state-file"
+
+    def resolve_for_process(_root):
+        raise AssertionError("the environment was consulted for a named session")
+
+    assert state_file_of(args, "/root", session_file, resolve_for_process) == "state-file"
+    assert seen == {"root": "/root", "session_id": "cc-target"}
+
+
+def test_the_session_falls_back_to_the_environment_for_the_cli():
+    from mission_application.guard_application import state_file_of
+
+    args = types.SimpleNamespace()
+    assert state_file_of(
+        args, "/root", lambda *_: "named", lambda root: f"process:{root}"
+    ) == "process:/root"
+
+
+# --- Progress, not a count (#779 review) ------------------------------------
+#
+# The walk was bounded by a fixed ceiling of 16.  Sixteen distinct orphans
+# processed in a row is progress, not a cycle, and the ceiling rejected it --
+# failing on exactly the busy host the guard exists to protect.
+
+
+class _FakeKind:
+    def __init__(self, value):
+        self.value = value
+
+
+class _FakeCommand:
+    def __init__(self, kind, **fields):
+        self.kind = _FakeKind(kind)
+        for name, value in fields.items():
+            setattr(self, name, value)
+
+
+class _FakeDecision:
+    def __init__(self, command):
+        self.command = command
+
+
+def _walk(decisions, *, limit=64):
+    """Drive the loop over a scripted sequence of decisions."""
+    from mission_application.guard_application import resolve_with_applications
+
+    remaining = list(decisions)
+    applied = []
+
+    def apply(decision):
+        applied.append(decision.command)
+        return (0, "")
+
+    def receipt(prior, kind, exit_code, stdout, *, request_for_orphan, hook_input):
+        return remaining.pop(0)
+
+    import mission_application.guard_application as ga
+
+    original = ga.receipt_decision
+    ga.receipt_decision = receipt
+    try:
+        settled = resolve_with_applications(
+            remaining.pop(0),
+            appliers={
+                "none": ga.no_application,
+                "mark-halt": apply,
+                "cleanup-stale": apply,
+                "stop-guard-observe": apply,
+            },
+            request_for_orphan=lambda _hook_input: None,
+            hook_input={},
+            limit=limit,
+        )
+    finally:
+        ga.receipt_decision = original
+    return settled, applied
+
+
+def test_many_distinct_orphans_are_progress_not_a_cycle():
+    """Sixteen different subjects in a row must settle, not raise."""
+    decisions = [
+        _FakeDecision(_FakeCommand("mark-halt", cwd=f"/repo/{index}", session_id=f"s{index}"))
+        for index in range(16)
+    ]
+    decisions.append(_FakeDecision(_FakeCommand("none")))
+
+    settled, applied = _walk(decisions)
+
+    assert settled.command.kind.value == "none"
+    assert len(applied) == 16
+
+
+def test_the_same_command_on_the_same_subject_twice_is_refused():
+    """A decision that keeps asking for one thing is a cycle, at any count."""
+    repeated = _FakeDecision(_FakeCommand("mark-halt", cwd="/repo", session_id="s"))
+    decisions = [repeated, repeated, repeated]
+
+    with pytest.raises(ValueError, match="did-not-settle"):
+        _walk(decisions)
+
+
+def test_a_retried_observation_is_progress():
+    """The attempt counter distinguishes a retry from re-issuing the same one."""
+    decisions = [
+        _FakeDecision(_FakeCommand("stop-guard-observe", session_id="s", attempt=attempt))
+        for attempt in (1, 2, 3)
+    ]
+    decisions.append(_FakeDecision(_FakeCommand("none")))
+
+    settled, applied = _walk(decisions)
+
+    assert settled.command.kind.value == "none"
+    assert [command.attempt for command in applied] == [1, 2, 3]
+
+
+def test_two_orphans_in_one_repository_are_two_subjects():
+    """`cwd` alone made them one, and the walk stopped on the second.
+
+    The reviewer's counter-example: same repository, different sessions.  That
+    is two orphans processed in turn -- progress -- and taking the first field
+    that happened to be set reported it as a cycle.
+    """
+    decisions = [
+        _FakeDecision(_FakeCommand("mark-halt", cwd="/repo", session_id="a")),
+        _FakeDecision(_FakeCommand("mark-halt", cwd="/repo", session_id="b")),
+        _FakeDecision(_FakeCommand("none")),
+    ]
+
+    settled, applied = _walk(decisions)
+
+    assert settled.command.kind.value == "none"
+    assert [command.session_id for command in applied] == ["a", "b"]
+
+
+def test_the_limit_the_hook_uses_is_a_backstop_not_a_ceiling():
+    """The fix has to reach the caller, not only the test's own argument.
+
+    The first attempt raised the limit inside the new tests and left
+    `_GUARD_APPLICATION_LIMIT` at 16, so the walk the hook actually runs was
+    still refused after sixteen distinct orphans.
+    """
+    module = _module()
+
+    assert module._GUARD_APPLICATION_LIMIT > 1000, (
+        "the limit the hook uses still rejects a long run of real progress"
+    )

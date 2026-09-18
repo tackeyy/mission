@@ -557,7 +557,12 @@ def test_stop_verdict_root_mode_serializes_typed_decision_and_keeps_legacy_proje
         "reason": "exact-session-id",
         "considered_state_files": [str(state_file)],
     }
-    assert payload["command"]["kind"] == "stop-guard-observe"
+    # The verdict is settled before it is printed (#779): the guard applies the
+    # observation in its own process, so what reaches the hook is the decision
+    # after the command, not an instruction to run one.  A `stop-guard-observe`
+    # here would mean the hook is expected to apply it -- the loop this change
+    # removed.
+    assert payload["command"]["kind"] == "none"
     assert payload["evidence"]["freshness"]["timestamp_field"] == "updated_at"
     assert payload["evidence"]["freshness"]["age_sec"] == 60
     assert payload["shell_text"].startswith('{"decision": "block"')
@@ -623,6 +628,81 @@ _POLICY_NAMES = re.compile(
 _COMMANDS = {"mark-halt", "cleanup-stale", "stop-guard-observe"}
 
 
+# `function name {`, `name() {`, and `name()` with the brace on a later line are
+# all definitions.  Only the header is read; see `_state_cli_callers`.
+_FUNCTION_HEADER = re.compile(
+    r"(?m)^[ \t]*(?:function[ \t]+(?P<kw>[A-Za-z_][A-Za-z0-9_]*)[ \t]*(?:\([ \t]*\))?"
+    r"|(?P<paren>[A-Za-z_][A-Za-z0-9_]*)[ \t]*\([ \t]*\))"
+)
+
+
+def _state_cli_callers(source: str) -> set[str]:
+    """Names that may reach `mission-state.py`: the variable, and every function.
+
+    The hook does not call the CLI directly; it defines a function that applies
+    the timeout and calls through it.  A check that only looks for `python3`
+    on the line therefore sees nothing -- `_mission_state_bounded resume` was
+    accepted by exactly that gap.
+
+    **Function bodies are not read.**  Earlier versions decided whether a
+    function was a wrapper by looking inside it, which meant finding where the
+    body ended, and every attempt at that leaked: a nested brace group, a `}`
+    in a heredoc, and an escaped quote in `$'...'` each ended the body early,
+    dropping the forwarding call so the wrapper went unrecognised.  All three
+    are valid shell (`bash -n` accepts them), and each one re-opened the same
+    hole -- a second `stop-verdict` reaching the hook unreported, which is the
+    loop #779 removed coming back by another name.
+
+    Locating the end of a shell construct needs a shell parser, and this check
+    does not have one.  So it stops needing one: **every function defined in
+    the file counts as a caller**, whatever its body.  The hook defines exactly
+    one function, and its shape is "call the CLI once and print what comes
+    back", so this costs nothing here and closes the whole class.
+
+    It errs toward reporting.  A hook that grew a helper called more than once
+    would be reported, and that is the direction to fail in -- CI says so on
+    the first push, rather than a bypass sitting unnoticed.
+    """
+    callers = {"$MISSION_STATE_PY", "${MISSION_STATE_PY}"}
+    for header in _FUNCTION_HEADER.finditer(source):
+        callers.add(header.group("kw") or header.group("paren"))
+    return callers
+
+
+def _state_cli_invocations(source: str, callers: set[str]) -> list[tuple[str, str]]:
+    """Return (line, first argument) for every call of the state CLI.
+
+    The forwarding call inside a wrapper -- the one whose argument is `"$@"` --
+    is what makes it a wrapper, so it is the only thing exempt.  Skipping the
+    whole *line* was the previous shape and let the rest of that line hide a
+    call:
+
+        python3 "$MISSION_STATE_PY" "$@"; _mission_state_bounded resume
+
+    Continuations are joined first, and an argument that is not a literal is
+    reported rather than ignored: `helper "$CMD"` asks for something this check
+    cannot read, and deny-by-default means refusing what it cannot read.
+    """
+    joined = re.sub(r"\\\n\s*", " ", source)
+    invocations: list[tuple[str, str]] = []
+    for line in joined.splitlines():
+        for caller in callers:
+            pattern = re.escape(caller) + r"\"?\s+(\S+)"
+            for match in re.finditer(pattern, line):
+                # `;` and `&` end the command, so they are not part of the
+                # argument.  Without stripping them the forwarding call is
+                # only recognised when nothing follows it on the line.
+                argument = match.group(1).rstrip(";&|").strip('"\'')
+                if argument == "$@":
+                    # The wrapper forwarding its own arguments.
+                    continue
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*", argument):
+                    invocations.append((line, "<not-a-literal>"))
+                    continue
+                invocations.append((line, argument))
+    return invocations
+
+
 def analyze_guard_shell(source: str) -> list[Violation]:
     """Conservative detector for policy or open command execution in the hook."""
     violations = []
@@ -674,42 +754,58 @@ def analyze_guard_shell(source: str) -> list[Violation]:
             tokens = shlex.split(line, comments=True, posix=True)
         except ValueError:
             pass
+        # The hook applies nothing now (#779): the commands are applied inside
+        # `stop-verdict`.  So the question is no longer "is this command inside
+        # the dispatch block" but "is any subcommand other than `stop-verdict`
+        # here at all".
+        #
+        # Deny by default rather than by allowlist.  An allowlist passes a
+        # subcommand nobody has added to it yet, which is exactly the shape a
+        # future change would take.
         for command in _COMMANDS:
-            if re.search(r"(?<![A-Za-z0-9-])" + re.escape(command) + r"(?![A-Za-z0-9-])", line) and not (
-                in_dispatch and dispatch_start <= source.find(line) < dispatch_end
-            ):
+            if re.search(r"(?<![A-Za-z0-9-])" + re.escape(command) + r"(?![A-Za-z0-9-])", line):
                 violations.append(Violation("command-outside-dispatch", line))
-        if tokens and "python3" in tokens:
-            for token in tokens:
-                if token in {"resume", "reactivate"}:
-                    violations.append(Violation("command-not-allowlisted", line))
 
-    labels = set(re.findall(r"^\s{4}(none|mark-halt|cleanup-stale|stop-guard-observe)\)\s*$", dispatch, re.MULTILINE))
-    if in_dispatch and labels != EXPECTED_COMMAND_KINDS:
-        violations.append(Violation("dispatch-set-mismatch", dispatch))
-    if not in_dispatch:
-        violations.append(Violation("dispatch-set-mismatch", source))
+    # Deny by default, at the call sites rather than by name.  Enumerating the
+    # subcommands and forbidding all but one looked equivalent, but it read only
+    # lines containing `python3` -- and the hook calls through a wrapper, so
+    # `_mission_state_bounded resume` passed.  Asking "what does each call of
+    # the CLI ask for" has no such gap, and needs no list to keep in step.
+    callers = _state_cli_callers(source)
+    invocations = _state_cli_invocations(source, callers)
+    for line, subcommand in invocations:
+        if subcommand != "stop-verdict":
+            violations.append(Violation("command-not-allowlisted", line))
+    if len(invocations) > 1:
+        violations.append(Violation("command-not-allowlisted", source))
+
+    # The dispatch block is gone, and its absence is the property now: if it
+    # returns, the loop it belonged to has returned with it.
+    #
+    # Narrow to branching on the *decision's command*.  The hook still has an
+    # unrelated `case` that validates the timeout string, and forbidding every
+    # `case` would forbid that too -- a check that fails for the wrong reason
+    # gets relaxed, and then it stops checking the right one.
+    if (
+        "GUARD_DECISION_DISPATCH_BEGIN" in source
+        or "COMMAND_KIND" in source
+        or re.search(r"case\s+\"?\$\{?(?:COMMAND|GUARD)", source)
+    ):
+        violations.append(Violation("dispatch-block-returned", source))
     return violations
 
 
+# What the hook looks like now: one call, and the text it returns (#779).
 _POSITIVE_DISPATCH = """
-# GUARD_DECISION_DISPATCH_BEGIN
-case "$COMMAND_KIND" in
-    none)
-        printf '%s' "$SHELL_TEXT"
-        ;;
-    mark-halt)
-        MISSION_SESSION_ID="$COMMAND_SESSION_ID" python3 "$MISSION_STATE_PY" mark-halt --reason "$COMMAND_REASON" --category stale
-        ;;
-    cleanup-stale)
-        python3 "$MISSION_STATE_PY" cleanup-stale --root "$COMMAND_ROOT" --execute
-        ;;
-    stop-guard-observe)
-        python3 "$MISSION_STATE_PY" stop-guard-observe --session-id "$COMMAND_SESSION_ID" --digest "$COMMAND_DIGEST" --now-epoch "$COMMAND_NOW" --ttl-seconds "$COMMAND_TTL"
-        ;;
-    *) exit 0 ;;
-esac
-# GUARD_DECISION_DISPATCH_END
+if ! GUARD_DECISION=$(printf '%s' "$INPUT" | _mission_state_bounded stop-verdict --hook-input - --json); then
+    printf '%s\\n' '{"decision":"block"}'
+    exit 0
+fi
+if ! SHELL_TEXT=$(printf '%s' "$GUARD_DECISION" | jq -er '.shell_text'); then
+    printf '%s\\n' '{"decision":"block"}'
+    exit 0
+fi
+printf '%s' "$SHELL_TEXT"
 """
 
 
@@ -719,13 +815,21 @@ _SYNTHETIC_GUARD_VIOLATIONS = {
     "arithmetic-minutes": ("MINS=$((AGE_SEC / 60))", "shell-arithmetic"),
     "timestamp-compare": ('[[ "$LEASE_EXPIRES_AT" > "$NOW" ]]', "timestamp-comparison"),
     "date-epoch": ("NOW=$(date +%s)", "timestamp-calculation"),
+    # The hook applies nothing now, so naming a command at all is the
+    # violation -- inside a branch or not.
     "branch-selects-command": ("if true; then python3 tool mark-halt; fi", "command-outside-dispatch"),
-    "unexpected-command": (_POSITIVE_DISPATCH.replace("python3 \"$MISSION_STATE_PY\" cleanup-stale", "python3 \"$MISSION_STATE_PY\" resume"), "command-not-allowlisted"),
+    "command-at-top-level": ('python3 "$MISSION_STATE_PY" cleanup-stale --root "$ROOT" --execute', "command-outside-dispatch"),
+    # Deny-by-default: `resume` was named before, but so is every other
+    # subcommand that is not `stop-verdict`, including ones added later.
+    "unexpected-command": ('python3 "$MISSION_STATE_PY" resume', "command-not-allowlisted"),
+    "unlisted-subcommand": ('python3 "$MISSION_STATE_PY" closeout', "command-not-allowlisted"),
     "dynamic-command": ('eval "$COMMAND"', "dynamic-command-execution"),
-    "jq-state-file": ('jq -r \'.updated_at\' "$sf"', "authoritative-jq-read"),
-    "jq-input": ('printf \'%s\' "$INPUT" | jq -r \'.cwd\'', "jq-input-not-guard-decision"),
+    "jq-state-file": ("jq -r '.updated_at' \"$sf\"", "authoritative-jq-read"),
+    "jq-input": ("printf '%s' \"$INPUT\" | jq -r '.cwd'", "jq-input-not-guard-decision"),
     "jq-construction": ("jq -n '{decision:\"block\"}'", "jq-construction"),
-    "missing-arm": (_POSITIVE_DISPATCH.replace("    none)\n        printf '%s' \"$SHELL_TEXT\"\n        ;;\n", ""), "dispatch-set-mismatch"),
+    # The loop coming back is itself the violation now.
+    "dispatch-block-returned": ('case "$COMMAND_KIND" in\n    none) ;;\nesac', "dispatch-block-returned"),
+    "dispatch-marker-returned": ("# GUARD_DECISION_DISPATCH_BEGIN", "dispatch-block-returned"),
 }
 
 
@@ -740,3 +844,235 @@ def test_canonical_hook_is_judgment_free_and_dispatches_the_closed_command_set()
     violations = analyze_guard_shell(HOOK.read_text(encoding="utf-8"))
 
     assert violations == []
+
+
+# --- The shapes the hook would actually use (#779 review) -------------------
+#
+# The first version of this check read only lines containing `python3`, and
+# enumerated the CLI's subcommands to forbid all but one.  Both halves were
+# wrong in the same direction: the hook calls through `_mission_state_bounded`,
+# so no line it uses contains `python3`, and `_mission_state_bounded resume`
+# passed a check whose whole purpose was to reject it.
+#
+# These mutate the *real* hook rather than a synthetic line, because the gap was
+# in how a call is written there, not in the rule.
+@pytest.mark.parametrize(
+    "label,inserted",
+    [
+        ("through the wrapper", "_mission_state_bounded resume"),
+        ("a subcommand nobody listed", "_mission_state_bounded closeout"),
+        ("bypassing the wrapper", 'python3 "$MISSION_STATE_PY" resume'),
+        ("the path with no quotes", "python3 $MISSION_STATE_PY reactivate"),
+    ],
+)
+def test_the_hook_may_not_call_any_other_subcommand(label, inserted):
+    source = HOOK.read_text(encoding="utf-8").replace(
+        'printf \'%s\' "$SHELL_TEXT"', inserted + '\nprintf \'%s\' "$SHELL_TEXT"'
+    )
+    codes = [violation.code for violation in analyze_guard_shell(source)]
+    assert "command-not-allowlisted" in codes, label
+
+
+def test_the_hook_may_not_call_the_verdict_twice():
+    """Two calls is the loop coming back by another name."""
+    source = HOOK.read_text(encoding="utf-8").replace(
+        'printf \'%s\' "$SHELL_TEXT"',
+        '_mission_state_bounded stop-verdict --hook-input - --json\n'
+        'printf \'%s\' "$SHELL_TEXT"',
+    )
+    codes = [violation.code for violation in analyze_guard_shell(source)]
+    assert "command-not-allowlisted" in codes
+
+
+def test_a_nested_brace_group_does_not_end_the_function():
+    """The body ends at the matching brace, not at the first line that is `}`.
+
+    This is the shape that matters most: a nested brace group is valid shell
+    (`bash -n` accepts it), and truncating the body there drops the forwarding
+    call, so the wrapper is never recognised and a second `stop-verdict`
+    reaches the hook unreported -- the loop this change removed, back under
+    another name.
+    """
+    source = HOOK.read_text(encoding="utf-8").replace(
+        'printf \'%s\' "$SHELL_TEXT"',
+        '_outer() {\n'
+        '  {\n'
+        '    :\n'
+        '  }\n'
+        '  _mission_state_bounded "$@"\n'
+        '}\n'
+        '_outer stop-verdict --hook-input - --json\n'
+        'printf \'%s\' "$SHELL_TEXT"',
+    )
+    codes = [violation.code for violation in analyze_guard_shell(source)]
+    assert "command-not-allowlisted" in codes
+
+
+def test_every_function_in_the_file_counts_as_a_caller():
+    """Which is what makes the body irrelevant, however it is written.
+
+    Three separate bypasses came from getting the end of a body wrong.  This
+    fixes the class by not needing the end: each definition contributes its
+    name, and the shapes that used to hide inside a body have nowhere left to
+    hide.  Asserting through the hook would not show it -- the hook has one
+    function, so the set looks the same either way.
+    """
+    source = (
+        "_paren() {\n  :\n}\n"
+        "function _keyword {\n  :\n}\n"
+        "_next_line()\n{\n  :\n}\n"
+        "_one_line() { :; }\n"
+    )
+
+    callers = _state_cli_callers(source)
+
+    assert {"_paren", "_keyword", "_next_line", "_one_line"} <= callers, callers
+    assert {"$MISSION_STATE_PY", "${MISSION_STATE_PY}"} <= callers, callers
+
+
+def test_a_wrapper_of_a_wrapper_cannot_hide_a_second_verdict_call():
+    """The count rule is what catches the removed loop returning by another name.
+
+    Every other row in the table below fires on "not allowlisted", so none of
+    them exercises `len(invocations) > 1`.  A second `stop-verdict` is
+    allowlisted by name; only the count rejects it.  Reaching it through a
+    wrapper of a wrapper defeated that rule until the caller set was closed
+    over wrappers.
+    """
+    source = HOOK.read_text(encoding="utf-8").replace(
+        'printf \'%s\' "$SHELL_TEXT"',
+        '_w2() { _mission_state_bounded "$@"; }\n'
+        '_w2 stop-verdict --hook-input - --json\n'
+        'printf \'%s\' "$SHELL_TEXT"',
+    )
+    codes = [violation.code for violation in analyze_guard_shell(source)]
+    assert "command-not-allowlisted" in codes
+
+
+def test_defining_a_wrapper_without_calling_it_is_not_a_violation():
+    """The closure must widen what counts as a caller, not what counts as a call.
+
+    Without this, making the caller set transitive could be "satisfied" by
+    reporting every definition, which would reject the hook itself.
+    """
+    source = HOOK.read_text(encoding="utf-8").replace(
+        'printf \'%s\' "$SHELL_TEXT"',
+        '_w7() { _mission_state_bounded "$@"; }\n'
+        'printf \'%s\' "$SHELL_TEXT"',
+    )
+    assert analyze_guard_shell(source) == []
+
+
+def test_the_wrapper_definition_is_not_itself_a_call():
+    """It forwards `"$@"`; counting it would report the hook as violating itself."""
+    assert analyze_guard_shell(HOOK.read_text(encoding="utf-8")) == []
+
+
+# The shapes a previous fix still let through.  Each was reported as passing a
+# check whose purpose is to reject it.  The last four came from the independent
+# checker: the caller set was seeded with one spelling of the variable, read
+# only `name() {` as a definition, skipped a one-line body, and did not follow a
+# wrapper of a wrapper.
+@pytest.mark.parametrize(
+    "label,inserted",
+    [
+        ("a variable as the subcommand", 'CMD=resume; _mission_state_bounded "$CMD"'),
+        ("a continuation line", "_mission_state_bounded \\\n    resume"),
+        ("hidden in another helper", "_other() {\n  _mission_state_bounded resume\n}"),
+        ("hidden in another helper, direct", '_other() {\n  python3 "$MISSION_STATE_PY" resume\n}'),
+        ("a wrapper of a wrapper", '_w2() { _mission_state_bounded "$@"; }\n_w2 resume'),
+        ("the braced spelling of the variable", 'python3 "${MISSION_STATE_PY}" resume'),
+        ("a function defined with the keyword",
+         'function _w3 { python3 "$MISSION_STATE_PY" "$@"; }\n_w3 resume'),
+        ("a function whose brace is on the next line",
+         '_w4()\n{\n  python3 "$MISSION_STATE_PY" "$@"\n}\n_w4 resume'),
+        # Each of these ended a function body early while `bash -n` accepted the
+        # script, so the wrapper went unrecognised.  The check no longer reads
+        # bodies, and they are kept as the regression for that decision.
+        ("a `}` in a heredoc body",
+         "_hd() {\n  cat <<'EOF'\n}\nEOF\n"
+         '  _mission_state_bounded "$@"\n}\n_hd resume'),
+        ("an escaped quote in an ANSI-C string",
+         "_ac() {\n  printf '%s' $'\\'}'\n"
+         '  _mission_state_bounded "$@"\n}\n_ac resume'),
+        ("a nested brace group before the call",
+         '_w8() {\n  {\n    :\n  }\n  _mission_state_bounded "$@"\n}\n_w8 resume'),
+        # The brace in each of these is *unbalanced*, so a parser that does not
+        # skip quoted text closes the body on it.  A balanced `{...}` would pass
+        # either way and would not exercise the skipping at all.
+        ("an unbalanced brace inside single quotes",
+         '_w9() {\n  printf \'%s\' \'}\'\n'
+         '  _mission_state_bounded "$@"\n}\n_w9 resume'),
+        ("an unbalanced brace inside double quotes",
+         '_w11() {\n  printf \'%s\' "}"\n'
+         '  _mission_state_bounded "$@"\n}\n_w11 resume'),
+        ("a brace escaped with a backslash",
+         '_w12() {\n  printf \'%s\' \\}\n'
+         '  _mission_state_bounded "$@"\n}\n_w12 resume'),
+        ("a brace inside a comment",
+         '_w10() {\n  # }\n  _mission_state_bounded "$@"\n}\n_w10 resume'),
+    ],
+)
+def test_the_hook_may_not_reach_the_cli_by_any_other_shape(label, inserted):
+    # Inserted as its own lines after the last `fi`, not spliced into the
+    # `printf`.  Splicing put the continuation case on the same line as
+    # another command, so it was caught by a different rule and the
+    # continuation handling was never exercised -- a mutation that removed
+    # the line-joining survived.
+    source = HOOK.read_text(encoding="utf-8")
+    marker = "\nfi\n"
+    at = source.rindex(marker) + len(marker)
+    source = source[:at] + inserted + "\n" + source[at:]
+    codes = [violation.code for violation in analyze_guard_shell(source)]
+    assert "command-not-allowlisted" in codes, label
+
+
+def test_an_unreadable_subcommand_is_refused_rather_than_ignored():
+    """Deny-by-default includes what the check cannot read.
+
+    `helper "$CMD"` may be `stop-verdict` at runtime or anything else.  Reading
+    it is not possible here, and treating unreadable as acceptable is the same
+    hole as an allowlist that nobody updated.
+    """
+    source = HOOK.read_text(encoding="utf-8").replace(
+        'printf \'%s\' "$SHELL_TEXT"',
+        '_mission_state_bounded "$SOMETHING"\nprintf \'%s\' "$SHELL_TEXT"',
+    )
+    codes = [violation.code for violation in analyze_guard_shell(source)]
+    assert "command-not-allowlisted" in codes
+
+
+def test_a_call_sharing_a_line_with_the_forwarding_call_is_still_read():
+    """Only the forwarding call is exempt, not the line it sits on.
+
+    The wrapper is recognised by forwarding `"$@"`, so that one call has to be
+    skipped.  Skipping the whole *line* let anything after the `;` through, and
+    a wrapper definition is exactly where such a line is plausible.  Asserting
+    through the hook cannot show this: the hook has no such line, so the rule
+    would look satisfied while the extraction dropped the call.
+    """
+    source = 'python3 "$MISSION_STATE_PY" "$@"; _mission_state_bounded resume\n'
+    callers = _state_cli_callers(
+        '_mission_state_bounded() {\n  python3 "$MISSION_STATE_PY" "$@"\n}\n'
+    )
+
+    invocations = _state_cli_invocations(source, callers)
+
+    assert [subcommand for _line, subcommand in invocations] == ["resume"], invocations
+
+
+def test_a_continuation_line_is_read_as_one_command():
+    """Joining continuations is what makes the subcommand visible at all.
+
+    Without it the analyzer sees `_mission_state_bounded \\` and then a bare
+    `resume`, and reads neither as a call.  Asserting through the whole hook
+    hid this: the extra call also trips the "more than one invocation" rule, so
+    a mutation that removed the joining still failed the test for the other
+    reason.  This asks the extraction directly.
+    """
+    source = "_mission_state_bounded \\\n    resume\n"
+    callers = _state_cli_callers('_x() {\n  python3 "$MISSION_STATE_PY" "$@"\n}\n') | {"_mission_state_bounded"}
+
+    invocations = _state_cli_invocations(source, callers)
+
+    assert [subcommand for _line, subcommand in invocations] == ["resume"], invocations

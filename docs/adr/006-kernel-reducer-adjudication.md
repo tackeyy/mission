@@ -77,6 +77,41 @@ principle actually protects — one authority for guard policy — is preserved 
 moving the judgment into typed Python and enumerating the shell's permitted
 actions.
 
+#### 追記 (#779, 2026-09-18): 撃つ場所が shell から adapter へ移った
+
+**Decision 1 の「fire from shell」という配置要件を supersede する。** 論拠は変わらないが、
+配置は変わった。**黙って読み替えないこと。**
+
+**何が変わったか。** 判定が返した命令を実行するのは、hook ではなく `stop-verdict` 自身
+（同一プロセス）になった。hook は 1 回呼んで、返った文字列を出すだけになる。
+
+**なぜ変えたか。** 配置そのものが可用性の欠陥になっていた。1 回の判定に最大 7 プロセスかかり、
+それらが 8 秒の予算を共有するため、負荷が上がると予算が起動時間で尽きて
+`guard-budget-exhausted` になる。**1 セッション中に 5 回発生したことを実測している。**
+プロセス境界は Decision 1 の論拠（guard policy の authority を 1 つにすること）には
+含まれていない。**分けることで守られていたものは無い。**
+
+**何が変わらないか。**
+
+- **判定の authority は `runtime_guard.py` のまま。** 純関数として判定し、I/O を持たない契約も
+  そのまま（同モジュールが `os` / `pathlib` / `subprocess` / `sys` / `importlib` を import できない
+  ことは、いまも検査で固定されている）
+- **命令集合は閉じたまま。** 閉性の検査場所が shell の `case` ラベルから Python 側の表へ移った。
+  欠けても余っても落ちる、という強さは変わらない
+- **hook が policy 判断を持たない契約もそのまま。** 時刻・算術・JSON 組み立て・動的実行の禁止は
+  縮んだ hook にも効く
+
+**代わりに shell 側へ課した検査。** Python 側の閉性検査では、hook に
+`python3 ... mark-halt` を直接書き足す変更を検出できない。**守っているのは「shell が副作用
+コマンドを直接実行できない」ことであり、それは shell を見ないと分からない。** そこで hook の
+検査を allowlist から deny-by-default へ変えた — **`stop-verdict` 以外の subcommand が 1 つでも
+現れたら落ちる**。許可する側を列挙すると、新しい subcommand が増えたときに黙って通る。
+
+**実装の配置について。** 適用のループと receipt の解決は `mission_application/guard_application.py`
+に置き、adapter（`mission-state.py`）は表と窓口だけを持つ。**設計時は adapter へ寄せる想定だったが、
+thin-adapter ratchet が「新しい違反関数」を拒否するため成立しない。** allowlist が
+`mission_application.*` への呼び出しを許していることが、この repo の分層の意図を示している。
+
 ### 2. Kernel: converge on "every mutation goes through `decide()`", in batches
 
 The owner ruled (2026-08-22) that the target state is the original principle:
