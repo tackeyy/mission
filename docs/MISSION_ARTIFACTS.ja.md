@@ -96,6 +96,7 @@ mission-state.py artifact publish --provider claude-code --require-confirm --app
 - `artifact append` は既知の section 名だけを受け付ける。
 - `artifact render` は state と追記された evidence block から canonical Markdown を再生成する。
 - `artifact export` はレビュー済み artifact をユーザー指定の durable path にコピーする。
+- 宛先に `.mission-state/` 配下は指定できない。
 - `artifact publish` は任意であり、必ず明示的なユーザー確認を要求する。現在の command は publish intent、
   approval text、provider、destination、artifact path を state に記録し、remote provider API は呼びません。
 

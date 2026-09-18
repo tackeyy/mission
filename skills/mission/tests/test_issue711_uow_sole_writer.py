@@ -122,6 +122,39 @@ def test_the_legacy_publisher_does_not_run_for_an_artifact_command(tmp_path):
     assert calls == [], "artifact publication reached the legacy publisher"
 
 
+def test_the_legacy_publisher_does_not_run_for_all_artifact_writers(tmp_path):
+    """#764 routes initialize, render, export, and publication through UoW."""
+    import contextlib
+
+    from mission_application.artifact import (
+        prepare_artifact_export,
+        prepare_artifact_publish,
+        prepare_artifact_render,
+    )
+
+    calls = []
+    @contextlib.contextmanager
+    def _spy(effects, prepared):
+        calls.append((effects, prepared))
+        yield effects
+
+    repository = _repository(tmp_path, effect_transaction=_spy)
+    render = lambda _document, _artifact: b"# t\n"
+    repository.execute_transition_effects(lambda state: _prepare_artifact(state))
+    repository.execute_transition_effects(lambda state: prepare_artifact_render(
+        state, now="2026-01-01T00:00:01Z", redaction_status="reviewed", render=render
+    ))
+    repository.execute_transition_effects(lambda state: prepare_artifact_export(
+        state, now="2026-01-01T00:00:02Z", destination="docs/out.md",
+        redaction_status="reviewed", render=render
+    ))
+    repository.execute_transition_effects(lambda state: prepare_artifact_publish(
+        state, now="2026-01-01T00:00:03Z", provider="local", destination=None,
+        approval_text="ok", confirmed=True, render=render
+    ))
+    assert calls == [], "an artifact effect reached the legacy publisher"
+
+
 def test_progress_no_longer_reaches_the_legacy_publisher(tmp_path):
     """The window #747 exists to close: progress wrote before the commit.
 

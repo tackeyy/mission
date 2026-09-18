@@ -1277,7 +1277,7 @@ def _prepared_binding_digest(prepared: PreparedCommit) -> str:
     return _sha256(_canonical_bytes(document, limit=STATE_LIMIT))
 
 
-def refuse_unauthorized_generated_blobs(
+def refuse_unauthorized_published_blobs(
     command_type, blobs, *, repository_root_name: Optional[str] = None
 ) -> None:
     """Refuse a request whose blobs publish in-root under the wrong command.
@@ -1304,18 +1304,14 @@ def refuse_unauthorized_generated_blobs(
         EvidencePublicationError,
         REPOSITORY_ROOT_NAME,
         canonical_generated_path,
-        internal_destination_rules_by_command_type,
+        publication_blob_shapes_by_command_type,
     )
 
-    generated = tuple(
-        blob
-        for blob in getattr(blobs, "blobs", ())
-        if getattr(blob.binding, "origin", "captured") == "generated"
-    )
+    published = tuple(getattr(blobs, "blobs", ()))
     root = REPOSITORY_ROOT_NAME if repository_root_name is None else repository_root_name
     try:
         classified = []
-        for blob in generated:
+        for blob in published:
             path = canonical_generated_path(
                 blob.binding.relative_path, repository_root_name=root
             )
@@ -1327,12 +1323,16 @@ def refuse_unauthorized_generated_blobs(
             else:
                 classified.append(("projection", blob))
         internal = tuple((kind, blob) for kind, blob in classified if kind != "projection")
-        permitted = internal_destination_rules_by_command_type().get(command_type, frozenset())
-        valid = len(internal) <= 1 and all(kind in permitted for kind, _blob in internal)
-        if valid and command_type == "export-artifact" and generated:
-            valid = len(generated) == 2
-            if valid:
-                first, second = generated
+        shape = publication_blob_shapes_by_command_type().get(command_type)
+        valid = shape is None and not internal
+        if shape is not None:
+            valid = not published or (
+                len(published) == shape["blob_count"]
+                and shape["internal_min"] <= len(internal) <= shape["internal_max"]
+                and all(kind in shape["rules"] for kind, _blob in internal)
+            )
+            if valid and published and shape["blob_count"] == 2:
+                first, second = published
                 valid = (first.binding.digest, first.binding.size) == (
                     second.binding.digest,
                     second.binding.size,
@@ -1344,6 +1344,10 @@ def refuse_unauthorized_generated_blobs(
             )
     except EvidencePublicationError as exc:
         raise FencedCommitError("request-invalid", str(exc)) from exc
+
+
+# Compatibility name for direct callers; admission now examines every blob.
+refuse_unauthorized_generated_blobs = refuse_unauthorized_published_blobs
 
 
 def validate_execution_request(
@@ -1382,7 +1386,7 @@ def validate_execution_request(
     # malformed request into an ``AttributeError`` instead of the typed
     # refusal every other malformed field gets.
     _audit_record(request.audit)
-    refuse_unauthorized_generated_blobs(
+    refuse_unauthorized_published_blobs(
         request.audit.command_type,
         request.blobs,
         repository_root_name=repository_root_name,

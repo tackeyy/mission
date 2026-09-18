@@ -423,6 +423,25 @@ def internal_destination_rules_by_command_type():
         rules.setdefault(command_type, set()).add(rule)
     return {command_type: frozenset(value) for command_type, value in rules.items()}
 
+
+def publication_blob_shapes_by_command_type():
+    """Derive published-blob cardinality and in-root ownership from fields."""
+    rules = internal_destination_rules_by_command_type()
+    shapes = {}
+    for command_type, fields in EFFECT_FIELDS_BY_COMMAND_TYPE.items():
+        internal_fields = tuple(
+            field for field in fields
+            if (command_type, field) in INTERNAL_DESTINATION_RULE_BY_COMMAND_FIELD
+        )
+        permitted = rules.get(command_type, frozenset())
+        shapes[command_type] = {
+            "blob_count": len(fields),
+            "internal_min": 0 if permitted == frozenset({"progress"}) else len(internal_fields),
+            "internal_max": len(internal_fields),
+            "rules": permitted,
+        }
+    return shapes
+
 # Which attribute of a command's effect claim holds the path it publishes to.
 # The two projection commands carry it separately from the effect target; the
 # progress claim has no such field and its target *is* the path.  Reading the

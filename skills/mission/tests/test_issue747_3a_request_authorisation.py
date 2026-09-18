@@ -87,7 +87,7 @@ def test_a_command_nobody_listed_is_refused():
 
 @pytest.mark.parametrize(
     "command_type",
-    ["generate-context-manifest", "some-future-command", None],
+    ["update-progress", "generate-context-manifest", "some-future-command", None],
 )
 def test_external_bindings_pass_for_every_command(command_type):
     from mission_persistence.fenced_commit import refuse_unauthorized_generated_blobs
@@ -108,8 +108,7 @@ def test_an_empty_blob_set_passes():
     refuse_unauthorized_generated_blobs("generate-context-manifest", _blob_set())
 
 
-def test_a_captured_binding_is_not_a_generated_destination():
-    """Captured blobs are caller input read from anywhere; this rule is about output."""
+def test_a_captured_binding_cannot_bypass_a_published_destination_rule():
     from mission_persistence.fenced_commit import refuse_unauthorized_generated_blobs
     from mission_persistence.local_uow import BlobBinding, VerifiedBlob, VerifiedBlobSet
 
@@ -124,9 +123,7 @@ def test_a_captured_binding_is_not_a_generated_destination():
         ),
         b"",
     )
-    refuse_unauthorized_generated_blobs(
-        "generate-context-manifest", VerifiedBlobSet((captured,))
-    )
+    _refuses("generate-context-manifest", VerifiedBlobSet((captured,)))
 
 
 def test_the_request_validation_applies_the_rule():
@@ -136,7 +133,7 @@ def test_the_request_validation_applies_the_rule():
     from mission_persistence import fenced_commit
 
     source = inspect.getsource(fenced_commit.validate_execution_request)
-    assert "refuse_unauthorized_generated_blobs(" in source
+    assert "refuse_unauthorized_published_blobs(" in source
     assert "request.audit.command_type" in source
     # The rule is expressed against the repository's own root name, so a
     # repository laid out under a different one is judged by its own name
@@ -291,7 +288,7 @@ def test_the_audit_is_validated_before_it_is_read():
 
     source = inspect.getsource(fenced_commit.validate_execution_request)
     assert source.index("_audit_record(request.audit)") < source.index(
-        "refuse_unauthorized_generated_blobs("
+        "refuse_unauthorized_published_blobs("
     )
 
 

@@ -104,6 +104,8 @@ intent digest の対象が変わって記録済みの identity が動く。**し
 入口ではどの blob がどのフィールド由来かを判別できないので、**判別できなくても結果が正規の
 実行と同じになる形**だけを受理する。
 
+公開される全 blob（`origin` を問わない）を field 表から導出した正規形で検査する。blob が 0 個なら従来どおり許すが、それ以外は effect field 数と一致させる。repository 内 blob は各 field の許可規則・必要個数に一致させ、progress だけは projection 宛先のため 0 または 1 個を許す。High-1 では artifact binding の `relative_path` を projection に差し替えて別ファイルへ書け、High-2 では `origin=captured` が旧 generated-only 検査を回避したため、この入口で全 blob を検査する。
+
 全コマンドに共通の条件と、export だけの条件がある。
 
 - generated blob を「progress 規則 / artifact 規則 / projection」に分類する

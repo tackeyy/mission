@@ -194,7 +194,7 @@ def test_entry_export_requires_two_equal_generated_blobs_when_nonempty():
     projection = _generated_blob("docs/a.md")
     _entry_refuses("export-artifact", artifact)
     refuse_unauthorized_generated_blobs("export-artifact", _blob_set(
-        _generated_blob("docs/a.md"), _generated_blob("docs/b.md")
+        artifact, _generated_blob("docs/a.md")
     ))
     _entry_refuses(
         "export-artifact", artifact,
@@ -236,6 +236,37 @@ def test_entry_refuses_two_internal_blobs_even_when_each_rule_is_permitted(
     _entry_refuses(command_type, _generated_blob(first), _generated_blob(second))
 
 
+def test_entry_refuses_a_render_binding_redirected_to_a_projection():
+    _entry_refuses("render-artifact", _generated_blob("docs/redirected.md"))
+
+
+@pytest.mark.parametrize("command_type", ("update-progress", "unknown-command"))
+def test_entry_does_not_let_captured_blobs_bypass_internal_destination_rules(command_type):
+    blob = _generated_blob(".mission-state/artifacts/victim/mission-artifact.md")
+    blob = blob.__class__(
+        blob.binding.__class__(**{**blob.binding.__dict__, "origin": "captured"}),
+        blob.content,
+    )
+    _entry_refuses(command_type, blob)
+
+
+@pytest.mark.parametrize("directory", ("sessions", "commits"))
+def test_artifact_rule_refuses_other_repository_directories(directory):
+    from mission_kernel.projection_path import ProjectionRejection, resolve_internal_artifact_path
+
+    assert isinstance(resolve_internal_artifact_path(
+        Path(f".mission-state/{directory}/x/mission-artifact.md"), root_name=".mission-state"
+    ), ProjectionRejection)
+
+
+def test_entry_refuses_export_with_three_equal_blobs():
+    _entry_refuses("export-artifact", *(
+        _generated_blob(path) for path in (
+            ".mission-state/artifacts/test/mission-artifact.md", "docs/a.md", "docs/b.md"
+        )
+    ))
+
+
 def test_export_to_state_root_is_refused_before_any_write(state_dir, run_cli, read_state):
     root = state_dir.parent
     assert run_cli("artifact", "init", "--json", cwd=root).returncode == 0
@@ -252,3 +283,34 @@ def test_export_to_state_root_is_refused_before_any_write(state_dir, run_cli, re
     assert state_path.read_bytes() == before
     assert not (root / ".mission-state" / "export.md").exists()
     assert read_state(state_dir) == __import__("json").loads(before)
+
+
+def test_v4_export_to_state_root_is_refused_before_any_write(legacy_run_cli, tmp_path):
+    assert legacy_run_cli("init", "artifact v4", cwd=tmp_path).returncode == 0
+    assert legacy_run_cli("artifact", "init", cwd=tmp_path).returncode == 0
+    state_path = tmp_path / ".mission-state" / "sessions" / "test.json"
+    before = state_path.read_bytes()
+    result = legacy_run_cli(
+        "artifact", "export", "--to", ".mission-state/export.md",
+        "--redaction-status", "reviewed", cwd=tmp_path,
+    )
+    assert result.returncode == 2
+    assert "publication-path-invalid" in result.stderr
+    assert state_path.read_bytes() == before
+
+
+def test_artifact_rendered_bytes_are_time_independent_but_input_sensitive():
+    from mission_application.artifact import prepare_artifact_init
+
+    render = _state_module()._render_artifact_markdown
+    state = {"session_id": "test", "mission": "one"}
+    def prepared(now, title="title"):
+        return prepare_artifact_init(
+            state, now=now,
+            artifact_path=".mission-state/artifacts/test/mission-artifact.md",
+            format="markdown", title=title, redaction_status="unchecked",
+            required_for_pass=False,
+            render=lambda document, artifact: render(document, artifact).encode(),
+        ).effects[0].content
+    assert prepared("2026-01-01T00:00:00Z") == prepared("2031-06-30T23:59:59Z")
+    assert prepared("2026-01-01T00:00:00Z", "other") != prepared("2026-01-01T00:00:00Z")
