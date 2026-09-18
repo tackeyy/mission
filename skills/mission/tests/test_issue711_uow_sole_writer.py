@@ -39,7 +39,22 @@ def _prepare_progress(state):
         last_unit=None,
         artifact_path=None,
         iteration=1,
-        evidence_path="progress.json",
+        evidence_path=".mission-state/archive/iter-1-abcdef01-progress.md",
+    )
+
+
+def _prepare_artifact(state):
+    from mission_application.artifact import prepare_artifact_init
+
+    return prepare_artifact_init(
+        state,
+        now="2026-01-01T00:00:00Z",
+        artifact_path="a.md",
+        format="markdown",
+        title="t",
+        redaction_status="unchecked",
+        required_for_pass=False,
+        render=lambda _document, _artifact: b"# t\n",
     )
 
 
@@ -89,7 +104,36 @@ def test_the_legacy_publisher_is_not_called_for_a_blob_bearing_path(tmp_path):
 
 
 def test_the_legacy_publisher_still_runs_for_a_path_less_command(tmp_path):
-    """Artifact and progress keep the old route until the later stage."""
+    """The artifact commands keep the old route until their own stage.
+
+    #747 3a moved ``update-progress`` onto the unit of work, so this now
+    stands on a command that has not moved.
+    """
+    import contextlib
+
+    calls = []
+
+    @contextlib.contextmanager
+    def _spy(effects, prepared):
+        calls.append(effects)
+        yield effects
+
+    repository = _repository(tmp_path, effect_transaction=_spy)
+    # The artifact commands enter through their own executor, which is why
+    # they are still on this branch: their claims carry no publication path.
+    _prepared_result, execution = repository.execute_transition_effects(
+        lambda state: _prepare_artifact(state)
+    )
+    assert execution.decision is None or execution.decision.accepted, execution.decision
+    assert calls, "the path-less route lost its publisher"
+
+
+def test_progress_no_longer_reaches_the_legacy_publisher(tmp_path):
+    """The window #747 exists to close: progress wrote before the commit.
+
+    The publisher is not merely unused -- it must not be reachable, because
+    reaching it is what put a file outside the generation that records it.
+    """
     import contextlib
 
     calls = []
@@ -104,11 +148,14 @@ def test_the_legacy_publisher_still_runs_for_a_path_less_command(tmp_path):
         lambda state: _prepare_progress(state)
     )
     assert execution.decision is None or execution.decision.accepted, execution.decision
-    assert calls, "the path-less route lost its publisher"
+    assert calls == [], "progress still publishes outside the unit of work"
 
 
 class _Killed(Exception):
     """Stand in for the process ending at one fault point."""
+
+
+PROGRESS_RELATIVE = ".mission-state/archive/iter-1-abcdef01-progress.md"
 
 
 def _publish_target(tmp_path, relative="build/m.json"):
@@ -122,7 +169,7 @@ def _publish_target(tmp_path, relative="build/m.json"):
     return Path(tmp_path) / "repository" / relative
 
 
-def _run_until(tmp_path, point, *, existing=None):
+def _run_until(tmp_path, point, *, existing=None, prepare=None, relative="build/m.json"):
     """Drive one publish and stop at `point`, returning what is on disk.
 
     Observing the file is the only way to tell when the publish happens: both
@@ -135,7 +182,7 @@ def _run_until(tmp_path, point, *, existing=None):
     from mission_persistence.legacy_v4 import V5CompatibilityRepository
 
     local, _repo, _clock, _sp, _sb, _r = _commit_cli_init(tmp_path)
-    target = _publish_target(tmp_path)
+    target = _publish_target(tmp_path, relative)
     target.parent.mkdir(parents=True, exist_ok=True)
     before = None
     if existing is not None:
@@ -163,7 +210,7 @@ def _run_until(tmp_path, point, *, existing=None):
     killed = False
     try:
         repository.execute_evidence_transition_effects(
-            lambda state: _prepare_context(state)
+            prepare or (lambda state: _prepare_context(state))
         )
     except _Killed:
         killed = True
@@ -196,6 +243,40 @@ def test_an_existing_target_is_untouched_before_the_generation_is_durable(
     assert observed["exists"]
     assert observed["content"] == b"previous", "the target was replaced early"
     assert observed["inode"] == observed["before"][1], "the target was rewritten"
+
+
+@pytest.mark.parametrize("point", ["after-stage", "after-prepare"])
+def test_progress_publishes_nothing_before_the_generation_is_durable(tmp_path, point):
+    """#747 3a: the in-root destination is held to the same order.
+
+    Progress writes inside the repository, which the projection rule refuses
+    by design, so it takes a destination of its own.  Being a different
+    destination must not make it a different order: the file may not exist
+    until the generation that records it is durable.
+    """
+    observed = _run_until(
+        tmp_path, point, prepare=_prepare_progress, relative=PROGRESS_RELATIVE
+    )
+    assert observed["killed"], "the run did not reach %s" % point
+    assert not observed["exists"], "%s already published the checkpoint" % point
+
+
+@pytest.mark.parametrize("point", ["after-stage", "after-prepare"])
+def test_an_existing_progress_checkpoint_is_untouched_before_durability(
+    tmp_path, point
+):
+    """The same iteration reuses one file, so the replacement is the risk here."""
+    observed = _run_until(
+        tmp_path,
+        point,
+        existing=b"previous",
+        prepare=_prepare_progress,
+        relative=PROGRESS_RELATIVE,
+    )
+    assert observed["killed"], "the run did not reach %s" % point
+    assert observed["exists"]
+    assert observed["content"] == b"previous", "the checkpoint was replaced early"
+    assert observed["inode"] == observed["before"][1], "the checkpoint was rewritten"
 
 
 def _run_until_and_recover(tmp_path, point, *, existing=None):

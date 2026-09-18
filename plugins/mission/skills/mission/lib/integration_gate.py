@@ -223,6 +223,179 @@ SUITE_REPORT_SCHEMA = "mission-suite-report/1"
 # rule would have to mean the same thing to every runner a repository might
 # declare; every runner already inherits the environment.
 SUITE_REPORT_ENV = "MISSION_SUITE_REPORT"
+_SUITE_FAILURE_PREFIX = "[suite_failure] "
+_ASCII_PUNCTUATION = r'''!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~'''
+_MATCHED_FAILURE_TITLE = "matched failure lines:"
+_OUTPUT_TAIL_TITLE = "output tail:"
+_TRUNCATION_MARKER = _SUITE_FAILURE_PREFIX + "output truncated"
+# A truncation can always fall back to the marker alone: headers are optional,
+# but an omitted input line must never be reported without this marker.
+_MIN_SUITE_FAILURE_EXCERPT_LIMIT = len(_TRUNCATION_MARKER)
+
+
+def _sanitize_suite_output(value: str) -> str:
+    """Keep only line structure that cannot alter the gate's terminal output."""
+    kept = []
+    for character in value:
+        codepoint = ord(character)
+        if character in ("\n", "\t"):
+            kept.append(character)
+        elif (codepoint <= 0x1F or codepoint == 0x7F
+              or 0x80 <= codepoint <= 0x9F
+              or character in ("\u2028", "\u2029")):
+            # Suite output becomes terminal-bound at this boundary; dropping
+            # controls prevents terminal actions and forged gate log records.
+            continue
+        else:
+            kept.append(character)
+    return "".join(kept)
+
+
+def _is_failure_line(line: str) -> bool:
+    tokens = [token.strip(_ASCII_PUNCTUATION) for token in re.split(r"[ \t]+", line)]
+    for index, token in enumerate(tokens):
+        if token in {"FAILED", "FAIL", "ERROR"}:
+            return True
+        if token == "not" and index + 1 < len(tokens) and tokens[index + 1] == "ok":
+            return True
+    return False
+
+
+def _with_truncation_marker(section: str, truncated: bool, limit: int) -> str:
+    """Append the reserved marker whenever a bounded excerpt omitted output."""
+    if not truncated:
+        return section
+    marked = "\n".join((section, _TRUNCATION_MARKER)) if section else _TRUNCATION_MARKER
+    # Content selection reserves this marker first.  If optional headers still
+    # leave no room, drop them: a truncation marker outranks every header.
+    return marked if len(marked) <= limit else _TRUNCATION_MARKER
+
+
+def _render_failure_sections(
+    matched: list[tuple[int, str]],
+    tail: list[tuple[int, str]],
+    *,
+    has_matches: bool,
+    show_headers: bool,
+) -> str:
+    """Render already-selected entries; callers decide whether truncation is needed."""
+    rendered: list[str] = []
+    if has_matches:
+        if show_headers:
+            rendered.append(_SUITE_FAILURE_PREFIX + _MATCHED_FAILURE_TITLE)
+        rendered.extend(_SUITE_FAILURE_PREFIX + line for _, line in matched)
+    if show_headers:
+        rendered.append(_SUITE_FAILURE_PREFIX + _OUTPUT_TAIL_TITLE)
+    if tail:
+        rendered.extend(_SUITE_FAILURE_PREFIX + line for _, line in tail)
+    return "\n".join(rendered)
+
+
+def _select_failure_entries(
+    entries: list[tuple[int, str]], matched_indices: set[int], limit: int
+) -> str:
+    """Select first matching and final remaining lines without spending the marker."""
+    matched_entries = [entry for entry in entries if entry[0] in matched_indices]
+    tail_entries = [entry for entry in entries if entry[0] not in matched_indices]
+    has_matches = bool(matched_entries)
+    full = _render_failure_sections(
+        matched_entries, tail_entries, has_matches=has_matches, show_headers=True
+    )
+    if len(full) <= limit:
+        return full
+
+    # Reserve the marker before accepting any content.  Headers are tried first
+    # for readability, then discarded if they would prevent every content line.
+    show_headers = len(_with_truncation_marker(
+        _render_failure_sections([], [], has_matches=has_matches, show_headers=True), True, limit
+    )) > len(_TRUNCATION_MARKER)
+    selected_matched: list[tuple[int, str]] = []
+    selected_tail: list[tuple[int, str]] = []
+    content_budget = (limit - len(_TRUNCATION_MARKER)) * 2 // 3
+
+    def marked_size() -> int:
+        section = _render_failure_sections(
+            selected_matched,
+            selected_tail,
+            has_matches=has_matches,
+            show_headers=show_headers,
+        )
+        return len(section) + 1 + len(_TRUNCATION_MARKER) if section else len(_TRUNCATION_MARKER)
+
+    # Reserve the final diagnostic before matching records consume the budget.
+    # This also makes an all-matching log retain its actual final line as tail.
+    last_entry = entries[-1]
+    selected_tail.append(last_entry)
+    if marked_size() > limit:
+        selected_tail.pop()
+
+    tail_indices = {index for index, _ in selected_tail}
+    # Matching records retain their existing forward direction, but never take
+    # all of the space reserved for the final tail.
+    for entry in matched_entries:
+        if entry[0] in tail_indices:
+            continue
+        before = marked_size()
+        selected_matched.append(entry)
+        if marked_size() > limit or marked_size() - before > content_budget:
+            selected_matched.pop()
+            break
+        content_budget -= marked_size() - before
+
+    selected_indices = {index for index, _ in selected_matched}
+    # The tail retains its existing reverse selection direction.  marked_size()
+    # includes the inter-record separator before the reserved truncation marker.
+    for entry in reversed(entries):
+        if entry[0] in selected_indices or entry[0] in tail_indices:
+            continue
+        selected_tail.insert(0, entry)
+        if marked_size() > limit:
+            selected_tail.pop(0)
+            break
+
+    if not selected_matched and not selected_tail and show_headers:
+        # A very small accepted limit may fit a content line only after headers
+        # are omitted; marker visibility still has priority in either layout.
+        show_headers = False
+        for entry in reversed(entries):
+            selected_tail.insert(0, entry)
+            if marked_size() > limit:
+                selected_tail.pop(0)
+                break
+
+    section = _render_failure_sections(
+        selected_matched,
+        selected_tail,
+        has_matches=has_matches,
+        show_headers=show_headers,
+    )
+    return _with_truncation_marker(section, True, limit)
+
+
+def suite_failure_excerpt(stdout, stderr, *, limit):
+    """Return a bounded diagnostic view of a failed declared suite."""
+    # The marker alone is the derived minimum; headers may be omitted so every
+    # accepted limit can still disclose that one or more input lines were lost.
+    if limit < _MIN_SUITE_FAILURE_EXCERPT_LIMIT:
+        raise ValueError(
+            "suite failure excerpt limit must be at least {}".format(
+                _MIN_SUITE_FAILURE_EXCERPT_LIMIT
+            )
+        )
+    streams = [stream for stream in (stdout or "", stderr or "") if stream]
+    sanitized = _sanitize_suite_output("\n".join(streams))
+    lines = sanitized.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    if not any(lines):
+        return _SUITE_FAILURE_PREFIX + "output unavailable"
+
+    entries = list(enumerate(lines))
+    matched_indices = {index for index, line in entries if _is_failure_line(line)}
+    # Runner-neutral matching deliberately permits ordinary prose to overmatch;
+    # a runner-specific format would make diagnostics disappear for other runners.
+    # Showing both matches and tail keeps that bounded false-positive cost useful.
+    return _select_failure_entries(entries, matched_indices, limit)
 
 
 def load_suite_contract(operations, *, base_sha: str, step: int) -> dict:
@@ -346,6 +519,7 @@ def run_declared_suite(command, *, runner, cwd, report_path, expected_tree_sha, 
     if result.returncode != 0:
         if logger is not None:
             logger("suite_exit={}".format(result.returncode))
+            logger(suite_failure_excerpt(result.stdout, result.stderr, limit=4000))
         raise IntegrationGateError(step, "suite-failed", "integrated tree suite failed")
     return require_suite_report(
         read_suite_report(report_path), expected_tree_sha=expected_tree_sha, step=step
