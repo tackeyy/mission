@@ -681,16 +681,30 @@ def _state_tree(root):
     return tree
 
 
-def _run_shapes_hook(tmp_path, inserted):
-    """Run a hook and return (subcommands, whether the state was left alone).
+def _run_shapes_hook(tmp_path, inserted, *, state=None):
+    """Run a hook and return (subcommands, state left alone, hook exit code).
 
     The second value is a separate observation, because the first depends on
     the CLI being reached through `$MISSION_STATE_PY`.  A hook that wrote the
     state directly would leave the count at one while changing what the count
     exists to protect.
+
+    The third tells "the shape ran and was not detected" from "the shape did
+    not run".  Those look the same from the first two: an inserted line that
+    dies takes the count and the state with it, and the row then passes -- or
+    fails naming the wrong symptom.  CI showed both, when two shapes named a
+    `python3.14` and a `$TMPDIR` that exist here and not there.
+
+    `state` picks which guard path the hook takes.  Leaving it out gives an
+    empty `sessions/`, which settles to `no-eligible-session` -- and a hook
+    that calls the CLI again *depending on the finding* is invisible there
+    (#796 checker round 1).  That is where the loop of #779 lived, so it has
+    to be reachable here.
     """
     root = tmp_path / "repo"
     (root / ".mission-state" / "sessions").mkdir(parents=True)
+    if state is not None:
+        _write_state(root, **state)
     # Seeded so the comparison can see a file *change*, not only appear.
     # Comparing the names alone would pass a hook that rewrote what is already
     # there, which is the more likely way for this to go wrong.
@@ -701,7 +715,7 @@ def _run_shapes_hook(tmp_path, inserted):
     before = _state_tree(root)
     shim, log = _recording_state_py(tmp_path)
     hook = _hook_with(tmp_path, inserted)
-    _run_hook(
+    result, _launches = _run_hook(
         tmp_path, root, hook=hook,
         env_overrides={
             "MISSION_STATE_PY": str(shim),
@@ -714,7 +728,7 @@ def _run_shapes_hook(tmp_path, inserted):
             "MISSION_TEST_OUTSIDE": str(tmp_path / "outside-target"),
         },
     )
-    return _subcommands(log), _state_tree(root) == before
+    return _subcommands(log), _state_tree(root) == before, result.returncode
 
 
 def test_a_missing_log_reads_as_no_calls_not_as_an_error(tmp_path):
@@ -760,8 +774,9 @@ def test_the_hook_names_the_cli_only_through_the_variable():
 
 def test_running_the_hook_shows_one_call_and_which_one(tmp_path):
     """The guarantee, measured: one launch, and it asks for `stop-verdict`."""
-    subcommands, untouched = _run_shapes_hook(tmp_path, "")
+    subcommands, untouched, code = _run_shapes_hook(tmp_path, "")
 
+    assert code == 0, code
     assert subcommands == ["stop-verdict"]
     assert untouched, "the guard changed the state it only had to read"
 
@@ -810,7 +825,11 @@ _BYPASS_SHAPES = {
 
 @pytest.mark.parametrize("label", sorted(_BYPASS_SHAPES))
 def test_running_the_hook_catches_what_reading_it_missed(tmp_path, label):
-    subcommands, _untouched = _run_shapes_hook(tmp_path, _BYPASS_SHAPES[label])
+    subcommands, _untouched, code = _run_shapes_hook(tmp_path, _BYPASS_SHAPES[label])
+
+    # A shape that failed to run takes the count with it, and the row would
+    # then fail naming the measurement instead of the shape.
+    assert code == 0, (label, code)
 
     # `!= ["stop-verdict"]` would also pass on an empty list, which is what a
     # broken harness produces: the shape would look detected because nothing
@@ -849,10 +868,11 @@ _SILENT_STATE_CHANGES = {
 
 @pytest.mark.parametrize("label", sorted(_SILENT_STATE_CHANGES))
 def test_a_change_that_reads_the_same_is_still_a_change(tmp_path, label):
-    subcommands, untouched = _run_shapes_hook(
+    subcommands, untouched, code = _run_shapes_hook(
         tmp_path, _SILENT_STATE_CHANGES[label]
     )
 
+    assert code == 0, (label, code)
     assert subcommands == ["stop-verdict"], (label, subcommands)
     assert not untouched, label
 
@@ -864,10 +884,11 @@ def test_rewriting_an_existing_state_file_is_seen(tmp_path):
     comes back different is the shape a guard would actually produce, and
     comparing the listing alone would call it unchanged.
     """
-    subcommands, untouched = _run_shapes_hook(
+    subcommands, untouched, code = _run_shapes_hook(
         tmp_path, 'printf \'rewritten\' > "$PWD/.mission-state/marker"'
     )
 
+    assert code == 0, code
     assert subcommands == ["stop-verdict"], subcommands
     assert not untouched
 
@@ -880,11 +901,12 @@ def test_writing_the_state_directly_is_seen_even_though_the_count_is_one(tmp_pat
     prevent.  Counting calls and comparing the state are two observations, and
     this shape separates them: the first stays at one, the second changes.
     """
-    subcommands, untouched = _run_shapes_hook(
+    subcommands, untouched, code = _run_shapes_hook(
         tmp_path,
         'printf \'{"mission":"x"}\' > "$PWD/.mission-state/sessions/cc-injected.json"',
     )
 
+    assert code == 0, code
     assert subcommands == ["stop-verdict"], subcommands
     assert not untouched
 
@@ -920,15 +942,81 @@ def test_a_path_built_from_pieces_is_not_detected_and_that_is_where_this_stops(
     on CI.  **If that arrives, this test fails -- delete it and say so.**
     """
     directory = STATE_PY.parent
-    subcommands, untouched = _run_shapes_hook(
+    # The witness.  Without it the test passes just as well against a path
+    # that does not exist -- and then it pins nothing, while reading as though
+    # it had measured something.  It sits outside the state tree, so it does
+    # not disturb the comparison.
+    witness = tmp_path / "second-call-really-ran"
+    subcommands, untouched, code = _run_shapes_hook(
         tmp_path,
         f"_dir={directory}\n_base=mission\n_suf=-state.py\n"
         'printf \'%s\' "$INPUT" | "$MISSION_TEST_PYTHON" "$_dir/$_base$_suf"'
-        " stop-verdict --hook-input - --json >/dev/null",
+        " stop-verdict --hook-input - --json >/dev/null"
+        f' && : > {witness}',
     )
 
+    assert code == 0, code
+    assert witness.exists(), "the second call did not run; this pins nothing"
     assert subcommands == ["stop-verdict"], subcommands
     assert untouched
+
+
+# The loop of #779 was not an unconditional second call.  It ran `mark-halt`
+# *because* the decision said stale, then decided again from the receipt.  A
+# shape placed behind that condition is invisible on an empty `sessions/`,
+# which is the only state the rows above use -- so the branch is exercised
+# here.  This is not an adversarial shape: "call again when the finding says
+# so" is the shape the change removed.
+_STALE = {"updated_at": "2020-01-01T00:00:00Z"}
+
+_BRANCHING_SHAPE = (
+    'if [ "$(printf \'%s\' "$GUARD_DECISION" | jq -r \'.finding\')" = "stale" ]; then\n'
+    '  ( exec "$MISSION_TEST_PYTHON" "$MISSION_STATE_PY" mark-halt'
+    ' --reason regression ) >/dev/null 2>&1 || true\n'
+    "fi"
+)
+
+
+def test_a_shape_that_dies_is_reported_as_dying(tmp_path):
+    """The third observation, checked on something that actually fails.
+
+    Every other row expects `code == 0`, so none of them shows that the code
+    is real rather than a constant.  Here the inserted line fails under the
+    hook's `set -e`, and the run has to say so -- otherwise "the shape ran and
+    was not detected" and "the shape did not run" stay indistinguishable, which
+    is how four rows passed on CI while running nothing at all.
+    """
+    subcommands, _untouched, code = _run_shapes_hook(tmp_path, "false")
+
+    assert code != 0, code
+    assert subcommands == ["stop-verdict"], subcommands
+
+
+def test_the_stale_path_also_costs_one_call(tmp_path):
+    """The control for the branch: deciding *and applying* is still one process.
+
+    `stale` is the path that used to spend a second process, so the count on
+    it is the claim of #779, not a repetition of the empty case.  The state
+    does change here -- the halt is what the decision resolves to -- so only
+    the count is asserted.
+    """
+    subcommands, _untouched, code = _run_shapes_hook(tmp_path, "", state=_STALE)
+
+    assert code == 0, code
+    assert subcommands == ["stop-verdict"], subcommands
+
+
+def test_a_second_call_behind_the_finding_is_caught(tmp_path):
+    """And the same state shows the second call that the empty one hides."""
+    empty, _untouched, empty_code = _run_shapes_hook(tmp_path / "empty", _BRANCHING_SHAPE)
+    stale, _changed, stale_code = _run_shapes_hook(
+        tmp_path / "stale", _BRANCHING_SHAPE, state=_STALE
+    )
+
+    assert (empty_code, stale_code) == (0, 0), (empty_code, stale_code)
+    # Named together on purpose: the first line is why the second is needed.
+    assert empty == ["stop-verdict"], empty
+    assert stale == ["stop-verdict", "mark-halt"], stale
 
 
 # The one shape that looked like the others and is not.  `\\ ` escapes the
@@ -937,7 +1025,7 @@ def test_a_path_built_from_pieces_is_not_detected_and_that_is_where_this_stops(
 # through, and that was correct: there is nothing to catch.  Without this
 # record the next reader spends the same time re-deriving it.
 def test_an_escaped_space_reaches_nothing(tmp_path):
-    subcommands, untouched = _run_shapes_hook(
+    subcommands, untouched, code = _run_shapes_hook(
         tmp_path, "_mission_state_bounded\\ resume"
     )
 
