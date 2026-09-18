@@ -7,6 +7,7 @@ import importlib.util
 import types
 import json
 import os
+import shlex
 import subprocess
 import sys
 from typing import NamedTuple
@@ -947,12 +948,14 @@ def test_a_path_built_from_pieces_is_not_detected_and_that_is_where_this_stops(
     # it had measured something.  It sits outside the state tree, so it does
     # not disturb the comparison.
     witness = tmp_path / "second-call-really-ran"
+    # Quoted: pytest's tmp path can contain a space, and an unquoted witness
+    # then lands somewhere else -- the test fails, but naming the wrong thing.
     subcommands, untouched, code = _run_shapes_hook(
         tmp_path,
-        f"_dir={directory}\n_base=mission\n_suf=-state.py\n"
+        f"_dir={shlex.quote(str(directory))}\n_base=mission\n_suf=-state.py\n"
         'printf \'%s\' "$INPUT" | "$MISSION_TEST_PYTHON" "$_dir/$_base$_suf"'
         " stop-verdict --hook-input - --json >/dev/null"
-        f' && : > {witness}',
+        f" && : > {shlex.quote(str(witness))}",
     )
 
     assert code == 0, code
