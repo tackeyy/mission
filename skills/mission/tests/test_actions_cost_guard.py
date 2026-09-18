@@ -62,9 +62,13 @@ def test_draft_prs_do_not_consume_ci():
 def test_python_and_shell_quality_gates_remain():
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     assert "PYTEST_TARGETS ?= skills/mission" in makefile
-    assert "$(VENV_PYTHON) -m pytest -q -n auto --dist loadfile $(PYTEST_TARGETS)" in makefile
-    assert "$(VENV_PYTHON) -m pytest -q -n auto --dist loadfile $$targets" in makefile  # test-shard も並列維持
-    assert "$(VENV_PYTHON) -m pytest -q -n auto --dist loadfile skills/mission -k" in makefile  # test-e2e も並列維持
+    # #775: 人が手で回す入口は固定値、CI が呼ぶ test-shard は auto のまま。
+    # 既定値そのものもここで固定する（上書きできる形にしただけでは、既定が
+    # auto へ戻っても気づけない）。
+    assert "MISSION_TEST_WORKERS ?= 4" in makefile
+    assert "$(VENV_PYTHON) -m pytest -q -n $(MISSION_TEST_WORKERS) --dist loadfile $(PYTEST_TARGETS)" in makefile
+    assert "$(VENV_PYTHON) -m pytest -q -n auto --dist loadfile $$targets" in makefile  # test-shard は CI 専有なので auto
+    assert "$(VENV_PYTHON) -m pytest -q -n $(MISSION_TEST_WORKERS) --dist loadfile skills/mission -k" in makefile
     assert (
         "shellcheck scripts/mission-stop-guard.sh plugins/mission/scripts/mission-stop-guard.sh "
         "scripts/sync-codex-plugin-wrapper.sh scripts/mission-local-authoring-sync.sh"
