@@ -704,6 +704,14 @@ def _state_cli_callers(source: str) -> set[str]:
 def _state_cli_invocations(source: str, callers: set[str]) -> list[tuple[str, str]]:
     """Return (line, first argument) for every call of the state CLI.
 
+    **Words are built with `shlex`, not matched in the raw text.**  Two earlier
+    shapes came from reading the text instead of the words.  Matching the name
+    literally missed `_mission_state_'bounded' resume`, which bash joins into
+    one word and runs.  Deleting every quote first caught that but reported
+    `printf '%s' "_mission_state_'bounded' resume"`, where the same characters
+    are data inside a string and nothing runs.  `shlex.split` makes the same
+    words bash does, so both come out right without a shell parser.
+
     The forwarding call inside a wrapper -- the one whose argument is `"$@"` --
     is what makes it a wrapper, so it is exempt.  **Only the CLI path itself
     may forward.**  A function name followed by `"$@"` is counted, because
@@ -717,41 +725,40 @@ def _state_cli_invocations(source: str, callers: set[str]) -> list[tuple[str, st
     through `python3 "$MISSION_STATE_PY" "$@"`, so narrowing the exemption
     costs it nothing.
 
-    **Quotes are removed before matching, not just around the name.**  A word
-    may be quoted anywhere and bash still joins it into one command:
-    `_mission_state_'bounded' resume` runs the wrapper.  Stripping only the
-    outside (`'_q' resume`) left that through.  Removing every quote first
-    reads the word the way bash assembles it.
-
-    Continuations are joined first, and an argument that is not a literal is
-    reported rather than ignored: `helper "$CMD"` asks for something this check
-    cannot read, and deny-by-default means refusing what it cannot read.
+    An argument that is not a literal is reported rather than ignored:
+    `helper "$CMD"` asks for something this check cannot read, and
+    deny-by-default means refusing what it cannot read.
     """
     forwarding = {"$MISSION_STATE_PY", "${MISSION_STATE_PY}"}
     joined = re.sub(r"\\\n\s*", " ", source)
     invocations: list[tuple[str, str]] = []
     for raw_line in joined.splitlines():
-        line = raw_line.replace('"', "").replace("'", "")
-        for caller in callers:
-            pattern = re.escape(caller) + r"\s+(\S+)"
-            for match in re.finditer(pattern, line):
-                # `;` and `&` end the command, so they are not part of the
-                # argument.  Without stripping them the forwarding call is
-                # only recognised when nothing follows it on the line.
-                argument = match.group(1).rstrip(";&|")
-                if argument == "{":
-                    # `function _w { ... }` -- a definition, not a call.
-                    # Counting it reports the definition on its own, which
-                    # passes any row that also calls the function while never
-                    # exercising the call site (#796 review round 1).
-                    continue
-                if argument == "$@" and caller in forwarding:
-                    # The wrapper forwarding its own arguments to the CLI.
-                    continue
-                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*", argument):
-                    invocations.append((raw_line, "<not-a-literal>"))
-                    continue
-                invocations.append((raw_line, argument))
+        try:
+            words = shlex.split(raw_line)
+        except ValueError:
+            # An unbalanced quote: the line cannot be read as words.  Fall back
+            # to the raw split rather than skipping it, so an unreadable line
+            # cannot be used to hide a call.
+            words = raw_line.split()
+        for index, word in enumerate(words):
+            if word not in callers:
+                continue
+            if index and words[index - 1] == "function":
+                # `function _w { ... }` -- a definition, not a call.  Only the
+                # keyword form reaches here; `_w() {` makes the word `_w()`,
+                # which is not a caller.  Excluding every `{` instead let a
+                # real call pass its own `{` (#796 review round 2).
+                continue
+            if index + 1 >= len(words):
+                continue
+            argument = words[index + 1].rstrip(";&|")
+            if argument == "$@" and word in forwarding:
+                # The wrapper forwarding its own arguments to the CLI.
+                continue
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*", argument):
+                invocations.append((raw_line, "<not-a-literal>"))
+                continue
+            invocations.append((raw_line, argument))
     return invocations
 
 
@@ -1045,6 +1052,47 @@ def test_an_escaped_space_is_not_a_call_so_it_needs_no_rule():
     assert "INVOKED" not in run.stdout, run.stdout
 
 
+def test_a_line_shlex_cannot_read_is_still_searched():
+    """An unbalanced quote must not become a place to hide a call.
+
+    `shlex.split` raises on it, and skipping the line would make "unreadable"
+    the easiest bypass to write.  The raw split is used instead, which reads
+    less but reads something.  `bash -n` rejects such a line, so this is
+    insurance rather than a shape anyone can run -- and insurance that is
+    never exercised is the kind that turns out not to work.
+
+    Asked of the extraction directly: through the hook, the unbalanced quote
+    would also break lines after it, so the test would pass for another
+    reason.
+    """
+    import shlex as _shlex
+
+    line = "_mission_state_bounded resume '"
+    with pytest.raises(ValueError):
+        _shlex.split(line)
+
+    invocations = _state_cli_invocations(line + "\n", {"_mission_state_bounded"})
+
+    assert [subcommand for _line, subcommand in invocations] == ["resume"], invocations
+
+
+def test_the_same_characters_inside_a_string_are_not_a_call():
+    """Words are what bash runs; characters inside a string are data.
+
+    `_mission_state_'bounded' resume` is one word and runs.  The same
+    characters inside `printf '%s' "..."` are one argument to `printf`, and
+    nothing runs.  Deleting every quote before matching cannot tell them
+    apart and reported the second -- a clean hook failing the check, which is
+    how a check gets relaxed.  Building words with `shlex` separates them.
+    """
+    source = HOOK.read_text(encoding="utf-8").replace(
+        'printf \'%s\' "$SHELL_TEXT"',
+        'printf \'%s\' "_mission_state_\'bounded\' resume"\n'
+        'printf \'%s\' "$SHELL_TEXT"',
+    )
+    assert analyze_guard_shell(source) == []
+
+
 def test_a_definition_header_alone_is_not_a_call():
     """`function _w { ... }` is a definition; counting it hollows out the rows.
 
@@ -1151,6 +1199,8 @@ def test_the_wrapper_definition_is_not_itself_a_call():
         # pass: `$_q` is not a caller yet when the alias line is read.  It runs
         # (bash expands `$_q` when the alias is defined), so the fixed point is
         # not theoretical.
+        ("a brace passed as the argument of a real call",
+         "_mission_state_bounded {"),
         ("a name quoted in the middle",
          "_mission_state_'bounded' resume"),
         ("an alias whose value is quoted",
