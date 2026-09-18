@@ -34,7 +34,7 @@ INTERNAL = ".mission-state/archive/iter-9-abcdef01-progress.md"
 EXTERNAL = "build/manifest.json"
 
 
-def _binding(relative_path, *, origin="generated", kind="progress"):
+def _binding(relative_path, *, origin="generated", kind="progress", target=None):
     from mission_application.evidence_publication import derive_blob_id
     from mission_persistence.evidence_order import published_binding_type
 
@@ -45,7 +45,10 @@ def _binding(relative_path, *, origin="generated", kind="progress"):
         digest="sha256:" + "0" * 64,
         size=0,
         origin=origin,
-        target="t",
+        # #764: a generated binding carries the claim's own path as its
+        # target, and the admission rule compares the two.  A fixture that
+        # names something else is not a binding the writer could produce.
+        target=relative_path if target is None else target,
     )
 
 
@@ -108,8 +111,7 @@ def test_an_empty_blob_set_passes():
     refuse_unauthorized_generated_blobs("generate-context-manifest", _blob_set())
 
 
-def test_a_captured_binding_is_not_a_generated_destination():
-    """Captured blobs are caller input read from anywhere; this rule is about output."""
+def test_a_captured_binding_cannot_bypass_a_published_destination_rule():
     from mission_persistence.fenced_commit import refuse_unauthorized_generated_blobs
     from mission_persistence.local_uow import BlobBinding, VerifiedBlob, VerifiedBlobSet
 
@@ -124,9 +126,7 @@ def test_a_captured_binding_is_not_a_generated_destination():
         ),
         b"",
     )
-    refuse_unauthorized_generated_blobs(
-        "generate-context-manifest", VerifiedBlobSet((captured,))
-    )
+    _refuses("generate-context-manifest", VerifiedBlobSet((captured,)))
 
 
 def test_the_request_validation_applies_the_rule():
@@ -136,7 +136,7 @@ def test_the_request_validation_applies_the_rule():
     from mission_persistence import fenced_commit
 
     source = inspect.getsource(fenced_commit.validate_execution_request)
-    assert "refuse_unauthorized_generated_blobs(" in source
+    assert "refuse_unauthorized_published_blobs(" in source
     assert "request.audit.command_type" in source
     # The rule is expressed against the repository's own root name, so a
     # repository laid out under a different one is judged by its own name
@@ -291,7 +291,7 @@ def test_the_audit_is_validated_before_it_is_read():
 
     source = inspect.getsource(fenced_commit.validate_execution_request)
     assert source.index("_audit_record(request.audit)") < source.index(
-        "refuse_unauthorized_generated_blobs("
+        "refuse_unauthorized_published_blobs("
     )
 
 

@@ -15,6 +15,8 @@ turning a refusal into a message and an exit code.  Those arrive as
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path, PurePosixPath
 
 from mission_application.artifact import (
     ArtifactAppendRequest,
@@ -35,6 +37,10 @@ from mission_application.artifact import (
     run_artifact_render,
 )
 from mission_application.cli_operation import CliOperationRejected
+from mission_application.evidence_publication import (
+    EvidencePublicationError,
+    REPOSITORY_ROOT_NAME,
+)
 from mission_kernel.artifact import (
     ARTIFACT_PUBLISH_PROVIDERS,
     ARTIFACT_REDACTION_STATUSES,
@@ -128,7 +134,7 @@ def run_artifact_init_cli(args, cwd, services) -> str:
             _repository(services, cwd, state_file, identity),
             services.render_markdown,
         )
-    except EvidenceFailure as exc:
+    except (EvidenceFailure, EvidencePublicationError) as exc:
         _refuse(services, exc.code)
     return _rendered(result, args)
 
@@ -153,7 +159,7 @@ def run_artifact_append_cli(args, cwd, services) -> str:
             ),
             _repository(services, cwd, state_file, identity),
         )
-    except EvidenceFailure as exc:
+    except (EvidenceFailure, EvidencePublicationError) as exc:
         _refuse(services, exc.code)
     return _rendered(result, args)
 
@@ -179,9 +185,40 @@ def run_artifact_render_cli(args, cwd, services) -> str:
             _repository(services, cwd, state_file, identity),
             services.render_markdown,
         )
-    except EvidenceFailure as exc:
+    except (EvidenceFailure, EvidencePublicationError) as exc:
         _refuse(services, exc.code)
     return _rendered(result, args)
+
+
+def _aims_at_the_state_root(cwd, destination) -> bool:
+    """Say whether this export would land inside the repository.
+
+    The name is checked first, but a name is not the directory it opens.  A
+    filesystem that ignores case opens ``.mission-state`` for spellings that
+    are not its own, and a symlink opens it under any name at all.  The v5
+    route asks the filesystem this question (``_refuse_repository_alias``);
+    the v4 route has no such layer, and this entry is the only place that
+    stops it before the file is written, so the same question is asked here.
+
+    A destination whose first step does not exist is not the repository, and
+    a filesystem that will not answer is not evidence that it is: both fall
+    through to the rest of the route, which refuses an in-root projection on
+    v5 and has always accepted an outside one.
+    """
+    parts = PurePosixPath(destination).parts
+    if not parts:
+        return False
+    if parts[0] == REPOSITORY_ROOT_NAME:
+        return True
+    try:
+        # ``stat`` rather than ``lstat``: a symlink that points at the
+        # repository opens the repository, and the question is where the
+        # write lands.
+        candidate = os.stat(Path(cwd) / parts[0])
+        root = os.stat(Path(cwd) / REPOSITORY_ROOT_NAME)
+    except OSError:
+        return False
+    return (candidate.st_dev, candidate.st_ino) == (root.st_dev, root.st_ino)
 
 
 def run_artifact_export_cli(args, cwd, services) -> str:
@@ -191,6 +228,8 @@ def run_artifact_export_cli(args, cwd, services) -> str:
     destination = services.state_relative_path(
         cwd, str(services.resolve_output_path(cwd, getattr(args, "to")))
     )
+    if _aims_at_the_state_root(cwd, destination):
+        _refuse(services, "publication-path-invalid")
     identity = _identity_or_refusal(services, lambda: prepare_artifact_export_operation(
         destination,
         getattr(args, "redaction_status"),
@@ -206,7 +245,7 @@ def run_artifact_export_cli(args, cwd, services) -> str:
             _repository(services, cwd, state_file, identity),
             services.render_markdown,
         )
-    except EvidenceFailure as exc:
+    except (EvidenceFailure, EvidencePublicationError) as exc:
         _refuse(services, exc.code)
     return _rendered(result, args)
 
@@ -237,6 +276,6 @@ def run_artifact_publish_cli(args, cwd, services) -> str:
             _repository(services, cwd, state_file, identity),
             services.render_markdown,
         )
-    except EvidenceFailure as exc:
+    except (EvidenceFailure, EvidencePublicationError) as exc:
         _refuse(services, exc.code)
     return _rendered(result, args)

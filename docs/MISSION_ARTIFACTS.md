@@ -119,6 +119,7 @@ Rules:
 - `artifact render` regenerates the canonical Markdown from state plus appended
   evidence blocks.
 - `artifact export` copies a reviewed version to a user-selected durable path.
+- Its destination cannot be inside `.mission-state/`.
 - `artifact publish` is optional and must require explicit user confirmation.
   It records publish intent, approval text, provider, destination, and artifact
   path in state. Remote provider APIs are not called by the current command.

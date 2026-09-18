@@ -33,13 +33,16 @@ INTERNAL = ".mission-state/archive/iter-4-abcdef01-progress.md"
 EXTERNAL = "docs/evidence/manifest.json"
 
 
-def test_only_update_progress_may_write_in_root_today():
-    assert INTERNAL_DESTINATION_COMMAND_TYPES == frozenset({"update-progress"})
+def test_only_declared_progress_and_artifact_commands_may_write_in_root():
+    assert INTERNAL_DESTINATION_COMMAND_TYPES == frozenset({
+        "update-progress", "initialize-artifact", "render-artifact",
+        "record-artifact-publication", "export-artifact",
+    })
 
 
 def test_the_permitted_command_may_use_the_internal_shape():
     authorize_generated_destinations(
-        (INTERNAL,), command_type="update-progress", repository_root_name=ROOT
+        (INTERNAL,), command_type="update-progress", field="effect", repository_root_name=ROOT
     )
 
 
@@ -51,7 +54,7 @@ def test_the_permitted_command_may_use_the_internal_shape():
 def test_no_other_command_may(command_type):
     with pytest.raises(EvidencePublicationError) as caught:
         authorize_generated_destinations(
-            (INTERNAL,), command_type=command_type, repository_root_name=ROOT
+            (INTERNAL,), command_type=command_type, field="effect", repository_root_name=ROOT
         )
     assert caught.value.code == "publication-destination-unauthorized"
     # The message names the command, because the reader is looking at a
@@ -63,12 +66,12 @@ def test_an_unknown_command_type_may_not():
     """Fail closed: a type nobody listed is not permitted by omission."""
     with pytest.raises(EvidencePublicationError):
         authorize_generated_destinations(
-            (INTERNAL,), command_type="some-future-command",
+            (INTERNAL,), command_type="some-future-command", field="effect",
             repository_root_name=ROOT,
         )
     with pytest.raises(EvidencePublicationError):
         authorize_generated_destinations(
-            (INTERNAL,), command_type=None, repository_root_name=ROOT
+            (INTERNAL,), command_type=None, field="effect", repository_root_name=ROOT
         )
 
 
@@ -78,7 +81,7 @@ def test_an_unknown_command_type_may_not():
 )
 def test_the_external_shape_needs_no_permission(command_type):
     authorize_generated_destinations(
-        (EXTERNAL,), command_type=command_type, repository_root_name=ROOT
+        (EXTERNAL,), command_type=command_type, field="effect", repository_root_name=ROOT
     )
 
 
@@ -86,7 +89,7 @@ def test_one_unauthorised_path_among_many_refuses_the_whole_set():
     with pytest.raises(EvidencePublicationError):
         authorize_generated_destinations(
             (EXTERNAL, INTERNAL, EXTERNAL),
-            command_type="generate-context-manifest",
+            command_type="generate-context-manifest", field="effect",
             repository_root_name=ROOT,
         )
 
@@ -96,7 +99,7 @@ def test_a_malformed_path_is_not_silently_treated_as_external():
     with pytest.raises(EvidencePublicationError) as caught:
         authorize_generated_destinations(
             (".mission-state/commits/x",),
-            command_type="update-progress",
+            command_type="update-progress", field="effect",
             repository_root_name=ROOT,
         )
     assert caught.value.code == "publication-path-invalid"

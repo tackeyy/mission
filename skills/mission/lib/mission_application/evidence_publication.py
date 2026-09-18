@@ -14,6 +14,7 @@ from typing import Optional
 
 from mission_kernel.projection_path import (
     ProjectionRejection,
+    resolve_internal_artifact_path,
     resolve_internal_archive_path,
     resolve_projection_path,
 )
@@ -106,6 +107,11 @@ def canonical_generated_path(
         )
         if not isinstance(internal, ProjectionRejection):
             return "/".join(internal)
+        artifact = resolve_internal_artifact_path(
+            PurePosixPath(relative_path), root_name=repository_root_name
+        )
+        if not isinstance(artifact, ProjectionRejection):
+            return "/".join(artifact)
     # Not the in-root destination, so the projection rule answers -- including
     # the refusals, whose wording names the way out for a caller that meant to
     # publish outside and got the path wrong.
@@ -118,6 +124,7 @@ def authorize_generated_destinations(
     paths,
     *,
     command_type,
+    field=None,
     repository_root_name: str = REPOSITORY_ROOT_NAME,
 ) -> None:
     """Refuse an in-root destination for a command that may not write one.
@@ -131,7 +138,7 @@ def authorize_generated_destinations(
     A path that is neither shape raises from the canonicaliser rather than
     passing as "not internal, so no permission needed".
     """
-    permitted = command_type in INTERNAL_DESTINATION_COMMAND_TYPES
+    permitted_rule = INTERNAL_DESTINATION_RULE_BY_COMMAND_FIELD.get((command_type, field))
     for path in paths:
         canonical = canonical_generated_path(
             path, repository_root_name=repository_root_name
@@ -139,7 +146,15 @@ def authorize_generated_destinations(
         internal = resolve_internal_archive_path(
             PurePosixPath(canonical), root_name=repository_root_name
         )
-        if isinstance(internal, ProjectionRejection) or permitted:
+        artifact = resolve_internal_artifact_path(
+            PurePosixPath(canonical), root_name=repository_root_name
+        )
+        rule = None
+        if not isinstance(internal, ProjectionRejection):
+            rule = "progress"
+        elif not isinstance(artifact, ProjectionRejection):
+            rule = "artifact"
+        if rule is None or rule == permitted_rule:
             continue
         raise EvidencePublicationError(
             "publication-destination-unauthorized",
@@ -389,7 +404,43 @@ PATH_BEARING_COMMAND_TYPES = frozenset(
 # publishes as a projection of it.  The list is explicit rather than derived
 # from the path, because the path alone cannot say who asked: a binding built
 # by hand carries a well-formed path and no permission.
-INTERNAL_DESTINATION_COMMAND_TYPES = frozenset({"update-progress"})
+INTERNAL_DESTINATION_RULE_BY_COMMAND_FIELD = {
+    ("update-progress", "effect"): "progress",
+    ("initialize-artifact", "effect"): "artifact",
+    ("render-artifact", "effect"): "artifact",
+    ("record-artifact-publication", "effect"): "artifact",
+    ("export-artifact", "artifact_effect"): "artifact",
+}
+INTERNAL_DESTINATION_COMMAND_TYPES = frozenset(
+    command for command, _field in INTERNAL_DESTINATION_RULE_BY_COMMAND_FIELD
+)
+
+
+def internal_destination_rules_by_command_type():
+    """Derive each command's in-repository rules from its effect fields."""
+    rules = {}
+    for (command_type, _field), rule in INTERNAL_DESTINATION_RULE_BY_COMMAND_FIELD.items():
+        rules.setdefault(command_type, set()).add(rule)
+    return {command_type: frozenset(value) for command_type, value in rules.items()}
+
+
+def publication_blob_shapes_by_command_type():
+    """Derive published-blob cardinality and in-root ownership from fields."""
+    rules = internal_destination_rules_by_command_type()
+    shapes = {}
+    for command_type, fields in EFFECT_FIELDS_BY_COMMAND_TYPE.items():
+        internal_fields = tuple(
+            field for field in fields
+            if (command_type, field) in INTERNAL_DESTINATION_RULE_BY_COMMAND_FIELD
+        )
+        permitted = rules.get(command_type, frozenset())
+        shapes[command_type] = {
+            "blob_count": len(fields),
+            "internal_min": 0 if permitted == frozenset({"progress"}) else len(internal_fields),
+            "internal_max": len(internal_fields),
+            "rules": permitted,
+        }
+    return shapes
 
 # Which attribute of a command's effect claim holds the path it publishes to.
 # The two projection commands carry it separately from the effect target; the
@@ -404,6 +455,10 @@ PUBLICATION_PATH_FIELD_BY_COMMAND_TYPE = {
     "generate-claims-ledger": "publication_path",
     "generate-context-manifest": "publication_path",
     "update-progress": "target",
+    "initialize-artifact": "target",
+    "render-artifact": "target",
+    "record-artifact-publication": "target",
+    "export-artifact": "target",
 }
 EFFECT_FIELDS_BY_COMMAND_TYPE = {
     "export-artifact": ("artifact_effect", "export_effect"),

@@ -173,7 +173,7 @@ def _artifact_prepare(state):
     )
 
 
-def test_publication_binding_truth_value_cannot_reenter_persistence(tmp_path, run_cli):
+def test_publication_binding_truth_value_cannot_reenter_persistence(tmp_path, run_cli, monkeypatch):
     """`__eq__` and `__bool__` both run inside the production guard (#670 review).
 
     The probe goes through `execute_evidence_transition_effects` so moving the
@@ -236,37 +236,25 @@ def test_publication_binding_truth_value_cannot_reenter_persistence(tmp_path, ru
         )
 
         def publisher(_effects, _prepared=None):
+            observed["publisher"] = True
             @contextlib.contextmanager
             def _managed():
                 yield _Published(repository)
 
             return _managed()
 
-        def prepare(state):
-            # #711 stage 2: a command that declares a publication path is
-            # published by the unit of work, which never runs this publisher.
-            # The guard being probed belongs to the legacy route, so the probe
-            # uses a command that still takes it.
-            from mission_application.evidence import prepare_progress_update
-
-            return prepare_progress_update(
-                state,
-                now="2030-01-01T00:00:00Z",
-                total=1,
-                completed=0,
-                batch_size=1,
-                last_unit=None,
-                artifact_path=None,
-                iteration=1,
-                evidence_path=".mission-state/archive/iter-1-abcdef01-progress.md",
-            )
-
         # The v5 executor only accepts its own injected publisher, so the probe
         # replaces that binding rather than passing one in.
         #
-        # #747 3a: progress no longer reaches that publisher, so the probe is
-        # driven through the branch that still has one -- an artifact command,
-        # whose claim carries no publication path.
+        # #764 moves every artifact command to the UoW path.  Remove this
+        # command's path declaration only inside this guard probe so the old
+        # branch remains tested without changing production routing.
+        from mission_application import evidence_publication
+
+        monkeypatch.delitem(
+            evidence_publication.PUBLICATION_PATH_FIELD_BY_COMMAND_TYPE,
+            "initialize-artifact",
+        )
         repository._effect_transaction = publisher
         repository.execute_transition_effects(_artifact_prepare)
     finally:
@@ -279,3 +267,4 @@ def test_publication_binding_truth_value_cannot_reenter_persistence(tmp_path, ru
 
     assert observed["eq_depth"] >= 1
     assert observed["bool_depth"] >= 1
+    assert observed["publisher"] is True

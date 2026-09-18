@@ -49,7 +49,7 @@ def _prepare_artifact(state):
     return prepare_artifact_init(
         state,
         now="2026-01-01T00:00:00Z",
-        artifact_path="a.md",
+        artifact_path=".mission-state/artifacts/test/mission-artifact.md",
         format="markdown",
         title="t",
         redaction_status="unchecked",
@@ -103,12 +103,8 @@ def test_the_legacy_publisher_is_not_called_for_a_blob_bearing_path(tmp_path):
     assert calls == [], "the legacy publisher ran for a blob-bearing path"
 
 
-def test_the_legacy_publisher_still_runs_for_a_path_less_command(tmp_path):
-    """The artifact commands keep the old route until their own stage.
-
-    #747 3a moved ``update-progress`` onto the unit of work, so this now
-    stands on a command that has not moved.
-    """
+def test_the_legacy_publisher_does_not_run_for_an_artifact_command(tmp_path):
+    """#764 moves artifact publication onto the UoW writer."""
     import contextlib
 
     calls = []
@@ -119,13 +115,44 @@ def test_the_legacy_publisher_still_runs_for_a_path_less_command(tmp_path):
         yield effects
 
     repository = _repository(tmp_path, effect_transaction=_spy)
-    # The artifact commands enter through their own executor, which is why
-    # they are still on this branch: their claims carry no publication path.
     _prepared_result, execution = repository.execute_transition_effects(
         lambda state: _prepare_artifact(state)
     )
     assert execution.decision is None or execution.decision.accepted, execution.decision
-    assert calls, "the path-less route lost its publisher"
+    assert calls == [], "artifact publication reached the legacy publisher"
+
+
+def test_the_legacy_publisher_does_not_run_for_all_artifact_writers(tmp_path):
+    """#764 routes initialize, render, export, and publication through UoW."""
+    import contextlib
+
+    from mission_application.artifact import (
+        prepare_artifact_export,
+        prepare_artifact_publish,
+        prepare_artifact_render,
+    )
+
+    calls = []
+    @contextlib.contextmanager
+    def _spy(effects, prepared):
+        calls.append((effects, prepared))
+        yield effects
+
+    repository = _repository(tmp_path, effect_transaction=_spy)
+    render = lambda _document, _artifact: b"# t\n"
+    repository.execute_transition_effects(lambda state: _prepare_artifact(state))
+    repository.execute_transition_effects(lambda state: prepare_artifact_render(
+        state, now="2026-01-01T00:00:01Z", redaction_status="reviewed", render=render
+    ))
+    repository.execute_transition_effects(lambda state: prepare_artifact_export(
+        state, now="2026-01-01T00:00:02Z", destination="docs/out.md",
+        redaction_status="reviewed", render=render
+    ))
+    repository.execute_transition_effects(lambda state: prepare_artifact_publish(
+        state, now="2026-01-01T00:00:03Z", provider="local", destination=None,
+        approval_text="ok", confirmed=True, render=render
+    ))
+    assert calls == [], "an artifact effect reached the legacy publisher"
 
 
 def test_progress_no_longer_reaches_the_legacy_publisher(tmp_path):

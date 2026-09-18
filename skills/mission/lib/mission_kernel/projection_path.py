@@ -25,6 +25,7 @@ from typing import Union
 __all__ = [
     "ProjectionRejection",
     "progress_mission_segment",
+    "resolve_internal_artifact_path",
     "resolve_internal_archive_path",
     "resolve_projection_path",
 ]
@@ -45,6 +46,8 @@ _PROGRESS_BASENAME_RE = re.compile(
 
 _PROGRESS_MISSION_SEGMENT_RE = re.compile(r"\A[0-9a-f]{1,8}\Z")
 _PROGRESS_ABSENT_MISSION_SEGMENT = "unknown"
+_ARTIFACT_DIRECTORY = "artifacts"
+_ARTIFACT_BASENAME = "mission-artifact.md"
 
 
 def progress_mission_segment(mission_id: object) -> str:
@@ -133,4 +136,23 @@ def resolve_internal_archive_path(
         or _PROGRESS_BASENAME_RE.match(parts[2]) is None
     ):
         return ProjectionRejection("not-the-progress-archive")
+    return parts
+
+
+def resolve_internal_artifact_path(
+    candidate: PurePosixPath, *, root_name: str
+) -> Union[ProjectionRejection, tuple[str, ...]]:
+    """Return the one in-root artifact destination the generator may use."""
+    if candidate.is_absolute():
+        return ProjectionRejection("absolute")
+    parts = candidate.parts
+    if not parts or any(part in _RELATIVE_SEGMENTS for part in parts):
+        return ProjectionRejection("empty-or-relative-segment")
+    if parts[0] != root_name:
+        return ProjectionRejection("outside-root")
+    if len(parts) != 4 or parts[1] != _ARTIFACT_DIRECTORY or parts[3] != _ARTIFACT_BASENAME:
+        return ProjectionRejection("not-the-artifact-path")
+    segment = parts[2]
+    if not segment or "/" in segment or "\\" in segment or segment.startswith(".") or segment != segment.rstrip():
+        return ProjectionRejection("not-the-artifact-path")
     return parts
