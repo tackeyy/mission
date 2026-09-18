@@ -1296,9 +1296,11 @@ def refuse_unauthorized_published_blobs(
     no identity.  It is also only a claim -- the executor compares it against
     the command it prepared, where both are in hand.
 
-    Only generated bindings are considered.  A captured blob is caller input
-    read from wherever the caller had it, and where it was read from is not
-    a destination this rule owns.
+    Every published blob is considered, whatever its origin says.  All of
+    them are written from ``relative_path``, so a rule that looked only at
+    generated ones would leave the same destination open under a different
+    label -- which is how ``origin="captured"`` reached the in-root
+    destination before #764.
     """
     from mission_application.evidence_publication import (
         EvidencePublicationError,

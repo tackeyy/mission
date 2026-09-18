@@ -259,6 +259,24 @@ def test_artifact_rule_refuses_other_repository_directories(directory):
     ), ProjectionRejection)
 
 
+def test_entry_refuses_export_with_both_blobs_inside_the_repository():
+    """The count alone does not carry this: two in-root blobs are two blobs.
+
+    Checker of #764: the in-root upper bound had no test that reached it,
+    because the only two-in-root case used a command whose blob count is one,
+    where the count refused it first.
+    """
+    # Both are the artifact rule, which this command is allowed, so only the
+    # upper bound can refuse them.  Mixing in a progress path would be
+    # refused for the rule instead and leave the bound untested.
+    _entry_refuses("export-artifact", *(
+        _generated_blob(path) for path in (
+            ".mission-state/artifacts/test/mission-artifact.md",
+            ".mission-state/artifacts/other/mission-artifact.md",
+        )
+    ))
+
+
 def test_entry_refuses_export_with_three_equal_blobs():
     _entry_refuses("export-artifact", *(
         _generated_blob(path) for path in (
@@ -341,6 +359,74 @@ def test_v4_export_to_state_root_is_refused_before_any_write(legacy_run_cli, tmp
     assert result.returncode == 2
     assert "publication-path-invalid" in result.stderr
     assert state_path.read_bytes() == before
+
+
+def _case_insensitive(root) -> bool:
+    """Say whether this filesystem opens one directory under two spellings."""
+    probe = root / ".mission-state"
+    try:
+        return (root / ".MISSION-STATE").stat().st_ino == probe.stat().st_ino
+    except OSError:
+        return False
+
+
+def test_v4_export_through_a_symlink_to_the_state_root_is_refused(legacy_run_cli, tmp_path):
+    """A name is not the directory it opens.
+
+    The v4 route has no filesystem-identity layer of its own, so this entry is
+    the only place that stops the write.  A symlink reaches the repository
+    under a name the string comparison accepts.
+    """
+    assert legacy_run_cli("init", "artifact v4", cwd=tmp_path).returncode == 0
+    assert legacy_run_cli("artifact", "init", cwd=tmp_path).returncode == 0
+    (tmp_path / "alias").symlink_to(tmp_path / ".mission-state", target_is_directory=True)
+    state_path = tmp_path / ".mission-state" / "sessions" / "test.json"
+    before = state_path.read_bytes()
+
+    result = legacy_run_cli(
+        "artifact", "export", "--to", "alias/export.md",
+        "--redaction-status", "reviewed", cwd=tmp_path,
+    )
+
+    assert result.returncode == 2
+    assert "publication-path-invalid" in result.stderr
+    assert state_path.read_bytes() == before
+    assert not (tmp_path / ".mission-state" / "export.md").exists()
+
+
+def test_v4_export_under_another_spelling_of_the_state_root_is_refused(legacy_run_cli, tmp_path):
+    """On a filesystem that ignores case, ``.MISSION-STATE`` is the repository."""
+    assert legacy_run_cli("init", "artifact v4", cwd=tmp_path).returncode == 0
+    assert legacy_run_cli("artifact", "init", cwd=tmp_path).returncode == 0
+    if not _case_insensitive(tmp_path):
+        pytest.skip("this filesystem distinguishes the two spellings")
+    state_path = tmp_path / ".mission-state" / "sessions" / "test.json"
+    before = state_path.read_bytes()
+
+    result = legacy_run_cli(
+        "artifact", "export", "--to", ".MISSION-STATE/export.md",
+        "--redaction-status", "reviewed", cwd=tmp_path,
+    )
+
+    assert result.returncode == 2
+    assert "publication-path-invalid" in result.stderr
+    assert state_path.read_bytes() == before
+    assert not (tmp_path / ".mission-state" / "export.md").exists()
+
+
+def test_an_export_beside_the_repository_still_passes(legacy_run_cli, tmp_path):
+    """The rule refuses the repository, not every directory near it."""
+    assert legacy_run_cli("init", "artifact v4", cwd=tmp_path).returncode == 0
+    assert legacy_run_cli("artifact", "init", cwd=tmp_path).returncode == 0
+    (tmp_path / "docs").mkdir()
+
+    result = legacy_run_cli(
+        "artifact", "export", "--to", "docs/export.md",
+        "--redaction-status", "reviewed", cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "docs" / "export.md").exists()
 
 
 def test_artifact_rendered_bytes_are_time_independent_but_input_sensitive():
