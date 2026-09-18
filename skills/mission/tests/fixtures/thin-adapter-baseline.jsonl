@@ -116,7 +116,6 @@
 {"path":"skills/mission/bin/mission-state.py","function":"_initialize_new_v5_session","rules":{"call.non-allowlisted":4,"logic.arithmetic":1}}
 {"path":"skills/mission/bin/mission-state.py","function":"_initialize_v5_state","rules":{"call.non-allowlisted":22,"io.direct":1,"logic.boolean":1,"logic.threshold-literal":2}}
 {"path":"skills/mission/bin/mission-state.py","function":"_is_bounded_orchestrator_candidate","rules":{"call.non-allowlisted":4,"control.branch":1,"logic.boolean":2,"logic.compare":3,"logic.comprehension":1}}
-{"path":"skills/mission/bin/mission-state.py","function":"_is_in_root_generated_destination","rules":{"call.non-allowlisted":4,"logic.arithmetic":2,"logic.boolean":1}}
 {"path":"skills/mission/bin/mission-state.py","function":"_is_mission_state_record","rules":{"call.non-allowlisted":4,"control.branch":1,"logic.arithmetic":1,"logic.boolean":1,"state.raw-access":3}}
 {"path":"skills/mission/bin/mission-state.py","function":"_is_provider_backed_application","rules":{"call.non-allowlisted":9,"logic.arithmetic":1,"logic.boolean":7,"logic.compare":6,"logic.comprehension":2,"state.raw-access":1}}
 {"path":"skills/mission/bin/mission-state.py","function":"_is_session_state_path","rules":{"logic.boolean":3,"logic.compare":4}}
@@ -201,10 +200,10 @@
 {"path":"skills/mission/bin/mission-state.py","function":"_public_specialist_records","rules":{"call.non-allowlisted":2,"logic.comprehension":1}}
 {"path":"skills/mission/bin/mission-state.py","function":"_publish_archive_generation","rules":{"call.non-allowlisted":17,"control.branch":5,"io.direct":7,"logic.arithmetic":3,"logic.boolean":5,"logic.compare":2,"logic.threshold-literal":1}}
 {"path":"skills/mission/bin/mission-state.py","function":"_publish_directory_detail","rules":{"call.non-allowlisted":5,"state.mutation":1}}
-{"path":"skills/mission/bin/mission-state.py","function":"_publish_evidence_effects","rules":{"call.non-allowlisted":11,"control.branch":1,"control.loop":1,"logic.arithmetic":1,"state.mutation":1}}
+{"path":"skills/mission/bin/mission-state.py","function":"_publish_evidence_effects","rules":{"call.non-allowlisted":7,"control.loop":1,"state.mutation":1}}
 {"path":"skills/mission/bin/mission-state.py","function":"_publish_first_mismatch_reason","rules":{"control.branch":1,"control.loop":1,"dispatch.dynamic":2,"logic.compare":1,"logic.threshold-literal":1}}
 {"path":"skills/mission/bin/mission-state.py","function":"_publish_identity_detail","rules":{"call.non-allowlisted":5,"control.branch":1,"logic.arithmetic":1,"logic.compare":1,"state.mutation":2}}
-{"path":"skills/mission/bin/mission-state.py","function":"_publish_output_transaction","rules":{"call.non-allowlisted":56,"control.branch":15,"io.direct":12,"logic.arithmetic":8,"logic.boolean":4,"logic.business-container":1,"logic.compare":12,"logic.threshold-literal":3}}
+{"path":"skills/mission/bin/mission-state.py","function":"_publish_output_transaction","rules":{"call.non-allowlisted":48,"control.branch":11,"io.direct":9,"logic.arithmetic":7,"logic.boolean":3,"logic.business-container":1,"logic.compare":8,"logic.threshold-literal":3}}
 {"path":"skills/mission/bin/mission-state.py","function":"_publish_preflight_pointer_transaction","rules":{"call.non-allowlisted":5,"control.branch":1,"io.direct":1}}
 {"path":"skills/mission/bin/mission-state.py","function":"_publish_recovery_residue","rules":{"call.non-allowlisted":11,"control.branch":1,"control.loop":1,"io.direct":3,"logic.arithmetic":1,"logic.boolean":1,"logic.business-container":1,"logic.compare":1,"logic.threshold-literal":3}}
 {"path":"skills/mission/bin/mission-state.py","function":"_publish_review_archive_transaction","rules":{"call.non-allowlisted":54,"control.branch":12,"io.direct":9,"logic.arithmetic":8,"logic.boolean":4,"logic.compare":11,"logic.threshold-literal":2}}
@@ -258,8 +257,7 @@
 {"path":"skills/mission/bin/mission-state.py","function":"_require_current_provider_application","rules":{"call.non-allowlisted":7,"control.branch":3,"logic.arithmetic":5,"logic.boolean":1,"logic.compare":2,"state.raw-access":1}}
 {"path":"skills/mission/bin/mission-state.py","function":"_require_current_registry_application","rules":{"call.non-allowlisted":57,"control.branch":10,"control.loop":2,"io.direct":1,"logic.arithmetic":9,"logic.boolean":20,"logic.business-container":7,"logic.compare":15,"logic.comprehension":8,"logic.threshold-literal":3,"state.mutation":1,"state.raw-access":5}}
 {"path":"skills/mission/bin/mission-state.py","function":"_require_score_resubmit_reason","rules":{"call.non-allowlisted":5,"control.branch":1,"logic.arithmetic":2,"logic.boolean":2,"logic.compare":1,"logic.comprehension":1,"logic.threshold-literal":1,"state.raw-access":1}}
-{"path":"skills/mission/bin/mission-state.py","function":"_resolve_evidence_cli_output_path","rules":{"call.non-allowlisted":6,"control.branch":2,"logic.arithmetic":4,"logic.boolean":1,"logic.business-container":1,"logic.compare":1}}
-{"path":"skills/mission/bin/mission-state.py","function":"_resolve_evidence_output_path","rules":{"call.non-allowlisted":1}}
+{"path":"skills/mission/bin/mission-state.py","function":"_resolve_evidence_output_path","rules":{"call.non-allowlisted":6,"control.branch":2,"logic.arithmetic":4,"logic.boolean":1,"logic.business-container":1,"logic.compare":1}}
 {"path":"skills/mission/bin/mission-state.py","function":"_resolve_goal_dispatch","rules":{"call.non-allowlisted":5,"control.branch":4,"logic.arithmetic":2,"logic.business-container":4,"logic.compare":3,"logic.threshold-literal":2}}
 {"path":"skills/mission/bin/mission-state.py","function":"_resolve_project_output_path","rules":{"call.non-allowlisted":6,"control.branch":1,"logic.arithmetic":2}}
 {"path":"skills/mission/bin/mission-state.py","function":"_resolve_queue_enqueue_shas","rules":{"call.non-allowlisted":11,"control.branch":5,"io.direct":2,"logic.arithmetic":2,"logic.boolean":3,"logic.compare":6}}

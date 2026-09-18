@@ -80,16 +80,18 @@ def test_publication_rechecks_after_initial_path_validation_before_opening(tmp_p
     (tmp_path / ".mission-state").mkdir()
     (tmp_path / "docs").mkdir()
     (tmp_path / "elsewhere").mkdir()
-    original = module._resolve_evidence_output_path
+    original = module.open_publication_directory
 
     @contextlib.contextmanager
-    def replace_then_resolve(root, path):
+    def replace_then_open(root, path, resolve_named):
+        # The swap happens after the CLI's name check and before anything is
+        # opened, which is the only window the descriptor route has to close.
         (root / "docs").rmdir()
         (root / "docs").symlink_to(root / target, target_is_directory=True)
-        with original(root, path) as destination:
+        with original(root, path, resolve_named) as destination:
             yield destination
 
-    monkeypatch.setattr(module, "_resolve_evidence_output_path", replace_then_resolve)
+    monkeypatch.setattr(module, "open_publication_directory", replace_then_open)
     with pytest.raises(ValueError):
         _publish(module, tmp_path, "docs/out.md")
     assert not (tmp_path / target / "out.md").exists()
@@ -133,6 +135,40 @@ def test_external_projection_directory_uses_the_process_umask(tmp_path):
         os.umask(original_umask)
 
 
+def test_external_projection_refuses_a_parent_escape(tmp_path):
+    from mission_persistence.evidence_publish_path import EvidencePublishPathError, open_evidence_publish_directory
+
+    (tmp_path / ".mission-state").mkdir()
+    with pytest.raises(EvidencePublishPathError):
+        with open_evidence_publish_directory(tmp_path, "../outside/out.md"):
+            pytest.fail("the helper must enforce its own project-root boundary")
+
+
+def test_external_projection_refuses_the_replaced_current_repository(tmp_path, monkeypatch):
+    from mission_persistence.evidence_publish_path import EvidencePublishPathError, open_evidence_publish_directory
+    import mission_persistence.evidence_publish_path as module
+
+    repository = tmp_path / ".mission-state"
+    repository.mkdir()
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    original_open = module.os.open
+    replaced = False
+
+    def replace_before_component(name, *args, **kwargs):
+        nonlocal replaced
+        if name == "docs" and not replaced:
+            repository.rename(tmp_path / "old-state")
+            replacement.rename(repository)
+            replaced = True
+        return original_open(name, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "open", replace_before_component)
+    with pytest.raises(EvidencePublishPathError):
+        with open_evidence_publish_directory(tmp_path, ".MISSION-STATE/docs/out.md"):
+            pytest.fail("the current repository name must be refused before opening")
+
+
 def test_dotdot_spelling_of_repository_is_refused_by_opened_identity(tmp_path):
     from mission_persistence.evidence_publish_path import (
         EvidencePublishPathError,
@@ -168,18 +204,20 @@ def test_external_effect_uses_descriptor_resolution_while_in_root_effects_keep_l
     external_calls = []
     internal_calls = []
 
+    original = module.open_publication_directory
+
     @contextlib.contextmanager
-    def external(root, path):
-        external_calls.append(path)
-        with module.open_evidence_publish_directory(root, path) as destination:
+    def record(root, path, resolve_named):
+        # The route is chosen inside the library, so the record is taken from
+        # the descriptor it yields: an in-root destination carries none.
+        with original(root, path, resolve_named) as destination:
+            if destination.directory_fd is None:
+                internal_calls.append(path)
+            else:
+                external_calls.append(path)
             yield destination
 
-    def internal(root, path):
-        internal_calls.append(path)
-        return root / path
-
-    monkeypatch.setattr(module, "_resolve_evidence_output_path", external)
-    monkeypatch.setattr(module, "_resolve_in_root_evidence_output_path", internal)
+    monkeypatch.setattr(module, "open_publication_directory", record)
     _publish(module, tmp_path, "docs/out.md")
     _publish(module, tmp_path, ".mission-state/archive/iter-1-abc12345-progress.md")
     _publish(module, tmp_path, ".mission-state/artifacts/test/mission-artifact.md")

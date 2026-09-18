@@ -112,17 +112,11 @@ from activity_segments import (  # noqa: E402
     transition_activity_phase,
     validate_activity,
 )
-from mission_application.evidence_publication import (  # noqa: E402
-    canonical_generated_path,
-    progress_mission_segment,
-)
-from mission_kernel.projection_path import (  # noqa: E402
-    ProjectionRejection,
-    resolve_internal_archive_path,
-    resolve_internal_artifact_path,
-)
+from mission_application.evidence_publication import progress_mission_segment  # noqa: E402
 from mission_persistence.evidence_publish_path import (  # noqa: E402
-    open_evidence_publish_directory,
+    open_publication_directory,
+    open_publication_parent,
+    publication_parent_mismatch,
 )
 from mission_application.lifecycle import (  # noqa: E402
     ActivityEndRequest,
@@ -6612,8 +6606,8 @@ def _artifact_profile_coverage(cwd: Path, data: dict) -> dict:
     }
 
 
-def _resolve_evidence_cli_output_path(cwd: Path, path_text: str) -> Path:
-    """Resolve an evidence path for CLI validation before publication."""
+def _resolve_evidence_output_path(cwd: Path, path_text: str) -> Path:
+    """Resolve parent directories without following the final output entry."""
     path = Path(path_text).expanduser()
     if not path.is_absolute():
         path = cwd / path
@@ -6627,33 +6621,6 @@ def _resolve_evidence_cli_output_path(cwd: Path, path_text: str) -> Path:
         print("ERROR: output filename is invalid", file=sys.stderr)
         sys.exit(2)
     return parent / path.name
-
-
-_resolve_in_root_evidence_output_path = _resolve_evidence_cli_output_path
-
-
-@contextlib.contextmanager
-def _resolve_evidence_output_path(cwd: Path, path_text: str):
-    """Pin one external evidence parent from the project root descriptor."""
-    canonical = canonical_generated_path(path_text)
-    with open_evidence_publish_directory(cwd, canonical) as destination:
-        yield destination
-
-
-def _is_in_root_generated_destination(publication_path: str) -> bool:
-    """Whether this effect belongs to a repository-owned publication rule."""
-    canonical = canonical_generated_path(publication_path)
-    candidate = Path(canonical)
-    return (
-        not isinstance(
-            resolve_internal_archive_path(candidate, root_name=".mission-state"),
-            ProjectionRejection,
-        )
-        or not isinstance(
-            resolve_internal_artifact_path(candidate, root_name=".mission-state"),
-            ProjectionRejection,
-        )
-    )
 
 
 def _legacy_evidence_repository(cwd: Path, sf: Path, *, stamp: bool) -> LegacyV4Repository:
@@ -6704,20 +6671,16 @@ def _publish_evidence_effects(
     with _PublishedFilesTransaction() as transaction:
         published = []
         for effect, publication_path in zip(effects, publication_paths):
-            if _is_in_root_generated_destination(publication_path):
-                output = _resolve_in_root_evidence_output_path(cwd, publication_path)
-                item = _publish_output_transaction(output, effect.content)
-            else:
-                canonical = canonical_generated_path(publication_path)
-                with _resolve_evidence_output_path(cwd, canonical) as destination:
-                    item = _publish_output_transaction(
-                        cwd / canonical,
+            with open_publication_directory(
+                cwd, publication_path, _resolve_evidence_output_path
+            ) as destination:
+                item = transaction.add(
+                    _publish_output_transaction(
+                        destination.path,
                         effect.content,
                         directory_fd=destination.directory_fd,
                     )
-            item = transaction.add(
-                item
-            )
+                )
             published.append(item)
         _bind_artifact_publication(cwd, effects, publication_paths, published)
         yield effects
@@ -8372,7 +8335,7 @@ def _artifact_cli_fail(message: str, exit_code: int):
 
 _EVIDENCE_CLI_SERVICES = EvidenceCliServices(
     resolve_state_file,
-    _resolve_evidence_cli_output_path,
+    _resolve_evidence_output_path,
     _legacy_lifecycle_repository,
     _progress_archive_path,
     _compatibility_operation_arguments,
@@ -8386,7 +8349,7 @@ _ARTIFACT_CLI_SERVICES = ArtifactCliServices(
     resolve_state_file,
     _artifact_path,
     _state_relative_path,
-    _resolve_evidence_cli_output_path,
+    _resolve_evidence_output_path,
     _legacy_lifecycle_repository,
     _render_artifact_markdown,
     _compatibility_operation_arguments,
@@ -12244,18 +12207,16 @@ def _publish_output_transaction(
     content: bytes,
     *,
     forbidden_targets: tuple[tuple[tuple[int, int, int], str], ...] = (),
-    directory_fd: int | None = None,
+    # The type is spelled in the library that supplies it; naming it here
+    # would add an expression to a function the ratchet keeps thin.
+    directory_fd=None,
 ) -> _PublishedFile:
     if not path.name or path.name in {".", ".."}:
         raise ValueError("output filename is invalid")
-    pinned_directory = directory_fd is not None
-    if pinned_directory:
-        directory_path = path.parent
-        directory_fd = os.dup(directory_fd)
-        directory_identity = _directory_identity(os.fstat(directory_fd))
-    else:
-        directory_path = path.parent.resolve()
-        directory_fd, directory_identity = _open_publish_directory(directory_path)
+    parent = open_publication_parent(path, directory_fd, _open_publish_directory)
+    directory_path = parent.directory_path
+    directory_fd = parent.directory_fd
+    directory_identity = parent.directory_identity
     temporary = ""
     temporary_stat: os.stat_result | None = None
     created = False
@@ -12267,19 +12228,12 @@ def _publish_output_transaction(
             raise ValueError("output target conflicts with an immutable archive")
         previous_entry = _read_review_archive_at(directory_fd, path.name)
         temporary, temporary_stat = _write_temp_at(directory_fd, path.name, content)
-        opened_parent = os.fstat(directory_fd)
-        opened_identity = _directory_identity(opened_parent)
-        if pinned_directory:
-            if opened_identity != directory_identity:
-                raise ValueError("publish directory changed after descriptor pin")
-        else:
-            named_parent = directory_path.lstat()
-            named_identity = _directory_identity(named_parent)
-            if opened_identity != directory_identity or named_identity != directory_identity:
-                reason = "directory-opened" if opened_identity != directory_identity else "directory-named"
-                raise ValueError(
-                    f"publish directory changed: {_publish_directory_detail(directory_identity, opened_parent, named_parent, reason=reason)}",
-                )
+        mismatch = publication_parent_mismatch(parent)
+        if mismatch is not None:
+            reason, opened_parent, named_parent = mismatch
+            raise ValueError(
+                f"publish directory changed: {_publish_directory_detail(directory_identity, opened_parent, named_parent, reason=reason)}",
+            )
         named_temporary = os.stat(temporary, dir_fd=directory_fd, follow_symlinks=False)
         if _stat_identity(named_temporary) != _stat_identity(temporary_stat):
             reason = _publish_first_mismatch_reason(
@@ -14062,7 +14016,7 @@ def cmd_verification_record(args):
 
 
 _CLAIMS_LEDGER_CLI_SERVICES = ClaimsLedgerCliServices(
-    resolve_state_file, _resolve_evidence_cli_output_path, _legacy_evidence_repository,
+    resolve_state_file, _resolve_evidence_output_path, _legacy_evidence_repository,
 )
 
 
