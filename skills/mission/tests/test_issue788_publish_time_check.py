@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 import os
 import stat
+import time
 from pathlib import Path
 
 import pytest
@@ -303,10 +304,16 @@ def test_the_write_goes_through_the_pinned_descriptor_not_the_name(tmp_path, mon
         return original(*args, **kwargs)
 
     monkeypatch.setattr(module, "_publish_output_transaction", swap_then_publish)
-    # The directory's own timestamp is the oracle: resolving the name writes a
+    # The directory's timestamp is the oracle: resolving the name writes a
     # temporary entry into ``elsewhere`` and removes it when the later checks
     # refuse, so the file is gone by the time the call returns but the
     # directory has changed.  Using the descriptor never enters it.
+    #
+    # The stamp is moved an hour into the past first.  Reading it as it stands
+    # would compare two values from the same moment, and a filesystem that
+    # stores seconds would report them equal however the write went.
+    stale = time.time() - 3600
+    os.utime(tmp_path / "elsewhere", (stale, stale))
     before = (tmp_path / "elsewhere").stat().st_mtime_ns
     with contextlib.suppress(ValueError):
         _publish(module, tmp_path, "docs/out.md")
