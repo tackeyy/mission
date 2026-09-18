@@ -717,30 +717,41 @@ def _state_cli_invocations(source: str, callers: set[str]) -> list[tuple[str, st
     through `python3 "$MISSION_STATE_PY" "$@"`, so narrowing the exemption
     costs it nothing.
 
-    A name may be quoted at the call site (`'_q' resume`), so quotes around it
-    are stripped.  Continuations are joined first, and an argument that is not
-    a literal is reported rather than ignored: `helper "$CMD"` asks for
-    something this check cannot read, and deny-by-default means refusing what
-    it cannot read.
+    **Quotes are removed before matching, not just around the name.**  A word
+    may be quoted anywhere and bash still joins it into one command:
+    `_mission_state_'bounded' resume` runs the wrapper.  Stripping only the
+    outside (`'_q' resume`) left that through.  Removing every quote first
+    reads the word the way bash assembles it.
+
+    Continuations are joined first, and an argument that is not a literal is
+    reported rather than ignored: `helper "$CMD"` asks for something this check
+    cannot read, and deny-by-default means refusing what it cannot read.
     """
     forwarding = {"$MISSION_STATE_PY", "${MISSION_STATE_PY}"}
     joined = re.sub(r"\\\n\s*", " ", source)
     invocations: list[tuple[str, str]] = []
-    for line in joined.splitlines():
+    for raw_line in joined.splitlines():
+        line = raw_line.replace('"', "").replace("'", "")
         for caller in callers:
-            pattern = r"['\"]?" + re.escape(caller) + r"['\"]?\s+(\S+)"
+            pattern = re.escape(caller) + r"\s+(\S+)"
             for match in re.finditer(pattern, line):
                 # `;` and `&` end the command, so they are not part of the
                 # argument.  Without stripping them the forwarding call is
                 # only recognised when nothing follows it on the line.
-                argument = match.group(1).rstrip(";&|").strip('"\'')
+                argument = match.group(1).rstrip(";&|")
+                if argument == "{":
+                    # `function _w { ... }` -- a definition, not a call.
+                    # Counting it reports the definition on its own, which
+                    # passes any row that also calls the function while never
+                    # exercising the call site (#796 review round 1).
+                    continue
                 if argument == "$@" and caller in forwarding:
                     # The wrapper forwarding its own arguments to the CLI.
                     continue
                 if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*", argument):
-                    invocations.append((line, "<not-a-literal>"))
+                    invocations.append((raw_line, "<not-a-literal>"))
                     continue
-                invocations.append((line, argument))
+                invocations.append((raw_line, argument))
     return invocations
 
 
@@ -1034,6 +1045,23 @@ def test_an_escaped_space_is_not_a_call_so_it_needs_no_rule():
     assert "INVOKED" not in run.stdout, run.stdout
 
 
+def test_a_definition_header_alone_is_not_a_call():
+    """`function _w { ... }` is a definition; counting it hollows out the rows.
+
+    The name is followed by whitespace and `{`, which read as a call with the
+    argument `{`.  That reports the definition on its own, so a row that
+    defines *and* calls a function passes on the definition alone -- the call
+    site, which is what the row exists to check, is never exercised.  Found by
+    deleting the call line from the hyphen row and watching it still pass.
+    """
+    source = HOOK.read_text(encoding="utf-8").replace(
+        'printf \'%s\' "$SHELL_TEXT"',
+        'function _q-x { python3 "$MISSION_STATE_PY" "$@"; }\n'
+        'printf \'%s\' "$SHELL_TEXT"',
+    )
+    assert analyze_guard_shell(source) == []
+
+
 def test_a_second_wrapper_is_reported_even_before_it_is_called():
     """Only the CLI path may forward `"$@"`; a function name doing so counts.
 
@@ -1123,6 +1151,8 @@ def test_the_wrapper_definition_is_not_itself_a_call():
         # pass: `$_q` is not a caller yet when the alias line is read.  It runs
         # (bash expands `$_q` when the alias is defined), so the fixed point is
         # not theoretical.
+        ("a name quoted in the middle",
+         "_mission_state_'bounded' resume"),
         ("an alias whose value is quoted",
          "shopt -s expand_aliases\nalias _al='_mission_state_bounded'\n_al resume"),
         ("an alias whose value is a variable",
