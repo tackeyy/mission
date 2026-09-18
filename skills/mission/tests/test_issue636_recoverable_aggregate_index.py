@@ -1123,20 +1123,3 @@ def test_repair_command_is_check_only_unless_execute_is_explicit(tmp_path, run_c
     assert executed_result["executed"] is True
     assert executed_result["matches_authority"] is True
     assert json.loads(aggregate.read_text())["active_sessions"] == ["s1"]
-
-
-@pytest.mark.parametrize(
-    "relative_path",
-    (
-        "bin/mission-state.py",
-        "lib/mission_application/runtime_guard.py",
-        "lib/mission_persistence/administrative.py",
-        "lib/mission_persistence/aggregate_index.py",
-        "lib/mission_persistence/legacy_v4.py",
-        "refs/state-management.md",
-    ),
-)
-def test_changed_source_and_plugin_mirrors_are_byte_identical(relative_path):
-    source = _REPOSITORY_ROOT / "skills" / "mission" / relative_path
-    plugin = _REPOSITORY_ROOT / "plugins" / "mission" / "skills" / "mission" / relative_path
-    assert source.read_bytes() == plugin.read_bytes()

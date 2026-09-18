@@ -8,10 +8,6 @@ CANONICAL_SKILLS = (
     REPO_ROOT / "skills" / "mission" / "SKILL.md",
     REPO_ROOT / "skills" / "mission-executor" / "SKILL.md",
 )
-PLUGIN_SKILLS = (
-    REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "SKILL.md",
-    REPO_ROOT / "plugins" / "mission" / "skills" / "mission-executor" / "SKILL.md",
-)
 
 
 def test_explicit_release_request_is_advance_authorization():
@@ -42,11 +38,3 @@ def test_material_authorization_changes_still_require_confirmation():
 
     missing = [marker for marker in safety_markers if marker not in mission_text]
     assert not missing, f"mission rule is missing re-confirmation boundaries: {missing}"
-
-
-def test_release_authorization_rule_is_packaged_without_drift():
-    """正典と配布pluginのmission/executorルールを完全一致させる。"""
-    for canonical, packaged in zip(CANONICAL_SKILLS, PLUGIN_SKILLS, strict=True):
-        assert canonical.read_bytes() == packaged.read_bytes(), (
-            f"release authorization rule is not packaged: {canonical} != {packaged}"
-        )

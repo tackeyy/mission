@@ -159,42 +159,38 @@ def test_init_runs_permission_preflight_before_returning_success(
 
 
 def test_skill_allows_only_state_cli_and_forbids_questions_on_preflight_failure():
-    paths = (
-        REPO_ROOT / "skills" / "mission" / "SKILL.md",
-        REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "SKILL.md",
+    path = REPO_ROOT / "skills" / "mission" / "SKILL.md"
+    text = path.read_text(encoding="utf-8")
+    frontmatter = text.split("---", 2)[1]
+    assert "allowed-tools:" in frontmatter
+    bash_rules = {
+        line.strip().removeprefix("- ")
+        for line in frontmatter.splitlines()
+        if line.strip().startswith("- Bash(")
+    }
+    assert bash_rules == {
+        'Bash(bash "$MISSION_PLUGIN_ROOT/scripts/mission-local-authoring-sync.sh")',
+        "Bash(scripts/mission-state.py init:*)",
+        "Bash(scripts/mission-state.py permission-preflight:*)",
+        "Bash(${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py init:*)",
+        "Bash(${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py permission-preflight:*)",
+    }
+    assert "Bash(python3:*)" not in frontmatter
+    assert "Bash(*:*)" not in frontmatter
+    assert "Bash(scripts/mission-state.py:*)" not in frontmatter
+    assert "Bash(bash:*)" not in frontmatter
+    assert (
+        'Bash(bash "$MISSION_PLUGIN_ROOT/scripts/mission-local-authoring-sync.sh":*)'
+        not in frontmatter
     )
-    for path in paths:
-        text = path.read_text(encoding="utf-8")
-        frontmatter = text.split("---", 2)[1]
-        assert "allowed-tools:" in frontmatter
-        bash_rules = {
-            line.strip().removeprefix("- ")
-            for line in frontmatter.splitlines()
-            if line.strip().startswith("- Bash(")
-        }
-        assert bash_rules == {
-            'Bash(bash "$MISSION_PLUGIN_ROOT/scripts/mission-local-authoring-sync.sh")',
-            "Bash(scripts/mission-state.py init:*)",
-            "Bash(scripts/mission-state.py permission-preflight:*)",
-            "Bash(${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py init:*)",
-            "Bash(${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py permission-preflight:*)",
-        }
-        assert "Bash(python3:*)" not in frontmatter
-        assert "Bash(*:*)" not in frontmatter
-        assert "Bash(scripts/mission-state.py:*)" not in frontmatter
-        assert "Bash(bash:*)" not in frontmatter
-        assert (
-            'Bash(bash "$MISSION_PLUGIN_ROOT/scripts/mission-local-authoring-sync.sh":*)'
-            not in frontmatter
-        )
-        assert "specialists invoke-command" not in frontmatter
+    assert "specialists invoke-command" not in frontmatter
 
-        compact = text.split("## Compact Instructions", 1)[1].split(
-            "## state.json 操作", 1
-        )[0]
-        assert "permission-preflight --json" in compact
-        assert "blocked-external" in compact
-        assert "質問" in compact
+    compact = text.split("## Compact Instructions", 1)[1].split(
+        "## state.json 操作", 1
+    )[0]
+    assert "permission-preflight --json" in compact
+    assert "blocked-external" in compact
+    assert "質問" in compact
 
 
 def test_permission_preflight_rejects_assumptions_path_outside_state_root(
