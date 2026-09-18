@@ -7,8 +7,6 @@ import json
 import os
 import re
 import shlex
-import subprocess
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -630,18 +628,12 @@ _POLICY_NAMES = re.compile(
 _COMMANDS = {"mark-halt", "cleanup-stale", "stop-guard-observe"}
 
 
-# bash accepts far more in a function name than an identifier: `_q-x` is legal.
-# Restricting the name to `[A-Za-z0-9_]` let a wrapper hide behind a hyphen, so
-# the name runs to the next character that would end a word in shell.
-_NAME = r"[^\s;&|()<>{}'\"$`\\=]+"
+# `function name {`, `name() {`, and `name()` with the brace on a later line are
+# all definitions.  Only the header is read; see `_state_cli_callers`.
 _FUNCTION_HEADER = re.compile(
-    r"(?m)^[ \t]*(?:function[ \t]+(?P<kw>" + _NAME + r")[ \t]*(?:\([ \t]*\))?"
-    r"|(?P<paren>" + _NAME + r")[ \t]*\([ \t]*\))"
+    r"(?m)^[ \t]*(?:function[ \t]+(?P<kw>[A-Za-z_][A-Za-z0-9_]*)[ \t]*(?:\([ \t]*\))?"
+    r"|(?P<paren>[A-Za-z_][A-Za-z0-9_]*)[ \t]*\([ \t]*\))"
 )
-
-# `alias _al=_bounded` and `_q=_bounded` both make a second name reach the CLI.
-_ALIAS = re.compile(r"(?m)^[ \t]*alias[ \t]+(?P<name>" + _NAME + r")=(?P<value>\S+)")
-_ASSIGNMENT = re.compile(r"(?m)^[ \t]*(?P<name>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>\S+)")
 
 
 def _state_cli_callers(source: str) -> set[str]:
@@ -667,199 +659,47 @@ def _state_cli_callers(source: str) -> set[str]:
     one function, and its shape is "call the CLI once and print what comes
     back", so this costs nothing here and closes the whole class.
 
-    Aliases and assignments give a name a second name (#796), so they are
-    followed to a fixed point: `alias _al=_bounded` and `_q=_bounded` each let
-    the CLI be reached under a spelling the definitions alone do not show.
-
-    It errs toward reporting.  A helper called with a literal argument is
-    reported even when it never touches the CLI, and that is the direction to
-    fail in -- CI says so on the first push, rather than a bypass sitting
-    unnoticed.
+    It errs toward reporting.  A hook that grew a helper called more than once
+    would be reported, and that is the direction to fail in -- CI says so on
+    the first push, rather than a bypass sitting unnoticed.
     """
     callers = {"$MISSION_STATE_PY", "${MISSION_STATE_PY}"}
     for header in _FUNCTION_HEADER.finditer(source):
         callers.add(header.group("kw") or header.group("paren"))
-    growing = True
-    while growing:
-        growing = False
-        for pattern in (_ALIAS, _ASSIGNMENT):
-            for match in pattern.finditer(source):
-                value = match.group("value").strip("\"'")
-                if value not in callers:
-                    continue
-                name = match.group("name")
-                # An assignment is reached through the variable, an alias by
-                # its own name.
-                spellings = (
-                    {name} if pattern is _ALIAS
-                    else {"$" + name, "${" + name + "}"}
-                )
-                if spellings <= callers:
-                    continue
-                callers |= spellings
-                growing = True
     return callers
-
-
-def _command_fragments(line: str) -> list[str]:
-    """Split a line wherever bash can start a new command.
-
-    `shlex` alone reads `x=$(_bounded resume)` as the words `x=$(_bounded` and
-    `resume)`, so the caller never appears as a word and the call is missed
-    (#796 review round 3).  Command substitution, backticks, and the operators
-    `;` `|` `&` all begin a command, and each fragment is read as its own line.
-
-    Three things decide where a command can begin, and each was found by an
-    input that ran under bash while the check stayed silent:
-
-    - **Single quotes stop everything.**  `'$(_bounded resume)'` is data;
-      `"$(_bounded resume)"` runs.  Same characters, different quote.
-    - **A substitution is a fresh command context.**  In
-      `"$(true;_bounded resume)"` the `;` separates commands even though the
-      whole thing sits in double quotes -- and after the `)` the enclosing
-      quotes are back, so in `"$(true) ; _bounded resume"` the same `;` is
-      data.  The state is pushed and popped, not cleared.
-    - **A fragment has to be quoted the way it was found.**  Cutting inside
-      `"..."` otherwise leaves an unpaired quote, `shlex` refuses the fragment,
-      and the raw fallback reads `resume"` as a subcommand -- reporting a hook
-      that runs nothing.
-
-    `$(` needs no case of its own: the `(` ends the fragment either way, and a
-    branch no mutation can distinguish is a branch that rots.
-    """
-    fragments: list[str] = []
-    buffer: list[str] = []
-    enclosing: list[bool] = []
-    in_backtick = False
-    in_single = False
-    in_double = False
-    index = 0
-    end = len(line)
-
-    def cut(reopen: bool) -> None:
-        """Emit the buffer, closing the quote it splits and reopening if asked."""
-        text = "".join(buffer) + ('"' if in_double else "")
-        buffer.clear()
-        fragments.append(text)
-        if reopen:
-            buffer.append('"')
-
-    while index < end:
-        char = line[index]
-        if in_single:
-            buffer.append(char)
-            if char == "'":
-                in_single = False
-            index += 1
-            continue
-        if char == "\\" and index + 1 < end:
-            buffer.append(char)
-            buffer.append(line[index + 1])
-            index += 2
-            continue
-        if char == "'":
-            in_single = True
-            buffer.append(char)
-            index += 1
-            continue
-        if char == '"':
-            in_double = not in_double
-            buffer.append(char)
-            index += 1
-            continue
-        if char == "`":
-            if in_backtick:
-                restored = enclosing.pop() if enclosing else False
-                cut(restored)
-                in_double = restored
-            else:
-                enclosing.append(in_double)
-                cut(False)
-                in_double = False
-            in_backtick = not in_backtick
-            index += 1
-            continue
-        if char == "(":
-            enclosing.append(in_double)
-            cut(False)
-            in_double = False
-            index += 1
-            continue
-        if char == ")":
-            restored = enclosing.pop() if enclosing else False
-            cut(restored)
-            in_double = restored
-            index += 1
-            continue
-        if not in_double and char in ";|&":
-            cut(False)
-            index += 1
-            continue
-        buffer.append(char)
-        index += 1
-    cut(False)
-    return [fragment for fragment in fragments if fragment.strip()]
 
 
 def _state_cli_invocations(source: str, callers: set[str]) -> list[tuple[str, str]]:
     """Return (line, first argument) for every call of the state CLI.
 
-    **Words are built with `shlex`, not matched in the raw text.**  Two earlier
-    shapes came from reading the text instead of the words.  Matching the name
-    literally missed `_mission_state_'bounded' resume`, which bash joins into
-    one word and runs.  Deleting every quote first caught that but reported
-    `printf '%s' "_mission_state_'bounded' resume"`, where the same characters
-    are data inside a string and nothing runs.  `shlex.split` makes the same
-    words bash does, so both come out right without a shell parser.
-
     The forwarding call inside a wrapper -- the one whose argument is `"$@"` --
-    is what makes it a wrapper, so it is exempt.  **Only the CLI path itself
-    may forward.**  A function name followed by `"$@"` is counted, because
-    `"$@"` says nothing about what is being passed:
+    is what makes it a wrapper, so it is the only thing exempt.  Skipping the
+    whole *line* was the previous shape and let the rest of that line hide a
+    call:
 
-        set -- resume
-        _mission_state_bounded "$@"
+        python3 "$MISSION_STATE_PY" "$@"; _mission_state_bounded resume
 
-    That reaches the CLI with `resume` and used to be exempt under the same
-    rule that exempts the wrapper's own line (#796).  The hook forwards only
-    through `python3 "$MISSION_STATE_PY" "$@"`, so narrowing the exemption
-    costs it nothing.
-
-    An argument that is not a literal is reported rather than ignored:
-    `helper "$CMD"` asks for something this check cannot read, and
-    deny-by-default means refusing what it cannot read.
+    Continuations are joined first, and an argument that is not a literal is
+    reported rather than ignored: `helper "$CMD"` asks for something this check
+    cannot read, and deny-by-default means refusing what it cannot read.
     """
-    forwarding = {"$MISSION_STATE_PY", "${MISSION_STATE_PY}"}
     joined = re.sub(r"\\\n\s*", " ", source)
     invocations: list[tuple[str, str]] = []
-    for raw_line in joined.splitlines():
-      for fragment in _command_fragments(raw_line):
-        try:
-            words = shlex.split(fragment)
-        except ValueError:
-            # An unbalanced quote: the line cannot be read as words.  Fall back
-            # to the raw split rather than skipping it, so an unreadable line
-            # cannot be used to hide a call.
-            words = fragment.split()
-        for index, word in enumerate(words):
-            if word not in callers:
-                continue
-            if index and words[index - 1] == "function":
-                # `function _w { ... }` -- a definition, not a call.  Only the
-                # keyword form reaches here; `_w() {` makes the word `_w()`,
-                # which is not a caller.  Excluding every `{` instead let a
-                # real call pass its own `{` (#796 review round 2).
-                continue
-            if index + 1 >= len(words):
-                continue
-            argument = words[index + 1].rstrip(";&|")
-            if argument == "$@" and word in forwarding:
-                # The wrapper forwarding its own arguments to the CLI.
-                continue
-            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*", argument):
-                invocations.append((raw_line, "<not-a-literal>"))
-                continue
-            invocations.append((raw_line, argument))
+    for line in joined.splitlines():
+        for caller in callers:
+            pattern = re.escape(caller) + r"\"?\s+(\S+)"
+            for match in re.finditer(pattern, line):
+                # `;` and `&` end the command, so they are not part of the
+                # argument.  Without stripping them the forwarding call is
+                # only recognised when nothing follows it on the line.
+                argument = match.group(1).rstrip(";&|").strip('"\'')
+                if argument == "$@":
+                    # The wrapper forwarding its own arguments.
+                    continue
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*", argument):
+                    invocations.append((line, "<not-a-literal>"))
+                    continue
+                invocations.append((line, argument))
     return invocations
 
 
@@ -1109,191 +949,18 @@ def test_a_wrapper_of_a_wrapper_cannot_hide_a_second_verdict_call():
     assert "command-not-allowlisted" in codes
 
 
-def test_defining_a_helper_without_calling_it_is_not_a_violation():
-    """The caller set widens what counts as a caller, not what counts as a call.
+def test_defining_a_wrapper_without_calling_it_is_not_a_violation():
+    """The closure must widen what counts as a caller, not what counts as a call.
 
-    Without this, making every definition a caller could be "satisfied" by
-    reporting the definitions themselves, which would reject the hook.
+    Without this, making the caller set transitive could be "satisfied" by
+    reporting every definition, which would reject the hook itself.
     """
     source = HOOK.read_text(encoding="utf-8").replace(
         'printf \'%s\' "$SHELL_TEXT"',
-        "_w7() { printf '%s' hi; }\n"
+        '_w7() { _mission_state_bounded "$@"; }\n'
         'printf \'%s\' "$SHELL_TEXT"',
     )
     assert analyze_guard_shell(source) == []
-
-
-def test_an_escaped_space_is_not_a_call_so_it_needs_no_rule():
-    """`_bounded\\ resume` reads as one word, and that word is not a command.
-
-    The static check lets it through, and it was reported as a bypass.  Running
-    it says otherwise: `\\ ` escapes the space, so bash looks for a command
-    named `_mission_state_bounded resume`, finds none, and exits 127.  The
-    wrapper is never entered, so the contract is not broken and there is
-    nothing here to close.
-
-    Kept as a test because the shape looks like the ones above, and without a
-    record the next reader spends the same time re-deriving that it is inert.
-    """
-    script = (
-        '_mission_state_bounded() { printf "INVOKED:%s" "$*"; }\n'
-        "_mission_state_bounded\\ resume\n"
-    )
-    path = tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False)
-    try:
-        path.write(script)
-        path.close()
-        syntax = subprocess.run(["bash", "-n", path.name], capture_output=True, text=True)
-        run = subprocess.run(["bash", path.name], capture_output=True, text=True)
-    finally:
-        os.unlink(path.name)
-
-    assert syntax.returncode == 0, syntax.stderr
-    assert run.returncode == 127, (run.returncode, run.stdout, run.stderr)
-    assert "INVOKED" not in run.stdout, run.stdout
-
-
-def test_a_line_shlex_cannot_read_is_still_searched():
-    """An unbalanced quote must not become a place to hide a call.
-
-    `shlex.split` raises on it, and skipping the line would make "unreadable"
-    the easiest bypass to write.  The raw split is used instead, which reads
-    less but reads something.  `bash -n` rejects such a line, so this is
-    insurance rather than a shape anyone can run -- and insurance that is
-    never exercised is the kind that turns out not to work.
-
-    Asked of the extraction directly: through the hook, the unbalanced quote
-    would also break lines after it, so the test would pass for another
-    reason.
-    """
-    import shlex as _shlex
-
-    line = "_mission_state_bounded resume '"
-    with pytest.raises(ValueError):
-        _shlex.split(line)
-
-    invocations = _state_cli_invocations(line + "\n", {"_mission_state_bounded"})
-
-    assert [subcommand for _line, subcommand in invocations] == ["resume"], invocations
-
-
-def test_a_fragment_keeps_the_quotes_it_was_cut_out_of():
-    """Otherwise the fallback reads a string as a command line.
-
-    `printf "%s" "a _bounded resume$(true)"` prints its text and runs nothing.
-    The `(` cuts the line inside the string, and if the piece before the cut
-    keeps its opening quote unpaired, `shlex` refuses it and the raw split
-    reads `_bounded resume` as a call -- reporting a clean hook.  Closing the
-    quote on the way out makes the same piece one word again.
-    """
-    source = HOOK.read_text(encoding="utf-8").replace(
-        'printf \'%s\' "$SHELL_TEXT"',
-        'printf "%s" "a _mission_state_bounded resume$(true)"\n'
-        'printf \'%s\' "$SHELL_TEXT"',
-    )
-    assert analyze_guard_shell(source) == []
-
-
-def test_the_quoting_resumes_after_a_substitution_closes():
-    """Push and pop, not reset: after `)` the enclosing quotes are back.
-
-    `"$(true) ; _bounded resume"` prints its text and runs nothing -- the `;`
-    is inside the outer double quotes.  Clearing the quote state at `(`
-    instead of stacking it would report this, so the row above (where the
-    operator *is* inside the substitution) and this one only pass together.
-    """
-    source = HOOK.read_text(encoding="utf-8").replace(
-        'printf \'%s\' "$SHELL_TEXT"',
-        'printf "%s" "$(true) ; _mission_state_bounded resume"\n'
-        'printf \'%s\' "$SHELL_TEXT"',
-    )
-    assert analyze_guard_shell(source) == []
-
-
-def test_an_operator_inside_double_quotes_is_not_a_call():
-    """`;` ends a command only outside quotes.
-
-    `printf "%s" "a; _bounded resume"` prints the text and runs nothing.
-    Ending the fragment at every `;` would report it -- a clean hook failing,
-    which is how a check gets relaxed.  This pins the quote tracking that the
-    operator rows above rely on.
-    """
-    source = HOOK.read_text(encoding="utf-8").replace(
-        'printf \'%s\' "$SHELL_TEXT"',
-        'printf "%s" "a; _mission_state_bounded resume"\n'
-        'printf \'%s\' "$SHELL_TEXT"',
-    )
-    assert analyze_guard_shell(source) == []
-
-
-def test_a_substitution_inside_single_quotes_is_not_a_call():
-    """Which quote encloses it is the whole difference.
-
-    `"$(_bounded resume)"` runs; `'$(_bounded resume)'` is data.  The
-    characters are identical, so splitting at `$(` without tracking quotes
-    would report the second -- a clean hook failing, which is how a check gets
-    relaxed.  This pins the control for the rows above.
-    """
-    source = HOOK.read_text(encoding="utf-8").replace(
-        'printf \'%s\' "$SHELL_TEXT"',
-        "printf '%s' '$(_mission_state_bounded resume)'\n"
-        'printf \'%s\' "$SHELL_TEXT"',
-    )
-    assert analyze_guard_shell(source) == []
-
-
-def test_the_same_characters_inside_a_string_are_not_a_call():
-    """Words are what bash runs; characters inside a string are data.
-
-    `_mission_state_'bounded' resume` is one word and runs.  The same
-    characters inside `printf '%s' "..."` are one argument to `printf`, and
-    nothing runs.  Deleting every quote before matching cannot tell them
-    apart and reported the second -- a clean hook failing the check, which is
-    how a check gets relaxed.  Building words with `shlex` separates them.
-    """
-    source = HOOK.read_text(encoding="utf-8").replace(
-        'printf \'%s\' "$SHELL_TEXT"',
-        'printf \'%s\' "_mission_state_\'bounded\' resume"\n'
-        'printf \'%s\' "$SHELL_TEXT"',
-    )
-    assert analyze_guard_shell(source) == []
-
-
-def test_a_definition_header_alone_is_not_a_call():
-    """`function _w { ... }` is a definition; counting it hollows out the rows.
-
-    The name is followed by whitespace and `{`, which read as a call with the
-    argument `{`.  That reports the definition on its own, so a row that
-    defines *and* calls a function passes on the definition alone -- the call
-    site, which is what the row exists to check, is never exercised.  Found by
-    deleting the call line from the hyphen row and watching it still pass.
-    """
-    source = HOOK.read_text(encoding="utf-8").replace(
-        'printf \'%s\' "$SHELL_TEXT"',
-        'function _q-x { python3 "$MISSION_STATE_PY" "$@"; }\n'
-        'printf \'%s\' "$SHELL_TEXT"',
-    )
-    assert analyze_guard_shell(source) == []
-
-
-def test_a_second_wrapper_is_reported_even_before_it_is_called():
-    """Only the CLI path may forward `"$@"`; a function name doing so counts.
-
-    This is the cost of closing `set -- resume` + `_bounded "$@"` (#796):
-    `"$@"` says nothing about what is being passed, so exempting it for
-    function names exempts whatever the positional parameters were set to.
-    The hook forwards only through `python3 "$MISSION_STATE_PY" "$@"`, so it
-    pays nothing -- but a second wrapper is now reported on sight, before
-    anyone calls it.  That is the direction to fail in, and writing it down
-    keeps the next reader from filing it as a false positive.
-    """
-    source = HOOK.read_text(encoding="utf-8").replace(
-        'printf \'%s\' "$SHELL_TEXT"',
-        '_w8() { _mission_state_bounded "$@"; }\n'
-        'printf \'%s\' "$SHELL_TEXT"',
-    )
-    codes = [violation.code for violation in analyze_guard_shell(source)]
-    assert "command-not-allowlisted" in codes
 
 
 def test_the_wrapper_definition_is_not_itself_a_call():
@@ -1342,72 +1009,6 @@ def test_the_wrapper_definition_is_not_itself_a_call():
         ("a brace escaped with a backslash",
          '_w12() {\n  printf \'%s\' \\}\n'
          '  _mission_state_bounded "$@"\n}\n_w12 resume'),
-        # #796: names and call sites the matching missed.  Each of these was
-        # checked by running it under `bash` with a stub wrapper: all five
-        # actually invoke the wrapper with `resume`, so each is a real hole and
-        # not just a shape the matching reads differently.
-        # These forward through `"$MISSION_STATE_PY"`, not through the hook's
-        # wrapper, so the definition line stays exempt and only the *call* can
-        # trip the check.  Written the other way, the definition itself is
-        # reported (a function name may not forward `"$@"`), which passes the
-        # row while leaving the name matching untested.
-        ("a name containing a hyphen",
-         'function _q-x { python3 "$MISSION_STATE_PY" "$@"; }\n_q-x resume'),
-        ("a call whose name is quoted",
-         '_q() { python3 "$MISSION_STATE_PY" "$@"; }\n\'_q\' resume'),
-        ("a call through a variable",
-         '_q=_mission_state_bounded\n"$_q" resume'),
-        ("a call through the braced spelling of a variable",
-         '_q=_mission_state_bounded\n"${_q}" resume'),
-        ("a variable assigned from another variable",
-         '_q=_mission_state_bounded\n_r=$_q\n"$_r" resume'),
-        # Aliases are scanned before assignments, so this one needs a second
-        # pass: `$_q` is not a caller yet when the alias line is read.  It runs
-        # (bash expands `$_q` when the alias is defined), so the fixed point is
-        # not theoretical.
-        # A command can begin inside a substitution or after an operator, and
-        # `shlex` alone joins the caller to the punctuation before it.
-        ("a call inside a command substitution",
-         'x=$(_mission_state_bounded resume)'),
-        ("a call inside backticks",
-         'x=`_mission_state_bounded resume`'),
-        ("a substitution inside double quotes",
-         'printf \'%s\' "$(_mission_state_bounded resume)"'),
-        ("a call after a semicolon", 'true; _mission_state_bounded resume'),
-        # No space: `shlex` alone yields `true;_mission_state_bounded` as one
-        # word, so the operator has to end the fragment.  Both of these run.
-        ("a call after a semicolon with no space",
-         'true;_mission_state_bounded resume'),
-        ("a call after a pipe with no space",
-         'true|_mission_state_bounded resume'),
-        # `\"` is a literal quote, not the start of a string.  Reading it as
-        # one leaves the rest of the line "inside quotes", so the operators
-        # stop ending fragments and the call joins the punctuation before it.
-        # Inside a substitution the enclosing quotes do not apply, so the
-        # operators separate commands again.  Both of these run the wrapper
-        # (its output is captured, so the stub has to write to stderr to see
-        # it -- measuring stdout alone says "nothing happened").
-        ("an operator inside a quoted substitution",
-         'x="$(true;_mission_state_bounded resume)"'),
-        ("an operator inside quoted backticks",
-         'x="`true;_mission_state_bounded resume`"'),
-        ("an escaped quote before the operators",
-         'printf \'%s\' \\";true;_mission_state_bounded resume'),
-        ("a call after a pipe", 'true | _mission_state_bounded resume'),
-        ("a call after &&", 'true && _mission_state_bounded resume'),
-        ("a brace passed as the argument of a real call",
-         "_mission_state_bounded {"),
-        ("a name quoted in the middle",
-         "_mission_state_'bounded' resume"),
-        ("an alias whose value is quoted",
-         "shopt -s expand_aliases\nalias _al='_mission_state_bounded'\n_al resume"),
-        ("an alias whose value is a variable",
-         'shopt -s expand_aliases\n_q=_mission_state_bounded\n'
-         'alias _al=$_q\n_al resume'),
-        ("a call through an alias",
-         'shopt -s expand_aliases\nalias _al=_mission_state_bounded\n_al resume'),
-        ("positional parameters replaced before forwarding",
-         'set -- resume\n_mission_state_bounded "$@"'),
         ("a brace inside a comment",
          '_w10() {\n  # }\n  _mission_state_bounded "$@"\n}\n_w10 resume'),
     ],

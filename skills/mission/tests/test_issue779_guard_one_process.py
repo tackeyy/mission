@@ -164,13 +164,14 @@ def _counting_python(tmp_path):
     return shim_dir, log
 
 
-def _run_hook(tmp_path, state_dir, *, stop_hook_active=False, env_overrides=None):
+def _run_hook(tmp_path, state_dir, *, stop_hook_active=False, env_overrides=None,
+              hook=HOOK):
     shim_dir, log = _counting_python(tmp_path)
     env = {**os.environ, **_GUARD_ENV, "PATH": f"{shim_dir}{os.pathsep}{os.environ['PATH']}",
            "MISSION_STATE_PY": str(STATE_PY)}
     _apply_env(env, env_overrides)
     result = subprocess.run(
-        ["bash", str(HOOK)],
+        ["bash", str(hook)],
         input=json.dumps({"stop_hook_active": stop_hook_active, "cwd": str(state_dir)}),
         capture_output=True,
         text=True,
@@ -590,3 +591,127 @@ def test_the_limit_the_hook_uses_is_a_backstop_not_a_ceiling():
     assert module._GUARD_APPLICATION_LIMIT > 1000, (
         "the limit the hook uses still rejects a long run of real progress"
     )
+
+
+# --- #796: the count is measured by running, not by reading the shell --------
+#
+# The static check in `test_issue615_guard_decision.py` reads the hook and
+# decides whether it can reach the CLI more than once.  Five review rounds
+# found five shells that it read as harmless and that ran the wrapper anyway
+# -- a quoted fragment of a name, a call through a variable, an alias, `set --`
+# before a forward, a call inside `$( )`.  Each fix moved the reading closer to
+# a shell lexer, and the next round found the next one (#796).
+#
+# Running the hook settles it without reading anything: the shim below records
+# every `mission-state.py` launch, so the count and the subcommand are
+# observed rather than inferred.  The static check keeps what only it can do --
+# refusing a shape before anyone runs it, and the policy rules (no arithmetic,
+# no numeric thresholds, no dynamic execution) -- and stops being the thing
+# that has to understand bash.
+
+
+def _subcommands(launches):
+    """The first argument of each recorded `mission-state.py` launch."""
+    found = []
+    for line in launches:
+        words = line.split()
+        for index, word in enumerate(words):
+            if word.endswith("mission-state.py") and index + 1 < len(words):
+                found.append(words[index + 1])
+                break
+    return found
+
+
+def _hook_with(tmp_path, inserted):
+    """A copy of the hook with `inserted` added after its last `fi`."""
+    source = HOOK.read_text(encoding="utf-8")
+    marker = "\nfi\n"
+    at = source.rindex(marker) + len(marker)
+    path = tmp_path / "hook-under-test.sh"
+    path.write_text(source[:at] + inserted + "\n" + source[at:], encoding="utf-8")
+    return path
+
+
+def _run_shapes_hook(tmp_path, inserted):
+    root = tmp_path / "repo"
+    (root / ".mission-state" / "sessions").mkdir(parents=True)
+    hook = _hook_with(tmp_path, inserted)
+    _result, launches = _run_hook(tmp_path, root, hook=hook)
+    return _subcommands(launches)
+
+
+def test_the_subcommand_is_read_after_the_script_not_at_a_fixed_place():
+    """The shim logs whatever `python3` was given, flags included.
+
+    Taking the second word works only while the script path happens to be
+    first.  `python3 -X importtime <script> stop-verdict` would then be read as
+    asking for `importtime`, and a second call with a flag would be read as
+    asking for whatever the flag is -- the count stays right while the
+    subcommand goes wrong, which is the quiet way for this to break.
+
+    Asked of the parsing directly: the hook passes no flags today, so a test
+    that runs it cannot tell the two readings apart.
+    """
+    launches = [
+        "/repo/skills/mission/bin/mission-state.py stop-verdict --hook-input - --json",
+        "-X importtime /repo/skills/mission/bin/mission-state.py resume",
+    ]
+
+    assert _subcommands(launches) == ["stop-verdict", "resume"]
+
+
+def test_running_the_hook_shows_one_call_and_which_one(tmp_path):
+    """The guarantee, measured: one launch, and it asks for `stop-verdict`."""
+    assert _run_shapes_hook(tmp_path, "") == ["stop-verdict"]
+
+
+# Each shape was run under bash with a stub wrapper before being listed here:
+# all five actually reach the CLI, which is why the static check reading them
+# as harmless mattered.  They are kept as the demonstration that running the
+# hook detects what reading it did not -- a measurement nobody has shown to
+# separate the two cases is not yet an instrument.
+_BYPASS_SHAPES = {
+    "a name containing a hyphen":
+        'function _q-x { python3 "$MISSION_STATE_PY" "$@"; }\n_q-x resume',
+    "a call whose name is quoted":
+        "'_mission_state_bounded' resume",
+    "a name quoted in the middle":
+        "_mission_state_'bounded' resume",
+    "a call through a variable":
+        '_q=_mission_state_bounded\n"$_q" resume',
+    "a call through an alias":
+        "shopt -s expand_aliases\nalias _al=_mission_state_bounded\n_al resume",
+    "positional parameters replaced before forwarding":
+        'set -- resume\n_mission_state_bounded "$@"',
+    "a call inside a command substitution":
+        "x=$(_mission_state_bounded resume)",
+    "a call inside backticks":
+        "x=`_mission_state_bounded resume`",
+    "an operator inside a quoted substitution":
+        'x="$(true;_mission_state_bounded resume)"',
+    "a call after a semicolon with no space":
+        "true;_mission_state_bounded resume",
+    "a brace inside a quoted string before the call":
+        'printf "%s" "(";_mission_state_bounded resume',
+}
+
+
+@pytest.mark.parametrize("label", sorted(_BYPASS_SHAPES))
+def test_running_the_hook_catches_what_reading_it_missed(tmp_path, label):
+    subcommands = _run_shapes_hook(tmp_path, _BYPASS_SHAPES[label])
+
+    # `!= ["stop-verdict"]` would also pass on an empty list, which is what a
+    # broken harness produces: the shape would look detected because nothing
+    # ran at all.  Name what the shape does instead.
+    assert subcommands == ["stop-verdict", "resume"], (label, subcommands)
+
+
+# The one shape that looked like the others and is not.  `\\ ` escapes the
+# space, so bash looks for a command named `_mission_state_bounded resume`,
+# finds none, and the wrapper is never entered.  The static check let it
+# through, and that was correct: there is nothing to catch.  Without this
+# record the next reader spends the same time re-deriving it.
+def test_an_escaped_space_reaches_nothing(tmp_path):
+    assert _run_shapes_hook(tmp_path, "_mission_state_bounded\\ resume") == [
+        "stop-verdict"
+    ]
