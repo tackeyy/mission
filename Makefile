@@ -6,6 +6,14 @@ REQUIREMENTS_STAMP := $(VENV)/.requirements-ci.stamp
 PYTEST_TARGETS ?= skills/mission
 SHARD_INDEX ?= 1
 SHARD_TOTAL ?= 1
+# The entries a person runs by hand share the machine with whatever else is
+# open on it, so they take a fixed number of workers rather than one per core.
+# 4 is the value tackeyy/open-claw-assistant#645 measured on this hardware:
+# serial, 2 and 4 all finished with the same results, and 4 was the fastest.
+# Override it when the machine is not shared: MISSION_TEST_WORKERS=auto make test
+#
+# test-shard keeps `auto` on purpose -- CI runners are not shared with anyone.
+MISSION_TEST_WORKERS ?= 4
 
 .PHONY: test-smoke test test-shard test-e2e
 
@@ -29,10 +37,10 @@ test: $(REQUIREMENTS_STAMP)
 	@set -eu; \
 	if [ -n "$${MISSION_SUITE_REPORT:-}" ]; then \
 	  junit="$$(dirname "$$MISSION_SUITE_REPORT")/mission-suite-junit.xml"; \
-	  $(VENV_PYTHON) -m pytest -q -n auto --dist loadfile --junit-xml="$$junit" $(PYTEST_TARGETS); \
+	  $(VENV_PYTHON) -m pytest -q -n $(MISSION_TEST_WORKERS) --dist loadfile --junit-xml="$$junit" $(PYTEST_TARGETS); \
 	  $(PYTHON) scripts/write_suite_report.py --junit "$$junit" --out "$$MISSION_SUITE_REPORT"; \
 	else \
-	  $(VENV_PYTHON) -m pytest -q -n auto --dist loadfile $(PYTEST_TARGETS); \
+	  $(VENV_PYTHON) -m pytest -q -n $(MISSION_TEST_WORKERS) --dist loadfile $(PYTEST_TARGETS); \
 	fi
 	@printf '{"schema":"mission-test-report/1","tree_sha":"%s","tier":"full","test_manifest":["skills/mission"]}\n' "$$(git rev-parse 'HEAD^{tree}')"
 
@@ -48,5 +56,5 @@ test-shard: $(REQUIREMENTS_STAMP)
 	@printf '{"schema":"mission-test-report/1","tree_sha":"%s","tier":"shard","shard":"%s/%s","test_manifest":["skills/mission"]}\n' "$$(git rev-parse 'HEAD^{tree}')" "$(SHARD_INDEX)" "$(SHARD_TOTAL)"
 
 test-e2e: $(REQUIREMENTS_STAMP)
-	$(VENV_PYTHON) -m pytest -q -n auto --dist loadfile skills/mission -k 'e2e or operational'
+	$(VENV_PYTHON) -m pytest -q -n $(MISSION_TEST_WORKERS) --dist loadfile skills/mission -k 'e2e or operational'
 	@printf '{"schema":"mission-test-report/1","tree_sha":"%s","tier":"e2e","test_manifest":["skills/mission","-k","e2e or operational"]}\n' "$$(git rev-parse 'HEAD^{tree}')"
