@@ -7,8 +7,8 @@ half of the work here and stop being read.
 
 What makes this repository's raw diff misleading is the distribution copy under
 `plugins/mission/`: its `skills/` and `scripts/` subtrees are held identical to
-their sources by `test_plugins_in_sync.py` and `test_codex_wrapper_sync.py` --
-outside `__pycache__` and `.pytest_cache`, which those tests skip.  A reviewer
+their sources by `test_codex_wrapper_sync.py` -- outside `__pycache__` and
+`.pytest_cache`, which it skips.  A reviewer
 reads that content once.  Counting it twice inflates every PR that
 touches the skill, by 20% at the median and 40% at p85.
 
@@ -39,8 +39,8 @@ import sys
 #
 # The list names only what a test enforces as a copy:
 # `plugins/mission/skills/**` and `plugins/mission/scripts/**` are held
-# byte-identical by test_plugins_in_sync.py and test_codex_wrapper_sync.py,
-# outside the cache directories those tests skip.
+# byte-identical by test_codex_wrapper_sync.py, outside the cache
+# directories it skips.
 # The rest of `plugins/mission/` is NOT a copy -- it carries its own CHANGELOGs
 # and plugin manifest, which are content a human reads.  Excluding the whole
 # directory would have quietly exempted those.

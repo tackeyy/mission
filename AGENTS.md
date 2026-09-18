@@ -37,9 +37,8 @@ fires on a fifth of all work stops being read.
 
 **Measure reviewed area, not raw diff.** `plugins/mission/skills/` and
 `plugins/mission/scripts/` are byte-identical copies of `skills/` and
-`scripts/`, enforced by `test_plugins_in_sync.py` and
-`test_codex_wrapper_sync.py` — **except under `__pycache__` and
-`.pytest_cache`, which those tests skip.** Paths under those directories are
+`scripts/`, enforced by `test_codex_wrapper_sync.py` — **except under
+`__pycache__` and `.pytest_cache`, which it skips.** Paths under those directories are
 counted as reviewed area, since nothing holds them identical to a source.
 
 **The rest of `plugins/mission/` is not a copy.** Its `CHANGELOG.md`,
@@ -89,7 +88,7 @@ Excluded from reviewed area. The first two entries name paths **a test holds
 identical to their source**; the rest are files produced by a tool from inputs
 already under review:
 
-- `plugins/mission/skills/**` — held byte-identical by `test_plugins_in_sync.py`
+- `plugins/mission/skills/**` — held byte-identical by `test_codex_wrapper_sync.py`
 - `plugins/mission/scripts/**` — held byte-identical by `test_codex_wrapper_sync.py`
 
 Both sync tests skip `__pycache__` and `.pytest_cache`, so paths under those are
