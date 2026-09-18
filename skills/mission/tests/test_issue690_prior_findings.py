@@ -13,8 +13,11 @@ so a missing producer fails here rather than passing unnoticed.
 
 from __future__ import annotations
 
+import argparse
+import importlib.util
 import json
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -240,31 +243,6 @@ def test_projection_rejects_input_the_review_contract_would_not_produce():
         project_findings_summary([])
 
 
-def test_the_gate_path_returns_the_archive_rather_than_a_projection():
-    """Pin the separation itself, not only its current user-visible effect.
-
-    The pass gate calls ``_revalidate_score_provenance`` too.  Today the
-    projection happens to raise on nothing a legal archive contains, so running
-    it there would be harmless -- but that is a property of the projection's
-    current strictness, not of the gate.  Anything tightened later would leak
-    straight into the gate.  Requiring the archive back is what keeps the
-    projection on the write path.
-    """
-    import importlib.util
-    import inspect
-
-    path = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
-    spec = importlib.util.spec_from_file_location("mission_state_690", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    source = inspect.getsource(module._revalidate_score_provenance)
-
-    assert "findings_summary" not in source
-    assert "project_findings" not in source
-    assert source.rstrip().endswith("return parsed")
-
-
 @pytest.mark.parametrize(
     "identifier",
     ["A-1", "", " ", "x"],
@@ -352,7 +330,7 @@ def test_an_archive_the_review_contract_accepts_is_not_rejected_here(
 
 
 def test_the_pass_gate_does_not_run_the_projection(
-    state_dir, run_cli, read_state, tmp_path
+    state_dir, run_cli, read_state, tmp_path, monkeypatch, capsys
 ):
     """mark-passes re-validates the archive; it must gain no new rejection.
 
@@ -361,9 +339,24 @@ def test_the_pass_gate_does_not_run_the_projection(
     """
     _push(state_dir, run_cli, tmp_path, [NON_STRING_SUMMARY_FINDING])
 
-    result = run_cli("mark-passes", cwd=state_dir.parent)
+    path = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
+    spec = importlib.util.spec_from_file_location("mission_state_690_gate", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
 
-    assert result.returncode == 0, result.stderr
+    def fail_projection(_archive):
+        raise AssertionError("the pass gate must not run the findings projection")
+
+    monkeypatch.setattr(module, "findings_summary_fields", fail_projection)
+    monkeypatch.chdir(state_dir.parent)
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+
+    assert module.cmd_mark_passes(argparse.Namespace(force=False)) is None
+
+    assert json.loads(capsys.readouterr().out)["passes"] is True
     assert read_state(state_dir)["passes"] is True
 
 

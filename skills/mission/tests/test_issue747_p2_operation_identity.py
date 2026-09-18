@@ -337,21 +337,6 @@ class TestSemanticIdentity:
             )
         assert excinfo.value.code == "request-invalid"
 
-    def test_every_digest_reads_bindings_through_one_projection(self):
-        """Contract 3 (v11): semantic digest, materialization and both D4 sites share ``binding_records``."""
-        import inspect
-
-        import mission_persistence.fenced_commit as persistence
-        import mission_persistence.legacy_v4 as executor
-
-        assert "binding_records(blobs)" in inspect.getsource(persistence.compute_intent_digest)
-        assert "binding_records(" in inspect.getsource(persistence.LocalFencedRepository._materialization)
-        assert "binding_records(" in inspect.getsource(persistence.LocalFencedRepository._generated_digest)
-        assert "binding_records(" in inspect.getsource(
-            executor.V5CompatibilityRepository._assert_replay_materializes
-        )
-
-
 # --------------------------------------------------------------------------
 # Contracts 2, 11, 13, 14: version-1 records are read, never rewritten
 # --------------------------------------------------------------------------

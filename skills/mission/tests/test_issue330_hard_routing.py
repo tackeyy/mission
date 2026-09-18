@@ -16,6 +16,8 @@ Contract under test:
 """
 
 import json
+
+import pytest
 from pathlib import Path
 
 from mission_persistence.authoritative_reader import read_authoritative_snapshot
@@ -49,52 +51,12 @@ def test_set_simple_routes_and_halts(run_cli, tmp_path):
     assert state["halt_category"] == "routed-goal"
 
 
-def test_set_simple_with_issue_ref_keeps_loop(run_cli, tmp_path):
-    run_cli("init", "typo を1箇所直す", "--issue-ref", "418", cwd=tmp_path, check=True)
-    r = run_cli("set", "complexity=Simple", cwd=tmp_path)
-    assert r.returncode == 0, r.stderr
-    state = _state(tmp_path)
-    assert state["loop_active"] is True
-
-
-def test_set_simple_with_force_mission_keeps_loop(run_cli, tmp_path):
-    run_cli("init", "typo を1箇所直す", "--force-mission", cwd=tmp_path, check=True)
-    r = run_cli("set", "complexity=Simple", cwd=tmp_path)
-    assert r.returncode == 0, r.stderr
-    state = _state(tmp_path)
-    assert state["loop_active"] is True
-
-
-def test_set_simple_checker_role_keeps_loop(run_cli, tmp_path):
-    run_cli("init", "PR review", "--role", "checker", cwd=tmp_path, check=True)
-    r = run_cli("set", "complexity=Simple", cwd=tmp_path)
-    assert r.returncode == 0, r.stderr
-    state = _state(tmp_path)
-    assert state["loop_active"] is True
-
-
 def test_set_simple_with_signals_keeps_loop(run_cli, tmp_path):
     run_cli("init", "deploy the hotfix to production", cwd=tmp_path, check=True)
     r = run_cli("set", "complexity=Simple", cwd=tmp_path)
     assert r.returncode == 0, r.stderr
     state = _state(tmp_path)
     assert state["loop_active"] is True, "不可逆シグナルありは routing しない"
-
-
-def test_set_simple_user_tier_keeps_loop(run_cli, tmp_path):
-    run_cli("init", "typo を1箇所直す", "--review-tier", "light", cwd=tmp_path, check=True)
-    r = run_cli("set", "complexity=Simple", cwd=tmp_path)
-    assert r.returncode == 0, r.stderr
-    state = _state(tmp_path)
-    assert state["loop_active"] is True
-
-
-def test_set_standard_keeps_loop(run_cli, tmp_path):
-    _init_unknown(run_cli, tmp_path)
-    r = run_cli("set", "complexity=Standard", cwd=tmp_path)
-    assert r.returncode == 0, r.stderr
-    state = _state(tmp_path)
-    assert state["loop_active"] is True
 
 
 def test_init_simple_still_routes_without_state(run_cli, tmp_path):
@@ -104,3 +66,32 @@ def test_init_simple_still_routes_without_state(run_cli, tmp_path):
     out = json.loads(r.stdout)
     assert out["route"] == "goal"
     assert _sessions(tmp_path) == []
+
+
+# The `set` path has its own conjunction (`route_simple_to_goal` in
+# mission_application/lifecycle.py), separate from `_derive_next_action`.  A
+# table over the latter does not constrain it: removing an exclusion from the
+# `set` side leaves routing and lifecycle tests green.  These rows are the
+# exclusions themselves, kept as one table rather than five near-identical
+# tests.
+@pytest.mark.parametrize(
+    "label,init_args,set_value",
+    [
+        ("issue-ref", ("--issue-ref", "418"), "complexity=Simple"),
+        ("force-mission", ("--force-mission",), "complexity=Simple"),
+        ("checker-role", ("--role", "checker"), "complexity=Simple"),
+        ("user-review-tier", ("--review-tier", "light"), "complexity=Simple"),
+        ("not-simple", (), "complexity=Standard"),
+    ],
+)
+def test_the_set_path_keeps_the_loop_for_every_exclusion(run_cli, tmp_path, label, init_args, set_value):
+    """Each row is an authority the route must not discard.
+
+    `checker-role` and `issue-ref` carry governance, `force-mission` is an
+    explicit request for the mission loop, `user-review-tier` is a user
+    selection, and `not-simple` is outside the route entirely.
+    """
+    run_cli("init", "typo を1箇所直す", *init_args, cwd=tmp_path, check=True)
+    result = run_cli("set", set_value, cwd=tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert _state(tmp_path)["loop_active"] is True, label
