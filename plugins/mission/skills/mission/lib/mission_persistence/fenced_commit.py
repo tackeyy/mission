@@ -25,7 +25,11 @@ from mission_kernel.json_codec import (
     encode_json_object,
     thaw_json_object,
 )
-from mission_kernel.projection_path import ProjectionRejection, resolve_projection_path
+from mission_kernel.projection_path import (
+    ProjectionRejection,
+    resolve_internal_archive_path,
+    resolve_projection_path,
+)
 from mission_kernel.model import (
     FencedLease,
     FrozenJsonObject,
@@ -1272,8 +1276,67 @@ def _prepared_binding_digest(prepared: PreparedCommit) -> str:
     return _sha256(_canonical_bytes(document, limit=STATE_LIMIT))
 
 
-def validate_execution_request(request: ExecutionRequest) -> None:
-    """Validate the shared immutable request before either writer uses it."""
+def refuse_unauthorized_generated_blobs(
+    command_type, blobs, *, repository_root_name: Optional[str] = None
+) -> None:
+    """Refuse a request whose blobs publish in-root under the wrong command.
+
+    #747 3a. The blob set built from a command's effects already asks this,
+    and that is not enough: this request carries a command and a blob set
+    directly, and the effect binding the kernel compares looks at kind,
+    target, digest and size -- never at the path.  A binding assembled by
+    hand, with a claim and content that are otherwise correct, reached the
+    in-root destination under a command that never asked for it.
+
+    The command is read from the audit because that is the field which
+    survives every route: an ordinary CLI run carries no caller operation
+    identity, so its command travels as a compatibility wrapper.  The audit
+    is not folded into the intent digest, so naming the command there changes
+    no identity.  It is also only a claim -- the executor compares it against
+    the command it prepared, where both are in hand.
+
+    Only generated bindings are considered.  A captured blob is caller input
+    read from wherever the caller had it, and where it was read from is not
+    a destination this rule owns.
+    """
+    from mission_application.evidence_publication import (
+        EvidencePublicationError,
+        authorize_generated_destinations,
+    )
+
+    paths = tuple(
+        blob.binding.relative_path
+        for blob in getattr(blobs, "blobs", ())
+        if getattr(blob.binding, "origin", "captured") == "generated"
+    )
+    if not paths:
+        return
+    from mission_application.evidence_publication import REPOSITORY_ROOT_NAME
+
+    try:
+        authorize_generated_destinations(
+            paths,
+            command_type=command_type,
+            repository_root_name=(
+                REPOSITORY_ROOT_NAME
+                if repository_root_name is None
+                else repository_root_name
+            ),
+        )
+    except EvidencePublicationError as exc:
+        raise FencedCommitError("request-invalid", str(exc)) from exc
+
+
+def validate_execution_request(
+    request: ExecutionRequest, *, repository_root_name: Optional[str] = None
+) -> None:
+    """Validate the shared immutable request before either writer uses it.
+
+    ``repository_root_name`` is the name the repository actually carries.  The
+    in-root rule is expressed against it, so a repository laid out under a
+    different name would otherwise be judged against the default and its own
+    subtree would read as external.
+    """
     if not isinstance(request, ExecutionRequest):
         raise FencedCommitError("request-invalid", "request type is invalid")
     _session_id(request.session_id)
@@ -1296,6 +1359,15 @@ def validate_execution_request(request: ExecutionRequest) -> None:
             raise FencedCommitError(
                 "audit-binding-mismatch", "audit command category differs"
             )
+    # The audit is validated before it is read.  Reading it first turns a
+    # malformed request into an ``AttributeError`` instead of the typed
+    # refusal every other malformed field gets.
+    _audit_record(request.audit)
+    refuse_unauthorized_generated_blobs(
+        request.audit.command_type,
+        request.blobs,
+        repository_root_name=repository_root_name,
+    )
     expected_intent = compute_intent_digest(
         session_id=request.session_id,
         lease_owner_session_id=request.lease_owner_session_id,
@@ -1309,7 +1381,6 @@ def validate_execution_request(request: ExecutionRequest) -> None:
         )
     if request.presented_lease_id is not None:
         _token(request.presented_lease_id, "presented_lease_id")
-    _audit_record(request.audit)
 
 
 @dataclass(frozen=True)
@@ -2153,7 +2224,7 @@ class LocalFencedRepository:
         resolved-operation index is not consulted (``begin`` remains the
         authority for that).
         """
-        validate_execution_request(request)
+        validate_execution_request(request, repository_root_name=self.root.name)
         # Taking the lock the usual way lays the repository out and creates
         # its lock file.  Neither may happen here: writing nothing is the
         # point of this entry point.  A root without a lock file or an
@@ -2498,7 +2569,7 @@ class LocalFencedRepository:
                 )
 
     def begin(self, request: ExecutionRequest) -> Union[AdmittedSnapshot, OperationReplay]:
-        validate_execution_request(request)
+        validate_execution_request(request, repository_root_name=self.root.name)
         with self._lock():
             prepared_entries = self._prepared_entries_unlocked()
             if not prepared_entries:
@@ -2685,7 +2756,7 @@ class LocalFencedRepository:
         request: ExecutionRequest,
     ) -> RepositoryExecutionResult:
         """Run one explicit request through admission, decision, stage, and commit."""
-        validate_execution_request(request)
+        validate_execution_request(request, repository_root_name=self.root.name)
         if request.typed_command is None:
             raise FencedCommitError("request-invalid", "typed command is required")
         admitted = self.begin(request)
@@ -2734,21 +2805,40 @@ class LocalFencedRepository:
             metadata.st_mtime_ns,
         )
 
-    def _projection_target(self, relative_path: str) -> Path:
+    def _resolve_generated_parts(self, relative_path: str) -> tuple[tuple[str, ...], bool]:
+        """Return where a generated file goes, and whether that is in-root.
+
+        Two destinations exist and they are disjoint (#747 3a): a projection
+        beside the repository, or the one in-root path progress writes.  Both
+        are spelled from the repository's parent -- the in-root form simply
+        names the repository as its first segment -- so only the acceptance
+        and the alias question differ, not the join.
+
+        Whether *this command* may use the in-root form was already settled
+        where the claim and the command type were both in hand.  Asking again
+        here would need the command, which this seam does not have.
+        """
         candidate = PurePosixPath(relative_path)
         resolved = resolve_projection_path(candidate, root_name=self.root.name)
-        if isinstance(resolved, ProjectionRejection):
-            # The unit of work answers with one refusal whatever the reason;
-            # the reasons themselves are the application layer's to explain.
-            raise FencedCommitError(
-                "projection-invalid", "projection target is outside its compatibility root"
-            )
+        if not isinstance(resolved, ProjectionRejection):
+            return resolved, False
+        internal = resolve_internal_archive_path(candidate, root_name=self.root.name)
+        if not isinstance(internal, ProjectionRejection):
+            return internal, True
+        # The unit of work answers with one refusal whatever the reason;
+        # the reasons themselves are the application layer's to explain.
+        raise FencedCommitError(
+            "projection-invalid", "projection target is outside its compatibility root"
+        )
+
+    def _projection_target(self, relative_path: str) -> Path:
+        resolved, internal = self._resolve_generated_parts(relative_path)
         target = self.root.parent.joinpath(*resolved)
         root_metadata = self.root.lstat()
         repository_device = root_metadata.st_dev
         root_identity = _directory_identity(root_metadata)
         current = self.root.parent
-        for part in candidate.parts[:-1]:
+        for index, part in enumerate(resolved[:-1]):
             current = current / part
             try:
                 metadata = current.lstat()
@@ -2772,7 +2862,17 @@ class LocalFencedRepository:
                 raise FencedCommitError(
                     "projection-invalid", "projection parent is not a safe same-filesystem directory"
                 )
-            _refuse_repository_alias(metadata, root_identity)
+            if internal and index == 0:
+                # The in-root destination's first step *is* the repository, so
+                # the alias question inverts: anything but the repository here
+                # is a directory that merely answers to its name.
+                if _directory_identity(metadata) != root_identity:
+                    raise FencedCommitError(
+                        "projection-invalid",
+                        "projection parent is not the repository it names",
+                    )
+            else:
+                _refuse_repository_alias(metadata, root_identity)
         # The name is checked above, but a name is not the directory it opens.
         # On a case-insensitive filesystem the repository answers to spellings
         # that are not its own, so a projection could reach inside it -- over
@@ -2834,16 +2934,10 @@ class LocalFencedRepository:
 
     @contextmanager
     def _pinned_projection_target(self, projection: ProjectionRecord):
-        candidate = PurePosixPath(projection.relative_path)
-        resolved = resolve_projection_path(candidate, root_name=self.root.name)
-        if isinstance(resolved, ProjectionRejection):
-            raise FencedCommitError(
-                "projection-invalid",
-                "projection target is outside its compatibility root",
-            )
+        resolved, internal = self._resolve_generated_parts(projection.relative_path)
         descriptors = []
         identities = []
-        names = tuple(candidate.parts[:-1])
+        names = tuple(resolved[:-1])
         # An open descriptor that is not yet in ``descriptors`` belongs to
         # nobody: the ``finally`` below closes the list, so a failure between
         # the open and the append would leave that one behind.  Each open is
@@ -2906,13 +3000,25 @@ class LocalFencedRepository:
                             "repository-changed",
                             "projection parent cannot be pinned",
                         )
-                    _refuse_repository_alias(opened, _directory_identity(self.root.lstat()))
+                    if internal and len(identities) == 1:
+                        # The first step of the in-root destination is the
+                        # repository itself; anything else at that name is a
+                        # different directory wearing it.
+                        if identity != _directory_identity(self.root.lstat()):
+                            raise FencedCommitError(
+                                "projection-invalid",
+                                "projection parent is not the repository it names",
+                            )
+                    else:
+                        _refuse_repository_alias(
+                            opened, _directory_identity(self.root.lstat())
+                        )
                     identities.append(identity)
                 pinned = _PinnedProjectionTarget(
                     descriptors=tuple(descriptors),
                     identities=tuple(identities),
                     names=names,
-                    target_name=candidate.parts[-1],
+                    target_name=resolved[-1],
                 )
                 if pinned.parent_identity != projection.parent_identity:
                     raise FencedCommitError(
@@ -3986,7 +4092,8 @@ class LocalFencedRepository:
         for index, projection in enumerate(prepare.projections):
             # Through the pinned walk rather than the name: a directory
             # replaced between resolving and reading would otherwise answer
-            # for a different one.
+            # for a different one, and #747 3a puts one of these destinations
+            # inside the repository.
             with self._pinned_projection_target(projection) as pinned:
                 if projection.base is None:
                     if self._pinned_projection_exists(pinned):
@@ -4036,7 +4143,8 @@ class LocalFencedRepository:
             )
             # Every read, unlink and rename below goes through the descriptor
             # the walk opened.  Resolving the name once and then acting on it
-            # by name leaves a window in which the directory is replaced.
+            # by name leaves a window in which the directory is replaced, and
+            # #747 3a puts one of these destinations inside the repository.
             with self._pinned_projection_target(projection) as pinned:
                 current = self._read_pinned_projection_bytes(
                     pinned,
@@ -4155,7 +4263,7 @@ class LocalFencedRepository:
                     index,
                     bundle=bundle,
                     after_path=after_path,
-                    target_is_authoritative=False,
+                    target_is_authoritative=target_is_authoritative,
                 )
         try:
             os.rmdir(bundle)
@@ -4578,7 +4686,9 @@ class LocalFencedRepository:
             raise FencedCommitError(
                 "precondition-mismatch", "prepared transaction ID is invalid"
             )
-        validate_execution_request(prepared.admitted.request)
+        validate_execution_request(
+            prepared.admitted.request, repository_root_name=self.root.name
+        )
         _digest(prepared.binding_digest, "prepared.binding_digest")
         stored_digest = self._stage_binding_registry.get(prepared.transaction_id)
         if (
