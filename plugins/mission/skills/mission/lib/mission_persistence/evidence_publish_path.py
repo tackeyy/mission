@@ -39,12 +39,15 @@ def _directory_flags() -> int:
 def _publication_parts(path_text: str) -> tuple[str, ...]:
     if not isinstance(path_text, str) or not path_text or "\x00" in path_text:
         raise EvidencePublishPathError("evidence publication path is invalid")
+    # The written form is checked before it is parsed: ``PurePosixPath`` drops
+    # a ``.`` component, so a path checked after parsing would accept
+    # ``docs/./out.md`` while this walk is meant to reject every component
+    # that is not a plain name.
+    written = tuple(path_text.split("/"))
+    if any(part in {"", ".", ".."} for part in written[:-1] + written[-1:]):
+        raise EvidencePublishPathError("evidence publication path is invalid")
     path = PurePosixPath(path_text)
-    if (
-        path.is_absolute()
-        or not path.name
-        or any(part in {"", ".", ".."} for part in path.parts)
-    ):
+    if path.is_absolute() or not path.name:
         raise EvidencePublishPathError("evidence publication path is invalid")
     return path.parts
 
@@ -63,48 +66,68 @@ def open_evidence_publish_directory(
     parts = _publication_parts(publication_path)
     descriptors: list[int] = []
     try:
-        root_fd = os.open(
-            os.fspath(project_root), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-        )
-        descriptors.append(root_fd)
+        # Whatever way this leaves -- a refusal while opening, a refusal from
+        # the body, or success -- the descriptors are released below.  The
+        # inner block only turns an OSError into this module's refusal.
         try:
-            repository_fd = os.open(".mission-state", _directory_flags(), dir_fd=root_fd)
-        except OSError as exc:
-            raise EvidencePublishPathError("evidence repository cannot be opened") from exc
-        descriptors.append(repository_fd)
-
-        for part in parts[:-1]:
-            if part.casefold() == ".mission-state":
-                raise EvidencePublishPathError("evidence publication parent names the repository")
+            root_fd = os.open(
+                os.fspath(project_root), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            )
+            descriptors.append(root_fd)
             try:
-                child_fd = os.open(part, _directory_flags(), dir_fd=descriptors[-2])
-            except FileNotFoundError:
-                try:
-                    # Repository-external publications follow the default umask, unlike private state directories.
-                    os.mkdir(part, dir_fd=descriptors[-2])
-                    child_fd = os.open(part, _directory_flags(), dir_fd=descriptors[-2])
-                except OSError as exc:
-                    raise EvidencePublishPathError(
-                        "evidence publication parent cannot be created safely"
-                    ) from exc
-            except OSError as exc:
-                if exc.errno == errno.ELOOP:
-                    raise EvidencePublishPathError(
-                        "evidence publication parent must not be a symlink"
-                    ) from exc
-                raise EvidencePublishPathError(
-                    "evidence publication parent cannot be opened safely"
-                ) from exc
-            descriptors.insert(-1, child_fd)
-            metadata = os.fstat(child_fd)
-            repository_identity = _identity(os.fstat(descriptors[-1]))
-            if not stat.S_ISDIR(metadata.st_mode) or _identity(metadata) == repository_identity:
-                raise EvidencePublishPathError(
-                    "evidence publication parent is the repository or not a directory"
+                repository_fd = os.open(
+                    ".mission-state", _directory_flags(), dir_fd=root_fd
                 )
-    except OSError as exc:
-        raise EvidencePublishPathError("evidence project root cannot be opened") from exc
-    try:
+            except OSError as exc:
+                raise EvidencePublishPathError(
+                    "evidence repository cannot be opened"
+                ) from exc
+            descriptors.append(repository_fd)
+
+            for part in parts[:-1]:
+                if part.casefold() == ".mission-state":
+                    raise EvidencePublishPathError(
+                        "evidence publication parent names the repository"
+                    )
+                try:
+                    child_fd = os.open(part, _directory_flags(), dir_fd=descriptors[-2])
+                except FileNotFoundError:
+                    try:
+                        # A repository-external publication follows the default
+                        # umask, unlike the private state directories.
+                        os.mkdir(part, dir_fd=descriptors[-2])
+                        child_fd = os.open(
+                            part, _directory_flags(), dir_fd=descriptors[-2]
+                        )
+                    except OSError as exc:
+                        raise EvidencePublishPathError(
+                            "evidence publication parent cannot be created safely"
+                        ) from exc
+                except OSError as exc:
+                    if exc.errno == errno.ELOOP:
+                        raise EvidencePublishPathError(
+                            "evidence publication parent must not be a symlink"
+                        ) from exc
+                    raise EvidencePublishPathError(
+                        "evidence publication parent cannot be opened safely"
+                    ) from exc
+                descriptors.insert(-1, child_fd)
+                metadata = os.fstat(child_fd)
+                # Taken again at every step: a repository replaced during the
+                # walk would otherwise be compared against the one that is
+                # gone.
+                repository_identity = _identity(os.fstat(descriptors[-1]))
+                if (
+                    not stat.S_ISDIR(metadata.st_mode)
+                    or _identity(metadata) == repository_identity
+                ):
+                    raise EvidencePublishPathError(
+                        "evidence publication parent is the repository or not a directory"
+                    )
+        except OSError as exc:
+            raise EvidencePublishPathError(
+                "evidence project root cannot be opened"
+            ) from exc
         yield EvidencePublishDirectory(descriptors[-2], parts[-1])
     finally:
         for descriptor in reversed(descriptors):

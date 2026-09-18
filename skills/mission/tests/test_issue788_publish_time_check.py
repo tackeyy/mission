@@ -97,6 +97,89 @@ def test_publication_rechecks_after_initial_path_validation_before_opening(tmp_p
     assert not (tmp_path / target / "out.md").exists()
 
 
+def test_a_refusal_releases_every_descriptor_it_opened(tmp_path):
+    """A refusal leaves nothing open.
+
+    Cross-model review round 2: the descriptors were released only after the
+    body ran, so a refusal raised while opening kept the project root and the
+    repository open.  The rule is checked by repetition -- a leak of two per
+    call shows up long before the process limit does.
+    """
+    from mission_persistence.evidence_publish_path import (
+        EvidencePublishPathError,
+        open_evidence_publish_directory,
+    )
+
+    (tmp_path / ".mission-state").mkdir()
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / "docs").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+
+    def open_descriptors() -> int:
+        return len(os.listdir("/dev/fd"))
+
+    before = open_descriptors()
+    for _ in range(64):
+        with pytest.raises(EvidencePublishPathError):
+            with open_evidence_publish_directory(tmp_path, "docs/out.md"):
+                pass
+    assert open_descriptors() <= before + 1
+
+
+def test_a_dot_component_is_refused_before_the_path_is_parsed(tmp_path):
+    """``PurePosixPath`` drops ``.``, so the written form is what is checked.
+
+    Cross-model review round 2: checking the parsed parts accepted
+    ``docs/./out.md``, because the parser had already removed the component
+    this walk refuses.
+    """
+    from mission_persistence.evidence_publish_path import (
+        EvidencePublishPathError,
+        open_evidence_publish_directory,
+    )
+
+    (tmp_path / ".mission-state").mkdir()
+    (tmp_path / "docs").mkdir()
+
+    # The library is called directly: the CLI route canonicalises the path
+    # first, so the parser would have removed the component before it arrived.
+    with pytest.raises(EvidencePublishPathError):
+        with open_evidence_publish_directory(tmp_path, "docs/./out.md"):
+            pass
+    assert not (tmp_path / "docs" / "out.md").exists()
+
+
+def test_a_repository_that_takes_the_parents_name_is_refused_by_identity(tmp_path, monkeypatch):
+    """Only the identity comparison can refuse this one.
+
+    The component is spelled ``docs``, so neither the name check nor
+    ``O_NOFOLLOW`` applies: the directory simply *is* the repository by the
+    time it is opened.  Cross-model review round 2 showed this is
+    constructible, which the design had said it was not.
+    """
+    from mission_persistence import evidence_publish_path as library
+
+    (tmp_path / ".mission-state").mkdir()
+    (tmp_path / "docs").mkdir()
+    original_open = library.os.open
+
+    def open_then_move_the_repository(path, *args, **kwargs):
+        opened = original_open(path, *args, **kwargs)
+        if path == ".mission-state":
+            # After the repository is pinned, it takes the parent's name.  The
+            # component is then spelled ``docs``, so neither the name check nor
+            # O_NOFOLLOW applies: only the identity comparison can refuse it.
+            (tmp_path / "docs").rmdir()
+            (tmp_path / ".mission-state").rename(tmp_path / "docs")
+        return opened
+
+    monkeypatch.setattr(library.os, "open", open_then_move_the_repository)
+    with pytest.raises(library.EvidencePublishPathError):
+        with library.open_evidence_publish_directory(tmp_path, "docs/out.md"):
+            pass
+    monkeypatch.undo()
+    assert not (tmp_path / "docs" / "out.md").exists()
+
+
 @pytest.mark.parametrize("target", ("../elsewhere", "../.mission-state"))
 def test_external_projection_refuses_a_symlinked_intermediate_component(tmp_path, target):
     module = _state_module()
