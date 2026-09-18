@@ -130,12 +130,12 @@ irreversible-operation keywords, 15 security keywords, and one task-profile
 risk signal. It emits each signal type at most once even when the source text
 contains repeated matches.
 
-The corpus measurement is reproducible with the required bounded worker count:
-
-```sh
-/Users/<user>/dev/mission/.venv-ci/bin/python -m pytest -q -n 4 --dist loadfile \
-  -rP skills/mission/tests/test_measure_k2_tmp.py::test_measure
-```
+These are historical measurements from the
+[diagnostic measurement script](https://github.com/tackeyy/mission/blob/6a3d9ce69d143c768299ee4157502c245f44f720/skills/mission/tests/test_measure_k2_tmp.py).
+The script was removed from the normal test suite because it only printed
+measurements; the actual CLI corpus and guidance parity checks remain in
+`skills/mission/tests/test_issue501_k2_parity.py`. The values above are not a
+measurement of the current revision.
 
 This is a lower-bound observation, not a license to derive small production
 limits from one run. The schema limits below align with already-enforced
