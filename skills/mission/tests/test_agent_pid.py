@@ -6,6 +6,7 @@ PID owner 判定 (find_agent_pid / _pid_is_agent) が claude だけでなく cod
 機能しない。共通ヘルパー _comm_is_agent() がその判定の単一の真実源。
 """
 import importlib.util
+from functools import lru_cache
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ import pytest
 MISSION_STATE_PY = Path(__file__).resolve().parent.parent / "bin" / "mission-state.py"
 
 
+@lru_cache(maxsize=1)
 def _load():
     spec = importlib.util.spec_from_file_location("mission_state_mod", MISSION_STATE_PY)
     mod = importlib.util.module_from_spec(spec)

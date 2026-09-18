@@ -6,16 +6,6 @@
 import pytest
 
 
-def test_the_run_helper_prefers_the_plan_route():
-    """`run_context_manifest` must reach the retrying entry point."""
-    from pathlib import Path
-
-    import mission_application.evidence as module
-
-    source = Path(module.__file__).read_text(encoding="utf-8")
-    assert "execute_retry_safe_evidence_plan" in source
-
-
 def test_the_plan_route_is_used_when_the_repository_supports_it(tmp_path):
     """A repository that offers the entry point gets the plan, not a callback."""
     from mission_application.evidence import ContextManifestRequest, run_context_manifest

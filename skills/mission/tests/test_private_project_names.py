@@ -78,40 +78,12 @@ def _tracked_files():
     return [p for p in out.split("\0") if p]
 
 
-# ---- 照合ロジックの単体テスト (実際の禁止語は使わず合成語で検証する) ----
+# ---- 共通 scanner contract の fixture ----
 _FIXTURE = frozenset({"73b5a32453860402"})  # sha256('zzsynthetic')[:16]
 
 
-def test_detects_standalone_token():
-    assert _banned_tokens("zzsynthetic の Issue #12 を修正", _FIXTURE)
-
-
-def test_detects_token_adjacent_to_japanese():
-    """\\b / \\w は Unicode 単語文字を含むため、日本語直結で取りこぼしやすい。"""
-    assert _banned_tokens("zzsyntheticランで ConnectionRefused", _FIXTURE)
-
-
-def test_detects_token_inside_separated_identifier():
-    """実行ログ由来のパス・識別子で再混入した実例の形。"""
-    assert _banned_tokens("~/dev/zzsynthetic/.worktrees/ 配下", _FIXTURE)
-    assert _banned_tokens("project_root=/dev/zzsynthetic 不存在", _FIXTURE)
-    assert _banned_tokens("docs/zzsynthetic-audit-2026-06-15.md", _FIXTURE)
-
-
-def test_is_case_insensitive():
-    """監査ログは表記ゆれを保存する (文頭で大文字化される等)。"""
-    for sample in ("ZZSynthetic ラン", "Zzsynthetic ラン", "ZZSYNTHETIC ラン"):
-        assert _banned_tokens(sample, _FIXTURE), f"取りこぼし: {sample}"
-
-
-def test_ignores_substrings():
-    """部分一致で拾うと一般語が大量に偽陽性になる。"""
-    for sample in ("zzsyntheticality", "prezzsynthetic", "zzsynthetics"):
-        assert not _banned_tokens(sample, _FIXTURE), f"偽陽性: {sample}"
-
-
-def test_ignores_unrelated_text():
-    assert not _banned_tokens("mission の scoring gate を修正", _FIXTURE)
+def test_scanner_contract(scanner_contract):
+    scanner_contract(lambda text: _banned_tokens(text, _FIXTURE))
 
 
 # ---- リポジトリ横断の不変条件 ----

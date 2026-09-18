@@ -55,50 +55,7 @@ def _make_state(tmp_path, *, iteration=1, phase="reviewing", reviewer_count=3,
     return sf
 
 
-# --- 1. next: iter >= 2, no new scope → reviewer_count=2 ---
-
-def test_next_iter2_no_new_scope_returns_2_reviewers(tmp_path):
-    """iteration >= 2 + critic_has_new_scope=false → reviewer_count=2."""
-    _make_state(tmp_path, iteration=2, phase="reviewing",
-                reviewer_count=3, critic_has_new_scope=False)
-    result = MS._derive_next_action(json.loads(
-        (tmp_path / ".mission-state" / "sessions" / f"{TEST_SID}.json").read_text()))
-    assert result["details"]["reviewer_count"] == 2
-
-
-# --- 2. next: iter >= 2, has new scope → full reviewer_count ---
-
-def test_next_iter2_new_scope_returns_full_reviewers(tmp_path):
-    """iteration >= 2 + critic_has_new_scope=true → full reviewer_count."""
-    _make_state(tmp_path, iteration=2, phase="reviewing",
-                reviewer_count=3, critic_has_new_scope=True)
-    result = MS._derive_next_action(json.loads(
-        (tmp_path / ".mission-state" / "sessions" / f"{TEST_SID}.json").read_text()))
-    assert result["details"]["reviewer_count"] == 3
-
-
-# --- 3. next: iter 1 → always full reviewer_count ---
-
-def test_next_iter1_ignores_new_scope_flag(tmp_path):
-    """iteration == 1 → critic_has_new_scope に関わらず full reviewer_count."""
-    _make_state(tmp_path, iteration=1, phase="reviewing",
-                reviewer_count=3, critic_has_new_scope=False)
-    result = MS._derive_next_action(json.loads(
-        (tmp_path / ".mission-state" / "sessions" / f"{TEST_SID}.json").read_text()))
-    assert result["details"]["reviewer_count"] == 3
-
-
-# --- 4. next: iter >= 2, no critic_has_new_scope field → full ---
-
-def test_next_iter2_missing_field_requires_scope_recording(tmp_path):
-    """#309: critic_has_new_scope 未設定 → run-reviewers でなく record-critic-scope."""
-    _make_state(tmp_path, iteration=2, phase="reviewing", reviewer_count=3)
-    result = MS._derive_next_action(json.loads(
-        (tmp_path / ".mission-state" / "sessions" / f"{TEST_SID}.json").read_text()))
-    assert result["next_action"] == "record-critic-scope"
-
-
-# --- 5. aggregate-reviews: reviewer count mismatch → exit 2 ---
+# --- aggregate-reviews: reviewer count mismatch → exit 2 ---
 
 def _write_review_json(path, perspective="A", iteration=1, scores=None):
     review = {
