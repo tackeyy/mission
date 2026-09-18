@@ -55,9 +55,12 @@ shellcheck scripts/mission-stop-guard.sh scripts/sync-codex-plugin-wrapper.sh sc
 | `skills/mission/tests/test_local_authoring_sync.py` | local authoring の最新 remote main bootstrap と fail-closed checkout 保護 |
 | `skills/mission/tests/test_doc_consistency.py` | ドキュメントと command の整合性 |
 
-## テストを追加すべき変更
+## 回帰の保証を確認する変更
 
-以下を変更する場合はテストを追加または更新してください。
+以下の変更では、[Test Value Policy](../AGENTS.md#test-value-policy) に沿って、
+現実的な不具合を検出できるか確認してください。既存テストで十分なら PR にそのテストを示し、
+検出できない不具合がある場合に追加・拡張します。ドキュメント変更には適切な整合性確認を行い、
+文言を固定するだけのテストは追加しません。
 
 - `mission-state.py` の command、schema field、session routing
 - Stop hook の owner check または blocking condition

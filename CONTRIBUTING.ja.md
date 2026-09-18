@@ -64,7 +64,7 @@ Python:
 - migration 方針が明確でない限り、state file schema の後方互換性を保つ
 - 文字列処理より structured JSON 操作を優先する
 - `mark-passes` の threshold gate を維持する
-- scoring、session routing、lifecycle 変更にはテストを追加する
+- scoring、session routing、lifecycle の挙動を[テストの検出価値ルール](AGENTS.md#test-value-policy)に沿って保証する。十分な既存テストは再利用・拡張する
 
 Shell:
 
@@ -98,7 +98,7 @@ Pull Request 前に確認してください。
 - `skills/mission` で `python3 -m pytest -q` を実行した
 - hook を変更した場合は `shellcheck scripts/mission-stop-guard.sh` を実行した
 - ユーザー向け挙動の変更に README または refs の更新がある
-- 挙動変更にテストを追加または更新した
+- PR の「テストの検出価値」欄に、検出する不具合・既存テストとの差・実行/保守コストを記載した（管理元: [Test Value Policy](AGENTS.md#test-value-policy)）。既存テストで十分なら対象を示し、無関係ならその理由を記載する
 - orchestration rule の変更理由を PR description に明記した
 - PR description へ貼るエージェント出力を redaction した (下記参照)
 
