@@ -628,109 +628,44 @@ _POLICY_NAMES = re.compile(
 _COMMANDS = {"mark-halt", "cleanup-stale", "stop-guard-observe"}
 
 
-# `function name {` and `name()` are both definitions, and the brace may sit on
-# a later line.  Recognising only `name() {` let a wrapper hide behind either
-# of the other two spellings.
+# `function name {`, `name() {`, and `name()` with the brace on a later line are
+# all definitions.  Only the header is read; see `_state_cli_callers`.
 _FUNCTION_HEADER = re.compile(
     r"(?m)^[ \t]*(?:function[ \t]+(?P<kw>[A-Za-z_][A-Za-z0-9_]*)[ \t]*(?:\([ \t]*\))?"
-    r"|(?P<paren>[A-Za-z_][A-Za-z0-9_]*)[ \t]*\([ \t]*\))[ \t]*"
+    r"|(?P<paren>[A-Za-z_][A-Za-z0-9_]*)[ \t]*\([ \t]*\))"
 )
 
 
-def _matching_brace(source: str, opening: int) -> int:
-    """Index of the `}` closing the `{` at `opening`, or -1.
-
-    Ending the body at the first line that is just `}` reads a nested brace
-    group as the end of the function:
-
-        _outer() {
-          { :; }
-          _mission_state_bounded "$@"
-        }
-
-    `bash -n` accepts that, and the truncated body no longer contains the call,
-    so the wrapper is not recognised and the second `stop-verdict` goes
-    unreported.  Depth is counted instead, and quoted text and comments are
-    skipped so a brace inside `'{"decision":"block"}'` does not shift it.
-    """
-    depth = 0
-    index = opening
-    end = len(source)
-    while index < end:
-        char = source[index]
-        if char == "\\":
-            index += 2
-            continue
-        if char == "'":
-            closing = source.find("'", index + 1)
-            index = end if closing < 0 else closing + 1
-            continue
-        if char == '"':
-            index += 1
-            while index < end:
-                if source[index] == "\\":
-                    index += 2
-                    continue
-                if source[index] == '"':
-                    index += 1
-                    break
-                index += 1
-            continue
-        if char == "#" and (index == 0 or source[index - 1] in " \t\n;&|("):
-            newline = source.find("\n", index)
-            index = end if newline < 0 else newline
-            continue
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return index
-        index += 1
-    return -1
-
-
-def _function_bodies(source: str) -> dict[str, str]:
-    """Map each shell function to its body, however the definition is spelled."""
-    bodies: dict[str, str] = {}
-    for header in _FUNCTION_HEADER.finditer(source):
-        name = header.group("kw") or header.group("paren")
-        rest = source[header.end():]
-        stripped = rest.lstrip(" \t\n")
-        if not stripped.startswith("{"):
-            continue
-        opening = header.end() + (len(rest) - len(stripped))
-        closing = _matching_brace(source, opening)
-        if closing < 0:
-            continue
-        bodies[name] = source[opening + 1:closing]
-    return bodies
-
-
 def _state_cli_callers(source: str) -> set[str]:
-    """Names that reach `mission-state.py`: the path itself and any wrapper.
+    """Names that may reach `mission-state.py`: the variable, and every function.
 
     The hook does not call the CLI directly; it defines a function that applies
     the timeout and calls through it.  A check that only looks for `python3`
     on the line therefore sees nothing -- `_mission_state_bounded resume` was
     accepted by exactly that gap.
 
-    Both spellings of the variable count, and wrappers are followed to a fixed
-    point.  A wrapper of a wrapper reaches the CLI just as directly, and it was
-    the shape that defeated the "more than one invocation" rule -- the only
-    check that catches the loop this change removed coming back by another name.
+    **Function bodies are not read.**  Earlier versions decided whether a
+    function was a wrapper by looking inside it, which meant finding where the
+    body ended, and every attempt at that leaked: a nested brace group, a `}`
+    in a heredoc, and an escaped quote in `$'...'` each ended the body early,
+    dropping the forwarding call so the wrapper went unrecognised.  All three
+    are valid shell (`bash -n` accepts them), and each one re-opened the same
+    hole -- a second `stop-verdict` reaching the hook unreported, which is the
+    loop #779 removed coming back by another name.
+
+    Locating the end of a shell construct needs a shell parser, and this check
+    does not have one.  So it stops needing one: **every function defined in
+    the file counts as a caller**, whatever its body.  The hook defines exactly
+    one function, and its shape is "call the CLI once and print what comes
+    back", so this costs nothing here and closes the whole class.
+
+    It errs toward reporting.  A hook that grew a helper called more than once
+    would be reported, and that is the direction to fail in -- CI says so on
+    the first push, rather than a bypass sitting unnoticed.
     """
     callers = {"$MISSION_STATE_PY", "${MISSION_STATE_PY}"}
-    bodies = _function_bodies(source)
-    growing = True
-    while growing:
-        growing = False
-        for name, body in bodies.items():
-            if name in callers:
-                continue
-            if any(caller in body for caller in callers):
-                callers.add(name)
-                growing = True
+    for header in _FUNCTION_HEADER.finditer(source):
+        callers.add(header.group("kw") or header.group("paren"))
     return callers
 
 
@@ -973,24 +908,26 @@ def test_a_nested_brace_group_does_not_end_the_function():
     assert "command-not-allowlisted" in codes
 
 
-def test_a_one_line_helper_does_not_swallow_the_rest_of_the_file():
-    """A body that opens and closes on one line ends there.
+def test_every_function_in_the_file_counts_as_a_caller():
+    """Which is what makes the body irrelevant, however it is written.
 
-    Collecting until a line that is just `}` never finds one for
-    `_helper() { ...; }`, so the body runs to the end of the file and every
-    later function is read as part of it.  That direction is over-detection,
-    not a bypass -- which is worse in practice: the check starts reporting a
-    clean hook, and a check that fails for the wrong reason gets relaxed.
+    Three separate bypasses came from getting the end of a body wrong.  This
+    fixes the class by not needing the end: each definition contributes its
+    name, and the shapes that used to hide inside a body have nowhere left to
+    hide.  Asserting through the hook would not show it -- the hook has one
+    function, so the set looks the same either way.
     """
     source = (
-        '_unrelated() { echo hi; }\n'
-        '_bounded() { python3 "$MISSION_STATE_PY" "$@"; }\n'
+        "_paren() {\n  :\n}\n"
+        "function _keyword {\n  :\n}\n"
+        "_next_line()\n{\n  :\n}\n"
+        "_one_line() { :; }\n"
     )
 
-    bodies = _function_bodies(source)
+    callers = _state_cli_callers(source)
 
-    assert bodies["_unrelated"].strip() == "echo hi;", bodies
-    assert "_unrelated" not in _state_cli_callers(source)
+    assert {"_paren", "_keyword", "_next_line", "_one_line"} <= callers, callers
+    assert {"$MISSION_STATE_PY", "${MISSION_STATE_PY}"} <= callers, callers
 
 
 def test_a_wrapper_of_a_wrapper_cannot_hide_a_second_verdict_call():
@@ -1049,6 +986,15 @@ def test_the_wrapper_definition_is_not_itself_a_call():
          'function _w3 { python3 "$MISSION_STATE_PY" "$@"; }\n_w3 resume'),
         ("a function whose brace is on the next line",
          '_w4()\n{\n  python3 "$MISSION_STATE_PY" "$@"\n}\n_w4 resume'),
+        # Each of these ended a function body early while `bash -n` accepted the
+        # script, so the wrapper went unrecognised.  The check no longer reads
+        # bodies, and they are kept as the regression for that decision.
+        ("a `}` in a heredoc body",
+         "_hd() {\n  cat <<'EOF'\n}\nEOF\n"
+         '  _mission_state_bounded "$@"\n}\n_hd resume'),
+        ("an escaped quote in an ANSI-C string",
+         "_ac() {\n  printf '%s' $'\\'}'\n"
+         '  _mission_state_bounded "$@"\n}\n_ac resume'),
         ("a nested brace group before the call",
          '_w8() {\n  {\n    :\n  }\n  _mission_state_bounded "$@"\n}\n_w8 resume'),
         # The brace in each of these is *unbalanced*, so a parser that does not
