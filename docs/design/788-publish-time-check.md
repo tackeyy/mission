@@ -22,17 +22,23 @@ v5 には書き込み側の `_refuse_repository_alias` があるので v5 では
 1. **その時点で存在する symlink**（`docs -> .mission-state` のような置き換え）を、解決が黙って追うこと
 2. repository が**別の名前で開けること**（大文字小文字を区別しないファイルシステム、別名の symlink）
 
-**対象外とするもの**と、その理由。
+**この設計が保証すること**は 1 つだけである。
 
-| 対象外 | 理由 |
+> **書き込みは、project root から symlink を 1 つも追わずに開いたディレクトリへ行われ、
+> その各段は、開いた時点で repository ではなかった。**
+
+**保証しないこと**と、その理由。**「攻撃者は直接書けるはずだ」という理由は使わない**
+（`docs` を差し替える権限と `.mission-state/` へ書く権限は別で、publisher が別の主体として
+動く場合には confused deputy になる。round 2 の指摘）。
+
+| 保証しないもの | なぜ閉じられないか |
 |---|---|
-| **書き込みと同時にディレクトリを入れ替え続ける主体** | その主体はプロジェクトのディレクトリへ書ける。**`.mission-state/` へ直接書けるので、export を経由する必要がない** |
-| **repository の一部を別の場所に bind mount する主体** | mount には特権が要る。**その特権があれば直接書ける** |
+| **開いたあとに、そのディレクトリが repository の中へ移動される** | fd は inode を指し続ける。移動を検出するには、書き込みの瞬間まで祖先関係を固定する必要があり、`openat(fd, "..")` は bind mount で mount point 側へ抜けるため、祖先関係そのものを確定できない |
+| **repository の部分木が別の場所に bind mount されている** | mount 先のディレクトリは自分の identity を持ち、repository root の identity とは一致しない。**identity の比較では原理的に見分けられない** |
 | Windows | `openat` / `O_NOFOLLOW` の挙動が違う。**現在の publisher も同じ前提に立っている**（`_open_publish_directory`） |
 
-**この設計は「競合する攻撃者」を止めない。** 止めるのは、**解決の途中で symlink を追うこと**と、
-**repository を別名で開くこと**である。前者は攻撃者がいなくても起こる（利用者が symlink を張った、
-ツールが張った）。
+**v5 側（`_refuse_repository_alias`）も同じ限界を持つ。** この設計は v4 を v5 と同じ水準へ揃えるもので、
+両方の水準を上げるものではない。**上の 2 つを閉じるなら、両方の層をまとめて変える別の作業になる。**
 
 ## 決定
 
@@ -91,15 +97,20 @@ fd は既に元のディレクトリを pin しており、既存の identity �
 外しても通る。** 差し替えは**解決と open より前**に置き、新しい経路が実際に symlink を開こうとする
 状態を作る。
 
-1. `docs` が `.mission-state` への symlink のとき、export が拒否され、`.mission-state/` 配下に
-   ファイルが作られない（symlink は入口の検査より前から存在する＝利用者が張った状態）
-2. 入口の検査を通した**後**に `docs` を symlink へ差し替えても拒否される。差し替えは
-   `_resolve_evidence_output_path` を呼ぶ直前に hook で行う
-3. 途中の部品が symlink のとき（`docs/out -> ../.mission-state`）も拒否される
-4. repository の外への通常の export が通る: 既存の `docs/`、これから作る深い階層
+1. **`docs` が repository の外の別ディレクトリ（`elsewhere/`）への symlink のとき、export が拒否され、
+   `elsewhere/` にファイルが作られない。** `O_NOFOLLOW` を外すと `elsewhere/` へ書かれてしまうので、
+   **このテストが `O_NOFOLLOW` を load-bearing にする**（`.mission-state` を指す symlink では、
+   identity の比較が先に拒否してしまい、`O_NOFOLLOW` を外しても落ちない）
+2. `docs` が `.mission-state` への symlink のとき、export が拒否され、`.mission-state/` 配下に
+   ファイルが作られない（identity の比較が担う側）
+3. 入口の検査を通した**後**に `docs` を symlink（repository の外・repository の中の両方）へ
+   差し替えても拒否される。差し替えは `_resolve_evidence_output_path` を呼ぶ直前の hook で行う
+4. 途中の部品が symlink のとき（`docs/out -> ../elsewhere` と `docs/out -> ../.mission-state`）も拒否される
+5. repository の外への通常の export が通る: 既存の `docs/`、これから作る深い階層
    （`a/b/c/d/e/f.md`）、ファイル名だけ（`out.md`）
-5. progress と artifact の in-root 公開は従来どおり通る（D2 の対象外側）
-6. 大文字小文字を区別しないファイルシステムでは `.MISSION-STATE/...` が拒否される
+6. progress と artifact の in-root 公開は従来どおり通る（D2 の対象外側）
+7. 大文字小文字を区別しないファイルシステムでは `.MISSION-STATE/...` が拒否される
    （区別する環境では skip）
-7. 変異: D1 の identity 比較を外す / `O_NOFOLLOW` を外す / D2 の分類を反転する。
-   それぞれで上のテストが落ちること
+8. 変異: D1 の identity 比較を外す（テスト 2・3・7 が落ちる）/ `O_NOFOLLOW` を外す
+   （テスト 1・4 が落ちる）/ D2 の分類を反転する（テスト 6 が落ちる）。
+   **2 つの検査がそれぞれ別のテストで固定されていること**を、この対応で確かめる
