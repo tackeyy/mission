@@ -261,11 +261,16 @@ jobs:
             mkdir -p "$PROBE_DIR/run-$i"
             report="$PROBE_DIR/run-$i/report.json"
             log="$PROBE_DIR/run-$i.txt"
-            # `make test` owns the flags (-n auto --dist loadfile) and builds
-            # the venv, so the probe cannot drift from how CI runs the suite.
+            # `make test` owns the flags and builds the venv, so the probe
+            # cannot drift from how CI runs the suite.  The worker count is
+            # the one exception: #775 fixed the hand-run entries to a smaller
+            # number because they share a developer's machine, while CI keeps
+            # one worker per core on a runner it has to itself.  The probe
+            # measures CI, so it asks for the CI value here.
             # A run that hangs is a result too, so it gets a bound of its own.
             timeout 900 make test \
               PYTEST_TARGETS="$TEST_FILE" \
+              MISSION_TEST_WORKERS=auto \
               MISSION_SUITE_REPORT="$report" > "$log" 2>&1
             status=$?
 

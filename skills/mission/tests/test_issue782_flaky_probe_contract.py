@@ -65,6 +65,11 @@ def test_the_suite_command_comes_from_the_makefile():
         assert reimplemented not in executable, (
             f"the probe spells out {reimplemented!r}; it must come from the Makefile"
         )
+    # #775 gave the hand-run entries a smaller worker count, because they share
+    # a developer's machine.  The probe measures CI, which does not, so it asks
+    # for the CI value by name.  Without this the probe would quietly start
+    # measuring a parallelism that CI never uses.
+    assert "MISSION_TEST_WORKERS=auto" in executable
 
 
 def test_the_verdict_is_decided_where_a_test_can_reach_it():
