@@ -629,51 +629,81 @@ _COMMANDS = {"mark-halt", "cleanup-stale", "stop-guard-observe"}
 
 
 # `function name {` and `name()` are both definitions, and the brace may sit on
-# the next line.  Recognising only `name() {` let a wrapper hide behind either
+# a later line.  Recognising only `name() {` let a wrapper hide behind either
 # of the other two spellings.
-_FUNCTION_OPEN = re.compile(
-    r"^\s*(?:function\s+(?P<kw>[A-Za-z_][A-Za-z0-9_]*)\s*(?:\(\s*\))?"
-    r"|(?P<paren>[A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\))\s*(?P<rest>.*)$"
+_FUNCTION_HEADER = re.compile(
+    r"(?m)^[ \t]*(?:function[ \t]+(?P<kw>[A-Za-z_][A-Za-z0-9_]*)[ \t]*(?:\([ \t]*\))?"
+    r"|(?P<paren>[A-Za-z_][A-Za-z0-9_]*)[ \t]*\([ \t]*\))[ \t]*"
 )
+
+
+def _matching_brace(source: str, opening: int) -> int:
+    """Index of the `}` closing the `{` at `opening`, or -1.
+
+    Ending the body at the first line that is just `}` reads a nested brace
+    group as the end of the function:
+
+        _outer() {
+          { :; }
+          _mission_state_bounded "$@"
+        }
+
+    `bash -n` accepts that, and the truncated body no longer contains the call,
+    so the wrapper is not recognised and the second `stop-verdict` goes
+    unreported.  Depth is counted instead, and quoted text and comments are
+    skipped so a brace inside `'{"decision":"block"}'` does not shift it.
+    """
+    depth = 0
+    index = opening
+    end = len(source)
+    while index < end:
+        char = source[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "'":
+            closing = source.find("'", index + 1)
+            index = end if closing < 0 else closing + 1
+            continue
+        if char == '"':
+            index += 1
+            while index < end:
+                if source[index] == "\\":
+                    index += 2
+                    continue
+                if source[index] == '"':
+                    index += 1
+                    break
+                index += 1
+            continue
+        if char == "#" and (index == 0 or source[index - 1] in " \t\n;&|("):
+            newline = source.find("\n", index)
+            index = end if newline < 0 else newline
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return -1
 
 
 def _function_bodies(source: str) -> dict[str, str]:
     """Map each shell function to its body, however the definition is spelled."""
-    lines = source.splitlines()
     bodies: dict[str, str] = {}
-    index = 0
-    while index < len(lines):
-        opened = _FUNCTION_OPEN.match(lines[index])
-        if not opened:
-            index += 1
+    for header in _FUNCTION_HEADER.finditer(source):
+        name = header.group("kw") or header.group("paren")
+        rest = source[header.end():]
+        stripped = rest.lstrip(" \t\n")
+        if not stripped.startswith("{"):
             continue
-        name = opened.group("kw") or opened.group("paren")
-        rest = opened.group("rest").lstrip()
-        if not rest.startswith("{"):
-            # The brace is on a later line, or this was not a definition.
-            probe = index + 1
-            while probe < len(lines) and not lines[probe].strip():
-                probe += 1
-            if probe >= len(lines) or not lines[probe].strip().startswith("{"):
-                index += 1
-                continue
-            rest = lines[probe].strip()
-            index = probe
-        after = rest[1:]
-        if after.rstrip().endswith("}"):
-            # `_w() { ...; }` on one line.  The previous shape matched this as a
-            # definition and then skipped the line, so a one-line wrapper was
-            # never read at all.
-            bodies[name] = after.rstrip()[:-1]
-            index += 1
+        opening = header.end() + (len(rest) - len(stripped))
+        closing = _matching_brace(source, opening)
+        if closing < 0:
             continue
-        body = [after]
-        index += 1
-        while index < len(lines) and lines[index].strip() != "}":
-            body.append(lines[index])
-            index += 1
-        bodies[name] = "\n".join(body)
-        index += 1
+        bodies[name] = source[opening + 1:closing]
     return bodies
 
 
@@ -919,6 +949,30 @@ def test_the_hook_may_not_call_the_verdict_twice():
     assert "command-not-allowlisted" in codes
 
 
+def test_a_nested_brace_group_does_not_end_the_function():
+    """The body ends at the matching brace, not at the first line that is `}`.
+
+    This is the shape that matters most: a nested brace group is valid shell
+    (`bash -n` accepts it), and truncating the body there drops the forwarding
+    call, so the wrapper is never recognised and a second `stop-verdict`
+    reaches the hook unreported -- the loop this change removed, back under
+    another name.
+    """
+    source = HOOK.read_text(encoding="utf-8").replace(
+        'printf \'%s\' "$SHELL_TEXT"',
+        '_outer() {\n'
+        '  {\n'
+        '    :\n'
+        '  }\n'
+        '  _mission_state_bounded "$@"\n'
+        '}\n'
+        '_outer stop-verdict --hook-input - --json\n'
+        'printf \'%s\' "$SHELL_TEXT"',
+    )
+    codes = [violation.code for violation in analyze_guard_shell(source)]
+    assert "command-not-allowlisted" in codes
+
+
 def test_a_one_line_helper_does_not_swallow_the_rest_of_the_file():
     """A body that opens and closes on one line ends there.
 
@@ -995,6 +1049,22 @@ def test_the_wrapper_definition_is_not_itself_a_call():
          'function _w3 { python3 "$MISSION_STATE_PY" "$@"; }\n_w3 resume'),
         ("a function whose brace is on the next line",
          '_w4()\n{\n  python3 "$MISSION_STATE_PY" "$@"\n}\n_w4 resume'),
+        ("a nested brace group before the call",
+         '_w8() {\n  {\n    :\n  }\n  _mission_state_bounded "$@"\n}\n_w8 resume'),
+        # The brace in each of these is *unbalanced*, so a parser that does not
+        # skip quoted text closes the body on it.  A balanced `{...}` would pass
+        # either way and would not exercise the skipping at all.
+        ("an unbalanced brace inside single quotes",
+         '_w9() {\n  printf \'%s\' \'}\'\n'
+         '  _mission_state_bounded "$@"\n}\n_w9 resume'),
+        ("an unbalanced brace inside double quotes",
+         '_w11() {\n  printf \'%s\' "}"\n'
+         '  _mission_state_bounded "$@"\n}\n_w11 resume'),
+        ("a brace escaped with a backslash",
+         '_w12() {\n  printf \'%s\' \\}\n'
+         '  _mission_state_bounded "$@"\n}\n_w12 resume'),
+        ("a brace inside a comment",
+         '_w10() {\n  # }\n  _mission_state_bounded "$@"\n}\n_w10 resume'),
     ],
 )
 def test_the_hook_may_not_reach_the_cli_by_any_other_shape(label, inserted):
