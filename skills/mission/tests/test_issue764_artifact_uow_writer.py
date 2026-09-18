@@ -153,7 +153,7 @@ def _generated_blob(path, *, digest="sha256:" + "0" * 64, size=0):
 
     binding = published_binding_type()(
         blob_id=derive_blob_id(path), kind="artifact", relative_path=path,
-        digest=digest, size=size, origin="generated", target="target",
+        digest=digest, size=size, origin="generated", target=path,
     )
     return VerifiedBlob(binding, b"")
 
@@ -265,6 +265,32 @@ def test_entry_refuses_export_with_three_equal_blobs():
             ".mission-state/artifacts/test/mission-artifact.md", "docs/a.md", "docs/b.md"
         )
     ))
+
+
+def test_entry_refuses_progress_target_redirected_to_projection():
+    blob = _generated_blob("docs/victim-progress.md")
+    blob = blob.__class__(blob.binding.__class__(**{
+        **blob.binding.__dict__,
+        "target": ".mission-state/archive/iter-1-abcdef01-progress.md",
+    }), blob.content)
+    _entry_refuses("update-progress", blob)
+
+
+def test_entry_refuses_export_projection_target_redirected_to_another_path():
+    artifact = _generated_blob(".mission-state/artifacts/test/mission-artifact.md")
+    projection = _generated_blob("docs/victim-export.md")
+    projection = projection.__class__(projection.binding.__class__(**{
+        **projection.binding.__dict__, "target": "docs/intended.md",
+    }), projection.content)
+    _entry_refuses("export-artifact", artifact, projection)
+
+
+def test_entry_allows_render_when_target_matches_its_canonical_path():
+    from mission_persistence.fenced_commit import refuse_unauthorized_published_blobs
+    path = ".mission-state/artifacts/test/mission-artifact.md"
+    blob = _generated_blob(path)
+    blob = blob.__class__(blob.binding.__class__(**{**blob.binding.__dict__, "target": path}), blob.content)
+    refuse_unauthorized_published_blobs("render-artifact", _blob_set(blob))
 
 
 def test_export_to_state_root_is_refused_before_any_write(state_dir, run_cli, read_state):

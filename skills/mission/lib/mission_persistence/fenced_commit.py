@@ -1304,6 +1304,7 @@ def refuse_unauthorized_published_blobs(
         EvidencePublicationError,
         REPOSITORY_ROOT_NAME,
         canonical_generated_path,
+        PUBLICATION_PATH_FIELD_BY_COMMAND_TYPE,
         publication_blob_shapes_by_command_type,
     )
 
@@ -1322,6 +1323,27 @@ def refuse_unauthorized_published_blobs(
                 classified.append(("artifact", blob))
             else:
                 classified.append(("projection", blob))
+            # Only a generated blob carries the command's own claim: its
+            # target is the path the claim declared, so the two must agree or
+            # the file lands somewhere the command never asked for.  A
+            # captured blob is caller input, whose target is the publication
+            # basename and whose path is wherever the caller read it from, so
+            # the same comparison does not hold for it.  A captured blob that
+            # aims inside the repository is refused by the shape rule below,
+            # whatever its target says.
+            if (
+                getattr(blob.binding, "origin", "captured") == "generated"
+                and PUBLICATION_PATH_FIELD_BY_COMMAND_TYPE.get(command_type) == "target"
+            ):
+                if canonical_generated_path(
+                    blob.binding.target, repository_root_name=root
+                ) != blob.binding.relative_path:
+                    raise EvidencePublicationError(
+                        "publication-destination-unauthorized",
+                        "published blob target and relative path differ",
+                    )
+        # Claims using publication_path cannot be compared here: bindings have
+        # no claim field, and their target is only the publication basename.
         internal = tuple((kind, blob) for kind, blob in classified if kind != "projection")
         shape = publication_blob_shapes_by_command_type().get(command_type)
         valid = shape is None and not internal

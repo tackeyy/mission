@@ -34,7 +34,7 @@ INTERNAL = ".mission-state/archive/iter-9-abcdef01-progress.md"
 EXTERNAL = "build/manifest.json"
 
 
-def _binding(relative_path, *, origin="generated", kind="progress"):
+def _binding(relative_path, *, origin="generated", kind="progress", target=None):
     from mission_application.evidence_publication import derive_blob_id
     from mission_persistence.evidence_order import published_binding_type
 
@@ -45,7 +45,10 @@ def _binding(relative_path, *, origin="generated", kind="progress"):
         digest="sha256:" + "0" * 64,
         size=0,
         origin=origin,
-        target="t",
+        # #764: a generated binding carries the claim's own path as its
+        # target, and the admission rule compares the two.  A fixture that
+        # names something else is not a binding the writer could produce.
+        target=relative_path if target is None else target,
     )
 
 
