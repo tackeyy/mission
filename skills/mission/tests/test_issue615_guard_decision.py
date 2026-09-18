@@ -654,29 +654,28 @@ def _state_cli_callers(source: str) -> set[str]:
 def _state_cli_invocations(source: str, callers: set[str]) -> list[tuple[str, str]]:
     """Return (line, first argument) for every call of the state CLI.
 
-    The body of a wrapper is where it forwards `"$@"`, not a call site, so it
-    is skipped: counting it would report the wrapper itself as a violation.
+    Only the *forwarding* line of a wrapper is exempt -- the `"$@"` that makes
+    it a wrapper.  Skipping whole function bodies let a second helper hide a
+    call inside itself, which is the same bypass as the wrapper it replaced.
+
+    Continuations are joined first, and an argument that is not a literal is
+    reported rather than ignored: `CMD=resume; helper "$CMD"` asks for
+    something this check cannot read, and deny-by-default means refusing what
+    it cannot read.
     """
+    joined = re.sub(r"\\\n\s*", " ", source)
     invocations: list[tuple[str, str]] = []
-    inside_wrapper = False
-    for line in source.splitlines():
-        if re.match(r"^\s*[A-Za-z_][A-Za-z0-9_]*\s*\(\)\s*\{", line):
-            inside_wrapper = True
-            continue
-        if inside_wrapper and line.strip() == "}":
-            inside_wrapper = False
-            continue
-        if inside_wrapper:
+    for line in joined.splitlines():
+        if '"$@"' in line:
             continue
         for caller in callers:
-            # The path is written `"$MISSION_STATE_PY"`, so the closing quote
-            # sits between the caller and its first argument.  Matching only
-            # whitespace after the name let `python3 "$MISSION_STATE_PY" resume`
-            # through -- the one shape the hook would use if it called the CLI
-            # directly.
-            pattern = re.escape(caller) + r"\"?\s+([A-Za-z0-9][A-Za-z0-9-]*)"
+            pattern = re.escape(caller) + r"\"?\s+(\S+)"
             for match in re.finditer(pattern, line):
-                invocations.append((line, match.group(1)))
+                argument = match.group(1).strip('"\'')
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*", argument):
+                    invocations.append((line, "<not-a-literal>"))
+                    continue
+                invocations.append((line, argument))
     return invocations
 
 
@@ -864,3 +863,60 @@ def test_the_hook_may_not_call_the_verdict_twice():
 def test_the_wrapper_definition_is_not_itself_a_call():
     """It forwards `"$@"`; counting it would report the hook as violating itself."""
     assert analyze_guard_shell(HOOK.read_text(encoding="utf-8")) == []
+
+
+# The shapes the first fix still let through (#779 review round 2).  Each was
+# reported as passing a check whose purpose is to reject it.
+@pytest.mark.parametrize(
+    "label,inserted",
+    [
+        ("a variable as the subcommand", 'CMD=resume; _mission_state_bounded "$CMD"'),
+        ("a continuation line", "_mission_state_bounded \\\n    resume"),
+        ("hidden in another helper", "_other() {\n  _mission_state_bounded resume\n}"),
+        ("hidden in another helper, direct", '_other() {\n  python3 "$MISSION_STATE_PY" resume\n}'),
+    ],
+)
+def test_the_hook_may_not_reach_the_cli_by_any_other_shape(label, inserted):
+    # Inserted as its own lines after the last `fi`, not spliced into the
+    # `printf`.  Splicing put the continuation case on the same line as
+    # another command, so it was caught by a different rule and the
+    # continuation handling was never exercised -- a mutation that removed
+    # the line-joining survived.
+    source = HOOK.read_text(encoding="utf-8")
+    marker = "\nfi\n"
+    at = source.rindex(marker) + len(marker)
+    source = source[:at] + inserted + "\n" + source[at:]
+    codes = [violation.code for violation in analyze_guard_shell(source)]
+    assert "command-not-allowlisted" in codes, label
+
+
+def test_an_unreadable_subcommand_is_refused_rather_than_ignored():
+    """Deny-by-default includes what the check cannot read.
+
+    `helper "$CMD"` may be `stop-verdict` at runtime or anything else.  Reading
+    it is not possible here, and treating unreadable as acceptable is the same
+    hole as an allowlist that nobody updated.
+    """
+    source = HOOK.read_text(encoding="utf-8").replace(
+        'printf \'%s\' "$SHELL_TEXT"',
+        '_mission_state_bounded "$SOMETHING"\nprintf \'%s\' "$SHELL_TEXT"',
+    )
+    codes = [violation.code for violation in analyze_guard_shell(source)]
+    assert "command-not-allowlisted" in codes
+
+
+def test_a_continuation_line_is_read_as_one_command():
+    """Joining continuations is what makes the subcommand visible at all.
+
+    Without it the analyzer sees `_mission_state_bounded \\` and then a bare
+    `resume`, and reads neither as a call.  Asserting through the whole hook
+    hid this: the extra call also trips the "more than one invocation" rule, so
+    a mutation that removed the joining still failed the test for the other
+    reason.  This asks the extraction directly.
+    """
+    source = "_mission_state_bounded \\\n    resume\n"
+    callers = _state_cli_callers('_x() {\n  python3 "$MISSION_STATE_PY" "$@"\n}\n') | {"_mission_state_bounded"}
+
+    invocations = _state_cli_invocations(source, callers)
+
+    assert [subcommand for _line, subcommand in invocations] == ["resume"], invocations

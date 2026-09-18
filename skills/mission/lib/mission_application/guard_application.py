@@ -182,15 +182,18 @@ def resolve_with_applications(
 def _command_subject(command):
     """What the command acts on, so repeating it can be told from progressing.
 
-    Each kind names its subject differently, and the observe command's attempt
-    counter is part of it: retrying an observation is progress, while
-    re-issuing the same attempt is not.
+    Every field that identifies the subject is used, not the first one found.
+    Taking `cwd` alone made two orphans in the same repository look like one
+    command repeated, and the walk stopped on the second -- refusing progress
+    as though it were a cycle.
+
+    The observe command's attempt counter belongs here too: retrying an
+    observation is progress, while re-issuing the same attempt is not.
     """
-    for field in ("cwd", "root", "session_id"):
-        value = getattr(command, field, None)
-        if value is not None:
-            return (field, value, getattr(command, "attempt", None))
-    return (None, None, getattr(command, "attempt", None))
+    return tuple(
+        getattr(command, field, None)
+        for field in ("cwd", "root", "session_id", "digest", "attempt")
+    )
 
 
 def project_root_of(args, current_root, path_factory):

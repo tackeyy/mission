@@ -9139,10 +9139,12 @@ def _guard_apply_stop_guard_observe(decision):
 # The closed command set, in one place.  It is a table rather than a chain of
 # branches so that the set can be checked for exactly the kinds the guard emits
 # -- the property the hook's `case` labels used to carry (#779).
-# One decision applies at most this many commands.  The observe path retries a
-# bounded number of times and each orphan is processed once, so a walk longer
-# than this is a cycle, not progress.
-_GUARD_APPLICATION_LIMIT = 16
+# A backstop only.  Cycles are caught by repetition (`resolve_with_applications`
+# refuses the same command on the same subject twice), so this bounds the walk
+# for a cycle that repetition cannot see.  It must be far above any real walk:
+# at 16 it rejected sixteen distinct orphans -- progress, on exactly the busy
+# host the guard exists to protect.
+_GUARD_APPLICATION_LIMIT = 4096
 
 _GUARD_COMMAND_APPLIERS = {
     "none": guard_application.no_application,

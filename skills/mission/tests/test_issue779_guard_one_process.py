@@ -178,42 +178,85 @@ def _write_state(root, **fields):
     return path
 
 
-# Each row builds the state that puts the guard on that path, then counts the
-# launches.  The first version looped over these names while running the same
-# fake against the same input `{}`: `path` reached the assertion message and
-# nothing else, so a path that started a second process could not have been
-# seen.  The three paths that used to be covered are the three with a real
-# state file; the rest exist because they are where a second launch would
-# come back.
+def _verdict(root):
+    """The decision itself, so a row can assert the branch it reaches."""
+    env = {
+        **os.environ,
+        "CLAUDE_CODE_SESSION_ID": "own",
+        "MISSION_STATE_NOW": "2026-08-23T01:00:00Z",
+        "MISSION_STOP_GUARD_NOW_EPOCH": "1000",
+    }
+    env.pop("MISSION_SESSION_ID", None)
+    result = subprocess.run(
+        [sys.executable, str(STATE_PY), "stop-verdict", "--hook-input", "-", "--json"],
+        input=json.dumps({"stop_hook_active": False, "cwd": str(root)}),
+        capture_output=True, text=True, env=env, cwd=str(root), timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+# Each row is a state, the branch it must reach, and the launch count.
+#
+# The branch is asserted because the first version asserted only the count:
+# three of its seven rows (`lease-expired`, `orphan-pid`, `awaiting-user`) were
+# in fact taking the ordinary active path, so the table looked like seven paths
+# and exercised four.  A row that does not reach its branch tests nothing that
+# the row above it did not.
+#
+# `stale` settles to `command=none` with the halt already applied -- which is
+# the point of #779: the application happened inside the same process, so the
+# hook sees a settled verdict rather than an instruction.
 _GUARD_PATHS = {
-    "missing": None,
-    "halted": {"loop_active": False, "halt_reason": "done by hand"},
-    "active": {},
-    "stale": {"updated_at": "2020-01-01T00:00:00Z"},
-    "lease-expired": {
-        "lease_id": "abc",
-        "lease_expires_at": "2020-01-01T00:00:00Z",
-        "lease_owner": "someone-else",
-    },
-    "orphan-pid": {"pid": 999999, "orphan_pid": 999999},
-    "awaiting-user": {"awaiting_user": True},
+    "missing": (None, "none", "no-eligible-session"),
+    "halted": ({"loop_active": False, "halt_reason": "done by hand"}, "none", "halt-reason"),
+    "active": ({}, "none", "active-unfinished"),
+    "stale": ({"updated_at": "2020-01-01T00:00:00Z"}, "stale", "stale-auto-halt-complete"),
+    "awaiting-user": (
+        {"updated_at": "2020-01-01T00:00:00Z", "awaiting_user": True},
+        "awaiting-user",
+        "active-unfinished",
+    ),
+    "lease-expired": (
+        {
+            "updated_at": "2020-01-01T00:00:00Z",
+            "lease_id": "abc",
+            "lease_expires_at": "2020-01-02T00:00:00Z",
+            "lease_owner": "other",
+        },
+        "stale",
+        "stale-auto-halt-complete",
+    ),
+    "orphan": ({"pid": 999999, "updated_at": "2020-01-01T00:00:00Z"}, "stale", "stale-auto-halt-complete"),
 }
 
 
 @pytest.mark.parametrize("path", sorted(_GUARD_PATHS))
 def test_the_hook_starts_mission_state_once_for_each_guard_path(tmp_path, path):
+    fields, expected_finding, expected_reason = _GUARD_PATHS[path]
     root = tmp_path / "repo"
     root.mkdir()
-    fields = _GUARD_PATHS[path]
     if fields is None:
         (root / ".mission-state" / "sessions").mkdir(parents=True)
     else:
         _write_state(root, **fields)
 
+    verdict = _verdict(root)
+    assert verdict["finding"] == expected_finding, (path, verdict["reason"])
+    assert verdict["reason"] == expected_reason, path
+
     result, launches = _run_hook(tmp_path, root)
 
     assert result.returncode == 0, (path, result.stderr)
     assert len(launches) == 1, (path, launches)
+
+
+def test_the_rows_reach_more_than_one_branch():
+    """A control: if every row collapsed onto one branch, the table would still
+    pass its per-row assertions while testing a single path seven times."""
+    findings = {finding for _fields, finding, _reason in _GUARD_PATHS.values()}
+    assert len(findings) >= 3, findings
+
 
 
 # --- Condition 5b: the budget's exhaustion is not a failed command ----------
@@ -417,3 +460,36 @@ def test_a_retried_observation_is_progress():
 
     assert settled.command.kind.value == "none"
     assert [command.attempt for command in applied] == [1, 2, 3]
+
+
+def test_two_orphans_in_one_repository_are_two_subjects():
+    """`cwd` alone made them one, and the walk stopped on the second.
+
+    The reviewer's counter-example: same repository, different sessions.  That
+    is two orphans processed in turn -- progress -- and taking the first field
+    that happened to be set reported it as a cycle.
+    """
+    decisions = [
+        _FakeDecision(_FakeCommand("mark-halt", cwd="/repo", session_id="a")),
+        _FakeDecision(_FakeCommand("mark-halt", cwd="/repo", session_id="b")),
+        _FakeDecision(_FakeCommand("none")),
+    ]
+
+    settled, applied = _walk(decisions)
+
+    assert settled.command.kind.value == "none"
+    assert [command.session_id for command in applied] == ["a", "b"]
+
+
+def test_the_limit_the_hook_uses_is_a_backstop_not_a_ceiling():
+    """The fix has to reach the caller, not only the test's own argument.
+
+    The first attempt raised the limit inside the new tests and left
+    `_GUARD_APPLICATION_LIMIT` at 16, so the walk the hook actually runs was
+    still refused after sixteen distinct orphans.
+    """
+    module = _module()
+
+    assert module._GUARD_APPLICATION_LIMIT > 1000, (
+        "the limit the hook uses still rejects a long run of real progress"
+    )
