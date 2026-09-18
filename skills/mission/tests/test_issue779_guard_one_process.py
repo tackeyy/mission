@@ -610,16 +610,40 @@ def test_the_limit_the_hook_uses_is_a_backstop_not_a_ceiling():
 # that has to understand bash.
 
 
-def _subcommands(launches):
-    """The first argument of each recorded `mission-state.py` launch."""
-    found = []
-    for line in launches:
-        words = line.split()
-        for index, word in enumerate(words):
-            if word.endswith("mission-state.py") and index + 1 < len(words):
-                found.append(words[index + 1])
-                break
-    return found
+def _recording_state_py(tmp_path):
+    """A `mission-state.py` that records its own argv, then runs the real one.
+
+    Recording at `python3` instead was the first shape of this measurement, and
+    it observed **the name of an interpreter on PATH**, not the CLI: a second
+    call written as `python3.14 "$MISSION_STATE_PY" stop-verdict` reached the
+    CLI, returned a real verdict, and was not recorded (#796 review round 6).
+    Any other spelling -- `python3.13`, a venv path, `exec` -- would do the
+    same, and enumerating them is the same losing game as reading the shell.
+
+    Recording at the entry point ends it: whatever runs this file is counted,
+    because the count is taken inside it.
+    """
+    log = tmp_path / "invocations.log"
+    shim = tmp_path / "mission-state.py"
+    shim.write_text(
+        "import runpy, sys\n"
+        f"open({str(log)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+        f"sys.argv[0] = {str(STATE_PY)!r}\n"
+        f"runpy.run_path({str(STATE_PY)!r}, run_name='__main__')\n",
+        encoding="utf-8",
+    )
+    return shim, log
+
+
+def _subcommands(log):
+    """The first argument of each recorded invocation."""
+    if not log.exists():
+        return []
+    return [
+        line.split()[0]
+        for line in log.read_text(encoding="utf-8").splitlines()
+        if line.split()
+    ]
 
 
 def _hook_with(tmp_path, inserted):
@@ -632,37 +656,58 @@ def _hook_with(tmp_path, inserted):
     return path
 
 
+def _state_tree(root):
+    """Every file under the state directory, with its bytes."""
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(root.rglob("*")) if path.is_file()
+    }
+
+
 def _run_shapes_hook(tmp_path, inserted):
+    """Run a hook and return (subcommands, whether the state was left alone).
+
+    The second value is a separate observation, because the first depends on
+    the CLI being reached through `$MISSION_STATE_PY`.  A hook that wrote the
+    state directly would leave the count at one while changing what the count
+    exists to protect.
+    """
     root = tmp_path / "repo"
     (root / ".mission-state" / "sessions").mkdir(parents=True)
+    # Seeded so the comparison can see a file *change*, not only appear.
+    # Comparing the names alone would pass a hook that rewrote what is already
+    # there, which is the more likely way for this to go wrong.
+    (root / ".mission-state" / "marker").write_text("seeded\n", encoding="utf-8")
+    before = _state_tree(root)
+    shim, log = _recording_state_py(tmp_path)
     hook = _hook_with(tmp_path, inserted)
-    _result, launches = _run_hook(tmp_path, root, hook=hook)
-    return _subcommands(launches)
+    _run_hook(tmp_path, root, hook=hook, env_overrides={"MISSION_STATE_PY": str(shim)})
+    return _subcommands(log), _state_tree(root) == before
 
 
-def test_the_subcommand_is_read_after_the_script_not_at_a_fixed_place():
-    """The shim logs whatever `python3` was given, flags included.
+def test_a_missing_log_reads_as_no_calls_not_as_an_error(tmp_path):
+    """Whether the CLI ran at all has to be answerable.
 
-    Taking the second word works only while the script path happens to be
-    first.  `python3 -X importtime <script> stop-verdict` would then be read as
-    asking for `importtime`, and a second call with a flag would be read as
-    asking for whatever the flag is -- the count stays right while the
-    subcommand goes wrong, which is the quiet way for this to break.
-
-    Asked of the parsing directly: the hook passes no flags today, so a test
-    that runs it cannot tell the two readings apart.
+    The log only exists once something has written to it, so "nothing ran" and
+    "the recorder is not there" reach the parsing the same way.  Returning an
+    empty list keeps the caller's assertion meaningful -- the control expects
+    exactly `["stop-verdict"]`, so an empty result fails it rather than
+    slipping through as "no violations found".
     """
-    launches = [
-        "/repo/skills/mission/bin/mission-state.py stop-verdict --hook-input - --json",
-        "-X importtime /repo/skills/mission/bin/mission-state.py resume",
-    ]
+    assert _subcommands(tmp_path / "absent.log") == []
 
-    assert _subcommands(launches) == ["stop-verdict", "resume"]
+    log = tmp_path / "invocations.log"
+    log.write_text("stop-verdict --hook-input - --json\n\nresume\n", encoding="utf-8")
+
+    assert _subcommands(log) == ["stop-verdict", "resume"]
 
 
 def test_running_the_hook_shows_one_call_and_which_one(tmp_path):
     """The guarantee, measured: one launch, and it asks for `stop-verdict`."""
-    assert _run_shapes_hook(tmp_path, "") == ["stop-verdict"]
+    subcommands, untouched = _run_shapes_hook(tmp_path, "")
+
+    assert subcommands == ["stop-verdict"]
+    assert untouched, "the guard changed the state it only had to read"
 
 
 # Each shape was run under bash with a stub wrapper before being listed here:
@@ -693,17 +738,64 @@ _BYPASS_SHAPES = {
         "true;_mission_state_bounded resume",
     "a brace inside a quoted string before the call":
         'printf "%s" "(";_mission_state_bounded resume',
+    # Recording at `python3` missed both of these: the first names another
+    # interpreter, the second replaces the process.  Neither is exotic, and
+    # enumerating interpreter names would be the same losing game as reading
+    # the shell -- which is why the recorder sits in the CLI instead.
+    "a second call through another interpreter":
+        '_state=$MISSION_STATE_PY\n'
+        'printf \'%s\' "$INPUT" | python3.14 "$_state" stop-verdict'
+        ' --hook-input - --json >/dev/null',
+    "a call that replaces the process":
+        '( exec python3.14 "$MISSION_STATE_PY" resume >/dev/null 2>&1 ) || true',
 }
 
 
 @pytest.mark.parametrize("label", sorted(_BYPASS_SHAPES))
 def test_running_the_hook_catches_what_reading_it_missed(tmp_path, label):
-    subcommands = _run_shapes_hook(tmp_path, _BYPASS_SHAPES[label])
+    subcommands, _untouched = _run_shapes_hook(tmp_path, _BYPASS_SHAPES[label])
 
     # `!= ["stop-verdict"]` would also pass on an empty list, which is what a
     # broken harness produces: the shape would look detected because nothing
     # ran at all.  Name what the shape does instead.
-    assert subcommands == ["stop-verdict", "resume"], (label, subcommands)
+    # `!= ["stop-verdict"]` alone also passes on an empty list, which is what a
+    # broken recorder produces -- every row would then report success for the
+    # wrong reason.  These two say it directly: the hook's own call happened,
+    # and the shape added another.  The slice is empty-safe on purpose.
+    assert subcommands[:1] == ["stop-verdict"], (label, subcommands)
+    assert len(subcommands) > 1, (label, subcommands)
+
+
+def test_rewriting_an_existing_state_file_is_seen(tmp_path):
+    """Names are not enough; the comparison has to look at the bytes.
+
+    A file that appears is easy to notice.  A file that is already there and
+    comes back different is the shape a guard would actually produce, and
+    comparing the listing alone would call it unchanged.
+    """
+    subcommands, untouched = _run_shapes_hook(
+        tmp_path, 'printf \'rewritten\' > "$PWD/.mission-state/marker"'
+    )
+
+    assert subcommands == ["stop-verdict"], subcommands
+    assert not untouched
+
+
+def test_writing_the_state_directly_is_seen_even_though_the_count_is_one(tmp_path):
+    """The count protects the state; something has to watch the state itself.
+
+    A hook that wrote a session file would reach the CLI once and pass every
+    assertion about the count, while doing the thing the count exists to
+    prevent.  Counting calls and comparing the state are two observations, and
+    this shape separates them: the first stays at one, the second changes.
+    """
+    subcommands, untouched = _run_shapes_hook(
+        tmp_path,
+        'printf \'{"mission":"x"}\' > "$PWD/.mission-state/sessions/cc-injected.json"',
+    )
+
+    assert subcommands == ["stop-verdict"], subcommands
+    assert not untouched
 
 
 # The one shape that looked like the others and is not.  `\\ ` escapes the
@@ -712,6 +804,9 @@ def test_running_the_hook_catches_what_reading_it_missed(tmp_path, label):
 # through, and that was correct: there is nothing to catch.  Without this
 # record the next reader spends the same time re-deriving it.
 def test_an_escaped_space_reaches_nothing(tmp_path):
-    assert _run_shapes_hook(tmp_path, "_mission_state_bounded\\ resume") == [
-        "stop-verdict"
-    ]
+    subcommands, untouched = _run_shapes_hook(
+        tmp_path, "_mission_state_bounded\\ resume"
+    )
+
+    assert subcommands == ["stop-verdict"]
+    assert untouched
