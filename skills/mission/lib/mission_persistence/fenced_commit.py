@@ -28,6 +28,7 @@ from mission_kernel.json_codec import (
 from mission_kernel.projection_path import (
     ProjectionRejection,
     resolve_internal_archive_path,
+    resolve_internal_artifact_path,
     resolve_projection_path,
 )
 from mission_kernel.model import (
@@ -1276,7 +1277,7 @@ def _prepared_binding_digest(prepared: PreparedCommit) -> str:
     return _sha256(_canonical_bytes(document, limit=STATE_LIMIT))
 
 
-def refuse_unauthorized_generated_blobs(
+def refuse_unauthorized_published_blobs(
     command_type, blobs, *, repository_root_name: Optional[str] = None
 ) -> None:
     """Refuse a request whose blobs publish in-root under the wrong command.
@@ -1295,36 +1296,81 @@ def refuse_unauthorized_generated_blobs(
     no identity.  It is also only a claim -- the executor compares it against
     the command it prepared, where both are in hand.
 
-    Only generated bindings are considered.  A captured blob is caller input
-    read from wherever the caller had it, and where it was read from is not
-    a destination this rule owns.
+    Every published blob is considered, whatever its origin says.  All of
+    them are written from ``relative_path``, so a rule that looked only at
+    generated ones would leave the same destination open under a different
+    label -- which is how ``origin="captured"`` reached the in-root
+    destination before #764.
     """
     from mission_application.evidence_publication import (
         EvidencePublicationError,
-        authorize_generated_destinations,
+        REPOSITORY_ROOT_NAME,
+        canonical_generated_path,
+        PUBLICATION_PATH_FIELD_BY_COMMAND_TYPE,
+        publication_blob_shapes_by_command_type,
     )
 
-    paths = tuple(
-        blob.binding.relative_path
-        for blob in getattr(blobs, "blobs", ())
-        if getattr(blob.binding, "origin", "captured") == "generated"
-    )
-    if not paths:
-        return
-    from mission_application.evidence_publication import REPOSITORY_ROOT_NAME
-
+    published = tuple(getattr(blobs, "blobs", ()))
+    root = REPOSITORY_ROOT_NAME if repository_root_name is None else repository_root_name
     try:
-        authorize_generated_destinations(
-            paths,
-            command_type=command_type,
-            repository_root_name=(
-                REPOSITORY_ROOT_NAME
-                if repository_root_name is None
-                else repository_root_name
-            ),
-        )
+        classified = []
+        for blob in published:
+            path = canonical_generated_path(
+                blob.binding.relative_path, repository_root_name=root
+            )
+            candidate = PurePosixPath(path)
+            if not isinstance(resolve_internal_archive_path(candidate, root_name=root), ProjectionRejection):
+                classified.append(("progress", blob))
+            elif not isinstance(resolve_internal_artifact_path(candidate, root_name=root), ProjectionRejection):
+                classified.append(("artifact", blob))
+            else:
+                classified.append(("projection", blob))
+            # Where a claim's publication path *is* its target, the two must
+            # agree: the binding comparison downstream looks at kind, target,
+            # digest and size, and the file is written to ``relative_path``.
+            # A binding that names one and writes the other lands somewhere
+            # the command never asked for.
+            #
+            # Origin does not enter into it.  Every blob is published from
+            # ``relative_path``, so exempting captured ones would leave the
+            # same redirection open under a different label -- which is what
+            # round 3 of the cross-model review found.
+            if PUBLICATION_PATH_FIELD_BY_COMMAND_TYPE.get(command_type) == "target":
+                if canonical_generated_path(
+                    blob.binding.target, repository_root_name=root
+                ) != blob.binding.relative_path:
+                    raise EvidencePublicationError(
+                        "publication-destination-unauthorized",
+                        "published blob target and relative path differ",
+                    )
+        # Claims using publication_path cannot be compared here: bindings have
+        # no claim field, and their target is only the publication basename.
+        internal = tuple((kind, blob) for kind, blob in classified if kind != "projection")
+        shape = publication_blob_shapes_by_command_type().get(command_type)
+        valid = shape is None and not internal
+        if shape is not None:
+            valid = not published or (
+                len(published) == shape["blob_count"]
+                and shape["internal_min"] <= len(internal) <= shape["internal_max"]
+                and all(kind in shape["rules"] for kind, _blob in internal)
+            )
+            if valid and published and shape["blob_count"] == 2:
+                first, second = published
+                valid = (first.binding.digest, first.binding.size) == (
+                    second.binding.digest,
+                    second.binding.size,
+                )
+        if not valid:
+            raise EvidencePublicationError(
+                "publication-destination-unauthorized",
+                "%s has an unauthorised generated blob shape" % (command_type,),
+            )
     except EvidencePublicationError as exc:
         raise FencedCommitError("request-invalid", str(exc)) from exc
+
+
+# Compatibility name for direct callers; admission now examines every blob.
+refuse_unauthorized_generated_blobs = refuse_unauthorized_published_blobs
 
 
 def validate_execution_request(
@@ -1363,7 +1409,7 @@ def validate_execution_request(
     # malformed request into an ``AttributeError`` instead of the typed
     # refusal every other malformed field gets.
     _audit_record(request.audit)
-    refuse_unauthorized_generated_blobs(
+    refuse_unauthorized_published_blobs(
         request.audit.command_type,
         request.blobs,
         repository_root_name=repository_root_name,
@@ -2825,6 +2871,9 @@ class LocalFencedRepository:
         internal = resolve_internal_archive_path(candidate, root_name=self.root.name)
         if not isinstance(internal, ProjectionRejection):
             return internal, True
+        artifact = resolve_internal_artifact_path(candidate, root_name=self.root.name)
+        if not isinstance(artifact, ProjectionRejection):
+            return artifact, True
         # The unit of work answers with one refusal whatever the reason;
         # the reasons themselves are the application layer's to explain.
         raise FencedCommitError(

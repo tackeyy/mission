@@ -262,7 +262,7 @@ kernel reducer でも検証し、CLI の事前検証だけに authority を残�
 
 ### render preparation と自己参照の回避
 
-現行 Markdown は artifact の title / path / status / redaction / updated_at /
+現行 Markdown は artifact の title / path / status / redaction（`updated_at` は #764 で削除）/
 required-for-pass / blocks と state の mission / score summary / assumptions を使い、artifact digest / size /
 producer identity / exports / publish event 本文は描画しない
 （`skills/mission/bin/mission-state.py:7357-7410`）。したがって effectful command は lease admission 後、
@@ -433,4 +433,3 @@ Red を先に作り、各まとまりを Green にする。
 | `bind_transition_effects` の強化が既存 effect consumer を壊す | 既存「claim なし transition への binding」回帰と、artifact claim ありの strict binding を分けてテストする | generic claim model への全面移行は別 Issue にし、#633 は artifact claim だけを追加する |
 | progress / context まで同時に kernel 化して scope が膨らむ | `_run_evidence_decision` の既存 consumer を維持し、artifact 専用 typed executor を追加する | 後続 family Issue で同じ executor を段階的に採用する |
 | v5 schema を暗黙変更する | 現行 legacy-only selector と rejection parity を固定する | dedicated artifact aggregate / codec v5 は別 Issue で明示 migration として扱う |
-

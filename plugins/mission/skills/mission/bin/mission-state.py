@@ -6522,7 +6522,6 @@ def _render_artifact_markdown(data: dict, artifact: dict) -> str:
         f"- status: {status}",
         f"- artifact_path: {path}",
         f"- redaction_status: {redaction_status}",
-        f"- updated_at: {artifact.get('updated_at') or data.get('updated_at') or ''}",
         "",
     ]
     if artifact.get("required_for_pass"):

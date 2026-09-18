@@ -437,21 +437,18 @@ def test_the_blob_identifier_comes_from_the_declared_path():
     assert blobs.blobs[0].binding.blob_id == derive_blob_id("build/m.json")
 
 
-def test_a_command_without_a_declared_path_produces_no_blobs():
-    """The artifact commands still publish through their own path.
-
-    #747 3a moved ``update-progress`` off this branch, so the case it used to
-    stand for is now held by a command that is still on it.
-    """
+def test_an_artifact_command_declares_its_target_and_produces_a_blob():
+    """#764 binds artifact publication to the UoW writer."""
     from mission_kernel.artifact import ArtifactEffectClaim
     from mission_kernel.commands import InitializeArtifact
     from mission_persistence.evidence_order import blob_set_from_effects
 
-    claim = ArtifactEffectClaim("artifact", "a.md", "sha256:" + "0" * 64, 2)
+    path = ".mission-state/artifacts/test/mission-artifact.md"
+    claim = ArtifactEffectClaim("artifact", path, "sha256:" + "0" * 64, 2)
     command = InitializeArtifact(
-        "2026-01-01T00:00:00Z", "a.md", "markdown", "t", "none", False, claim
+        "2026-01-01T00:00:00Z", path, "markdown", "t", "none", False, claim
     )
-    assert blob_set_from_effects((_effect(target="a.md"),), command).blobs == ()
+    assert len(blob_set_from_effects((_effect(target=path),), command).blobs) == 1
 
 
 def test_progress_now_declares_its_path_through_its_effect_target():
