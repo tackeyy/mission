@@ -657,11 +657,28 @@ def _hook_with(tmp_path, inserted):
 
 
 def _state_tree(root):
-    """Every file under the state directory, with its bytes."""
-    return {
-        str(path.relative_to(root)): path.read_bytes()
-        for path in sorted(root.rglob("*")) if path.is_file()
-    }
+    """Every node under the state directory: kind, mode, and what it holds.
+
+    Reading only the bytes of regular files called three real changes
+    "unchanged" (#796 review round 7): a `chmod`, a new empty directory, and a
+    symlink put in place of a file with the same contents behind it.  The last
+    one matters most -- it points later writes outside `.mission-state` while
+    every byte read through it stays the same.
+
+    `lstat` is what makes the symlink visible: `read_bytes` follows it and sees
+    the target, so the swap is invisible to anything that reads through.
+    """
+    tree = {}
+    for path in sorted(root.rglob("*")):
+        status = path.lstat()
+        name = str(path.relative_to(root))
+        if path.is_symlink():
+            tree[name] = ("symlink", status.st_mode, os.readlink(path))
+        elif path.is_dir():
+            tree[name] = ("dir", status.st_mode, None)
+        else:
+            tree[name] = ("file", status.st_mode, path.read_bytes())
+    return tree
 
 
 def _run_shapes_hook(tmp_path, inserted):
@@ -678,6 +695,9 @@ def _run_shapes_hook(tmp_path, inserted):
     # Comparing the names alone would pass a hook that rewrote what is already
     # there, which is the more likely way for this to go wrong.
     (root / ".mission-state" / "marker").write_text("seeded\n", encoding="utf-8")
+    # A symlink is seeded too, so the comparison can be asked about a change
+    # that keeps the kind and the mode and moves only the target.
+    (root / ".mission-state" / "link").symlink_to("marker")
     before = _state_tree(root)
     shim, log = _recording_state_py(tmp_path)
     hook = _hook_with(tmp_path, inserted)
@@ -700,6 +720,30 @@ def test_a_missing_log_reads_as_no_calls_not_as_an_error(tmp_path):
     log.write_text("stop-verdict --hook-input - --json\n\nresume\n", encoding="utf-8")
 
     assert _subcommands(log) == ["stop-verdict", "resume"]
+
+
+def test_the_hook_names_the_cli_only_through_the_variable():
+    """The measurement records what goes through `$MISSION_STATE_PY`.
+
+    That is a real limit: a call written against the file's own path would run
+    the CLI without passing the recorder, and the count would stay at one
+    (#796 review round 7).  Rather than chase it at run time -- the same losing
+    game as enumerating interpreter names -- the shape is forbidden outright.
+
+    This is a string check, not a reading of the shell: the name may appear
+    only where the variable gets its default.  Whatever a future hook does
+    with the CLI, it has to go through the variable to name it at all, and
+    then the recorder sees it.
+    """
+    naming = [
+        line for line in HOOK.read_text(encoding="utf-8").splitlines()
+        if "mission-state.py" in line and not line.lstrip().startswith("#")
+    ]
+
+    assert naming == [
+        'MISSION_STATE_PY="${MISSION_STATE_PY:-$SCRIPT_DIR/../skills/mission/bin/'
+        'mission-state.py}"'
+    ], naming
 
 
 def test_running_the_hook_shows_one_call_and_which_one(tmp_path):
@@ -764,6 +808,40 @@ def test_running_the_hook_catches_what_reading_it_missed(tmp_path, label):
     # and the shape added another.  The slice is empty-safe on purpose.
     assert subcommands[:1] == ["stop-verdict"], (label, subcommands)
     assert len(subcommands) > 1, (label, subcommands)
+
+
+# Changes that leave every byte readable through the tree the same.  Reading
+# only the contents of regular files called all three "unchanged".
+_SILENT_STATE_CHANGES = {
+    "a mode change": 'chmod 0444 "$PWD/.mission-state/marker"',
+    "a new empty directory": 'mkdir -p "$PWD/.mission-state/created-empty"',
+    # The one with teeth: later writes through this name land outside the
+    # state directory, while anything that reads through it sees what it
+    # always saw.
+    # Same kind, same mode: only the target moves.  Nothing but reading the
+    # target tells these apart, and where the target points decides where a
+    # later write lands.
+    "a symlink repointed outside the state directory":
+        'ln -sfn "$TMPDIR/outside-target" "$PWD/.mission-state/link"',
+    # `stat` follows the link and raises on this one, which would end the test
+    # in an error instead of a report.  `lstat` describes the link itself.
+    "a dangling symlink":
+        'ln -s /nonexistent/target "$PWD/.mission-state/dangling"',
+    "a symlink in place of a file with the same contents":
+        'cp "$PWD/.mission-state/marker" "$TMPDIR/outside-marker"'
+        ' && rm "$PWD/.mission-state/marker"'
+        ' && ln -s "$TMPDIR/outside-marker" "$PWD/.mission-state/marker"',
+}
+
+
+@pytest.mark.parametrize("label", sorted(_SILENT_STATE_CHANGES))
+def test_a_change_that_reads_the_same_is_still_a_change(tmp_path, label):
+    subcommands, untouched = _run_shapes_hook(
+        tmp_path, _SILENT_STATE_CHANGES[label]
+    )
+
+    assert subcommands == ["stop-verdict"], (label, subcommands)
+    assert not untouched, label
 
 
 def test_rewriting_an_existing_state_file_is_seen(tmp_path):
