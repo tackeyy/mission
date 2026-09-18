@@ -708,24 +708,41 @@ def _command_fragments(line: str) -> list[str]:
     `resume)`, so the caller never appears as a word and the call is missed
     (#796 review round 3).  Command substitution, backticks, and the operators
     `;` `|` `&` all begin a command, and each fragment is read as its own line.
+
+    Three things decide where a command can begin, and each was found by an
+    input that ran under bash while the check stayed silent:
+
+    - **Single quotes stop everything.**  `'$(_bounded resume)'` is data;
+      `"$(_bounded resume)"` runs.  Same characters, different quote.
+    - **A substitution is a fresh command context.**  In
+      `"$(true;_bounded resume)"` the `;` separates commands even though the
+      whole thing sits in double quotes -- and after the `)` the enclosing
+      quotes are back, so in `"$(true) ; _bounded resume"` the same `;` is
+      data.  The state is pushed and popped, not cleared.
+    - **A fragment has to be quoted the way it was found.**  Cutting inside
+      `"..."` otherwise leaves an unpaired quote, `shlex` refuses the fragment,
+      and the raw fallback reads `resume"` as a subcommand -- reporting a hook
+      that runs nothing.
+
     `$(` needs no case of its own: the `(` ends the fragment either way, and a
     branch no mutation can distinguish is a branch that rots.
-
-    **Single quotes are the one thing that stops it.**  `'$(_bounded resume)'`
-    is data and runs nothing, while `"$(_bounded resume)"` runs -- the same
-    characters, told apart only by which quote encloses them.  The scan tracks
-    that, so neither is guessed.
     """
     fragments: list[str] = []
     buffer: list[str] = []
+    enclosing: list[bool] = []
+    in_backtick = False
     in_single = False
     in_double = False
     index = 0
     end = len(line)
 
-    def cut() -> None:
-        fragments.append("".join(buffer))
+    def cut(reopen: bool) -> None:
+        """Emit the buffer, closing the quote it splits and reopening if asked."""
+        text = "".join(buffer) + ('"' if in_double else "")
         buffer.clear()
+        fragments.append(text)
+        if reopen:
+            buffer.append('"')
 
     while index < end:
         char = line[index]
@@ -751,16 +768,36 @@ def _command_fragments(line: str) -> list[str]:
             index += 1
             continue
         if char == "`":
-            cut()
+            if in_backtick:
+                restored = enclosing.pop() if enclosing else False
+                cut(restored)
+                in_double = restored
+            else:
+                enclosing.append(in_double)
+                cut(False)
+                in_double = False
+            in_backtick = not in_backtick
             index += 1
             continue
-        if char in "()" or (not in_double and char in ";|&"):
-            cut()
+        if char == "(":
+            enclosing.append(in_double)
+            cut(False)
+            in_double = False
+            index += 1
+            continue
+        if char == ")":
+            restored = enclosing.pop() if enclosing else False
+            cut(restored)
+            in_double = restored
+            index += 1
+            continue
+        if not in_double and char in ";|&":
+            cut(False)
             index += 1
             continue
         buffer.append(char)
         index += 1
-    cut()
+    cut(False)
     return [fragment for fragment in fragments if fragment.strip()]
 
 
@@ -1140,6 +1177,39 @@ def test_a_line_shlex_cannot_read_is_still_searched():
     assert [subcommand for _line, subcommand in invocations] == ["resume"], invocations
 
 
+def test_a_fragment_keeps_the_quotes_it_was_cut_out_of():
+    """Otherwise the fallback reads a string as a command line.
+
+    `printf "%s" "a _bounded resume$(true)"` prints its text and runs nothing.
+    The `(` cuts the line inside the string, and if the piece before the cut
+    keeps its opening quote unpaired, `shlex` refuses it and the raw split
+    reads `_bounded resume` as a call -- reporting a clean hook.  Closing the
+    quote on the way out makes the same piece one word again.
+    """
+    source = HOOK.read_text(encoding="utf-8").replace(
+        'printf \'%s\' "$SHELL_TEXT"',
+        'printf "%s" "a _mission_state_bounded resume$(true)"\n'
+        'printf \'%s\' "$SHELL_TEXT"',
+    )
+    assert analyze_guard_shell(source) == []
+
+
+def test_the_quoting_resumes_after_a_substitution_closes():
+    """Push and pop, not reset: after `)` the enclosing quotes are back.
+
+    `"$(true) ; _bounded resume"` prints its text and runs nothing -- the `;`
+    is inside the outer double quotes.  Clearing the quote state at `(`
+    instead of stacking it would report this, so the row above (where the
+    operator *is* inside the substitution) and this one only pass together.
+    """
+    source = HOOK.read_text(encoding="utf-8").replace(
+        'printf \'%s\' "$SHELL_TEXT"',
+        'printf "%s" "$(true) ; _mission_state_bounded resume"\n'
+        'printf \'%s\' "$SHELL_TEXT"',
+    )
+    assert analyze_guard_shell(source) == []
+
+
 def test_an_operator_inside_double_quotes_is_not_a_call():
     """`;` ends a command only outside quotes.
 
@@ -1313,6 +1383,14 @@ def test_the_wrapper_definition_is_not_itself_a_call():
         # `\"` is a literal quote, not the start of a string.  Reading it as
         # one leaves the rest of the line "inside quotes", so the operators
         # stop ending fragments and the call joins the punctuation before it.
+        # Inside a substitution the enclosing quotes do not apply, so the
+        # operators separate commands again.  Both of these run the wrapper
+        # (its output is captured, so the stub has to write to stderr to see
+        # it -- measuring stdout alone says "nothing happened").
+        ("an operator inside a quoted substitution",
+         'x="$(true;_mission_state_bounded resume)"'),
+        ("an operator inside quoted backticks",
+         'x="`true;_mission_state_bounded resume`"'),
         ("an escaped quote before the operators",
          'printf \'%s\' \\";true;_mission_state_bounded resume'),
         ("a call after a pipe", 'true | _mission_state_bounded resume'),
