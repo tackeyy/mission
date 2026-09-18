@@ -81,6 +81,18 @@ def test_iter1_unset_scope_not_required():
     assert result["next_action"] == "run-reviewers"
 
 
+def test_iter1_keeps_full_reviewers_even_when_scope_is_false():
+    """iteration 1 は flag の値に関わらず reviewer を減らさない.
+
+    削減は「前 iteration の指摘を直しただけ」という前提に立つもので、
+    iteration 1 にはその前提が無い (#240)。この行が無いと、`iteration >= 2`
+    の条件を外す変異が表を素通りし、iteration 1 で 3 名が 2 名に落ちる。
+    """
+    result = MS._derive_next_action(_data(iteration=1, critic_has_new_scope=False))
+    assert result["next_action"] == "run-reviewers"
+    assert result["details"]["reviewer_count"] == 3
+
+
 def test_explicit_none_treated_as_unset():
     """critic_has_new_scope=null (明示 None) も未設定として強制対象."""
     result = MS._derive_next_action(_data(iteration=2, critic_has_new_scope=None))

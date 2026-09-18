@@ -16,6 +16,8 @@ Contract under test:
 """
 
 import json
+
+import pytest
 from pathlib import Path
 
 from mission_persistence.authoritative_reader import read_authoritative_snapshot
@@ -64,3 +66,32 @@ def test_init_simple_still_routes_without_state(run_cli, tmp_path):
     out = json.loads(r.stdout)
     assert out["route"] == "goal"
     assert _sessions(tmp_path) == []
+
+
+# The `set` path has its own conjunction (`route_simple_to_goal` in
+# mission_application/lifecycle.py), separate from `_derive_next_action`.  A
+# table over the latter does not constrain it: removing an exclusion from the
+# `set` side leaves routing and lifecycle tests green.  These rows are the
+# exclusions themselves, kept as one table rather than five near-identical
+# tests.
+@pytest.mark.parametrize(
+    "label,init_args,set_value",
+    [
+        ("issue-ref", ("--issue-ref", "418"), "complexity=Simple"),
+        ("force-mission", ("--force-mission",), "complexity=Simple"),
+        ("checker-role", ("--role", "checker"), "complexity=Simple"),
+        ("user-review-tier", ("--review-tier", "light"), "complexity=Simple"),
+        ("not-simple", (), "complexity=Standard"),
+    ],
+)
+def test_the_set_path_keeps_the_loop_for_every_exclusion(run_cli, tmp_path, label, init_args, set_value):
+    """Each row is an authority the route must not discard.
+
+    `checker-role` and `issue-ref` carry governance, `force-mission` is an
+    explicit request for the mission loop, `user-review-tier` is a user
+    selection, and `not-simple` is outside the route entirely.
+    """
+    run_cli("init", "typo を1箇所直す", *init_args, cwd=tmp_path, check=True)
+    result = run_cli("set", set_value, cwd=tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert _state(tmp_path)["loop_active"] is True, label

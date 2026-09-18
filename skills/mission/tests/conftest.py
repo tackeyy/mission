@@ -29,6 +29,11 @@ def scanner_contract():
             "docs/zzsynthetic-redesign-analysis.md",
             "project_root=/dev/zzsynthetic 不存在",
             "ZZSYNTHETIC ラン",
+            # The banned token in the *middle* of a delimited chunk, which is
+            # the shape the real contamination took (a timestamped filename).
+            # Without it a scanner that only inspects the first element after
+            # splitting passes this contract and misses that shape.
+            "2026-06-18T06-21-35-Ztry-mission_zzsynthetic_redesign.md",
         )
         ignored = (
             "zzsyntheticality",
