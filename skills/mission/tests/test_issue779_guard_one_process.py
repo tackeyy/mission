@@ -7,8 +7,11 @@ import importlib.util
 import types
 import json
 import os
+import re
+import shlex
 import subprocess
 import sys
+import time
 from typing import NamedTuple
 from pathlib import Path
 
@@ -164,20 +167,80 @@ def _counting_python(tmp_path):
     return shim_dir, log
 
 
-def _run_hook(tmp_path, state_dir, *, stop_hook_active=False, env_overrides=None):
+def _session_members(sid):
+    """Every live process in session `sid`, whatever its process group."""
+    listing = subprocess.run(["ps", "-A", "-o", "pid="],
+                             capture_output=True, text=True, check=True)
+    members = []
+    for word in listing.stdout.split():
+        pid = int(word)
+        try:
+            if os.getsid(pid) == sid:
+                members.append(pid)
+        except (ProcessLookupError, PermissionError):
+            continue
+    return members
+
+
+def _wait_for_session(sid, *, timeout=60.0):
+    """Block until no process is left in the hook's session.
+
+    Waiting for the hook process alone reads the log while its children are
+    still on their way to the CLI, and three narrower waits were each walked
+    around in review:
+
+    - `wait` inside the hook waits for direct jobs only, so
+      `( ( ... & ) & )` hands the work to a grandchild and returns (round 3)
+    - the hook's *process group* holds those, but `set -m` turns job control
+      on and puts each background job in a group of its own (round 4)
+
+    A session holds all of them.  It is inherited across `fork` and survives
+    the death of every intermediate process, and `set -m` does not change it.
+    `start_new_session` makes the hook a session leader, so the id is its pid
+    and no unrelated process can satisfy the wait.
+
+    A descendant that calls `setsid` leaves the session and is not waited
+    for.  Nothing here does, and catching that belongs to the recorder rather
+    than the harness -- which is where #779 put it, and why the recorder sits
+    in the CLI instead of at `python3`.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        members = _session_members(sid)
+        if not members:
+            return
+        if time.monotonic() > deadline:
+            raise AssertionError(
+                f"session {sid} still held {members} after {timeout}s")
+        time.sleep(0.02)
+
+
+def _run_hook(tmp_path, state_dir, *, stop_hook_active=False, env_overrides=None,
+              hook=HOOK):
     shim_dir, log = _counting_python(tmp_path)
     env = {**os.environ, **_GUARD_ENV, "PATH": f"{shim_dir}{os.pathsep}{os.environ['PATH']}",
            "MISSION_STATE_PY": str(STATE_PY)}
     _apply_env(env, env_overrides)
-    result = subprocess.run(
-        ["bash", str(HOOK)],
-        input=json.dumps({"stop_hook_active": stop_hook_active, "cwd": str(state_dir)}),
-        capture_output=True,
+    # `start_new_session` gives the hook a session of its own, so its id is
+    # the hook's pid and no unrelated process can satisfy the wait below.
+    with subprocess.Popen(
+        ["bash", str(hook)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         env=env,
         cwd=str(state_dir),
-        timeout=120,
-    )
+        start_new_session=True,
+    ) as process:
+        sid = process.pid
+        stdout, stderr = process.communicate(
+            json.dumps({"stop_hook_active": stop_hook_active, "cwd": str(state_dir)}),
+            timeout=120,
+        )
+    result = subprocess.CompletedProcess(
+        process.args, process.returncode, stdout, stderr)
+    _wait_for_session(sid)
     launches = [
         line for line in log.read_text(encoding="utf-8").splitlines()
         if "mission-state.py" in line
@@ -590,3 +653,612 @@ def test_the_limit_the_hook_uses_is_a_backstop_not_a_ceiling():
     assert module._GUARD_APPLICATION_LIMIT > 1000, (
         "the limit the hook uses still rejects a long run of real progress"
     )
+
+
+# --- #796: the count is measured by running, not by reading the shell --------
+#
+# The static check in `test_issue615_guard_decision.py` reads the hook and
+# decides whether it can reach the CLI more than once.  Five review rounds
+# found five shells that it read as harmless and that ran the wrapper anyway
+# -- a quoted fragment of a name, a call through a variable, an alias, `set --`
+# before a forward, a call inside `$( )`.  Each fix moved the reading closer to
+# a shell lexer, and the next round found the next one (#796).
+#
+# Running the hook settles it without reading anything: the shim below records
+# every `mission-state.py` launch, so the count and the subcommand are
+# observed rather than inferred.  The static check keeps what only it can do --
+# refusing a shape before anyone runs it, and the policy rules (no arithmetic,
+# no numeric thresholds, no dynamic execution) -- and stops being the thing
+# that has to understand bash.
+
+
+def _recording_state_py(tmp_path):
+    """A `mission-state.py` that records its own argv, then runs the real one.
+
+    Recording at `python3` instead was the first shape of this measurement, and
+    it observed **the name of an interpreter on PATH**, not the CLI: a second
+    call written as `python3.14 "$MISSION_STATE_PY" stop-verdict` reached the
+    CLI, returned a real verdict, and was not recorded (#796 review round 6).
+    Any other spelling -- `python3.13`, a venv path, `exec` -- would do the
+    same, and enumerating them is the same losing game as reading the shell.
+
+    Recording at the entry point ends it: whatever runs this file is counted,
+    because the count is taken inside it.
+    """
+    log = tmp_path / "invocations.log"
+    shim = tmp_path / "mission-state.py"
+    shim.write_text(
+        "import json, runpy, sys\n"
+        # One JSON line per invocation, argv and all.  Writing the arguments
+        # as text loses the invocation that has none: an empty line and no
+        # line read the same, so a second process started without arguments
+        # disappeared from the count (#796 cross-model review round 1).
+        f"open({str(log)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        f"sys.argv[0] = {str(STATE_PY)!r}\n"
+        f"runpy.run_path({str(STATE_PY)!r}, run_name='__main__')\n",
+        encoding="utf-8",
+    )
+    return shim, log
+
+
+def _invocations(log):
+    """The argv of each recorded invocation, one entry per process."""
+    if not log.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in log.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _subcommands(log):
+    """The first argument of each recorded invocation.
+
+    An invocation with no arguments is reported as ``""`` rather than dropped:
+    the count of processes is what #779 is about, and a process that ran
+    without arguments still ran.
+    """
+    return [argv[0] if argv else "" for argv in _invocations(log)]
+
+
+def _hook_with(tmp_path, inserted):
+    """A copy of the hook with `inserted` added after its last `fi`."""
+    source = HOOK.read_text(encoding="utf-8")
+    marker = "\nfi\n"
+    at = source.rindex(marker) + len(marker)
+    path = tmp_path / "hook-under-test.sh"
+    path.write_text(source[:at] + inserted + "\n" + source[at:], encoding="utf-8")
+    return path
+
+
+def _state_tree(root):
+    """Every node under the state directory: kind, mode, and what it holds.
+
+    Reading only the bytes of regular files called three real changes
+    "unchanged" (#796 review round 7): a `chmod`, a new empty directory, and a
+    symlink put in place of a file with the same contents behind it.  The last
+    one matters most -- it points later writes outside `.mission-state` while
+    every byte read through it stays the same.
+
+    `lstat` is what makes the symlink visible: `read_bytes` follows it and sees
+    the target, so the swap is invisible to anything that reads through.
+    """
+    tree = {}
+    for path in sorted(root.rglob("*")):
+        status = path.lstat()
+        name = str(path.relative_to(root))
+        if path.is_symlink():
+            tree[name] = ("symlink", status.st_mode, os.readlink(path))
+        elif path.is_dir():
+            tree[name] = ("dir", status.st_mode, None)
+        else:
+            tree[name] = ("file", status.st_mode, path.read_bytes())
+    return tree
+
+
+def _run_shapes_hook(tmp_path, inserted, *, state=None):
+    """Run a hook and return (subcommands, state left alone, hook exit code).
+
+    The second value is a separate observation, because the first depends on
+    the CLI being reached through `$MISSION_STATE_PY`.  A hook that wrote the
+    state directly would leave the count at one while changing what the count
+    exists to protect.
+
+    The third tells "the shape ran and was not detected" from "the shape did
+    not run".  Those look the same from the first two: an inserted line that
+    dies takes the count and the state with it, and the row then passes -- or
+    fails naming the wrong symptom.  CI showed both, when two shapes named a
+    `python3.14` and a `$TMPDIR` that exist here and not there.
+
+    `state` picks which guard path the hook takes.  Leaving it out gives an
+    empty `sessions/`, which settles to `no-eligible-session` -- and a hook
+    that calls the CLI again *depending on the finding* is invisible there
+    (#796 checker round 1).  That is where the loop of #779 lived, so it has
+    to be reachable here.
+    """
+    root = tmp_path / "repo"
+    (root / ".mission-state" / "sessions").mkdir(parents=True)
+    if state is not None:
+        _write_state(root, **state)
+    # Seeded so the comparison can see a file *change*, not only appear.
+    # Comparing the names alone would pass a hook that rewrote what is already
+    # there, which is the more likely way for this to go wrong.
+    (root / ".mission-state" / "marker").write_text("seeded\n", encoding="utf-8")
+    # A symlink is seeded too, so the comparison can be asked about a change
+    # that keeps the kind and the mode and moves only the target.
+    (root / ".mission-state" / "link").symlink_to("marker")
+    before = _state_tree(root)
+    shim, log = _recording_state_py(tmp_path)
+    hook = _hook_with(tmp_path, inserted)
+    result, _launches = _run_hook(
+        tmp_path, root, hook=hook,
+        env_overrides={
+            "MISSION_STATE_PY": str(shim),
+            # Named here rather than written into the shapes: `python3.14` and
+            # `$TMPDIR` exist on the machine this was written on and not on the
+            # CI runner, so shapes that used them ran nothing there and the
+            # rows passed for the wrong reason.  Both are properties of the
+            # environment, so the environment supplies them.
+            "MISSION_TEST_PYTHON": sys.executable,
+            "MISSION_TEST_OUTSIDE": str(tmp_path / "outside-target"),
+        },
+    )
+    return _subcommands(log), _state_tree(root) == before, result.returncode
+
+
+_LEASE_ID_RE = re.compile(rb'"lease_id":\s*"[0-9a-f]+"')
+
+
+def _tree_difference(left, right):
+    """What the two trees disagree about, named entry by entry."""
+    return sorted(
+        (name, left.get(name), right.get(name))
+        for name in set(left) | set(right)
+        if left.get(name) != right.get(name)
+    )
+
+
+def _normalised_state_tree(root):
+    """The state tree with the values that name *this run* folded away.
+
+    Two runs live under different temporary roots and take a fresh lease, so
+    comparing the bytes as they stand reports a difference for every run.
+    Those two are the only values that differ by construction -- measured by
+    running the same path twice and reading what disagreed -- and everything
+    else is compared as it is, because noticing what the hook did is the point.
+
+    Folding away more than that would hide the writes this is looking for, so
+    the substitutions stay exactly this narrow.
+    """
+    tree = _state_tree(root)
+    normalised = {}
+    for name, (kind, mode, payload) in tree.items():
+        if kind == "file" and isinstance(payload, bytes):
+            payload = payload.replace(str(root).encode("utf-8"), b"<root>")
+            payload = _LEASE_ID_RE.sub(b'"lease_id": "<lease>"', payload)
+        elif kind == "symlink" and isinstance(payload, str):
+            payload = payload.replace(str(root), "<root>")
+        normalised[name] = (kind, mode, payload)
+    return normalised
+
+
+def _tree_after_shapes_hook(tmp_path, inserted, *, state=None):
+    """Run a hook and return the state tree it leaves behind.
+
+    The comparison in ``_run_shapes_hook`` answers "did anything change", which
+    only decides anything where nothing is supposed to: on a path whose verdict
+    writes -- ``stale`` resolves to a halt -- everything changes and the answer
+    carries nothing.  A write the hook does *itself* hides in that change
+    (#796 cross-model review round 1), and a hook that writes directly keeps
+    its process count at one, so the count does not see it either.
+
+    Returning the tree lets a path be compared against the same path without
+    the inserted line: what ``stop-verdict`` writes on its own is the baseline,
+    and anything beyond it came from the hook.
+    """
+    root = tmp_path / "repo"
+    (root / ".mission-state" / "sessions").mkdir(parents=True)
+    if state is not None:
+        _write_state(root, **state)
+    shim, log = _recording_state_py(tmp_path)
+    hook = _hook_with(tmp_path, inserted)
+    result, _launches = _run_hook(
+        tmp_path, root, hook=hook,
+        env_overrides={
+            "MISSION_STATE_PY": str(shim),
+            "MISSION_TEST_PYTHON": sys.executable,
+            "MISSION_TEST_OUTSIDE": str(tmp_path / "outside-target"),
+        },
+    )
+    return _normalised_state_tree(root), _subcommands(log), result.returncode
+
+
+def test_a_missing_log_reads_as_no_calls_not_as_an_error(tmp_path):
+    """Whether the CLI ran at all has to be answerable.
+
+    The log only exists once something has written to it, so "nothing ran" and
+    "the recorder is not there" reach the parsing the same way.  Returning an
+    empty list keeps the caller's assertion meaningful -- the control expects
+    exactly `["stop-verdict"]`, so an empty result fails it rather than
+    slipping through as "no violations found".
+    """
+    assert _subcommands(tmp_path / "absent.log") == []
+    assert _invocations(tmp_path / "absent.log") == []
+
+    log = tmp_path / "invocations.log"
+    log.write_text(
+        '["stop-verdict", "--hook-input", "-", "--json"]\n[]\n["resume"]\n',
+        encoding="utf-8",
+    )
+
+    # The middle entry is a process started with no arguments.  It has to
+    # count: the claim of #779 is about how many processes run, and reading
+    # the log as text dropped that one silently (cross-model review round 1).
+    assert _subcommands(log) == ["stop-verdict", "", "resume"]
+    assert len(_invocations(log)) == 3
+
+
+def test_the_hook_names_the_cli_only_through_the_variable():
+    """The measurement records what goes through `$MISSION_STATE_PY`.
+
+    That is a real limit: a call written against the file's own path would run
+    the CLI without passing the recorder, and the count would stay at one
+    (#796 review round 7).  Rather than chase it at run time -- the same losing
+    game as enumerating interpreter names -- the shape is forbidden outright.
+
+    This is a string check, not a reading of the shell: the name may appear
+    only where the variable gets its default.  Whatever a future hook does
+    with the CLI, it has to go through the variable to name it at all, and
+    then the recorder sees it.
+    """
+    naming = [
+        line for line in HOOK.read_text(encoding="utf-8").splitlines()
+        if "mission-state.py" in line and not line.lstrip().startswith("#")
+    ]
+
+    assert naming == [
+        'MISSION_STATE_PY="${MISSION_STATE_PY:-$SCRIPT_DIR/../skills/mission/bin/'
+        'mission-state.py}"'
+    ], naming
+
+
+def test_running_the_hook_shows_one_call_and_which_one(tmp_path):
+    """The guarantee, measured: one launch, and it asks for `stop-verdict`."""
+    subcommands, untouched, code = _run_shapes_hook(tmp_path, "")
+
+    assert code == 0, code
+    assert subcommands == ["stop-verdict"]
+    assert untouched, "the guard changed the state it only had to read"
+
+
+# Each shape was run under bash with a stub wrapper before being listed here:
+# all five actually reach the CLI, which is why the static check reading them
+# as harmless mattered.  They are kept as the demonstration that running the
+# hook detects what reading it did not -- a measurement nobody has shown to
+# separate the two cases is not yet an instrument.
+_BYPASS_SHAPES = {
+    "a name containing a hyphen":
+        'function _q-x { python3 "$MISSION_STATE_PY" "$@"; }\n_q-x resume',
+    "a call whose name is quoted":
+        "'_mission_state_bounded' resume",
+    "a name quoted in the middle":
+        "_mission_state_'bounded' resume",
+    "a call through a variable":
+        '_q=_mission_state_bounded\n"$_q" resume',
+    "a call through an alias":
+        "shopt -s expand_aliases\nalias _al=_mission_state_bounded\n_al resume",
+    "positional parameters replaced before forwarding":
+        'set -- resume\n_mission_state_bounded "$@"',
+    "a call inside a command substitution":
+        "x=$(_mission_state_bounded resume)",
+    "a call inside backticks":
+        "x=`_mission_state_bounded resume`",
+    "an operator inside a quoted substitution":
+        'x="$(true;_mission_state_bounded resume)"',
+    "a call after a semicolon with no space":
+        "true;_mission_state_bounded resume",
+    "a brace inside a quoted string before the call":
+        'printf "%s" "(";_mission_state_bounded resume',
+    # Recording at `python3` missed both of these: the first names another
+    # interpreter, the second replaces the process.  Neither is exotic, and
+    # enumerating interpreter names would be the same losing game as reading
+    # the shell -- which is why the recorder sits in the CLI instead.
+    "a second call through another interpreter":
+        '_state=$MISSION_STATE_PY\n'
+        'printf \'%s\' "$INPUT" | "$MISSION_TEST_PYTHON" "$_state" stop-verdict'
+        ' --hook-input - --json >/dev/null',
+    "a call that replaces the process":
+        '( exec "$MISSION_TEST_PYTHON" "$MISSION_STATE_PY" resume'
+        ' >/dev/null 2>&1 ) || true',
+    # Reading the log as text dropped this one: an invocation with no
+    # arguments wrote an empty line, and an empty line and no line are the
+    # same text (cross-model review round 1).  The process still ran.
+    "a second call with no arguments at all":
+        '_state=$MISSION_STATE_PY\n'
+        '"$MISSION_TEST_PYTHON" "$_state" >/dev/null 2>&1 || true',
+    # Measuring the moment the hook returns missed this one: the second call
+    # is launched into the background and reaches the CLI afterwards
+    # (cross-model review round 2).  The harness waits for the hook's process
+    # group, so the log is read after they have run.
+    "a second call launched into the background":
+        '_q=_mission_state_bounded\n'
+        '( sleep 1; "$_q" resume ) >/dev/null 2>&1 &',
+    # Waiting for the hook's own jobs was not enough: the outer subshell
+    # starts the inner one and exits, so `wait` returns with the work still
+    # ahead of it (cross-model review round 3).  The session outlives both.
+    "a second call handed to a grandchild":
+        '_q=_mission_state_bounded\n'
+        '( ( sleep 1; "$_q" resume ) >/dev/null 2>&1 & ) &',
+    # Waiting for the hook's process group was not enough either: job
+    # control puts each background job in a group of its own, so the group
+    # the hook started with empties while the job runs (round 4).  The
+    # session is the same one, which is what the harness waits for.
+    "a second call backgrounded with job control on":
+        'set -m\n'
+        '_q=_mission_state_bounded\n'
+        '( sleep 1; "$_q" resume ) >/dev/null 2>&1 &',
+}
+
+
+@pytest.mark.parametrize("label", sorted(_BYPASS_SHAPES))
+def test_running_the_hook_catches_what_reading_it_missed(tmp_path, label):
+    subcommands, _untouched, code = _run_shapes_hook(tmp_path, _BYPASS_SHAPES[label])
+
+    # A shape that failed to run takes the count with it, and the row would
+    # then fail naming the measurement instead of the shape.
+    assert code == 0, (label, code)
+
+    # `!= ["stop-verdict"]` would also pass on an empty list, which is what a
+    # broken harness produces: the shape would look detected because nothing
+    # ran at all.  Name what the shape does instead.
+    # `!= ["stop-verdict"]` alone also passes on an empty list, which is what a
+    # broken recorder produces -- every row would then report success for the
+    # wrong reason.  These two say it directly: the hook's own call happened,
+    # and the shape added another.  The slice is empty-safe on purpose.
+    assert subcommands[:1] == ["stop-verdict"], (label, subcommands)
+    assert len(subcommands) > 1, (label, subcommands)
+
+
+# Changes that leave every byte readable through the tree the same.  Reading
+# only the contents of regular files called all three "unchanged".
+_SILENT_STATE_CHANGES = {
+    "a mode change": 'chmod 0444 "$PWD/.mission-state/marker"',
+    "a new empty directory": 'mkdir -p "$PWD/.mission-state/created-empty"',
+    # The one with teeth: later writes through this name land outside the
+    # state directory, while anything that reads through it sees what it
+    # always saw.
+    # Same kind, same mode: only the target moves.  Nothing but reading the
+    # target tells these apart, and where the target points decides where a
+    # later write lands.
+    "a symlink repointed outside the state directory":
+        'ln -sfn "$MISSION_TEST_OUTSIDE" "$PWD/.mission-state/link"',
+    # `stat` follows the link and raises on this one, which would end the test
+    # in an error instead of a report.  `lstat` describes the link itself.
+    "a dangling symlink":
+        'ln -s /nonexistent/target "$PWD/.mission-state/dangling"',
+    "a symlink in place of a file with the same contents":
+        'cp "$PWD/.mission-state/marker" "$MISSION_TEST_OUTSIDE"'
+        ' && rm "$PWD/.mission-state/marker"'
+        ' && ln -s "$MISSION_TEST_OUTSIDE" "$PWD/.mission-state/marker"',
+}
+
+
+@pytest.mark.parametrize("label", sorted(_SILENT_STATE_CHANGES))
+def test_a_change_that_reads_the_same_is_still_a_change(tmp_path, label):
+    subcommands, untouched, code = _run_shapes_hook(
+        tmp_path, _SILENT_STATE_CHANGES[label]
+    )
+
+    assert code == 0, (label, code)
+    assert subcommands == ["stop-verdict"], (label, subcommands)
+    assert not untouched, label
+
+
+def test_rewriting_an_existing_state_file_is_seen(tmp_path):
+    """Names are not enough; the comparison has to look at the bytes.
+
+    A file that appears is easy to notice.  A file that is already there and
+    comes back different is the shape a guard would actually produce, and
+    comparing the listing alone would call it unchanged.
+    """
+    subcommands, untouched, code = _run_shapes_hook(
+        tmp_path, 'printf \'rewritten\' > "$PWD/.mission-state/marker"'
+    )
+
+    assert code == 0, code
+    assert subcommands == ["stop-verdict"], subcommands
+    assert not untouched
+
+
+def test_writing_the_state_directly_is_seen_even_though_the_count_is_one(tmp_path):
+    """The count protects the state; something has to watch the state itself.
+
+    A hook that wrote a session file would reach the CLI once and pass every
+    assertion about the count, while doing the thing the count exists to
+    prevent.  Counting calls and comparing the state are two observations, and
+    this shape separates them: the first stays at one, the second changes.
+    """
+    subcommands, untouched, code = _run_shapes_hook(
+        tmp_path,
+        'printf \'{"mission":"x"}\' > "$PWD/.mission-state/sessions/cc-injected.json"',
+    )
+
+    assert code == 0, code
+    assert subcommands == ["stop-verdict"], subcommands
+    assert not untouched
+
+
+def test_a_path_built_from_pieces_is_not_detected_and_that_is_where_this_stops(
+    tmp_path,
+):
+    """The known limit, pinned with evidence rather than left to be rediscovered.
+
+    A hook that assembles the CLI's path out of fragments reaches it without
+    naming it and without passing the recorder:
+
+        _dir=<repo>/skills/mission/bin
+        _base=mission ; _suf=-state.py
+        python3 "$_dir/$_base$_suf" stop-verdict ...
+
+    All three observations pass while a second `stop-verdict` really runs.
+    Nothing here can close it: a test in the same filesystem cannot stop a hook
+    from addressing the file directly, and chasing the spellings (`printf`,
+    `basename`, an encoding) is the losing game twice over -- rounds 1-5 chased
+    ways of writing a call, rounds 6-8 chased ways of hiding from the
+    measurement.
+
+    **This is out of scope on purpose.**  What these tests defend against is
+    the loop of #779 coming back by accident: an edit that calls the CLI again
+    without meaning to.  Every shape of that -- eleven reported ones, other
+    interpreters, `exec`, writing the state directly -- is caught.  A change
+    written to evade the instrument is a matter for review, not for the
+    instrument.
+
+    Closing it would need process-level observation (what actually got
+    spawned), which is a different mechanism with different costs on macOS and
+    on CI.  **If that arrives, this test fails -- delete it and say so.**
+    """
+    directory = STATE_PY.parent
+    # The witness.  Without it the test passes just as well against a path
+    # that does not exist -- and then it pins nothing, while reading as though
+    # it had measured something.  It sits outside the state tree, so it does
+    # not disturb the comparison.
+    witness = tmp_path / "second-call-really-ran"
+    # Quoted: pytest's tmp path can contain a space, and an unquoted witness
+    # then lands somewhere else -- the test fails, but naming the wrong thing.
+    subcommands, untouched, code = _run_shapes_hook(
+        tmp_path,
+        f"_dir={shlex.quote(str(directory))}\n_base=mission\n_suf=-state.py\n"
+        'printf \'%s\' "$INPUT" | "$MISSION_TEST_PYTHON" "$_dir/$_base$_suf"'
+        " stop-verdict --hook-input - --json >/dev/null"
+        f" && : > {shlex.quote(str(witness))}",
+    )
+
+    assert code == 0, code
+    assert witness.exists(), "the second call did not run; this pins nothing"
+    assert subcommands == ["stop-verdict"], subcommands
+    assert untouched
+
+
+# The loop of #779 was not an unconditional second call.  It ran `mark-halt`
+# *because* the decision said stale, then decided again from the receipt.  A
+# shape placed behind that condition is invisible on an empty `sessions/`,
+# which is the only state the rows above use -- so the branch is exercised
+# here.  This is not an adversarial shape: "call again when the finding says
+# so" is the shape the change removed.
+_STALE = {"updated_at": "2020-01-01T00:00:00Z"}
+
+_BRANCHING_SHAPE = (
+    'if [ "$(printf \'%s\' "$GUARD_DECISION" | jq -r \'.finding\')" = "stale" ]; then\n'
+    '  ( exec "$MISSION_TEST_PYTHON" "$MISSION_STATE_PY" mark-halt'
+    ' --reason regression ) >/dev/null 2>&1 || true\n'
+    "fi"
+)
+
+
+def test_a_shape_that_dies_is_reported_as_dying(tmp_path):
+    """The third observation, checked on something that actually fails.
+
+    Every other row expects `code == 0`, so none of them shows that the code
+    is real rather than a constant.  Here the inserted line fails under the
+    hook's `set -e`, and the run has to say so -- otherwise "the shape ran and
+    was not detected" and "the shape did not run" stay indistinguishable, which
+    is how four rows passed on CI while running nothing at all.
+    """
+    subcommands, _untouched, code = _run_shapes_hook(tmp_path, "false")
+
+    assert code != 0, code
+    assert subcommands == ["stop-verdict"], subcommands
+
+
+def test_the_stale_path_also_costs_one_call(tmp_path):
+    """The control for the branch: deciding *and applying* is still one process.
+
+    `stale` is the path that used to spend a second process, so the count on
+    it is the claim of #779, not a repetition of the empty case.  The state
+    does change here -- the halt is what the decision resolves to -- so only
+    the count is asserted.
+    """
+    subcommands, _untouched, code = _run_shapes_hook(tmp_path, "", state=_STALE)
+
+    assert code == 0, code
+    assert subcommands == ["stop-verdict"], subcommands
+
+
+@pytest.mark.parametrize("state", (None, _STALE), ids=("empty", "stale"))
+def test_a_direct_write_is_caught_on_every_path_not_only_the_quiet_one(tmp_path, state):
+    """A hook that writes the state itself, without spending a second process.
+
+    This is the shape the count cannot see: one invocation, no violation to
+    read statically, and on ``stale`` the verdict writes anyway, so "did the
+    tree change" is true either way.  Comparing against what the same path
+    writes *without* the inserted line is what separates them.
+    """
+    baseline, base_subcommands, base_code = _tree_after_shapes_hook(
+        tmp_path / "baseline", "", state=state
+    )
+    written, subcommands, code = _tree_after_shapes_hook(
+        tmp_path / "written",
+        # The hook runs with the repository as its working directory, which is
+        # how it finds the state in the first place.
+        'printf %s x > .mission-state/direct-write',
+        state=state,
+    )
+
+    assert (base_code, code) == (0, 0), (base_code, code)
+    # The count says nothing here -- that is the point of this row.
+    assert base_subcommands == subcommands == ["stop-verdict"], (base_subcommands, subcommands)
+
+    # Compared as whole entries, not as names: a hook that rewrote a file that
+    # is already there, changed a mode, or removed something would leave the
+    # set of names untouched (cross-model review round 2).
+    added = {name: written[name] for name in set(written) - set(baseline)}
+    assert set(added) == {".mission-state/direct-write"}, sorted(added)
+    remainder = {name: entry for name, entry in written.items() if name in baseline}
+    assert remainder == baseline, _tree_difference(baseline, remainder)
+
+
+def test_the_baseline_tree_is_the_same_twice_so_the_comparison_means_something(tmp_path):
+    """Two runs of the same path have to agree, or the row above proves nothing.
+
+    A verdict that writes a timestamp, a pid or a session id would make every
+    comparison report a difference, and the row above would pass whatever the
+    hook did.
+    """
+    first, _first_subcommands, first_code = _tree_after_shapes_hook(
+        tmp_path / "first", "", state=_STALE
+    )
+    second, _second_subcommands, second_code = _tree_after_shapes_hook(
+        tmp_path / "second", "", state=_STALE
+    )
+
+    assert (first_code, second_code) == (0, 0), (first_code, second_code)
+    assert first == second, _tree_difference(first, second)
+
+
+def test_a_second_call_behind_the_finding_is_caught(tmp_path):
+    """And the same state shows the second call that the empty one hides."""
+    empty, _untouched, empty_code = _run_shapes_hook(tmp_path / "empty", _BRANCHING_SHAPE)
+    stale, _changed, stale_code = _run_shapes_hook(
+        tmp_path / "stale", _BRANCHING_SHAPE, state=_STALE
+    )
+
+    assert (empty_code, stale_code) == (0, 0), (empty_code, stale_code)
+    # Named together on purpose: the first line is why the second is needed.
+    assert empty == ["stop-verdict"], empty
+    assert stale == ["stop-verdict", "mark-halt"], stale
+
+
+# The one shape that looked like the others and is not.  `\\ ` escapes the
+# space, so bash looks for a command named `_mission_state_bounded resume`,
+# finds none, and the wrapper is never entered.  The static check let it
+# through, and that was correct: there is nothing to catch.  Without this
+# record the next reader spends the same time re-deriving it.
+def test_an_escaped_space_reaches_nothing(tmp_path):
+    subcommands, untouched, code = _run_shapes_hook(
+        tmp_path, "_mission_state_bounded\\ resume"
+    )
+
+    assert subcommands == ["stop-verdict"]
+    assert untouched
