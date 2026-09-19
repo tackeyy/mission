@@ -7,6 +7,7 @@ import importlib.util
 import types
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -661,9 +662,25 @@ def _subcommands(log):
     return [argv[0] if argv else "" for argv in _invocations(log)]
 
 
+_WAIT_FOR_CHILDREN = "trap 'wait >/dev/null 2>&1 || true' EXIT\n"
+
+
 def _hook_with(tmp_path, inserted):
-    """A copy of the hook with `inserted` added after its last `fi`."""
+    """A copy of the hook with `inserted` added after its last `fi`.
+
+    The copy also waits for its background jobs before it exits.  Without
+    that, `subprocess.run` returns when the hook's own process ends and the
+    log is read while a child is still on its way to the CLI -- measured at
+    0.00 s for a shape whose second call arrived 1.5 s later (cross-model
+    review round 2).  The row then reports one invocation and passes, for a
+    shape that ran twice.  `wait` is hung on `EXIT` rather than appended,
+    because the hook leaves through `exit 0` in several places and never
+    reaches its own last line.
+    """
     source = HOOK.read_text(encoding="utf-8")
+    pipefail = "set -euo pipefail\n"
+    after_pipefail = source.index(pipefail) + len(pipefail)
+    source = source[:after_pipefail] + _WAIT_FOR_CHILDREN + source[after_pipefail:]
     marker = "\nfi\n"
     at = source.rindex(marker) + len(marker)
     path = tmp_path / "hook-under-test.sh"
@@ -746,6 +763,42 @@ def _run_shapes_hook(tmp_path, inserted, *, state=None):
     return _subcommands(log), _state_tree(root) == before, result.returncode
 
 
+_LEASE_ID_RE = re.compile(rb'"lease_id":\s*"[0-9a-f]+"')
+
+
+def _tree_difference(left, right):
+    """What the two trees disagree about, named entry by entry."""
+    return sorted(
+        (name, left.get(name), right.get(name))
+        for name in set(left) | set(right)
+        if left.get(name) != right.get(name)
+    )
+
+
+def _normalised_state_tree(root):
+    """The state tree with the values that name *this run* folded away.
+
+    Two runs live under different temporary roots and take a fresh lease, so
+    comparing the bytes as they stand reports a difference for every run.
+    Those two are the only values that differ by construction -- measured by
+    running the same path twice and reading what disagreed -- and everything
+    else is compared as it is, because noticing what the hook did is the point.
+
+    Folding away more than that would hide the writes this is looking for, so
+    the substitutions stay exactly this narrow.
+    """
+    tree = _state_tree(root)
+    normalised = {}
+    for name, (kind, mode, payload) in tree.items():
+        if kind == "file" and isinstance(payload, bytes):
+            payload = payload.replace(str(root).encode("utf-8"), b"<root>")
+            payload = _LEASE_ID_RE.sub(b'"lease_id": "<lease>"', payload)
+        elif kind == "symlink" and isinstance(payload, str):
+            payload = payload.replace(str(root), "<root>")
+        normalised[name] = (kind, mode, payload)
+    return normalised
+
+
 def _tree_after_shapes_hook(tmp_path, inserted, *, state=None):
     """Run a hook and return the state tree it leaves behind.
 
@@ -774,7 +827,7 @@ def _tree_after_shapes_hook(tmp_path, inserted, *, state=None):
             "MISSION_TEST_OUTSIDE": str(tmp_path / "outside-target"),
         },
     )
-    return _state_tree(root), _subcommands(log), result.returncode
+    return _normalised_state_tree(root), _subcommands(log), result.returncode
 
 
 def test_a_missing_log_reads_as_no_calls_not_as_an_error(tmp_path):
@@ -880,6 +933,13 @@ _BYPASS_SHAPES = {
     "a second call with no arguments at all":
         '_state=$MISSION_STATE_PY\n'
         '"$MISSION_TEST_PYTHON" "$_state" >/dev/null 2>&1 || true',
+    # Measuring the moment the hook returns missed this one: the second call
+    # is launched into the background and reaches the CLI afterwards
+    # (cross-model review round 2).  `_hook_with` waits for children so the
+    # log is read after they have run, not while they are still starting.
+    "a second call launched into the background":
+        '_q=_mission_state_bounded\n'
+        '( sleep 1; "$_q" resume ) >/dev/null 2>&1 &',
 }
 
 
@@ -1091,9 +1151,14 @@ def test_a_direct_write_is_caught_on_every_path_not_only_the_quiet_one(tmp_path,
     assert (base_code, code) == (0, 0), (base_code, code)
     # The count says nothing here -- that is the point of this row.
     assert base_subcommands == subcommands == ["stop-verdict"], (base_subcommands, subcommands)
-    assert set(written) - set(baseline) == {".mission-state/direct-write"}, (
-        sorted(set(written) - set(baseline))
-    )
+
+    # Compared as whole entries, not as names: a hook that rewrote a file that
+    # is already there, changed a mode, or removed something would leave the
+    # set of names untouched (cross-model review round 2).
+    added = {name: written[name] for name in set(written) - set(baseline)}
+    assert set(added) == {".mission-state/direct-write"}, sorted(added)
+    remainder = {name: entry for name, entry in written.items() if name in baseline}
+    assert remainder == baseline, _tree_difference(baseline, remainder)
 
 
 def test_the_baseline_tree_is_the_same_twice_so_the_comparison_means_something(tmp_path):
@@ -1111,7 +1176,7 @@ def test_the_baseline_tree_is_the_same_twice_so_the_comparison_means_something(t
     )
 
     assert (first_code, second_code) == (0, 0), (first_code, second_code)
-    assert set(first) == set(second), (sorted(set(first) ^ set(second)))
+    assert first == second, _tree_difference(first, second)
 
 
 def test_a_second_call_behind_the_finding_is_caught(tmp_path):
