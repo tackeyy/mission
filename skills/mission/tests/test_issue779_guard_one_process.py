@@ -167,32 +167,51 @@ def _counting_python(tmp_path):
     return shim_dir, log
 
 
-def _wait_for_process_group(pgid, *, timeout=60.0):
-    """Block until no process is left in `pgid`.
+def _session_members(sid):
+    """Every live process in session `sid`, whatever its process group."""
+    listing = subprocess.run(["ps", "-A", "-o", "pid="],
+                             capture_output=True, text=True, check=True)
+    members = []
+    for word in listing.stdout.split():
+        pid = int(word)
+        try:
+            if os.getsid(pid) == sid:
+                members.append(pid)
+        except (ProcessLookupError, PermissionError):
+            continue
+    return members
+
+
+def _wait_for_session(sid, *, timeout=60.0):
+    """Block until no process is left in the hook's session.
 
     Waiting for the hook process alone reads the log while its children are
-    still on their way to the CLI.  `wait` inside the hook is not enough
-    either: it waits for direct jobs, and `( ( ... & ) & )` hands the work to
-    a grandchild whose parent exits at once (cross-model review round 3).
+    still on their way to the CLI, and three narrower waits were each walked
+    around in review:
 
-    A process group holds both.  `bash` does not put background jobs in a new
-    group when job control is off, which is the case for a script, so every
-    descendant stays in the group the session started with -- however many
-    subshells deep, and after its own parent is gone.
+    - `wait` inside the hook waits for direct jobs only, so
+      `( ( ... & ) & )` hands the work to a grandchild and returns (round 3)
+    - the hook's *process group* holds those, but `set -m` turns job control
+      on and puts each background job in a group of its own (round 4)
 
-    A descendant that calls `setsid` leaves the group and is not waited for.
-    Nothing in the hook or in the shapes does, and detecting that needs the
-    recorder rather than the harness, which is where #779 already put it.
+    A session holds all of them.  It is inherited across `fork` and survives
+    the death of every intermediate process, and `set -m` does not change it.
+    `start_new_session` makes the hook a session leader, so the id is its pid
+    and no unrelated process can satisfy the wait.
+
+    A descendant that calls `setsid` leaves the session and is not waited
+    for.  Nothing here does, and catching that belongs to the recorder rather
+    than the harness -- which is where #779 put it, and why the recorder sits
+    in the CLI instead of at `python3`.
     """
     deadline = time.monotonic() + timeout
     while True:
-        try:
-            os.killpg(pgid, 0)
-        except ProcessLookupError:
+        members = _session_members(sid)
+        if not members:
             return
         if time.monotonic() > deadline:
             raise AssertionError(
-                f"process group {pgid} still had members after {timeout}s")
+                f"session {sid} still held {members} after {timeout}s")
         time.sleep(0.02)
 
 
@@ -202,8 +221,8 @@ def _run_hook(tmp_path, state_dir, *, stop_hook_active=False, env_overrides=None
     env = {**os.environ, **_GUARD_ENV, "PATH": f"{shim_dir}{os.pathsep}{os.environ['PATH']}",
            "MISSION_STATE_PY": str(STATE_PY)}
     _apply_env(env, env_overrides)
-    # `start_new_session` gives the hook a group of its own, so waiting for
-    # the group cannot be satisfied by unrelated processes.
+    # `start_new_session` gives the hook a session of its own, so its id is
+    # the hook's pid and no unrelated process can satisfy the wait below.
     with subprocess.Popen(
         ["bash", str(hook)],
         stdin=subprocess.PIPE,
@@ -214,14 +233,14 @@ def _run_hook(tmp_path, state_dir, *, stop_hook_active=False, env_overrides=None
         cwd=str(state_dir),
         start_new_session=True,
     ) as process:
-        pgid = process.pid
+        sid = process.pid
         stdout, stderr = process.communicate(
             json.dumps({"stop_hook_active": stop_hook_active, "cwd": str(state_dir)}),
             timeout=120,
         )
     result = subprocess.CompletedProcess(
         process.args, process.returncode, stdout, stderr)
-    _wait_for_process_group(pgid)
+    _wait_for_session(sid)
     launches = [
         line for line in log.read_text(encoding="utf-8").splitlines()
         if "mission-state.py" in line
@@ -967,10 +986,18 @@ _BYPASS_SHAPES = {
         '( sleep 1; "$_q" resume ) >/dev/null 2>&1 &',
     # Waiting for the hook's own jobs was not enough: the outer subshell
     # starts the inner one and exits, so `wait` returns with the work still
-    # ahead of it (cross-model review round 3).  The group outlives both.
+    # ahead of it (cross-model review round 3).  The session outlives both.
     "a second call handed to a grandchild":
         '_q=_mission_state_bounded\n'
         '( ( sleep 1; "$_q" resume ) >/dev/null 2>&1 & ) &',
+    # Waiting for the hook's process group was not enough either: job
+    # control puts each background job in a group of its own, so the group
+    # the hook started with empties while the job runs (round 4).  The
+    # session is the same one, which is what the harness waits for.
+    "a second call backgrounded with job control on":
+        'set -m\n'
+        '_q=_mission_state_bounded\n'
+        '( sleep 1; "$_q" resume ) >/dev/null 2>&1 &',
 }
 
 
