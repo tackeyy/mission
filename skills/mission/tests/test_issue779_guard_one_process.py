@@ -11,6 +11,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 from typing import NamedTuple
 from pathlib import Path
 
@@ -166,21 +167,61 @@ def _counting_python(tmp_path):
     return shim_dir, log
 
 
+def _wait_for_process_group(pgid, *, timeout=60.0):
+    """Block until no process is left in `pgid`.
+
+    Waiting for the hook process alone reads the log while its children are
+    still on their way to the CLI.  `wait` inside the hook is not enough
+    either: it waits for direct jobs, and `( ( ... & ) & )` hands the work to
+    a grandchild whose parent exits at once (cross-model review round 3).
+
+    A process group holds both.  `bash` does not put background jobs in a new
+    group when job control is off, which is the case for a script, so every
+    descendant stays in the group the session started with -- however many
+    subshells deep, and after its own parent is gone.
+
+    A descendant that calls `setsid` leaves the group and is not waited for.
+    Nothing in the hook or in the shapes does, and detecting that needs the
+    recorder rather than the harness, which is where #779 already put it.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return
+        if time.monotonic() > deadline:
+            raise AssertionError(
+                f"process group {pgid} still had members after {timeout}s")
+        time.sleep(0.02)
+
+
 def _run_hook(tmp_path, state_dir, *, stop_hook_active=False, env_overrides=None,
               hook=HOOK):
     shim_dir, log = _counting_python(tmp_path)
     env = {**os.environ, **_GUARD_ENV, "PATH": f"{shim_dir}{os.pathsep}{os.environ['PATH']}",
            "MISSION_STATE_PY": str(STATE_PY)}
     _apply_env(env, env_overrides)
-    result = subprocess.run(
+    # `start_new_session` gives the hook a group of its own, so waiting for
+    # the group cannot be satisfied by unrelated processes.
+    with subprocess.Popen(
         ["bash", str(hook)],
-        input=json.dumps({"stop_hook_active": stop_hook_active, "cwd": str(state_dir)}),
-        capture_output=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         env=env,
         cwd=str(state_dir),
-        timeout=120,
-    )
+        start_new_session=True,
+    ) as process:
+        pgid = process.pid
+        stdout, stderr = process.communicate(
+            json.dumps({"stop_hook_active": stop_hook_active, "cwd": str(state_dir)}),
+            timeout=120,
+        )
+    result = subprocess.CompletedProcess(
+        process.args, process.returncode, stdout, stderr)
+    _wait_for_process_group(pgid)
     launches = [
         line for line in log.read_text(encoding="utf-8").splitlines()
         if "mission-state.py" in line
@@ -662,25 +703,9 @@ def _subcommands(log):
     return [argv[0] if argv else "" for argv in _invocations(log)]
 
 
-_WAIT_FOR_CHILDREN = "trap 'wait >/dev/null 2>&1 || true' EXIT\n"
-
-
 def _hook_with(tmp_path, inserted):
-    """A copy of the hook with `inserted` added after its last `fi`.
-
-    The copy also waits for its background jobs before it exits.  Without
-    that, `subprocess.run` returns when the hook's own process ends and the
-    log is read while a child is still on its way to the CLI -- measured at
-    0.00 s for a shape whose second call arrived 1.5 s later (cross-model
-    review round 2).  The row then reports one invocation and passes, for a
-    shape that ran twice.  `wait` is hung on `EXIT` rather than appended,
-    because the hook leaves through `exit 0` in several places and never
-    reaches its own last line.
-    """
+    """A copy of the hook with `inserted` added after its last `fi`."""
     source = HOOK.read_text(encoding="utf-8")
-    pipefail = "set -euo pipefail\n"
-    after_pipefail = source.index(pipefail) + len(pipefail)
-    source = source[:after_pipefail] + _WAIT_FOR_CHILDREN + source[after_pipefail:]
     marker = "\nfi\n"
     at = source.rindex(marker) + len(marker)
     path = tmp_path / "hook-under-test.sh"
@@ -935,11 +960,17 @@ _BYPASS_SHAPES = {
         '"$MISSION_TEST_PYTHON" "$_state" >/dev/null 2>&1 || true',
     # Measuring the moment the hook returns missed this one: the second call
     # is launched into the background and reaches the CLI afterwards
-    # (cross-model review round 2).  `_hook_with` waits for children so the
-    # log is read after they have run, not while they are still starting.
+    # (cross-model review round 2).  The harness waits for the hook's process
+    # group, so the log is read after they have run.
     "a second call launched into the background":
         '_q=_mission_state_bounded\n'
         '( sleep 1; "$_q" resume ) >/dev/null 2>&1 &',
+    # Waiting for the hook's own jobs was not enough: the outer subshell
+    # starts the inner one and exits, so `wait` returns with the work still
+    # ahead of it (cross-model review round 3).  The group outlives both.
+    "a second call handed to a grandchild":
+        '_q=_mission_state_bounded\n'
+        '( ( sleep 1; "$_q" resume ) >/dev/null 2>&1 & ) &',
 }
 
 
