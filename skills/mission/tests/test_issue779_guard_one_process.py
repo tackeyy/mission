@@ -627,8 +627,12 @@ def _recording_state_py(tmp_path):
     log = tmp_path / "invocations.log"
     shim = tmp_path / "mission-state.py"
     shim.write_text(
-        "import runpy, sys\n"
-        f"open({str(log)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+        "import json, runpy, sys\n"
+        # One JSON line per invocation, argv and all.  Writing the arguments
+        # as text loses the invocation that has none: an empty line and no
+        # line read the same, so a second process started without arguments
+        # disappeared from the count (#796 cross-model review round 1).
+        f"open({str(log)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
         f"sys.argv[0] = {str(STATE_PY)!r}\n"
         f"runpy.run_path({str(STATE_PY)!r}, run_name='__main__')\n",
         encoding="utf-8",
@@ -636,15 +640,25 @@ def _recording_state_py(tmp_path):
     return shim, log
 
 
-def _subcommands(log):
-    """The first argument of each recorded invocation."""
+def _invocations(log):
+    """The argv of each recorded invocation, one entry per process."""
     if not log.exists():
         return []
     return [
-        line.split()[0]
+        json.loads(line)
         for line in log.read_text(encoding="utf-8").splitlines()
-        if line.split()
+        if line.strip()
     ]
+
+
+def _subcommands(log):
+    """The first argument of each recorded invocation.
+
+    An invocation with no arguments is reported as ``""`` rather than dropped:
+    the count of processes is what #779 is about, and a process that ran
+    without arguments still ran.
+    """
+    return [argv[0] if argv else "" for argv in _invocations(log)]
 
 
 def _hook_with(tmp_path, inserted):
@@ -732,6 +746,37 @@ def _run_shapes_hook(tmp_path, inserted, *, state=None):
     return _subcommands(log), _state_tree(root) == before, result.returncode
 
 
+def _tree_after_shapes_hook(tmp_path, inserted, *, state=None):
+    """Run a hook and return the state tree it leaves behind.
+
+    The comparison in ``_run_shapes_hook`` answers "did anything change", which
+    only decides anything where nothing is supposed to: on a path whose verdict
+    writes -- ``stale`` resolves to a halt -- everything changes and the answer
+    carries nothing.  A write the hook does *itself* hides in that change
+    (#796 cross-model review round 1), and a hook that writes directly keeps
+    its process count at one, so the count does not see it either.
+
+    Returning the tree lets a path be compared against the same path without
+    the inserted line: what ``stop-verdict`` writes on its own is the baseline,
+    and anything beyond it came from the hook.
+    """
+    root = tmp_path / "repo"
+    (root / ".mission-state" / "sessions").mkdir(parents=True)
+    if state is not None:
+        _write_state(root, **state)
+    shim, log = _recording_state_py(tmp_path)
+    hook = _hook_with(tmp_path, inserted)
+    result, _launches = _run_hook(
+        tmp_path, root, hook=hook,
+        env_overrides={
+            "MISSION_STATE_PY": str(shim),
+            "MISSION_TEST_PYTHON": sys.executable,
+            "MISSION_TEST_OUTSIDE": str(tmp_path / "outside-target"),
+        },
+    )
+    return _state_tree(root), _subcommands(log), result.returncode
+
+
 def test_a_missing_log_reads_as_no_calls_not_as_an_error(tmp_path):
     """Whether the CLI ran at all has to be answerable.
 
@@ -742,11 +787,19 @@ def test_a_missing_log_reads_as_no_calls_not_as_an_error(tmp_path):
     slipping through as "no violations found".
     """
     assert _subcommands(tmp_path / "absent.log") == []
+    assert _invocations(tmp_path / "absent.log") == []
 
     log = tmp_path / "invocations.log"
-    log.write_text("stop-verdict --hook-input - --json\n\nresume\n", encoding="utf-8")
+    log.write_text(
+        '["stop-verdict", "--hook-input", "-", "--json"]\n[]\n["resume"]\n',
+        encoding="utf-8",
+    )
 
-    assert _subcommands(log) == ["stop-verdict", "resume"]
+    # The middle entry is a process started with no arguments.  It has to
+    # count: the claim of #779 is about how many processes run, and reading
+    # the log as text dropped that one silently (cross-model review round 1).
+    assert _subcommands(log) == ["stop-verdict", "", "resume"]
+    assert len(_invocations(log)) == 3
 
 
 def test_the_hook_names_the_cli_only_through_the_variable():
@@ -821,6 +874,12 @@ _BYPASS_SHAPES = {
     "a call that replaces the process":
         '( exec "$MISSION_TEST_PYTHON" "$MISSION_STATE_PY" resume'
         ' >/dev/null 2>&1 ) || true',
+    # Reading the log as text dropped this one: an invocation with no
+    # arguments wrote an empty line, and an empty line and no line are the
+    # same text (cross-model review round 1).  The process still ran.
+    "a second call with no arguments at all":
+        '_state=$MISSION_STATE_PY\n'
+        '"$MISSION_TEST_PYTHON" "$_state" >/dev/null 2>&1 || true',
 }
 
 
@@ -1007,6 +1066,52 @@ def test_the_stale_path_also_costs_one_call(tmp_path):
 
     assert code == 0, code
     assert subcommands == ["stop-verdict"], subcommands
+
+
+@pytest.mark.parametrize("state", (None, _STALE), ids=("empty", "stale"))
+def test_a_direct_write_is_caught_on_every_path_not_only_the_quiet_one(tmp_path, state):
+    """A hook that writes the state itself, without spending a second process.
+
+    This is the shape the count cannot see: one invocation, no violation to
+    read statically, and on ``stale`` the verdict writes anyway, so "did the
+    tree change" is true either way.  Comparing against what the same path
+    writes *without* the inserted line is what separates them.
+    """
+    baseline, base_subcommands, base_code = _tree_after_shapes_hook(
+        tmp_path / "baseline", "", state=state
+    )
+    written, subcommands, code = _tree_after_shapes_hook(
+        tmp_path / "written",
+        # The hook runs with the repository as its working directory, which is
+        # how it finds the state in the first place.
+        'printf %s x > .mission-state/direct-write',
+        state=state,
+    )
+
+    assert (base_code, code) == (0, 0), (base_code, code)
+    # The count says nothing here -- that is the point of this row.
+    assert base_subcommands == subcommands == ["stop-verdict"], (base_subcommands, subcommands)
+    assert set(written) - set(baseline) == {".mission-state/direct-write"}, (
+        sorted(set(written) - set(baseline))
+    )
+
+
+def test_the_baseline_tree_is_the_same_twice_so_the_comparison_means_something(tmp_path):
+    """Two runs of the same path have to agree, or the row above proves nothing.
+
+    A verdict that writes a timestamp, a pid or a session id would make every
+    comparison report a difference, and the row above would pass whatever the
+    hook did.
+    """
+    first, _first_subcommands, first_code = _tree_after_shapes_hook(
+        tmp_path / "first", "", state=_STALE
+    )
+    second, _second_subcommands, second_code = _tree_after_shapes_hook(
+        tmp_path / "second", "", state=_STALE
+    )
+
+    assert (first_code, second_code) == (0, 0), (first_code, second_code)
+    assert set(first) == set(second), (sorted(set(first) ^ set(second)))
 
 
 def test_a_second_call_behind_the_finding_is_caught(tmp_path):
