@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.util
 import types
 import json
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import time
@@ -686,19 +688,59 @@ def _recording_state_py(tmp_path):
     because the count is taken inside it.
     """
     log = tmp_path / "invocations.log"
+    snapshots = tmp_path / "snapshots.log"
     shim = tmp_path / "mission-state.py"
     shim.write_text(
-        "import json, runpy, sys\n"
+        "import hashlib, json, os, runpy, stat, sys\n"
+        f"_snapshots = {str(snapshots)!r}\n"
+        # The same reading as `_state_tree`, kept to digests because nothing
+        # here compares contents -- only whether they stayed the same.  A
+        # non-regular file is named by its kind rather than opened: a FIFO has
+        # no writer, so reading one would block for ever.
+        "def _tree(root):\n"
+        "    out = {}\n"
+        "    for base, dirs, files in os.walk(root, followlinks=False):\n"
+        "        for name in dirs + files:\n"
+        "            path = os.path.join(base, name)\n"
+        "            rel = os.path.relpath(path, root)\n"
+        "            mode = os.lstat(path).st_mode\n"
+        "            if stat.S_ISLNK(mode):\n"
+        "                out[rel] = ['symlink', mode, os.readlink(path)]\n"
+        "            elif stat.S_ISDIR(mode):\n"
+        "                out[rel] = ['dir', mode, None]\n"
+        "            elif stat.S_ISREG(mode):\n"
+        "                with open(path, 'rb') as handle:\n"
+        "                    out[rel] = ['file', mode,\n"
+        "                                hashlib.sha256(handle.read()).hexdigest()]\n"
+        "            else:\n"
+        "                out[rel] = ['other', mode, None]\n"
+        "    return out\n"
+        # The hook runs with the repository as its working directory, which is
+        # how it finds the state at all, so that is the root to read.
+        "def _record(phase):\n"
+        "    with open(_snapshots, 'a') as handle:\n"
+        "        handle.write(\n"
+        "            json.dumps({'phase': phase, 'tree': _tree(os.getcwd())}) + '\\n')\n"
         # One JSON line per invocation, argv and all.  Writing the arguments
         # as text loses the invocation that has none: an empty line and no
         # line read the same, so a second process started without arguments
         # disappeared from the count (#796 cross-model review round 1).
         f"open({str(log)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
         f"sys.argv[0] = {str(STATE_PY)!r}\n"
-        f"runpy.run_path({str(STATE_PY)!r}, run_name='__main__')\n",
+        # The state as the CLI found it and as the CLI left it.  Both are
+        # taken inside the one process that is allowed to write, so the run's
+        # own lease appears in each and the comparison needs no normalising
+        # -- which is what let a lease rewrite through (#802).
+        "_record('entry')\n"
+        "try:\n"
+        f"    runpy.run_path({str(STATE_PY)!r}, run_name='__main__')\n"
+        "finally:\n"
+        # The CLI leaves through `sys.exit`, so this cannot be written after
+        # the call: `SystemExit` would carry straight past it.
+        "    _record('exit')\n",
         encoding="utf-8",
     )
-    return shim, log
+    return shim, log, snapshots
 
 
 def _invocations(log):
@@ -752,8 +794,15 @@ def _state_tree(root):
             tree[name] = ("symlink", status.st_mode, os.readlink(path))
         elif path.is_dir():
             tree[name] = ("dir", status.st_mode, None)
-        else:
+        elif stat.S_ISREG(status.st_mode):
             tree[name] = ("file", status.st_mode, path.read_bytes())
+        else:
+            # Named by kind rather than opened.  A FIFO has no writer here, so
+            # reading one would block for ever and the run would end in a hang
+            # instead of a report -- and the recorder reads the same tree, so
+            # the two would disagree about what they are comparing (#801
+            # Checker, Low 3).
+            tree[name] = ("other", status.st_mode, None)
     return tree
 
 
@@ -789,7 +838,7 @@ def _run_shapes_hook(tmp_path, inserted, *, state=None):
     # that keeps the kind and the mode and moves only the target.
     (root / ".mission-state" / "link").symlink_to("marker")
     before = _state_tree(root)
-    shim, log = _recording_state_py(tmp_path)
+    shim, log, _snapshots = _recording_state_py(tmp_path)
     hook = _hook_with(tmp_path, inserted)
     result, _launches = _run_hook(
         tmp_path, root, hook=hook,
@@ -810,6 +859,80 @@ def _run_shapes_hook(tmp_path, inserted, *, state=None):
 _LEASE_ID_RE = re.compile(rb'"lease_id":\s*"[0-9a-f]+"')
 
 
+class _HookRun(NamedTuple):
+    """One run of the hook, and the five things the tests ask about it."""
+
+    tree: dict
+    subcommands: list
+    returncode: int
+    outside_the_cli: list
+    #: The recorder's own edges, in order.  A call killed part way through
+    #: leaves fewer of them, and without reading this an interrupted run looks
+    #: clean: nothing was recorded, so the whole run is one gap, and a CLI that
+    #: never got to write leaves that gap empty.
+    phases: list
+
+
+def _recorded(snapshots):
+    """The recorder's snapshots, in the order it took them."""
+    if not snapshots.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in snapshots.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _digest_tree(tree):
+    """`_state_tree` in the form the recorder writes: contents as digests."""
+    return {
+        name: [kind, mode,
+               hashlib.sha256(payload).hexdigest() if kind == "file" else payload]
+        for name, (kind, mode, payload) in tree.items()
+    }
+
+
+def _writes_outside_the_cli(before, after, snapshots):
+    """State changes that happened while the CLI was not running.
+
+    The tree comparison folds the values that differ between runs by
+    construction -- the temporary root and the lease -- and folding the lease
+    hid a hook that rewrote the fencing token and nothing else (#802).  It
+    could not be kept raw: two runs take two leases, so every comparison would
+    report a difference.
+
+    Reading it inside the run removes the need to fold anything.  The recorder
+    takes the tree as the CLI finds it and as the CLI leaves it, so both
+    snapshots carry *this* run's lease, and the gaps around them are compared
+    byte for byte:
+
+        test before  ==  first entry      nothing written before the CLI ran
+        exit N       ==  entry N+1        nothing written between two calls
+        last exit    ==  test after       nothing written after the CLI left
+
+    Every write the CLI itself makes falls inside a call, so it never appears
+    here; every write the hook makes falls between them, so it always does.
+
+    With no call recorded there is nothing to bracket, and the whole run is
+    one gap.
+    """
+    recorded = _recorded(snapshots)
+    edges = [("before the first call", _digest_tree(before))]
+    edges += [(entry["phase"], entry["tree"]) for entry in recorded]
+    edges += [("after the last call", _digest_tree(after))]
+
+    differences = []
+    for (left_name, left), (right_name, right) in zip(edges, edges[1:]):
+        # Consecutive edges that belong to the same call are the call itself,
+        # and the CLI is the one process allowed to write.
+        if (left_name, right_name) == ("entry", "exit"):
+            continue
+        for name, was, became in _tree_difference(left, right):
+            differences.append((f"{left_name} -> {right_name}", name, was, became))
+    return differences
+
+
 def _tree_difference(left, right):
     """What the two trees disagree about, named entry by entry."""
     return sorted(
@@ -828,8 +951,15 @@ def _normalised_state_tree(root):
     running the same path twice and reading what disagreed -- and everything
     else is compared as it is, because noticing what the hook did is the point.
 
-    Folding away more than that would hide the writes this is looking for, so
-    the substitutions stay exactly this narrow.
+    **Folding the lease already hides one write**: a hook that swaps the
+    fencing token and leaves every other byte alone normalises to the
+    baseline's tree (#802).  Nothing here can see it, because the value it
+    would have to compare against is different in the two runs by
+    construction.  `_writes_outside_the_cli` reads that inside one run
+    instead, where no folding is needed.
+
+    So this is not the whole comparison, and folding away more than these two
+    would widen a hole that is already there.
     """
     tree = _state_tree(root)
     normalised = {}
@@ -843,7 +973,7 @@ def _normalised_state_tree(root):
     return normalised
 
 
-def _tree_after_shapes_hook(tmp_path, inserted, *, state=None):
+def _tree_after_shapes_hook(tmp_path, inserted, *, state=None, seed=None):
     """Run a hook and return the state tree it leaves behind.
 
     The comparison in ``_run_shapes_hook`` answers "did anything change", which
@@ -861,7 +991,10 @@ def _tree_after_shapes_hook(tmp_path, inserted, *, state=None):
     (root / ".mission-state" / "sessions").mkdir(parents=True)
     if state is not None:
         _write_state(root, **state)
-    shim, log = _recording_state_py(tmp_path)
+    if seed is not None:
+        seed(root / ".mission-state")
+    before = _state_tree(root)
+    shim, log, snapshots = _recording_state_py(tmp_path)
     hook = _hook_with(tmp_path, inserted)
     result, _launches = _run_hook(
         tmp_path, root, hook=hook,
@@ -871,7 +1004,13 @@ def _tree_after_shapes_hook(tmp_path, inserted, *, state=None):
             "MISSION_TEST_OUTSIDE": str(tmp_path / "outside-target"),
         },
     )
-    return _normalised_state_tree(root), _subcommands(log), result.returncode
+    return _HookRun(
+        tree=_normalised_state_tree(root),
+        subcommands=_subcommands(log),
+        returncode=result.returncode,
+        outside_the_cli=_writes_outside_the_cli(before, _state_tree(root), snapshots),
+        phases=[entry["phase"] for entry in _recorded(snapshots)],
+    )
 
 
 def test_a_missing_log_reads_as_no_calls_not_as_an_error(tmp_path):
@@ -979,8 +1118,8 @@ _BYPASS_SHAPES = {
         '"$MISSION_TEST_PYTHON" "$_state" >/dev/null 2>&1 || true',
     # Measuring the moment the hook returns missed this one: the second call
     # is launched into the background and reaches the CLI afterwards
-    # (cross-model review round 2).  The harness waits for the hook's process
-    # group, so the log is read after they have run.
+    # (cross-model review round 2).  The harness waits for the hook's session,
+    # so the log is read after they have run.
     "a second call launched into the background":
         '_q=_mission_state_bounded\n'
         '( sleep 1; "$_q" resume ) >/dev/null 2>&1 &',
@@ -1195,10 +1334,8 @@ def test_a_direct_write_is_caught_on_every_path_not_only_the_quiet_one(tmp_path,
     tree change" is true either way.  Comparing against what the same path
     writes *without* the inserted line is what separates them.
     """
-    baseline, base_subcommands, base_code = _tree_after_shapes_hook(
-        tmp_path / "baseline", "", state=state
-    )
-    written, subcommands, code = _tree_after_shapes_hook(
+    baseline = _tree_after_shapes_hook(tmp_path / "baseline", "", state=state)
+    written = _tree_after_shapes_hook(
         tmp_path / "written",
         # The hook runs with the repository as its working directory, which is
         # how it finds the state in the first place.
@@ -1206,17 +1343,141 @@ def test_a_direct_write_is_caught_on_every_path_not_only_the_quiet_one(tmp_path,
         state=state,
     )
 
-    assert (base_code, code) == (0, 0), (base_code, code)
+    assert (baseline.returncode, written.returncode) == (0, 0)
     # The count says nothing here -- that is the point of this row.
-    assert base_subcommands == subcommands == ["stop-verdict"], (base_subcommands, subcommands)
+    assert baseline.subcommands == written.subcommands == ["stop-verdict"], (
+        baseline.subcommands, written.subcommands)
 
     # Compared as whole entries, not as names: a hook that rewrote a file that
     # is already there, changed a mode, or removed something would leave the
     # set of names untouched (cross-model review round 2).
-    added = {name: written[name] for name in set(written) - set(baseline)}
+    added = {name: written.tree[name] for name in set(written.tree) - set(baseline.tree)}
     assert set(added) == {".mission-state/direct-write"}, sorted(added)
-    remainder = {name: entry for name, entry in written.items() if name in baseline}
-    assert remainder == baseline, _tree_difference(baseline, remainder)
+    remainder = {
+        name: entry for name, entry in written.tree.items() if name in baseline.tree
+    }
+    assert remainder == baseline.tree, _tree_difference(baseline.tree, remainder)
+
+
+# Rewrites the fencing token and nothing else.  Every byte around it stays,
+# the file keeps its name, its kind and its mode, and the process count stays
+# at one -- so this passes the count, the static check, and the tree
+# comparison that folds the lease away (#802).
+_LEASE_REWRITE = (
+    'python3 - <<\'REWRITE\'\n'
+    'import pathlib, re\n'
+    'p = pathlib.Path(".mission-state/sessions/cc-own.json")\n'
+    's = p.read_text()\n'
+    'p.write_text(re.sub(r\'("lease_id":\\s*)"[0-9a-f]+"\', r\'\\1"00bad1d"\', s))\n'
+    'REWRITE'
+)
+
+
+def test_rewriting_only_the_lease_is_caught(tmp_path):
+    """The fencing token is state; changing it is writing the state.
+
+    `_normalised_state_tree` folds the lease away because it differs between
+    runs by construction, and folding it hid exactly this: a hook that keeps
+    every other byte and swaps the token reaches the CLI once and leaves a
+    tree that normalises to the baseline's (#802, found by the independent
+    Checker on #801).
+    """
+    baseline = _tree_after_shapes_hook(tmp_path / "baseline", "", state=_STALE)
+    written = _tree_after_shapes_hook(
+        tmp_path / "written", _LEASE_REWRITE, state=_STALE
+    )
+
+    assert (baseline.returncode, written.returncode) == (0, 0)
+    # Neither observation that came before this one can see the rewrite: the
+    # count is one, and the normalised trees are equal.  Both are asserted
+    # rather than described, so the row fails if it stops being the case and
+    # nobody has to trust this comment.
+    assert baseline.subcommands == written.subcommands == ["stop-verdict"], (
+        baseline.subcommands, written.subcommands)
+    assert written.tree == baseline.tree, "the normalised trees differ, so this row is moot"
+
+    assert written.outside_the_cli, "the lease rewrite was not observed"
+    assert not baseline.outside_the_cli, baseline.outside_the_cli
+
+
+def test_which_gaps_are_read_and_which_belong_to_the_cli(tmp_path):
+    """The three gaps, and the one stretch that is not a gap.
+
+    The hook's own write lands after the CLI, so that is the gap the run above
+    exercises.  The other two are asserted here rather than left to be
+    believed: written by hand because the insertion point in `_hook_with` is
+    after the last call, so a hook that writes *before* it cannot be built
+    there.  What this cannot show is that the recorder ever produces these
+    shapes -- the run above shows that for the last gap.
+    """
+    snapshots = tmp_path / "snapshots.log"
+    # The ends are read by `_state_tree`, which holds contents; the recorder
+    # writes digests.  Both sides are built from the same bytes so that the
+    # fixture cannot disagree with itself.
+    before, after = {".mission-state/f": ("file", 0o100600, b"a")}, \
+        {".mission-state/f": ("file", 0o100600, b"b")}
+    seeded, changed = _digest_tree(before), _digest_tree(after)
+
+    def record(*entries):
+        snapshots.write_text(
+            "".join(json.dumps({"phase": phase, "tree": tree}) + "\n"
+                    for phase, tree in entries),
+            encoding="utf-8",
+        )
+
+    # Written between the test's reading and the CLI's: the hook got there
+    # first.
+    record(("entry", changed), ("exit", changed))
+    gaps = _writes_outside_the_cli(before, after, snapshots)
+    assert [gap for gap, _name, _was, _became in gaps] == ["before the first call -> entry"]
+
+    # The same change inside the call is the CLI doing its job.
+    record(("entry", seeded), ("exit", changed))
+    assert _writes_outside_the_cli(before, after, snapshots) == []
+
+    # Between two calls is a gap as much as either end is.
+    record(("entry", seeded), ("exit", seeded), ("entry", changed), ("exit", changed))
+    gaps = _writes_outside_the_cli(before, after, snapshots)
+    assert [gap for gap, _name, _was, _became in gaps] == ["exit -> entry"]
+
+    # With nothing recorded the run is one stretch, and a change in it is the
+    # hook's: reading an absent log as "no writes" would turn a CLI that never
+    # ran into a clean report.
+    assert not snapshots.with_name("absent.log").exists()
+    gaps = _writes_outside_the_cli(before, after, snapshots.with_name("absent.log"))
+    assert [gap for gap, _name, _was, _became in gaps] == [
+        "before the first call -> after the last call"]
+
+
+def test_a_pipe_in_the_state_is_named_rather_than_opened(tmp_path):
+    """Both readings of the tree have to survive a file with no contents.
+
+    A FIFO has no writer here, so opening one blocks for ever: the run would
+    end in a hang instead of a report, and with no pytest-timeout in this repo
+    the shard would be cancelled on its own limit (#801 Checker, Low 3).  Both
+    the test's reading and the recorder's walk the same tree, so both have to
+    stop at the kind rather than read the contents -- otherwise they disagree
+    about what they are comparing.
+
+    A hang is what failure looks like here, which no assertion can express;
+    the timeout is the observation.
+    """
+    def seed(state_dir):
+        os.mkfifo(state_dir / "pipe")
+
+    run = _tree_after_shapes_hook(tmp_path, "", state=_STALE, seed=seed)
+
+    assert run.returncode == 0, run.returncode
+    assert run.subcommands == ["stop-verdict"], run.subcommands
+    # Without this the row passes on a recorder that blocked on the pipe: the
+    # call is killed by the guard's own budget, nothing is recorded, and a run
+    # in which the CLI never wrote leaves every other assertion here happy.
+    assert run.phases == ["entry", "exit"], run.phases
+    # Named by kind in the test's reading...
+    assert run.tree[".mission-state/pipe"][0] == "other", run.tree[".mission-state/pipe"]
+    # ...and undisturbed in the recorder's, which is the one that ran with it
+    # already in place.
+    assert run.outside_the_cli == [], run.outside_the_cli
 
 
 def test_the_baseline_tree_is_the_same_twice_so_the_comparison_means_something(tmp_path):
@@ -1226,15 +1487,11 @@ def test_the_baseline_tree_is_the_same_twice_so_the_comparison_means_something(t
     comparison report a difference, and the row above would pass whatever the
     hook did.
     """
-    first, _first_subcommands, first_code = _tree_after_shapes_hook(
-        tmp_path / "first", "", state=_STALE
-    )
-    second, _second_subcommands, second_code = _tree_after_shapes_hook(
-        tmp_path / "second", "", state=_STALE
-    )
+    first = _tree_after_shapes_hook(tmp_path / "first", "", state=_STALE)
+    second = _tree_after_shapes_hook(tmp_path / "second", "", state=_STALE)
 
-    assert (first_code, second_code) == (0, 0), (first_code, second_code)
-    assert first == second, _tree_difference(first, second)
+    assert (first.returncode, second.returncode) == (0, 0)
+    assert first.tree == second.tree, _tree_difference(first.tree, second.tree)
 
 
 def test_a_second_call_behind_the_finding_is_caught(tmp_path):
