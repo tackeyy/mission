@@ -638,11 +638,15 @@ issue 起票 → worktree feature ブランチ → PR (本文に `Closes #N` を
 
 適用できるのは、base に契約がなく、その PR が初めて contract と full-suite runner/report writer を導入するときだけである。owner は repository、PR 番号、current base SHA、current head SHA、有効期限を一回の承認に明記する。承認は別 PR、後続変更、base/head の変更、期限後へ流用しない。
 
-1. `git ls-remote --symref origin HEAD` で default branch を解決し、fetch 後の base SHA と GitHub PR の base/head SHA を記録する。CI required checks green、同一 head を対象とする独立 review accepted、repo 固有 gate を先に確認する。
+この手順は、owner が default branch の全更新経路（他 PR merge、auto-merge、queue、直接 push、自動更新）を停止し、step 1 の開始前から step 5 の merge/read-back 完了まで排他を実効的に維持できるときだけ使える。同一 host の lease は全更新経路を排他しない。排他が確立できない場合は、driver も起動せず、通常 gate の `suite-contract-missing` のまま停止する。agent や通常 gate への自動 fallback はない。
+
+GitHub CLI では base の CAS を保証できない。`--match-head-commit` は head だけを照合するため、最終照合から merge 完了までの base 一致は、この owner 排他を前提にする。
+
+1. 排他を開始した後に、`git ls-remote --symref origin HEAD` で default branch を解決し、fetch 後の base SHA と GitHub PR の base/head SHA を記録する。CI required checks green、同一 head を対象とする独立 review accepted、repo 固有 gate を先に確認する。
 2. disposable scratch worktree を base SHA で作り、PR head を `git merge --no-commit --no-ff` で統合する。conflict なら停止する。これは scratch tree の作成だけで、commit、ref 更新、GitHub 操作を行わない。
 3. 下の driver を scratch tree と `MISSION_PLUGIN_ROOT` を指定して実行する。driver は contract の argv を既存 validator に渡し、fresh report path で full suite を起動し、integrated tree SHA、`status: complete`、正の executed count を検証する。
-4. suite 成功後に live base/head、CI 対象 head、review 対象 head を読み直す。一つでも記録値と違えば merge せず step 1 からやり直す。owner は SHA、実行 command、executed count、CI、review を確認する。
-5. owner だけが `gh pr merge --squash --match-head-commit <head> <pr>` を実行できる。直後に merged commit と base の contract を read-back する。この手順は通常の agent merge entrypoint を変更しない。
+4. suite 成功後も排他が継続していることを確認し、live base/head、CI 対象 head、review 対象 head を読み直す。一つでも記録値と違えば merge せず step 1 からやり直す。owner は SHA、実行 command、executed count、CI、review を確認する。
+5. owner だけが排他を保ったまま `gh pr merge --squash --match-head-commit <head> <pr>` を実行できる。直後に squash merge commit の親が記録した base SHA と一致すること、および base の contract の存在を read-back する。不一致は成功として扱わず owner へ報告する。この read-back は予防ではなく証跡である。この手順は通常の agent merge entrypoint を変更しない。
 
 driver は GitHub API、`gh`、PR merge、承認判定、Mission state を扱わない。scratch tree の作成も行わないため、明示した tree だけを検証する。report は runner の自己申告であり、contract が本当に CI の full suite であることは review と owner 承認で確認する。
 
