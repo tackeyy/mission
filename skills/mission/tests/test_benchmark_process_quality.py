@@ -167,7 +167,7 @@ def test_iteration_ordering_numeric(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Goal arm -> process_quality is null (via extract_mission_state_fields for goal path)
+# State-missing reader and goal record quality fields
 # ---------------------------------------------------------------------------
 
 def test_state_missing_reader_keeps_null_process_quality_fields():
