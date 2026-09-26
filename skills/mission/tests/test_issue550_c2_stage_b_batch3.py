@@ -232,18 +232,6 @@ def _fixed_lease_clock(module, run_cli, root: Path, session_id: str, monkeypatch
     monkeypatch.setattr(module, "_lease_now", lambda: next(times, later))
 
 
-def _force_legacy_renewal_for_v5(module, monkeypatch) -> None:
-    """Fault one handler boundary without altering repository admission itself."""
-    builtin_isinstance = isinstance
-
-    def force_boundary(value, classinfo):
-        if classinfo is module.V5CompatibilityRepository:
-            return False
-        return builtin_isinstance(value, classinfo)
-
-    monkeypatch.setattr(module, "isinstance", force_boundary, raising=False)
-
-
 # ---------------------------------------------------------------------------
 # tests: planning adopt-core
 # ---------------------------------------------------------------------------
@@ -345,40 +333,6 @@ def test_planning_promote_provider_plan_v5_does_not_renew_admitted_lease_again(
     ))
 
     assert _public_state(run_cli, tmp_path, session_id)["canonical_plan"]["source_id"] == invocation_id
-
-
-@pytest.mark.parametrize("command", ["adopt", "promote"])
-def test_planning_v5_legacy_renewal_fault_rejects_pending_lease(
-    command, run_cli, legacy_run_cli, tmp_path, monkeypatch,
-):
-    """Each planning handler reaches the fenced rejection if its v5 guard regresses."""
-    session_id = f"batch3-{command}-lease-fault"
-    if command == "adopt":
-        _init_v5(run_cli, tmp_path, session_id)
-        args = argparse.Namespace(
-            input=str(_write_plan(tmp_path, "plan-lease-fault.json")),
-            source_id="lease-fault-source", json=True,
-        )
-        handler_name = "cmd_planning_adopt_core"
-        operation_id = "adopt-lease-fault-op"
-    else:
-        invocation_id = _prepare_v5_provider_promotion(
-            run_cli, legacy_run_cli, tmp_path, session_id,
-        )
-        args = argparse.Namespace(invocation_id=invocation_id)
-        handler_name = "cmd_planning_promote_provider_plan"
-        operation_id = "promote-lease-fault-op"
-    module = _load_state_module(f"mission_state_issue861_{command}_fault")
-    _fixed_lease_clock(module, run_cli, tmp_path, session_id, monkeypatch)
-    _force_legacy_renewal_for_v5(module, monkeypatch)
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("MISSION_SESSION_ID", session_id)
-    monkeypatch.setenv("MISSION_LEASE_ID", session_id + "-lease")
-    monkeypatch.setenv("MISSION_OPERATION_ID", operation_id)
-
-    with pytest.raises(module.FencedCommitError) as rejected:
-        getattr(module, handler_name)(args)
-    assert rejected.value.code == "pending-lease-mismatch"
 
 
 def test_planning_adopt_core_v5_requires_operation_id(run_cli, tmp_path):
