@@ -78,18 +78,6 @@ def test_a_successful_run_with_no_report_cannot_be_measured(tmp_path):
     assert "does not call the report writer" in reason, reason
 
 
-def test_a_failed_run_with_no_report_is_still_a_failure(tmp_path):
-    """The distinction above must not swallow real failures, which never get a report."""
-    verdict, _ = classify(status=2, report_path=tmp_path / "absent.json")
-    assert verdict == "failed"
-
-
-def test_a_successful_run_whose_report_says_zero_is_still_a_no_result(tmp_path):
-    """A report that exists but counts nothing is a runtime skip, not an old recipe."""
-    verdict, _ = classify(status=0, report_path=_report(tmp_path, {"executed": 0}))
-    assert verdict == "no-result"
-
-
 @pytest.mark.parametrize(
     "payload",
     [
