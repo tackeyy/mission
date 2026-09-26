@@ -907,6 +907,8 @@ def _writes_outside_the_cli(before, after, snapshots):
     The entry-to-exit interval is excluded as the CLI window.  This observes
     differences that remain in the surrounding gaps; it does not establish
     whether a hook write overlapped a CLI call or was restored before an edge.
+    Records contain phase and tree only, with no PID or call identifier; the
+    exclusion assumes adjacent entry and exit records belong to one call.
     With no call recorded, the whole run is one observed gap.
     """
     recorded = _recorded(snapshots)
