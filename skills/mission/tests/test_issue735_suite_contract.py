@@ -188,6 +188,7 @@ def test_a_contract_absent_from_the_base_is_reported_with_its_bootstrap_path():
 
     assert captured.value.reason == "suite-contract-missing"
     assert CONTRACT_PATH in str(captured.value)
+    assert "owner-only bootstrap runbook" in str(captured.value)
 
 
 def test_the_report_path_is_passed_to_the_suite_through_the_environment():
