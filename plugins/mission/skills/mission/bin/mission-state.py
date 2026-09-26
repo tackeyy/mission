@@ -12786,7 +12786,10 @@ def cmd_planning_adopt_core(args):
         if replayed:
             print(json.dumps({"ok": True, "canonical_plan": data.get("canonical_plan")}, indent=2 if args.json else None, ensure_ascii=False))
             return
-        _enforce_session_lease_for_write(sf, data)
+        # v5 load() has already admitted its lease for this transaction; only
+        # the retained v4 path needs the legacy renewal.
+        if not isinstance(repository, V5CompatibilityRepository):
+            _enforce_session_lease_for_write(sf, data)
         if data.get("planning_policy_version") != 1 or data.get("phase") != "planning":
             _provider_gate("planning-policy-not-active")
         if data.get("planning_strategy") not in {None, "core"}:
@@ -12912,7 +12915,10 @@ def cmd_planning_promote_provider_plan(args):
         if replayed:
             print(json.dumps({"ok": True, "canonical_plan": data.get("canonical_plan")}, ensure_ascii=False))
             return
-        _enforce_session_lease_for_write(sf, data)
+        # See adopt-core: a v5 compatibility load has one admitted lease for
+        # this transaction; only the retained v4 path needs this renewal.
+        if not isinstance(repository, V5CompatibilityRepository):
+            _enforce_session_lease_for_write(sf, data)
         if data.get("planning_policy_version") != 1 or data.get("phase") != "planning":
             _provider_gate("planning-policy-not-active")
         if data.get("planning_strategy") != "provider-primary":

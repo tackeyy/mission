@@ -8,14 +8,18 @@ TDD: 各テストは移行前に Red になることを確認した上で実装�
 
 from __future__ import annotations
 
+import argparse
+import importlib.util
 import json
 import sys
+from datetime import timedelta
 from pathlib import Path
 from typing import Callable
 
 import pytest
 
 LIB_DIR = Path(__file__).resolve().parents[1] / "lib"
+MISSION_STATE_PY = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +178,14 @@ def _v5_patch_session_state(
         compat.save(data)
 
 
+def _load_state_module(name: str):
+    spec = importlib.util.spec_from_file_location(name, MISSION_STATE_PY)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
 # ---------------------------------------------------------------------------
 # tests: planning adopt-core
 # ---------------------------------------------------------------------------
@@ -228,6 +240,38 @@ def test_planning_adopt_core_v5_preserves_head_and_replays(run_cli, tmp_path):
     )
     assert updated.returncode == 0, updated.stderr
     assert _public_state(run_cli, tmp_path, session_id).get("batch3_adopt_probe") is True
+
+
+def test_planning_adopt_core_v5_does_not_renew_admitted_lease_again(
+    run_cli, tmp_path, monkeypatch,
+):
+    """One v5 admission must retain its pending lease through the CLI handler.
+
+    The fixed clock advances exactly one second between repository admission and
+    the legacy compatibility write.  A second renewal changes the projected
+    lease expiry and is rejected by the fenced commit's pending-lease check.
+    """
+    session_id = "batch3-adopt-lease-boundary"
+    _init_v5(run_cli, tmp_path, session_id)
+    plan = _write_plan(tmp_path, "plan-lease-boundary.json")
+    module = _load_state_module("mission_state_issue861_adopt")
+    initial = _public_state(run_cli, tmp_path, session_id)
+    expires_at = module.parse_iso_datetime(initial["lease_expires_at"])
+    assert expires_at is not None
+    admitted_at = expires_at - timedelta(seconds=module._lease_ttl_seconds() - 1)
+    later = admitted_at + timedelta(seconds=1)
+    times = iter((admitted_at, later))
+    monkeypatch.setattr(module, "_lease_now", lambda: next(times, later))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MISSION_SESSION_ID", session_id)
+    monkeypatch.setenv("MISSION_LEASE_ID", session_id + "-lease")
+    monkeypatch.setenv("MISSION_OPERATION_ID", "adopt-lease-boundary-op")
+
+    module.cmd_planning_adopt_core(argparse.Namespace(
+        input=str(plan), source_id="lease-boundary-source", json=True,
+    ))
+
+    assert _public_state(run_cli, tmp_path, session_id)["canonical_plan"]["source_id"] == "lease-boundary-source"
 
 
 def test_planning_adopt_core_v5_requires_operation_id(run_cli, tmp_path):
