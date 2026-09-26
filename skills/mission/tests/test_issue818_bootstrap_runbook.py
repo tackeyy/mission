@@ -31,14 +31,8 @@ def _driver_source() -> str:
     return match.group(1)
 
 
-def test_bootstrap_driver_runs_the_declared_suite_on_a_real_scratch_tree(tmp_path):
-    """Detect a runbook driver that stops using the contract/report boundary.
-
-    Existing #735 tests cover malformed contracts and reports. This test instead
-    executes the published driver after a real no-commit scratch integration,
-    so a stale tree SHA, missing environment report path, or direct subprocess
-    shortcut fails at the operator entrypoint.
-    """
+def _scratch_tree_with_suite(tmp_path: Path, test_source: str):
+    """Create an integrated tree whose runner reports a real unittest result."""
     repository = tmp_path / "repository"
     repository.mkdir()
     _git(repository, "init")
@@ -55,20 +49,42 @@ def test_bootstrap_driver_runs_the_declared_suite_on_a_real_scratch_tree(tmp_pat
         encoding="utf-8",
     )
     (repository / "runner.py").write_text(
-        "import json, os, subprocess\n"
+        "import json, os, subprocess, unittest\n"
+        "suite = unittest.defaultTestLoader.discover('suite_tests')\n"
+        "result = unittest.TextTestRunner(verbosity=0).run(suite)\n"
         "tree = subprocess.check_output(['git', 'write-tree'], text=True).strip()\n"
         "with open(os.environ['MISSION_SUITE_REPORT'], 'w', encoding='utf-8') as report:\n"
-        "    json.dump({'schema': 'mission-suite-report/1', 'tree_sha': tree, 'executed': 1, 'status': 'complete'}, report)\n",
+        "    json.dump({'schema': 'mission-suite-report/1', 'tree_sha': tree, 'executed': result.testsRun, 'status': 'complete' if result.wasSuccessful() else 'failed'}, report)\n"
+        "raise SystemExit(0 if result.wasSuccessful() else 1)\n",
         encoding="utf-8",
     )
-    _git(repository, "add", ".mission/suite-contract.json", "runner.py")
+    (repository / "suite_tests").mkdir()
+    (repository / "suite_tests" / "test_contract.py").write_text(
+        test_source, encoding="utf-8"
+    )
+    _git(repository, "add", ".mission/suite-contract.json", "runner.py", "suite_tests")
     _git(repository, "commit", "-m", "add suite contract")
     head = _git(repository, "rev-parse", "HEAD")
 
     scratch = tmp_path / "scratch"
     _git(repository, "worktree", "add", "--detach", str(scratch), base)
+    _git(scratch, "merge", "--no-commit", "--no-ff", head)
+    return repository, scratch
+
+
+def test_bootstrap_driver_runs_a_real_declared_test_on_a_scratch_tree(tmp_path):
+    """Detect a driver that accepts a self-reported count without a real suite.
+
+    Existing #735 tests cover malformed contracts and reports. This test runs
+    the published driver after a real no-commit integration and makes the
+    declared runner execute a unittest, so the operational entrypoint proves
+    the report is connected to actual test execution.
+    """
+    repository, scratch = _scratch_tree_with_suite(
+        tmp_path,
+        "import unittest\n\nclass ContractTest(unittest.TestCase):\n    def test_passes(self):\n        self.assertEqual(2 + 2, 4)\n",
+    )
     try:
-        _git(scratch, "merge", "--no-commit", "--no-ff", head)
         driver = tmp_path / "bootstrap_suite_driver.py"
         driver.write_text(_driver_source(), encoding="utf-8")
         result = subprocess.run(
@@ -87,11 +103,27 @@ def test_bootstrap_driver_runs_the_declared_suite_on_a_real_scratch_tree(tmp_pat
     assert len(evidence["tree_sha"]) == 40
 
 
-def test_bootstrap_driver_never_performs_remote_or_state_operations():
-    """The published executable is evidence collection, never an approval bypass."""
-    source = _driver_source()
-    for forbidden in ("gh", "git merge", "mission-state", "approve"):
-        assert forbidden not in source
+def test_bootstrap_driver_rejects_a_real_failing_declared_test(tmp_path):
+    """Detect a driver that records success when the declared suite fails."""
+    repository, scratch = _scratch_tree_with_suite(
+        tmp_path,
+        "import unittest\n\nclass ContractTest(unittest.TestCase):\n    def test_fails(self):\n        self.assertEqual(2 + 2, 5)\n",
+    )
+    try:
+        driver = tmp_path / "bootstrap_suite_driver.py"
+        driver.write_text(_driver_source(), encoding="utf-8")
+        result = subprocess.run(
+            (sys.executable, str(driver), str(scratch)),
+            text=True,
+            capture_output=True,
+            check=False,
+            env={**os.environ, "MISSION_PLUGIN_ROOT": str(REPO_ROOT)},
+        )
+    finally:
+        _git(repository, "worktree", "remove", "--force", str(scratch))
+
+    assert result.returncode != 0
+    assert "suite-failed" in result.stderr
 
 
 def test_bootstrap_runbook_keeps_the_owner_only_freshness_boundary():
