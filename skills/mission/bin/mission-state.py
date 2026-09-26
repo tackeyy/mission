@@ -12776,7 +12776,7 @@ def cmd_planning_adopt_core(args):
         print(f"ERROR: {error}", file=sys.stderr)
         sys.exit(2)
     repository = _legacy_lifecycle_repository(
-        cwd, sf, stamp=True, strict_read=True, session_id=session_id,
+        cwd, sf, stamp=True, strict_read=True, pre_admit_lease=True, session_id=session_id,
         operation_id=operation_id, operation_command=operation_command,
         operation_command_type="planning-adopt-core",
     )
@@ -12786,7 +12786,6 @@ def cmd_planning_adopt_core(args):
         if replayed:
             print(json.dumps({"ok": True, "canonical_plan": data.get("canonical_plan")}, indent=2 if args.json else None, ensure_ascii=False))
             return
-        _enforce_session_lease_for_write(sf, data)
         if data.get("planning_policy_version") != 1 or data.get("phase") != "planning":
             _provider_gate("planning-policy-not-active")
         if data.get("planning_strategy") not in {None, "core"}:
@@ -12902,7 +12901,7 @@ def cmd_planning_promote_provider_plan(args):
         print(f"ERROR: {error}", file=sys.stderr)
         sys.exit(2)
     repository = _legacy_lifecycle_repository(
-        cwd, sf, stamp=True, strict_read=True, session_id=session_id,
+        cwd, sf, stamp=True, strict_read=True, pre_admit_lease=True, session_id=session_id,
         operation_id=operation_id, operation_command=operation_command,
         operation_command_type="planning-promote-provider-plan",
     )
@@ -12912,7 +12911,6 @@ def cmd_planning_promote_provider_plan(args):
         if replayed:
             print(json.dumps({"ok": True, "canonical_plan": data.get("canonical_plan")}, ensure_ascii=False))
             return
-        _enforce_session_lease_for_write(sf, data)
         if data.get("planning_policy_version") != 1 or data.get("phase") != "planning":
             _provider_gate("planning-policy-not-active")
         if data.get("planning_strategy") != "provider-primary":
