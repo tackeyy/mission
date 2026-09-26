@@ -894,28 +894,20 @@ def _digest_tree(tree):
 
 
 def _writes_outside_the_cli(before, after, snapshots):
-    """State changes that happened while the CLI was not running.
+    """Residual state differences around recorded CLI calls.
 
-    The tree comparison folds the values that differ between runs by
-    construction -- the temporary root and the lease -- and folding the lease
-    hid a hook that rewrote the fencing token and nothing else (#802).  It
-    could not be kept raw: two runs take two leases, so every comparison would
-    report a difference.
-
-    Reading it inside the run removes the need to fold anything.  The recorder
-    takes the tree as the CLI finds it and as the CLI leaves it, so both
-    snapshots carry *this* run's lease, and the gaps around them are compared
-    byte for byte:
+    `_digest_tree` retains entry kind and mode, hashes file contents, and keeps
+    the payload for other entry kinds.  The recorder takes trees at CLI entry
+    and exit, so the gaps around those edges compare state from this run:
 
         test before  ==  first entry      nothing written before the CLI ran
         exit N       ==  entry N+1        nothing written between two calls
         last exit    ==  test after       nothing written after the CLI left
 
-    Every write the CLI itself makes falls inside a call, so it never appears
-    here; every write the hook makes falls between them, so it always does.
-
-    With no call recorded there is nothing to bracket, and the whole run is
-    one gap.
+    The entry-to-exit interval is excluded as the CLI window.  This observes
+    differences that remain in the surrounding gaps; it does not establish
+    whether a hook write overlapped a CLI call or was restored before an edge.
+    With no call recorded, the whole run is one observed gap.
     """
     recorded = _recorded(snapshots)
     edges = [("before the first call", _digest_tree(before))]
@@ -924,8 +916,7 @@ def _writes_outside_the_cli(before, after, snapshots):
 
     differences = []
     for (left_name, left), (right_name, right) in zip(edges, edges[1:]):
-        # Consecutive edges that belong to the same call are the call itself,
-        # and the CLI is the one process allowed to write.
+        # Consecutive edges belonging to one call are the excluded CLI window.
         if (left_name, right_name) == ("entry", "exit"):
             continue
         for name, was, became in _tree_difference(left, right):
