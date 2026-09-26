@@ -186,6 +186,64 @@ def _load_state_module(name: str):
     return module
 
 
+def _prepare_v5_provider_promotion(run_cli, legacy_run_cli, root: Path, session_id: str) -> str:
+    """Reuse the retained provider fixture to prepare a real v5 promotion input."""
+    fixture_path = Path(__file__).with_name("test_planning_provider_lifecycle.py")
+    spec = importlib.util.spec_from_file_location("issue861_provider_fixture", fixture_path)
+    fixture = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(fixture)
+    fixture_root = root / "provider-fixture"
+    fixture_root.mkdir()
+    _registry, state_file, source, invocation_id, env = fixture._provider_import_fixture(
+        legacy_run_cli, fixture_root,
+    )
+    imported = legacy_run_cli(
+        "specialists", "plan-import", "--input", str(source),
+        "--invocation-id", invocation_id, "--registry", str(_registry),
+        cwd=fixture_root, env_extra=env,
+    )
+    assert imported.returncode == 0, imported.stderr
+    legacy_state = json.loads(state_file.read_text(encoding="utf-8"))
+    record = legacy_state["provider_plan_imports"][invocation_id]
+    candidate = fixture_root / record["candidate_path"]
+    _init_v5(run_cli, root, session_id)
+    destination = root / record["candidate_path"]
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(candidate.read_bytes())
+    copied_fields = {
+        key: legacy_state[key]
+        for key in (
+            "iteration", "planning_policy_version", "planning_strategy", "specialists_selected",
+            "planning_provider_binding", "specialist_invocations", "provider_plan_imports",
+        )
+    }
+    _v5_patch_session_state(root, session_id, lambda state: state.update(copied_fields))
+    return invocation_id
+
+
+def _fixed_lease_clock(module, run_cli, root: Path, session_id: str, monkeypatch) -> None:
+    initial = _public_state(run_cli, root, session_id)
+    expires_at = module.parse_iso_datetime(initial["lease_expires_at"])
+    assert expires_at is not None
+    admitted_at = expires_at - timedelta(seconds=module._lease_ttl_seconds() - 1)
+    later = admitted_at + timedelta(seconds=1)
+    times = iter((admitted_at, later))
+    monkeypatch.setattr(module, "_lease_now", lambda: next(times, later))
+
+
+def _force_legacy_renewal_for_v5(module, monkeypatch) -> None:
+    """Fault one handler boundary without altering repository admission itself."""
+    builtin_isinstance = isinstance
+
+    def force_boundary(value, classinfo):
+        if classinfo is module.V5CompatibilityRepository:
+            return False
+        return builtin_isinstance(value, classinfo)
+
+    monkeypatch.setattr(module, "isinstance", force_boundary, raising=False)
+
+
 # ---------------------------------------------------------------------------
 # tests: planning adopt-core
 # ---------------------------------------------------------------------------
@@ -255,13 +313,7 @@ def test_planning_adopt_core_v5_does_not_renew_admitted_lease_again(
     _init_v5(run_cli, tmp_path, session_id)
     plan = _write_plan(tmp_path, "plan-lease-boundary.json")
     module = _load_state_module("mission_state_issue861_adopt")
-    initial = _public_state(run_cli, tmp_path, session_id)
-    expires_at = module.parse_iso_datetime(initial["lease_expires_at"])
-    assert expires_at is not None
-    admitted_at = expires_at - timedelta(seconds=module._lease_ttl_seconds() - 1)
-    later = admitted_at + timedelta(seconds=1)
-    times = iter((admitted_at, later))
-    monkeypatch.setattr(module, "_lease_now", lambda: next(times, later))
+    _fixed_lease_clock(module, run_cli, tmp_path, session_id, monkeypatch)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("MISSION_SESSION_ID", session_id)
     monkeypatch.setenv("MISSION_LEASE_ID", session_id + "-lease")
@@ -272,6 +324,61 @@ def test_planning_adopt_core_v5_does_not_renew_admitted_lease_again(
     ))
 
     assert _public_state(run_cli, tmp_path, session_id)["canonical_plan"]["source_id"] == "lease-boundary-source"
+
+
+def test_planning_promote_provider_plan_v5_does_not_renew_admitted_lease_again(
+    run_cli, legacy_run_cli, tmp_path, monkeypatch,
+):
+    session_id = "batch3-promote-lease-boundary"
+    invocation_id = _prepare_v5_provider_promotion(
+        run_cli, legacy_run_cli, tmp_path, session_id,
+    )
+    module = _load_state_module("mission_state_issue861_promote")
+    _fixed_lease_clock(module, run_cli, tmp_path, session_id, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MISSION_SESSION_ID", session_id)
+    monkeypatch.setenv("MISSION_LEASE_ID", session_id + "-lease")
+    monkeypatch.setenv("MISSION_OPERATION_ID", "promote-lease-boundary-op")
+
+    module.cmd_planning_promote_provider_plan(argparse.Namespace(
+        invocation_id=invocation_id,
+    ))
+
+    assert _public_state(run_cli, tmp_path, session_id)["canonical_plan"]["source_id"] == invocation_id
+
+
+@pytest.mark.parametrize("command", ["adopt", "promote"])
+def test_planning_v5_legacy_renewal_fault_rejects_pending_lease(
+    command, run_cli, legacy_run_cli, tmp_path, monkeypatch,
+):
+    """Each planning handler reaches the fenced rejection if its v5 guard regresses."""
+    session_id = f"batch3-{command}-lease-fault"
+    if command == "adopt":
+        _init_v5(run_cli, tmp_path, session_id)
+        args = argparse.Namespace(
+            input=str(_write_plan(tmp_path, "plan-lease-fault.json")),
+            source_id="lease-fault-source", json=True,
+        )
+        handler_name = "cmd_planning_adopt_core"
+        operation_id = "adopt-lease-fault-op"
+    else:
+        invocation_id = _prepare_v5_provider_promotion(
+            run_cli, legacy_run_cli, tmp_path, session_id,
+        )
+        args = argparse.Namespace(invocation_id=invocation_id)
+        handler_name = "cmd_planning_promote_provider_plan"
+        operation_id = "promote-lease-fault-op"
+    module = _load_state_module(f"mission_state_issue861_{command}_fault")
+    _fixed_lease_clock(module, run_cli, tmp_path, session_id, monkeypatch)
+    _force_legacy_renewal_for_v5(module, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MISSION_SESSION_ID", session_id)
+    monkeypatch.setenv("MISSION_LEASE_ID", session_id + "-lease")
+    monkeypatch.setenv("MISSION_OPERATION_ID", operation_id)
+
+    with pytest.raises(module.FencedCommitError) as rejected:
+        getattr(module, handler_name)(args)
+    assert rejected.value.code == "pending-lease-mismatch"
 
 
 def test_planning_adopt_core_v5_requires_operation_id(run_cli, tmp_path):
