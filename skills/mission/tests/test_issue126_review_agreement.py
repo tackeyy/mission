@@ -97,6 +97,39 @@ def test_mark_passes_rejects_max_delta_above_1_5(state_dir, run_cli, read_state,
     assert read_state(state_dir)["passes"] is False
 
 
+def test_mark_passes_low_agreement_guidance_points_to_critic_not_more_reviews(
+    state_dir, run_cli, read_state, tmp_path
+):
+    """#869: 案内どおり追加レビューを足しても max-min は縮まらないため、reject の
+    案内は他 threshold gate (composite/min item) と同じく Critic 起動 → 次イテレー
+    ションを促す。従っても同じエラーが返り続ける旧文言 (「追加レビュー…再集計して
+    ください」) は返さない。"""
+    reviewer_a = dict(ITEMS, completeness=5.0)
+    reviewer_b = dict(ITEMS, completeness=4.0)
+    reviewer_c = dict(ITEMS, completeness=3.0)
+    evidence = write_canonical_review_aggregate(
+        state_dir.parent,
+        [
+            canonical_review(reviewer_a, perspective="A"),
+            canonical_review(reviewer_b, perspective="B"),
+            canonical_review(reviewer_c, perspective="C"),
+        ],
+        name_prefix="review-agreement-3reviewer",
+    )
+    scoring = _write_scoring(tmp_path, evidence)
+    run_cli("push-score", "--iteration", "1", "--scoring-json", str(scoring), cwd=state_dir.parent, check=True)
+
+    r = run_cli("mark-passes", cwd=state_dir.parent)
+
+    assert r.returncode == 2
+    assert "低合意" in r.stderr
+    assert "completeness" in r.stderr
+    assert read_state(state_dir)["passes"] is False
+    assert "Critic を起動し次イテレーションへ進んでください" in r.stderr
+    # 従っても max-min が縮まらない旧案内が復活していないことを固定する
+    assert "追加レビュー 1 名を実施して再集計してください" not in r.stderr
+
+
 def test_mark_passes_warns_for_delta_above_1_0_and_passes(state_dir, run_cli, read_state, tmp_path):
     evidence = _write_evidence(state_dir, delta=1.1)
     scoring = _write_scoring(tmp_path, evidence)
