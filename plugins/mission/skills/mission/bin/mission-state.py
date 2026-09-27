@@ -11103,7 +11103,9 @@ def _validate_review_agreement_gate(latest: dict) -> None:
         return
     if delta > 1.5:
         print(
-            f"ERROR: 低合意: 争点軸 {axis} の追加レビュー 1 名を実施して再集計してください (max-min={delta:.2f})",
+            f"ERROR: 低合意: 争点軸 {axis} の agreement が低いため合格にできません "
+            f"(max-min={delta:.2f})。追加レビューでは縮まらないため、"
+            "Critic を起動し次イテレーションへ進んでください。",
             file=sys.stderr,
         )
         sys.exit(2)
