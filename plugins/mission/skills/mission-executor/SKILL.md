@@ -35,7 +35,7 @@ allowed-tools:
 5. **不可逆操作の承認を確認**: 削除・本番デプロイ・force push 等は呼び出し元に承認状態を返す。現在のユーザー依頼が対象操作を明示していれば事前承認として扱う
 6. **artifact handoff を確定**: 実行契約が生成対象かを確定し、生成する場合は bounded regular file と producer run id、対象外なら明示的な not-applicable を返す。`pending` のまま reviewer へ渡さない
 
-## 並列 fan-out 指針 (P4, 2026-06-12)
+## 並列 fan-out 指針
 
 複数の**独立**サブタスク (記事読解バッチ・ファイル群調査・データ収集等) は、呼び出し元 orchestrator が許可した範囲でのみ fan-out する。executor 自身の `allowed-tools` には Agent tool を含めない。Skill tool の Reviewer 並列は /mission SKILL.md 本体と refs/gotchas.md §1 を参照。
 
