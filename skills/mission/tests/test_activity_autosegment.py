@@ -161,7 +161,14 @@ def test_resume_gap_keeps_a_reason_and_rollup_conserves_elapsed(run_cli, tmp_pat
     run_cli("activity", "start", "--kind", "active", "--reason", "resumed-implementation", "--resume", "--at", "2027-08-10T00:10:00Z", cwd=tmp_path, check=True)
 
     state = _read(tmp_path)
-    assert state["activity_unobserved_gap_reasons_sec"]["clock-gap"] >= 0.0
+    assert state["activity_unobserved_gap_sec"] == 600.0
+    assert state["activity_unobserved_gap_reasons_sec"] == {"clock-gap": 600.0}
+
+    result = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path, check=True)
+    timing = json.loads(result.stdout)["activity_timing"]
+    assert timing["unobserved_gap_sec"] == 600.0
+    assert timing["unobserved_gap_reasons_sec"] == {"clock-gap": 600.0}
+    assert timing["totals_consistent"] is True
 
 
 def test_activity_event_api_maps_approval_and_specialist_boundaries():
