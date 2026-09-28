@@ -8,14 +8,18 @@ TDD: 各テストは移行前に Red になることを確認した上で実装�
 
 from __future__ import annotations
 
+import argparse
+import importlib.util
 import json
 import sys
+from datetime import timedelta
 from pathlib import Path
 from typing import Callable
 
 import pytest
 
 LIB_DIR = Path(__file__).resolve().parents[1] / "lib"
+MISSION_STATE_PY = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +178,60 @@ def _v5_patch_session_state(
         compat.save(data)
 
 
+def _load_state_module(name: str):
+    spec = importlib.util.spec_from_file_location(name, MISSION_STATE_PY)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def _prepare_v5_provider_promotion(run_cli, legacy_run_cli, root: Path, session_id: str) -> str:
+    """Reuse the retained provider fixture to prepare a real v5 promotion input."""
+    fixture_path = Path(__file__).with_name("test_planning_provider_lifecycle.py")
+    spec = importlib.util.spec_from_file_location("issue861_provider_fixture", fixture_path)
+    fixture = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(fixture)
+    fixture_root = root / "provider-fixture"
+    fixture_root.mkdir()
+    _registry, state_file, source, invocation_id, env = fixture._provider_import_fixture(
+        legacy_run_cli, fixture_root,
+    )
+    imported = legacy_run_cli(
+        "specialists", "plan-import", "--input", str(source),
+        "--invocation-id", invocation_id, "--registry", str(_registry),
+        cwd=fixture_root, env_extra=env,
+    )
+    assert imported.returncode == 0, imported.stderr
+    legacy_state = json.loads(state_file.read_text(encoding="utf-8"))
+    record = legacy_state["provider_plan_imports"][invocation_id]
+    candidate = fixture_root / record["candidate_path"]
+    _init_v5(run_cli, root, session_id)
+    destination = root / record["candidate_path"]
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(candidate.read_bytes())
+    copied_fields = {
+        key: legacy_state[key]
+        for key in (
+            "iteration", "planning_policy_version", "planning_strategy", "specialists_selected",
+            "planning_provider_binding", "specialist_invocations", "provider_plan_imports",
+        )
+    }
+    _v5_patch_session_state(root, session_id, lambda state: state.update(copied_fields))
+    return invocation_id
+
+
+def _fixed_lease_clock(module, run_cli, root: Path, session_id: str, monkeypatch) -> None:
+    initial = _public_state(run_cli, root, session_id)
+    expires_at = module.parse_iso_datetime(initial["lease_expires_at"])
+    assert expires_at is not None
+    admitted_at = expires_at - timedelta(seconds=module._lease_ttl_seconds() - 1)
+    later = admitted_at + timedelta(seconds=1)
+    times = iter((admitted_at, later))
+    monkeypatch.setattr(module, "_lease_now", lambda: next(times, later))
+
+
 # ---------------------------------------------------------------------------
 # tests: planning adopt-core
 # ---------------------------------------------------------------------------
@@ -228,6 +286,53 @@ def test_planning_adopt_core_v5_preserves_head_and_replays(run_cli, tmp_path):
     )
     assert updated.returncode == 0, updated.stderr
     assert _public_state(run_cli, tmp_path, session_id).get("batch3_adopt_probe") is True
+
+
+def test_planning_adopt_core_v5_does_not_renew_admitted_lease_again(
+    run_cli, tmp_path, monkeypatch,
+):
+    """One v5 admission must retain its pending lease through the CLI handler.
+
+    The fixed clock advances exactly one second between repository admission and
+    the legacy compatibility write.  A second renewal changes the projected
+    lease expiry and is rejected by the fenced commit's pending-lease check.
+    """
+    session_id = "batch3-adopt-lease-boundary"
+    _init_v5(run_cli, tmp_path, session_id)
+    plan = _write_plan(tmp_path, "plan-lease-boundary.json")
+    module = _load_state_module("mission_state_issue861_adopt")
+    _fixed_lease_clock(module, run_cli, tmp_path, session_id, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MISSION_SESSION_ID", session_id)
+    monkeypatch.setenv("MISSION_LEASE_ID", session_id + "-lease")
+    monkeypatch.setenv("MISSION_OPERATION_ID", "adopt-lease-boundary-op")
+
+    module.cmd_planning_adopt_core(argparse.Namespace(
+        input=str(plan), source_id="lease-boundary-source", json=True,
+    ))
+
+    assert _public_state(run_cli, tmp_path, session_id)["canonical_plan"]["source_id"] == "lease-boundary-source"
+
+
+def test_planning_promote_provider_plan_v5_does_not_renew_admitted_lease_again(
+    run_cli, legacy_run_cli, tmp_path, monkeypatch,
+):
+    session_id = "batch3-promote-lease-boundary"
+    invocation_id = _prepare_v5_provider_promotion(
+        run_cli, legacy_run_cli, tmp_path, session_id,
+    )
+    module = _load_state_module("mission_state_issue861_promote")
+    _fixed_lease_clock(module, run_cli, tmp_path, session_id, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MISSION_SESSION_ID", session_id)
+    monkeypatch.setenv("MISSION_LEASE_ID", session_id + "-lease")
+    monkeypatch.setenv("MISSION_OPERATION_ID", "promote-lease-boundary-op")
+
+    module.cmd_planning_promote_provider_plan(argparse.Namespace(
+        invocation_id=invocation_id,
+    ))
+
+    assert _public_state(run_cli, tmp_path, session_id)["canonical_plan"]["source_id"] == invocation_id
 
 
 def test_planning_adopt_core_v5_requires_operation_id(run_cli, tmp_path):
