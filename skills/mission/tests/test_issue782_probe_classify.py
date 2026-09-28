@@ -91,7 +91,16 @@ def test_a_successful_run_whose_report_says_zero_is_still_a_no_result(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "payload", [{"executed": "3"}, {"executed": None}, {}, [], "not json at all"]
+    "payload",
+    [
+        {"executed": "3"},
+        {"executed": None},
+        {"executed": True},
+        {"executed": False},
+        {},
+        [],
+        "not json at all",
+    ],
 )
 def test_an_unreadable_report_is_not_a_pass(tmp_path, payload):
     path = tmp_path / "report.json"

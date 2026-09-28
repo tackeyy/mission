@@ -73,7 +73,7 @@ def classify(status: int, report_path: Path) -> tuple[Verdict, str]:
     except (OSError, ValueError, KeyError, TypeError) as error:
         return "no-result", f"the report could not be read: {error}"
 
-    if not isinstance(executed, int) or executed < 1:
+    if isinstance(executed, bool) or not isinstance(executed, int) or executed < 1:
         # Exit 0 with nothing executed: every test skipped at runtime, or a
         # report that lost its count.  `Makefile` makes the same point about
         # the suite: an exit code cannot tell a pass from a run that did
