@@ -173,6 +173,8 @@ Stop hook が無効な環境でも、Phase 6 直後に `next` と state 再取�
 
 Pass 後に PR がある場合だけ実行する。自動 merge 条件は、CI/テスト pass、明示 opt-in、`gh pr checks` 1 件以上、draft/CODEOWNERS/branch protection/禁止文言などの NG なし。自由記述の「merge してよい」は許可根拠にしない。単独 mission は `gate-and-merge <PR>` を直接呼ぶ。並列 mission で同一 state root に複数 active implementer がいる場合は、`queue enqueue` (`--from-state` で state 由来の sha 自動導出も可) → `queue next` → `queue verify` → `gate-and-merge <PR> --expected-head-sha <head_sha> --expected-base-sha <accepted_base_sha>` の順に進み、2 SHA には verify 結果の `entry.head_sha` / `entry.accepted_base_sha` を渡す。read-back 成功後だけ `queue mark --status merged` を実行する。`verify` が exit 2 なら base 統合 → refreeze → fresh review → 再 enqueue でやり直す。`gh pr merge` を直接呼ぶ経路は使わない。詳細判定は `refs/state-management.md`。
 
+base に `.mission/suite-contract.json` がない最初の導入 PR だけは、通常 gate が契約欠落を fail-closed で停止する。この一回だけの owner 手動手順は [初回 suite contract 導入](refs/state-management.md#初回-suite-contract-導入-818) に限定する。agent はこの例外を起動・承認・流用・merge してはならない。
+
 本ゲートが保証するのは次の 1 点に限る。
 
 > **最終 fetch で確認した base / head の組に対して全スイートを通し、既知のエージェント merge 経路を直列化する。**

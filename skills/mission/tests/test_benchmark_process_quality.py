@@ -167,27 +167,67 @@ def test_iteration_ordering_numeric(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Goal arm -> process_quality is null (via extract_mission_state_fields for goal path)
+# State-missing reader and goal record quality fields
 # ---------------------------------------------------------------------------
 
-def test_goal_arm_has_null_process_quality():
-    """Goal arm hardcoded dict must include process_quality: None."""
-    # Verify the goal arm dict returned by caller has process_quality=None.
-    # We test this by checking the MODULE constant fields present in the else-branch dict.
-    # The simplest way: call extract_mission_state_fields on a path with no .mission-state
-    # and verify the returned fields include process_quality.
-    # Actually, the goal-arm dict is constructed in run_arm(); we validate via the
-    # extract_mission_state_fields path (which also has process_quality initialized to None).
+def test_state_missing_reader_keeps_null_process_quality_fields():
+    """State reader returns the null quality contract when no mission state exists."""
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         wt = Path(td)
         fields, note = MODULE.extract_mission_state_fields(wt)
-    # When state is missing, fields are still returned with process_quality key
     assert "process_quality" in fields
     assert fields["process_quality"] is None
     assert "process_quality_error" in fields
-    # note should be mission_state_missing, not a process_quality error
     assert note == "mission_state_missing"
+
+
+def test_goal_run_record_has_null_process_quality_fields(tmp_path, monkeypatch):
+    """Goal record preserves unavailable process-quality fields after an isolated child run."""
+    task = {
+        "id": "complex-cross-file-feature",
+        "category": "coding",
+        "prompt": "Produce the requested artifact.",
+        "validator": "Include Evidence and Assumptions.",
+    }
+    run_id = "goal-process-quality-contract"
+    arm = "claude_code_goal_command"
+    run_name = MODULE.run_name_for(task["id"], arm, 1, 1)
+
+    def fake_clone(_source, target, _starting_commit):
+        target.mkdir(parents=True)
+
+    def fake_child_run(_command, *, cwd, **_kwargs):
+        output = cwd / "benchmarks" / "mission-vs-goal" / "run-output" / run_id / f"{run_name}.md"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("# Goal\n# Result\n# Stop Condition\n# Evidence\n# Assumptions\n", encoding="utf-8")
+        return type("ChildResult", (), {"stdout": "{}", "stderr": "", "returncode": 0})()
+
+    def fake_git_diff(*_args, **_kwargs):
+        return type("GitResult", (), {"stdout": "", "stderr": "", "returncode": 0})()
+
+    monkeypatch.setattr(MODULE, "prepare_clone", fake_clone)
+    monkeypatch.setattr(MODULE.subprocess, "run", fake_child_run)
+    monkeypatch.setattr(MODULE, "run_command", fake_git_diff)
+    monkeypatch.setattr(MODULE, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(MODULE, "ARTIFACTS_DIR", tmp_path / "artifacts")
+
+    record = MODULE.run_one(
+        task=task,
+        arm=arm,
+        run_id=run_id,
+        starting_commit="fixture-commit",
+        run_root=tmp_path / "runs",
+        timeout=1,
+        max_budget_usd=None,
+        mission_max_iter=None,
+        mission_profile="full",
+        arm_order=1,
+        model_id="fixture-model",
+    )
+
+    assert record["process_quality"] is None
+    assert record["process_quality_error"] is None
 
 
 # ---------------------------------------------------------------------------
