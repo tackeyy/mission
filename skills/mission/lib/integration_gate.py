@@ -422,8 +422,9 @@ def load_suite_contract(operations, *, base_sha: str, step: int) -> dict:
         raise IntegrationGateError(
             step,
             "suite-contract-missing",
-            "no {} in the base.  Declare the full suite there and merge it "
-            "first -- the gate cannot show a suite ran without one.".format(
+            "no {} in the base. Normal gate use requires a merged contract; "
+            "for its first introduction, follow the owner-only bootstrap runbook "
+            "in skills/mission/refs/state-management.md.".format(
                 SUITE_CONTRACT_PATH
             ),
         )

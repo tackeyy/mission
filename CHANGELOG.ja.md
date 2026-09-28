@@ -14,6 +14,8 @@
 - fix: git が解決した base commit と、API が報告する `baseRefOid` の一致を要求するようにした。`url.<base>.insteadOf` がゲートの git 解決先を別 repository へ書き換えている場合、テスト実行前・merge 前に検出される。`gh` は検証済み identity で repository を指し git の書き換え規則の影響を受けないため、両者は独立した観測になる。不一致は再 fetch で切り分け、git 自身の観測が動いていれば既存の `base-moved` を返す。正当な base 移動を書き換えとして報告しない一方、検出はスイート実行後ではなく step 3 で行われるようになる。比較できない観測は「検査不要」と読み替えず、専用の理由でゲートを停止する（#701）。
 - fix: `push-score` が digest 検証済みの review aggregate から `findings_summary` を導出するようにし、bounded context manifest が前 iteration の指摘を実際に運ぶようにした。従来はこの field を書く実装が無く、production では `prior_findings` が常に空だったが、合成 state のテストが green を維持していた。manifest には `prior_findings_status`（`no-history` / `complete` / `partial`）を追加し、空リストと供給元の不在を区別できるようにした。pass gate は不変（#690）。
 
+- fix: reviewer agreement が低い（`max-min > 1.5`）ときの `mark-passes` reject 案内を、`composite-below-threshold` / `minimum-item-below-threshold` と同じく `mission-critic` → 次イテレーションへ進む案内に変更した。旧案内は「追加レビュー 1 名を実施して再集計してください」だったが、既存レビュアーの max/min の値は残るため max-min は縮まらず、案内に従っても同じ `exit 2` が返り続けていた。ゲート自体（1.5 超で reject・1.0 超で WARN）は変更していない（#869）。
+
 - fix: unsafeなlegacy specialist recordを型付きaudit read errorとして隔離し、unsafe stateをsnapshotへコピーせず横断監査を継続できるようにした（#648）。
 
 ## [2.8.0] - 2026-08-19
