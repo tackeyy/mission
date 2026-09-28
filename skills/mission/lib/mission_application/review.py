@@ -366,7 +366,10 @@ _PASS_REJECTION_MESSAGES = {
     "open-high-findings": "未解決 High があるため合格にできません。High 指摘を全て解消してから再採点してください。",
     "composite-below-threshold": "composite が threshold 未満のため合格にできません。",
     "minimum-item-below-threshold": "min_item が 3.5 未満のため合格にできません。",
-    "review-agreement-too-low": "低合意: 争点軸の追加レビューを実施して再集計してください。",
+    "review-agreement-too-low": (
+        "低合意: 争点軸の agreement が低いため合格にできません。"
+        "追加レビューを重ねても max-min は縮まりません。Critic を起動し次イテレーションへ進んでください。"
+    ),
     "artifact-gate-unsatisfied": "artifact gate is not satisfied",
     "specialist-gate-unsatisfied": "specialist gate is not satisfied",
     "force-approval-required": "force approval evidence is required",
@@ -415,8 +418,9 @@ def _pass_rejection_message(reason: str, data: dict, latest: dict | None) -> str
         axis, delta = _maximum_agreement(latest)
         rendered = "unknown" if delta is None else f"{delta:.2f}"
         return (
-            f"低合意: 争点軸 {axis} の追加レビュー 1 名を実施して再集計してください "
-            f"(max-min={rendered})"
+            f"低合意: 争点軸 {axis} の agreement が低いため合格にできません "
+            f"(max-min={rendered})。既存レビュアーの値は追加レビューで縮まりません。"
+            "Critic を起動し次イテレーションへ進んでください。"
         )
     return _PASS_REJECTION_MESSAGES.get(reason, reason)
 
