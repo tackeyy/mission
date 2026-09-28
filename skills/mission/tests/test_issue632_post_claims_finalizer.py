@@ -150,22 +150,6 @@ def test_kernel_and_legacy_derivations_agree_for_every_category_and_role(tmp_pat
 
 
 
-def test_permission_preflight_and_init_report_internal_invariant_without_traceback(monkeypatch, capsys):
-    from mission_persistence.fenced_commit import FencedCommitError
-
-    path = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
-    spec = importlib.util.spec_from_file_location("issue632_invariant_cli", path)
-    cli = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[spec.name] = cli
-    spec.loader.exec_module(cli)
-    monkeypatch.setattr(cli, "_permission_preflight", lambda _cwd: (_ for _ in ()).throw(FencedCommitError("transition-divergence", "test")))
-    with pytest.raises(SystemExit) as result:
-        cli.cmd_permission_preflight(type("Args", (), {"json": True})())
-    assert result.value.code == 2
-    assert "internal-invariant: transition-divergence" in capsys.readouterr().err
-
-
 _SOURCE_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -912,8 +896,18 @@ def test_supersede_reviews_saves_gate_only_values_through_the_real_cli(
         assert old_state["passes"] is False
 
 
-def test_permission_preflight_reports_unsealed_and_halt_rejection(monkeypatch, capsys):
-    """`transition-unsealed` と `PermissionHaltRejected` も構造化されること（設計書 §5）。"""
+@pytest.mark.parametrize(
+    ("error_kind", "code", "detail"),
+    (
+        ("fenced", "transition-divergence", "test"),
+        ("fenced", "transition-unsealed", "unsealed"),
+        ("halt", "permission-halt-rejected", None),
+    ),
+)
+def test_permission_preflight_reports_all_internal_invariants_without_traceback(
+    monkeypatch, capsys, error_kind, code, detail
+):
+    """Preflight の kernel invariant 違反は構造化診断だけを返すこと。"""
     from mission_application.runtime_guard import PermissionHaltRejected
     from mission_persistence.fenced_commit import FencedCommitError
 
@@ -924,26 +918,30 @@ def test_permission_preflight_reports_unsealed_and_halt_rejection(monkeypatch, c
     sys.modules[spec.name] = cli
     spec.loader.exec_module(cli)
 
-    for error in (
-        FencedCommitError("transition-unsealed", "unsealed"),
-        PermissionHaltRejected("permission-halt-rejected"),
-    ):
-        monkeypatch.setattr(
-            cli,
-            "_permission_preflight",
-            lambda _cwd, error=error: (_ for _ in ()).throw(error),
-        )
-        with pytest.raises(SystemExit) as result:
-            cli.cmd_permission_preflight(type("Args", (), {"json": True})())
-        assert result.value.code == 2
-        assert "internal-invariant" in capsys.readouterr().err
+    error = (
+        FencedCommitError(code, detail)
+        if error_kind == "fenced"
+        else PermissionHaltRejected(code)
+    )
+    monkeypatch.setattr(
+        cli,
+        "_permission_preflight",
+        lambda _cwd: (_ for _ in ()).throw(error),
+    )
+    with pytest.raises(SystemExit) as result:
+        cli.cmd_permission_preflight(type("Args", (), {"json": True})())
+    assert result.value.code == 2
+    captured = capsys.readouterr()
+    assert "internal-invariant: " + code in captured.err
+    assert captured.out == ""
+    assert "Traceback" not in captured.err
 
 
 # --- 再入と nested transaction（Sol high レビューの High 指摘・実再現あり） ---
 
 
-def test_init_reports_internal_invariant_without_traceback(monkeypatch, capsys):
-    """`cmd_init` 経路でも kernel invariant 違反が構造化されること（設計書 §5）。
+def test_init_write_failure_reports_internal_invariant_without_traceback(monkeypatch, capsys):
+    """Init write failure 経路でも kernel invariant 違反が構造化されること。
 
     `_exit_init_write_failure` は `except OSError` の中から呼ばれるため、
     `PermissionHaltRejected` が抜けると traceback になる（修正前の挙動）。
@@ -972,6 +970,7 @@ def test_init_reports_internal_invariant_without_traceback(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "internal-invariant: permission-halt-rejected" in captured.err
     assert captured.out == "", "invariant 違反では fallback JSON を出さない"
+    assert "Traceback" not in captured.err
 
 
 def test_execute_effects_callbacks_cannot_save_before_verification(tmp_path):
