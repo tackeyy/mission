@@ -26,7 +26,14 @@ def test_make_smoke_runs_without_install_and_reports_tree_and_manifest(tmp_path:
     report = _last_json_line(result.stdout)
     assert report["schema"] == "mission-test-report/1"
     assert report["tier"] == "smoke"
-    assert len(report["tree_sha"]) == 40
+    tree = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert tree.returncode == 0, tree.stderr
+    assert report["tree_sha"] == tree.stdout.strip()
     assert report["test_manifest"] == [
         "skills/mission/bin/mission-state.py",
         "scripts/mission-audit.py",
