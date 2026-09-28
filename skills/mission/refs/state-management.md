@@ -632,6 +632,72 @@ issue 起票 → worktree feature ブランチ → PR (本文に `Closes #N` を
 - 個人リポジトリでは GitHub Merge Queue を使わない。queue 相当の順序制御が必要なときは `.mission-state/merge-queue.json` と `gate-and-merge` を使って直列化する。
 - これは reject しない補助規律 (issue 連携がないミッションには影響しない・後方互換)。
 
+## 初回 suite contract 導入 (#818)
+
+通常の `gate-and-merge` は base にある `.mission/suite-contract.json` だけを信頼する。base に契約がない repository の最初の導入 PR は通常 gate を通れない。これは欠落を許可する例外ではない。以下は **その最初の PR 一回だけ** の owner 手動手順であり、agent は起動・承認・merge しない。
+
+適用できるのは、base に契約がなく、その PR が初めて contract と full-suite runner/report writer を導入するときだけである。owner は repository、PR 番号、current base SHA、current head SHA、有効期限を一回の承認に明記する。承認は別 PR、後続変更、base/head の変更、期限後へ流用しない。
+
+この手順は、owner が default branch の全更新経路（他 PR merge、auto-merge、queue、直接 push、自動更新）を停止し、step 1 の開始前から step 5 の merge/read-back 完了まで排他を実効的に維持できるときだけ使える。同一 host の lease は全更新経路を排他しない。排他が確立できない場合は、driver も起動せず、通常 gate の `suite-contract-missing` のまま停止する。agent や通常 gate への自動 fallback はない。
+
+GitHub CLI では base の CAS を保証できない。`--match-head-commit` は head だけを照合するため、最終照合から merge 完了までの base 一致は、この owner 排他を前提にする。
+
+1. 排他を開始した後に、`git ls-remote --symref origin HEAD` で default branch を解決し、fetch 後の base SHA と GitHub PR の base/head SHA を記録する。CI required checks green、同一 head を対象とする独立 review accepted、repo 固有 gate を先に確認する。
+2. disposable scratch worktree を base SHA で作り、PR head を `git merge --no-commit --no-ff` で統合する。conflict なら停止する。これは scratch tree の作成だけで、commit、ref 更新、GitHub 操作を行わない。
+3. 下の driver を scratch tree と `MISSION_PLUGIN_ROOT` を指定して実行する。driver は contract の argv を既存 validator に渡し、fresh report path で full suite を起動し、integrated tree SHA、`status: complete`、正の executed count を検証する。
+4. suite 成功後も排他が継続していることを確認し、live base/head、CI 対象 head、review 対象 head を読み直す。一つでも記録値と違えば merge せず step 1 からやり直す。owner は SHA、実行 command、executed count、CI、review を確認する。
+5. owner だけが排他を保ったまま `gh pr merge --squash --match-head-commit <head> <pr>` を実行できる。直後に squash merge commit の親が記録した base SHA と一致すること、および base の contract の存在を read-back する。不一致は成功として扱わず owner へ報告する。この read-back は予防ではなく証跡である。この手順は通常の agent merge entrypoint を変更しない。
+
+driver は GitHub API、`gh`、PR merge、承認判定、Mission state を扱わない。scratch tree の作成も行わないため、明示した tree だけを検証する。report は runner の自己申告であり、contract が本当に CI の full suite であることは review と owner 承認で確認する。
+
+<!-- bootstrap-suite-driver:start -->
+```python
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+if len(sys.argv) != 2:
+    raise SystemExit("usage: bootstrap_suite_driver.py <scratch-tree>")
+
+scratch = Path(sys.argv[1]).resolve()
+plugin_root = Path(os.environ["MISSION_PLUGIN_ROOT"]).resolve()
+sys.path.insert(0, str(plugin_root / "skills" / "mission" / "lib"))
+
+from integration_gate import CommandResult, require_suite_contract, run_declared_suite
+
+
+def runner(argv, cwd, env=None):
+    result = subprocess.run(
+        argv,
+        cwd=cwd,
+        env={**os.environ, **(env or {})},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return CommandResult(result.returncode, result.stdout, result.stderr)
+
+
+contract = json.loads((scratch / ".mission" / "suite-contract.json").read_text())
+command = require_suite_contract(contract, step=4)
+tree_sha = subprocess.run(
+    ["git", "write-tree"], cwd=scratch, text=True, capture_output=True, check=True
+).stdout.strip()
+report_path = scratch / ".mission-bootstrap-suite-report.json"
+executed = run_declared_suite(
+    command,
+    runner=runner,
+    cwd=scratch,
+    report_path=report_path,
+    expected_tree_sha=tree_sha,
+    step=4,
+)
+print(json.dumps({"command": list(command), "executed": executed, "tree_sha": tree_sha}))
+```
+<!-- bootstrap-suite-driver:end -->
+
 ## Merge queue
 
 並列 mission で同一 state root に複数 active implementer がいる場合、merge 順序を直列化する sidecar として `.mission-state/merge-queue.json` を使う。queue は state / lease / gate の意味論に触れず、順序と検証状態だけを管理する。

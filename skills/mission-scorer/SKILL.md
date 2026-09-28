@@ -43,6 +43,7 @@ allowed-tools: Read, Grep, Glob
 5. 全 4 軸が同点の場合、元レビューに自己警告や理由が無ければ `same_score_note` を追加しない。native import/finalize 経路に reject させる。
 6. 採点、平均、合意度、合否判定、rubric cap の適用は `review-finalize` に任せる。
 7. 元レビューが各findingについて Cause / General Fix Rule / Weak phase の3値を明記している場合だけ `learning_schema: mission-review-learning/1` と3値を変換する。1つでも明記がなければmarkerごと省略し、推測補完しない。
+8. `perspective` は入力の「reviewer の担当観点」をそのまま使う。findings の `id` は `<perspective>-<連番>` にする（`mission-review/1` は perspective を必須とし、`review-import` は id の prefix が一致しないものを reject する）。
 
 ## 出力形式
 
@@ -53,12 +54,11 @@ allowed-tools: Read, Grep, Glob
   "schema": "mission-review/1",
   "learning_schema": "mission-review-learning/1",
   "iteration": 1,
-  "reviewer": "fallback-scorer",
-  "axis": "accuracy",
+  "perspective": "A",
   "scores": null,
   "findings": [
     {
-      "id": "F-1",
+      "id": "A-1",
       "severity": "Medium",
       "axis": "accuracy",
       "summary": "散文レビューに書かれていた指摘の要約",
