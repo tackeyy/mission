@@ -111,10 +111,12 @@ def test_scoring_json_stagnation_still_updates(state_dir, run_cli, read_state, t
 
 
 def test_scoring_json_conflicts_with_items(state_dir, run_cli, tmp_path):
-    src = _write_scoring_json(tmp_path, {"items": {**CANONICAL_ITEMS, "reviewer_consensus": 4.0}})
+    """--items 併用は JSON 内容が正規でも、読み込み前に拒否する。"""
+    src = _write_scoring_json(tmp_path, {"items": CANONICAL_ITEMS})
     r = run_cli("push-score", "--iteration", "1", "--scoring-json", str(src),
-                "--items", '{"a": 4.0}', cwd=state_dir.parent)
+                "--items", json.dumps(CANONICAL_ITEMS), cwd=state_dir.parent)
     assert r.returncode == 2, f"stderr: {r.stderr}"
+    assert "--scoring-json と --items/--composite/--min-item は併用できません" in r.stderr
 
 
 def test_scoring_json_conflicts_with_composite(state_dir, run_cli, tmp_path):
