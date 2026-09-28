@@ -17,6 +17,12 @@ def run_cli(legacy_run_cli):
     return legacy_run_cli
 
 
+# init records the real clock in ``updated_at``; later commands pass fixed
+# ``--at`` times. Once the real clock passes those times, the rollback guard
+# rejects them. Pin init before the fixed times so the tests do not expire.
+_INIT_CLOCK = {"MISSION_STATE_NOW": "2027-08-09T23:59:00Z"}
+
+
 def _read(tmp_path):
     path = tmp_path / ".mission-state" / "sessions" / "test.json"
     return read_authoritative_snapshot(
@@ -156,12 +162,19 @@ def test_aggregate_reviews_transitions_reviewing_to_scoring_activity(run_cli, tm
 
 
 def test_resume_gap_keeps_a_reason_and_rollup_conserves_elapsed(run_cli, tmp_path):
-    run_cli("init", "automatic activity", cwd=tmp_path, check=True)
+    run_cli("init", "automatic activity", cwd=tmp_path, check=True, env_extra=_INIT_CLOCK)
     run_cli("activity", "start", "--kind", "active", "--reason", "work", "--at", "2027-08-10T00:00:00Z", cwd=tmp_path, check=True)
     run_cli("activity", "start", "--kind", "active", "--reason", "resumed-implementation", "--resume", "--at", "2027-08-10T00:10:00Z", cwd=tmp_path, check=True)
 
     state = _read(tmp_path)
-    assert state["activity_unobserved_gap_reasons_sec"]["clock-gap"] >= 0.0
+    assert state["activity_unobserved_gap_sec"] == 600.0
+    assert state["activity_unobserved_gap_reasons_sec"] == {"clock-gap": 600.0}
+
+    result = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path, check=True)
+    timing = json.loads(result.stdout)["activity_timing"]
+    assert timing["unobserved_gap_sec"] == 600.0
+    assert timing["unobserved_gap_reasons_sec"] == {"clock-gap": 600.0}
+    assert timing["totals_consistent"] is True
 
 
 def test_activity_event_api_maps_approval_and_specialist_boundaries():
@@ -206,7 +219,7 @@ def test_resume_gap_classifies_legacy_crash_provider_and_clock_boundaries():
 def test_parallel_implementer_sessions_have_no_zero_activity_cohort(run_cli, tmp_path):
     for index in range(2):
         env = {"MISSION_SESSION_ID": f"parallel-{index}", "MISSION_LEASE_ID": f"lease-{index}"}
-        run_cli("init", f"parallel {index}", cwd=tmp_path, check=True, env_extra=env)
+        run_cli("init", f"parallel {index}", cwd=tmp_path, check=True, env_extra={**env, **_INIT_CLOCK})
         run_cli(
             "activity", "start", "--kind", "active", "--reason", "work",
             "--at", f"2027-08-10T00:0{index}:00Z", cwd=tmp_path, check=True, env_extra=env,
