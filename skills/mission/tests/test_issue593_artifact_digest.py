@@ -56,6 +56,14 @@ def _set_artifact(state_dir, rel_path):
     session.write_text(json.dumps(data, indent=2))
 
 
+def _set_legacy_artifact_path(state_dir, rel_path):
+    """Record a digest source without changing the resolved artifact contract."""
+    session = state_dir / "sessions" / "test.json"
+    data = json.loads(session.read_text())
+    data["artifact_path"] = rel_path
+    session.write_text(json.dumps(data, indent=2))
+
+
 def _push(run_cli, state_dir, tmp_path, iteration, reviewers=1):
     src = _scoring_json(tmp_path, iteration=iteration,
                         name=f"scoring-{iteration}.json", reviewers=reviewers)
@@ -124,16 +132,49 @@ def test_digest_failure_never_blocks_push_score(state_dir, run_cli, read_state, 
     assert entry["artifact_digest_status"] not in (None, "ok")
 
 
-def test_gate_semantics_unchanged_by_digest_recording(state_dir, run_cli, read_state, tmp_path):
+def test_gate_semantics_unchanged_by_digest_recording(legacy_run_cli, read_state, tmp_path):
     """digest の記録が pass gate の判定に影響しないこと。"""
-    root = state_dir.parent
-    (root / "artifact.md").write_text("# v1\n", encoding="utf-8")
-    _set_artifact(state_dir, "artifact.md")
-    # reviewer 2 名にして agreement 算出経路まで通す (1 名だと agreement は
-    # 元から None であり、gate 経路が生きているかを検証できない)。
-    assert _push(run_cli, state_dir, tmp_path, 1, reviewers=2).returncode == 0
+    outcomes = {}
+    states = {}
+    for record_digest in (False, True):
+        root = tmp_path / ("with-digest" if record_digest else "without-digest")
+        root.mkdir()
+        assert legacy_run_cli("init", "digest gate invariance", cwd=root).returncode == 0
+        assert legacy_run_cli(
+            "advance", "--phase", "reviewing", "--artifact-applicability", "not-applicable",
+            cwd=root,
+        ).returncode == 0
+        state_dir = root / ".mission-state"
+        if record_digest:
+            (root / "artifact.md").write_text("# v1\n", encoding="utf-8")
+            _set_legacy_artifact_path(state_dir, "artifact.md")
+        # reviewer 2 名にして agreement 算出経路まで通す (1 名だと agreement は
+        # 元から None であり、gate 経路が生きているかを検証できない)。
+        assert _push(legacy_run_cli, state_dir, root, 1, reviewers=2).returncode == 0
+        result = legacy_run_cli("mark-passes", cwd=root)
+        state = read_state(state_dir)
+        states[record_digest] = state
+        outcomes[record_digest] = (
+            result.returncode, state["passes"], state.get("halt_reason", ""),
+            state["phase"], state["loop_active"],
+        )
 
-    entry = read_state(state_dir)["score_history"][0]
+    # 観測記録以外の gate 前提を揃え、合格 control が実際に通ることを確認する。
+    for state in states.values():
+        entry = state["score_history"][0]
+        assert state["artifact_applicability"] == "not-applicable"
+        assert entry["score_provenance"]
+        specialist_decision = dict(state.get("specialists_decision") or {})
+        specialist_decision.pop("selection_id", None)  # arm-local selection identity
+        control_decision = dict(states[False].get("specialists_decision") or {})
+        control_decision.pop("selection_id", None)
+        assert specialist_decision == control_decision
+    assert states[True]["score_history"][0]["artifact_digest_status"] == "ok"
+    assert states[False]["score_history"][0]["artifact_digest_status"] == "not-configured"
+    assert outcomes[False][:2] == (0, True)
+    assert outcomes[True] == outcomes[False]
+
+    entry = states[True]["score_history"][0]
     # gate が参照するフィールドが従来どおり揃っている
     assert entry["composite"] == 4.0
     assert entry["min_item"] == 3.5

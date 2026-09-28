@@ -113,13 +113,48 @@ def _scoring_json(tmp_path, iteration=1):
     return path
 
 
-def test_gate_semantics_unchanged_by_verification_record(state_dir, run_cli, read_state, tmp_path):
+def test_gate_semantics_unchanged_by_verification_record(legacy_run_cli, read_state, tmp_path):
     """検証はゲートの**入力**を増やすものであり、ゲートの式を変えない。"""
-    assert _record(run_cli, state_dir, [_failed_check()]).returncode == 0
-    src = _scoring_json(tmp_path)
-    assert run_cli("push-score", "--iteration", "1", "--scoring-json", str(src),
-                   cwd=state_dir.parent).returncode == 0
-    entry = read_state(state_dir)["score_history"][0]
+    outcomes = {}
+    states = {}
+    for record_failed_verification in (False, True):
+        root = tmp_path / ("with-failed-verification" if record_failed_verification else "without-verification")
+        root.mkdir()
+        assert legacy_run_cli("init", "verification gate invariance", cwd=root).returncode == 0
+        assert legacy_run_cli(
+            "advance", "--phase", "reviewing", "--artifact-applicability", "not-applicable",
+            cwd=root,
+        ).returncode == 0
+        state_dir = root / ".mission-state"
+        if record_failed_verification:
+            assert _record(legacy_run_cli, state_dir, [_failed_check()]).returncode == 0
+        src = _scoring_json(root)
+        assert legacy_run_cli("push-score", "--iteration", "1", "--scoring-json", str(src),
+                              cwd=root).returncode == 0
+        result = legacy_run_cli("mark-passes", cwd=root)
+        state = read_state(state_dir)
+        states[record_failed_verification] = state
+        outcomes[record_failed_verification] = (
+            result.returncode, state["passes"], state.get("halt_reason", ""),
+            state["phase"], state["loop_active"],
+        )
+
+    # 観測記録以外の gate 前提を揃え、合格 control が実際に通ることを確認する。
+    for state in states.values():
+        entry = state["score_history"][0]
+        assert state["artifact_applicability"] == "not-applicable"
+        assert entry["score_provenance"]
+        specialist_decision = dict(state.get("specialists_decision") or {})
+        specialist_decision.pop("selection_id", None)  # arm-local selection identity
+        control_decision = dict(states[False].get("specialists_decision") or {})
+        control_decision.pop("selection_id", None)
+        assert specialist_decision == control_decision
+    assert states[True]["verification_history"][0]["status"] == "failed"
+    assert not states[False].get("verification_history")
+    assert outcomes[False][:2] == (0, True)
+    assert outcomes[True] == outcomes[False]
+
+    entry = states[True]["score_history"][0]
     assert entry["composite"] == 4.0
     assert entry["min_item"] == 3.5
     assert entry["open_high"] == 0
