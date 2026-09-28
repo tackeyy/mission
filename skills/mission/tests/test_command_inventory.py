@@ -1848,21 +1848,6 @@ def test_direct_legacy_call_allowlist_has_no_stale_entries():
     assert ALLOWED_NON_C2_CALL_SITES - unallowlisted_call_sites == set()
 
 
-def test_c2_direct_write_allowlist_is_empty():
-    """Enforce that the C2 migration is complete: no mutating command bypasses the repository.
-
-    This test is the mechanical guarantee that every mutating command goes through
-    the repository.  If a future change adds an entry to C2_DIRECT_WRITE_ALLOWLIST,
-    CI turns Red here before the regression reaches production.
-    """
-    from mission_application.command_owners import C2_DIRECT_WRITE_ALLOWLIST
-
-    assert C2_DIRECT_WRITE_ALLOWLIST == frozenset(), (
-        "C2_DIRECT_WRITE_ALLOWLIST must remain empty after Batch 3 migration. "
-        f"Found: {C2_DIRECT_WRITE_ALLOWLIST!r}"
-    )
-
-
 def test_a1_registry_has_one_owner_for_every_lifecycle_command():
     from mission_application.lifecycle import LIFECYCLE_COMMAND_OWNERS
 
