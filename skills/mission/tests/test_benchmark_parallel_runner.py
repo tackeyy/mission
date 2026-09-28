@@ -53,22 +53,39 @@ def test_parallel_executes_all_entries():
 def test_on_record_called_serially_per_record():
     """on_record は record ごとに 1 回、直列に呼ばれる (JSONL append の安全性)."""
     calls = []
-    lock_probe = {"depth": 0, "max_depth": 0}
-    probe_lock = threading.Lock()
+    worker_barrier = threading.Barrier(len(ENTRIES))
+    callback_lock = threading.Lock()
+    callback_overlap = threading.Event()
+    second_callback = threading.Event()
+    active_callbacks = 0
+    first_callback_started = False
+
+    def worker(entry):
+        worker_barrier.wait(timeout=2)
+        return {"entry": entry, "run_status": "completed"}
 
     def on_record(entry, record):
-        with probe_lock:
-            lock_probe["depth"] += 1
-            lock_probe["max_depth"] = max(lock_probe["max_depth"], lock_probe["depth"])
-        calls.append(entry)
-        with probe_lock:
-            lock_probe["depth"] -= 1
+        nonlocal active_callbacks, first_callback_started
+        with callback_lock:
+            active_callbacks += 1
+            calls.append(entry)
+            is_first_callback = not first_callback_started
+            first_callback_started = True
+            if active_callbacks > 1:
+                callback_overlap.set()
+                second_callback.set()
+        try:
+            if is_first_callback:
+                second_callback.wait(timeout=1)
+        finally:
+            with callback_lock:
+                active_callbacks -= 1
 
     MODULE.execute_plan(
-        ENTRIES, lambda e: {"entry": e, "run_status": "completed"},
+        ENTRIES, worker,
         parallel=4, on_record=on_record)
     assert sorted(calls) == sorted(ENTRIES)
-    assert lock_probe["max_depth"] == 1
+    assert not callback_overlap.is_set()
 
 
 def test_stop_on_blocked_skips_unstarted_entries():
