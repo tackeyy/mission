@@ -1,3 +1,4 @@
-class Store:
-    def __init__(self): self.items = {}; self.sent = []; self.total = 0
-    def snapshot(self): return {'items': self.items, 'sent': self.sent, 'total': self.total}
+class StateStore:
+    def __init__(self): self.value = None
+    def save(self, value): self.value = dict(value)
+    def snapshot(self): return dict(self.value)

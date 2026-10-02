@@ -1,2 +1,1 @@
-def normalise(operation):
-    return dict(operation)
+def normalise(request): return list(request.get('events', []))

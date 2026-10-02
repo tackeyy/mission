@@ -1,2 +1,1 @@
-def normalise(operation):
-    return dict(operation)
+def normalise(request): return {'state': dict(request.get('state', {})), 'calls': list(request.get('calls', []))}

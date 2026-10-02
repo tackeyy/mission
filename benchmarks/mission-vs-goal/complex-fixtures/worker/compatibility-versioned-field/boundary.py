@@ -1,2 +1,2 @@
-def normalise(operation):
-    return dict(operation)
+def normalise(payload):
+    value = dict(payload); return {'priority': value.get('priority', 'normal')}

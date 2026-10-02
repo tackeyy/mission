@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent / "complex-fixtures"
@@ -174,9 +175,93 @@ assert execute({"candidates": [{"id": "x", "rank": 1}, {"id": "y", "rank": 2}], 
     }
 
 
+def stateful_files(task_id: str, broken: bool, requirement: str) -> dict[str, str]:
+    """Render task-specific worker code; only the evaluator owns case data."""
+    common = {
+        "README.md": f"# {task_id}\n\nContract: {requirement}\n",
+    }
+    if task_id == "multi-module-cache":
+        common.update({
+            "boundary.py": "def normalise(request):\n    return dict(request)\n",
+            "storage.py": "class Storage:\n    def __init__(self, records): self.records = dict(records)\n    def read(self, key): return self.records.get(key)\n    def write(self, key, value): self.records[key] = value\n    def snapshot(self): return dict(self.records)\n",
+            "cache.py": "class Cache:\n    def __init__(self): self.values = {}\n    def read(self, storage, key):\n        if key not in self.values: self.values[key] = storage.read(key)\n        return self.values[key]\n" + ("" if broken else "    def invalidate(self, key): self.values.pop(key, None)\n"),
+            "service.py": "from boundary import normalise\nfrom storage import Storage\nfrom cache import Cache\n\ndef execute(request):\n    request = normalise(request); storage = Storage(request.get('initial', {})); cache = Cache(); values = []\n    for operation in request.get('operations', []):\n        if operation['kind'] == 'read': values.append(cache.read(storage, operation['key']))\n        else:\n            storage.write(operation['key'], operation['value'])\n" + ("            # retained cached value is observable through the next read\n" if broken else "            cache.invalidate(operation['key'])\n") + "    return {'values': values, 'state': storage.snapshot()}\n",
+            "public_smoke.py": "from service import execute\nassert isinstance(execute({'initial': {}, 'operations': []}), dict)\n",
+        })
+    elif task_id == "multi-module-unit-boundary":
+        common.update({
+            "boundary.py": "def to_minor(payload):\n    amount = payload['amount']\n    return int(round(amount * 100)) if payload['unit'] == 'major' else int(amount)\n" if not broken else "def to_minor(payload):\n    return int(payload['amount'])\n",
+            "consumer.py": "def present(minor, fee):\n    total = minor + fee\n    return {'minor_total': total, 'display_major': total / 100}\n",
+            "store.py": "class Ledger:\n    def __init__(self): self.minor = 0\n    def post(self, value): self.minor += value\n",
+            "service.py": "from boundary import to_minor\nfrom consumer import present\nfrom store import Ledger\n\ndef execute(request):\n    ledger = Ledger(); ledger.post(to_minor(request['payload']))\n    return present(ledger.minor, int(request.get('fee_minor', 0)))\n",
+            "public_smoke.py": "from service import execute\nassert execute({'payload': {'amount': 1, 'unit': 'minor'}})['minor_total'] == 1\n",
+        })
+    elif task_id == "compatibility-legacy-default":
+        common.update({
+            "boundary.py": "def normalise(payload):\n    value = dict(payload); version = value.get('version', 1)\n    default = 'open' if version == 1 else 'pending'\n    return {'state': value.get('state', default), 'version': version}\n" if not broken else "def normalise(payload):\n    value = dict(payload); return {'state': value.get('state', 'unknown'), 'version': value.get('version', 1)}\n",
+            "store.py": "class StateStore:\n    def __init__(self): self.value = None\n    def save(self, value): self.value = dict(value)\n    def snapshot(self): return dict(self.value)\n",
+            "service.py": "from boundary import normalise\nfrom store import StateStore\n\ndef execute(request):\n    store = StateStore(); store.save(normalise(request)); return store.snapshot()\n",
+            "public_smoke.py": "from service import execute\nassert isinstance(execute({}), dict)\n",
+        })
+    elif task_id == "compatibility-versioned-field":
+        common.update({
+            "boundary.py": "def normalise(payload):\n    value = dict(payload)\n    return {'priority': value.get('priority', value.get('urgency', 'normal'))}\n" if not broken else "def normalise(payload):\n    value = dict(payload); return {'priority': value.get('priority', 'normal')}\n",
+            "store.py": "class PriorityStore:\n    def __init__(self): self.priority = None\n    def save(self, value): self.priority = value\n",
+            "service.py": "from boundary import normalise\nfrom store import PriorityStore\n\ndef execute(request):\n    store = PriorityStore(); store.save(normalise(request)['priority']); return {'priority': store.priority}\n",
+            "public_smoke.py": "from service import execute\nassert isinstance(execute({}), dict)\n",
+        })
+    elif task_id == "partial-failure-rollback":
+        common.update({
+            "boundary.py": "def normalise(request): return {'existing': dict(request.get('existing', {})), 'writes': list(request.get('writes', [])), 'fail_after': request.get('fail_after')}\n",
+            "store.py": "class TransactionStore:\n    def __init__(self, records): self.records = dict(records)\n    def apply(self, writes, fail_after):\n        working = dict(self.records)\n        try:\n            for index, write in enumerate(writes):\n                working[write['key']] = write['value']\n                if index == fail_after: raise RuntimeError('injected')\n        except RuntimeError:\n            return False\n        self.records = working; return True\n    def snapshot(self): return dict(self.records)\n" if not broken else "class TransactionStore:\n    def __init__(self, records): self.records = dict(records)\n    def apply(self, writes, fail_after):\n        try:\n            for index, write in enumerate(writes):\n                self.records[write['key']] = write['value']\n                if index == fail_after: raise RuntimeError('injected')\n        except RuntimeError:\n            self.records.clear(); return False\n        return True\n    def snapshot(self): return dict(self.records)\n",
+            "service.py": "from boundary import normalise\nfrom store import TransactionStore\n\ndef execute(request):\n    request = normalise(request); store = TransactionStore(request['existing']); committed = store.apply(request['writes'], request['fail_after']); return {'committed': committed, 'state': store.snapshot()}\n",
+            "public_smoke.py": "from service import execute\nassert isinstance(execute({}), dict)\n",
+        })
+    elif task_id == "partial-failure-selective-retry":
+        common.update({
+            "boundary.py": "def normalise(request): return {'accepted': list(request.get('accepted', [])), 'rounds': list(request.get('rounds', [])), 'fail_once': set(request.get('fail_once', []))}\n",
+            "store.py": "class DeliveryStore:\n    def __init__(self, accepted, fail_once): self.accepted = set(accepted); self.fail_once = set(fail_once); self.attempts = []\n    def send(self, identifier):\n        if identifier in self.accepted: return\n        self.attempts.append(identifier)\n        if identifier in self.fail_once: self.fail_once.remove(identifier); return\n        self.accepted.add(identifier)\n" if not broken else "class DeliveryStore:\n    def __init__(self, accepted, fail_once): self.accepted = set(accepted); self.fail_once = set(fail_once); self.attempts = []\n    def send(self, identifier):\n        self.attempts.append(identifier)\n        if identifier not in self.fail_once: self.accepted.add(identifier)\n        self.fail_once.discard(identifier)\n",
+            "service.py": "from boundary import normalise\nfrom store import DeliveryStore\n\ndef execute(request):\n    request = normalise(request); store = DeliveryStore(request['accepted'], request['fail_once'])\n    for round_ids in request['rounds']:\n        for identifier in round_ids: store.send(identifier)\n    return {'attempts': store.attempts, 'accepted': sorted(store.accepted)}\n",
+            "public_smoke.py": "from service import execute\nassert isinstance(execute({}), dict)\n",
+        })
+    elif task_id == "rerun-idempotency-key":
+        common.update({
+            "boundary.py": "def normalise(request): return {'state': dict(request.get('state', {})), 'calls': list(request.get('calls', []))}\n",
+            "store.py": "class EffectStore:\n    def __init__(self, state): self.effects = dict(state)\n    def apply(self, event):\n        self.effects.setdefault(event['id'], event['amount'])\n    def snapshot(self): return dict(self.effects)\n" if not broken else "class EffectStore:\n    def __init__(self, state): self.effects = dict(state)\n    def apply(self, event): self.effects[event['id']] = self.effects.get(event['id'], 0) + event['amount']\n    def snapshot(self): return dict(self.effects)\n",
+            "service.py": "from boundary import normalise\nfrom store import EffectStore\n\ndef execute(request):\n    request = normalise(request); store = EffectStore(request['state'])\n    for call in request['calls']:\n        store.apply(call['event'])\n        if call.get('reload'): store = EffectStore(store.snapshot())\n    return {'effects': store.snapshot(), 'total': sum(store.snapshot().values())}\n",
+            "public_smoke.py": "from service import execute\nassert isinstance(execute({}), dict)\n",
+        })
+    elif task_id == "rerun-resume-watermark":
+        common.update({
+            "boundary.py": "def normalise(request): return {'state': dict(request.get('state', {})), 'runs': list(request.get('runs', []))}\n",
+            "store.py": "class WatermarkStore:\n    def __init__(self, state): self.watermark = state.get('watermark', -1); self.processed = list(state.get('processed', []))\n    def apply(self, event):\n        if event['offset'] > self.watermark: self.processed.append(event['id']); self.watermark = event['offset']\n    def snapshot(self): return {'watermark': self.watermark, 'processed': list(self.processed)}\n" if not broken else "class WatermarkStore:\n    def __init__(self, state): self.watermark = state.get('watermark', -1); self.processed = list(state.get('processed', []))\n    def apply(self, event):\n        if event['offset'] >= self.watermark: self.processed.append(event['id']); self.watermark = event['offset']\n    def snapshot(self): return {'watermark': self.watermark, 'processed': list(self.processed)}\n",
+            "service.py": "from boundary import normalise\nfrom store import WatermarkStore\n\ndef execute(request):\n    request = normalise(request); store = WatermarkStore(request['state'])\n    for run in request['runs']:\n        for event in run.get('events', []): store.apply(event)\n        if run.get('reload'): store = WatermarkStore(store.snapshot())\n    return store.snapshot()\n",
+            "public_smoke.py": "from service import execute\nassert isinstance(execute({}), dict)\n",
+        })
+    elif task_id == "aggregation-cancellation":
+        common.update({
+            "boundary.py": "def normalise(request): return list(request.get('events', []))\n",
+            "store.py": "class Aggregate:\n    def __init__(self): self.entries = {}\n    def apply(self, event):\n        if event['kind'] == 'add': self.entries[event['id']] = event['amount']\n        elif event['kind'] == 'cancel': self.entries.pop(event['id'], None)\n    def snapshot(self): return {'entries': dict(self.entries), 'total': sum(self.entries.values())}\n" if not broken else "class Aggregate:\n    def __init__(self): self.entries = {}\n    def apply(self, event):\n        if event['kind'] == 'add': self.entries[event['id']] = event['amount']\n        elif event['kind'] == 'cancel': self.entries.clear()\n    def snapshot(self): return {'entries': dict(self.entries), 'total': sum(self.entries.values())}\n",
+            "service.py": "from boundary import normalise\nfrom store import Aggregate\n\ndef execute(request):\n    store = Aggregate()\n    for event in normalise(request): store.apply(event)\n    return store.snapshot()\n",
+            "public_smoke.py": "from service import execute\nassert isinstance(execute({}), dict)\n",
+        })
+    elif task_id == "aggregation-deduplication":
+        common.update({
+            "boundary.py": "def normalise(request): return list(request.get('events', []))\n",
+            "store.py": "class Aggregate:\n    def __init__(self): self.entries = {}\n    def apply(self, event): self.entries.setdefault(event['id'], event['amount'])\n    def snapshot(self): return {'entries': dict(self.entries), 'total': sum(self.entries.values())}\n" if not broken else "class Aggregate:\n    def __init__(self): self.entries = {}; self.total = 0\n    def apply(self, event): self.entries[event['id']] = event['amount']; self.total += event['amount']\n    def snapshot(self): return {'entries': dict(self.entries), 'total': self.total}\n",
+            "service.py": "from boundary import normalise\nfrom store import Aggregate\n\ndef execute(request):\n    store = Aggregate()\n    for event in normalise(request): store.apply(event)\n    return store.snapshot()\n",
+            "public_smoke.py": "from service import execute\nassert isinstance(execute({}), dict)\n",
+        })
+    else:
+        raise ValueError(f"unknown stateful task: {task_id}")
+    return common
+
+
 def files(mode: str, broken: bool, task_id: str, requirement: str, failure: str) -> dict[str, str]:
     if mode == "lost-update" or mode == "ordering":
         return concurrency_files(task_id, broken, requirement)
+    if task_id:
+        return stateful_files(task_id, broken, requirement)
     return {
         "boundary.py": "def normalise(operation):\n    return dict(operation)\n",
         "store.py": "class Store:\n    def __init__(self): self.items = {}; self.sent = []; self.total = 0\n    def snapshot(self): return {'items': self.items, 'sent': self.sent, 'total': self.total}\n",
@@ -223,22 +308,83 @@ def execute(operations):
 
 def write_tree(root: Path, data: dict[str, str]) -> None:
     root.mkdir(parents=True, exist_ok=True)
+    for path in root.iterdir():
+        if path.is_file() and path.name not in data:
+            path.unlink()
     for name, text in data.items():
         (root / name).write_text(text, encoding="utf-8")
+
+
+def task_template(task_id: str, group: str) -> dict[str, str]:
+    """Return one reproducible fixture tree without writing it to the source tree."""
+    for known_id, _, requirement, failure, *_ in TASKS:
+        if known_id == task_id:
+            if group not in {"worker", "reference", "control"}:
+                raise ValueError("unknown fixture group")
+            mode = {'multi-module-cache':'cache','multi-module-unit-boundary':'units','compatibility-legacy-default':'legacy','compatibility-versioned-field':'rename','partial-failure-rollback':'rollback','partial-failure-selective-retry':'retry','rerun-idempotency-key':'idempotent','rerun-resume-watermark':'resume','aggregation-cancellation':'cancel','aggregation-deduplication':'dedupe','concurrency-lost-update':'lost-update','concurrency-order-independent':'ordering'}[task_id]
+            return files(mode, group == "worker", task_id, requirement, failure)
+    raise ValueError("unknown fixture task")
+
+
+def template_digest(task_id: str, group: str) -> str:
+    digest = hashlib.sha256()
+    for name, content in sorted(task_template(task_id, group).items()):
+        digest.update(name.encode("utf-8")); digest.update(b"\0"); digest.update(content.encode("utf-8")); digest.update(b"\0")
+    return "sha256:" + digest.hexdigest()
 
 def main() -> None:
     catalog = []
     cases = {
-      'cache': [{'name':'replace-cache','operations':[{'kind':'write','key':'x','value':1},{'kind':'write','key':'x','value':2}],'expected':{'items':{'x':2},'sent':[],'total':0}}],
-      'units': [{'name':'cents-boundary','operations':[{'kind':'amount','cents':1250}],'expected':{'items':{'amount':12.5},'sent':[],'total':0}}],
-      'legacy': [{'name':'legacy-default','operations':[{'kind':'payload'}],'expected':{'items':{'state':'open'},'sent':[],'total':0}}],
-      'rename': [{'name':'renamed-field','operations':[{'kind':'payload','urgency':'high'}],'expected':{'items':{'priority':'high'},'sent':[],'total':0}}],
-      'rollback': [{'name':'atomic-failure','operations':[{'kind':'put','key':'a','value':1},{'kind':'fail'}],'expected':{'items':{},'sent':[],'total':0}}],
-      'retry': [{'name':'selective-retry','operations':[{'kind':'send','id':'a'},{'kind':'send','id':'a'},{'kind':'send','id':'b'}],'expected':{'items':{},'sent':['a','b'],'total':0}}],
-      'idempotent': [{'name':'same-event','operations':[{'kind':'charge','id':'x','amount':3},{'kind':'charge','id':'x','amount':3}],'expected':{'items':{},'sent':[],'total':3}}],
-      'resume': [{'name':'watermark','operations':[{'kind':'event','id':'a','offset':1},{'kind':'event','id':'b','offset':1},{'kind':'event','id':'c','offset':2}],'expected':{'items':{},'sent':['a','c'],'total':0}}],
-      'cancel': [{'name':'cancellation','operations':[{'kind':'add','amount':3},{'kind':'cancel','amount':3}],'expected':{'items':{},'sent':[],'total':0}}],
-      'dedupe': [{'name':'duplicate','operations':[{'kind':'add','id':'x','amount':2},{'kind':'add','id':'x','amount':2}],'expected':{'items':{},'sent':[],'total':2}}],
+      'cache': [
+          {'name':'read-write-read', 'scenario': {'initial': {'x': 1}, 'operations': [{'kind':'read','key':'x'}, {'kind':'write','key':'x','value':2}, {'kind':'read','key':'x'}]}, 'expected': {'values':[1,2], 'state':{'x':2}}},
+          {'name':'independent-key', 'scenario': {'initial': {'x': 1, 'y': 4}, 'operations': [{'kind':'read','key':'y'}, {'kind':'write','key':'x','value':7}, {'kind':'read','key':'y'}, {'kind':'read','key':'x'}]}, 'expected': {'values':[4,4,7], 'state':{'x':7,'y':4}}},
+          {'name':'two-updates', 'scenario': {'initial': {'x': 3}, 'operations': [{'kind':'read','key':'x'}, {'kind':'write','key':'x','value':5}, {'kind':'read','key':'x'}, {'kind':'write','key':'x','value':9}, {'kind':'read','key':'x'}]}, 'expected': {'values':[3,5,9], 'state':{'x':9}}},
+      ],
+      'units': [
+          {'name':'major-with-fee', 'scenario': {'payload': {'amount': 12.5, 'unit':'major'}, 'fee_minor':25}, 'expected': {'minor_total':1275,'display_major':12.75}},
+          {'name':'minor-with-fee', 'scenario': {'payload': {'amount': 1250, 'unit':'minor'}, 'fee_minor':50}, 'expected': {'minor_total':1300,'display_major':13.0}},
+          {'name':'fractional-major', 'scenario': {'payload': {'amount': 0.75, 'unit':'major'}, 'fee_minor':5}, 'expected': {'minor_total':80,'display_major':0.8}},
+      ],
+      'legacy': [
+          {'name':'legacy-default', 'scenario': {'version':1}, 'expected': {'state':'open','version':1}},
+          {'name':'current-default', 'scenario': {'version':2}, 'expected': {'state':'pending','version':2}},
+          {'name':'explicit-state', 'scenario': {'version':1,'state':'closed'}, 'expected': {'state':'closed','version':1}},
+      ],
+      'rename': [
+          {'name':'legacy-urgency', 'scenario': {'urgency':'high'}, 'expected': {'priority':'high'}},
+          {'name':'current-priority', 'scenario': {'priority':'low'}, 'expected': {'priority':'low'}},
+          {'name':'explicit-current-wins', 'scenario': {'priority':'low','urgency':'high'}, 'expected': {'priority':'low'}},
+      ],
+      'rollback': [
+          {'name':'preserve-existing-on-first-fault', 'scenario': {'existing':{'keep':9}, 'writes':[{'key':'new','value':1}], 'fail_after':0}, 'expected': {'committed':False,'state':{'keep':9}}},
+          {'name':'commit-whole-batch', 'scenario': {'existing':{'keep':9}, 'writes':[{'key':'a','value':1},{'key':'b','value':2}], 'fail_after':None}, 'expected': {'committed':True,'state':{'keep':9,'a':1,'b':2}}},
+          {'name':'preserve-existing-on-late-fault', 'scenario': {'existing':{'prior':4}, 'writes':[{'key':'a','value':1},{'key':'b','value':2}], 'fail_after':1}, 'expected': {'committed':False,'state':{'prior':4}}},
+      ],
+      'retry': [
+          {'name':'skip-accepted', 'scenario': {'accepted':['a'], 'rounds':[['a','b']], 'fail_once':[]}, 'expected': {'attempts':['b'],'accepted':['a','b']}},
+          {'name':'retry-only-failed', 'scenario': {'accepted':['a'], 'rounds':[['a','b','c'],['b']], 'fail_once':['b']}, 'expected': {'attempts':['b','c','b'],'accepted':['a','b','c']}},
+          {'name':'retain-two-accepted', 'scenario': {'accepted':['a','c'], 'rounds':[['a','b','c'],['b']], 'fail_once':[]}, 'expected': {'attempts':['b'],'accepted':['a','b','c']}},
+      ],
+      'idempotent': [
+          {'name':'same-event', 'scenario': {'state':{}, 'calls':[{'event':{'id':'a','amount':3}},{'event':{'id':'a','amount':3}}]}, 'expected': {'effects':{'a':3},'total':3}},
+          {'name':'reload-retains-effect', 'scenario': {'state':{}, 'calls':[{'event':{'id':'a','amount':3},'reload':True},{'event':{'id':'a','amount':3}}]}, 'expected': {'effects':{'a':3},'total':3}},
+          {'name':'persisted-plus-new', 'scenario': {'state':{'a':3}, 'calls':[{'event':{'id':'a','amount':3}},{'event':{'id':'b','amount':5},'reload':True}]}, 'expected': {'effects':{'a':3,'b':5},'total':8}},
+      ],
+      'resume': [
+          {'name':'skip-persisted-watermark', 'scenario': {'state':{'watermark':1,'processed':['a']}, 'runs':[{'events':[{'id':'b','offset':1},{'id':'c','offset':2}]}]}, 'expected': {'watermark':2,'processed':['a','c']}},
+          {'name':'reload-between-runs', 'scenario': {'state':{}, 'runs':[{'events':[{'id':'a','offset':1}], 'reload':True},{'events':[{'id':'b','offset':1},{'id':'c','offset':2}]}]}, 'expected': {'watermark':2,'processed':['a','c']}},
+          {'name':'continue-after-watermark', 'scenario': {'state':{'watermark':2,'processed':['a','b']}, 'runs':[{'events':[{'id':'c','offset':3},{'id':'d','offset':4}], 'reload':True}]}, 'expected': {'watermark':4,'processed':['a','b','c','d']}},
+      ],
+      'cancel': [
+          {'name':'cancel-one-keeps-other', 'scenario': {'events':[{'kind':'add','id':'a','amount':5},{'kind':'add','id':'b','amount':3},{'kind':'cancel','id':'a'}]}, 'expected': {'entries':{'b':3},'total':3}},
+          {'name':'unknown-cancel', 'scenario': {'events':[{'kind':'add','id':'a','amount':2},{'kind':'cancel','id':'missing'}]}, 'expected': {'entries':{'a':2},'total':2}},
+          {'name':'order-with-three-ids', 'scenario': {'events':[{'kind':'add','id':'a','amount':1},{'kind':'add','id':'b','amount':4},{'kind':'cancel','id':'b'},{'kind':'add','id':'c','amount':2}]}, 'expected': {'entries':{'a':1,'c':2},'total':3}},
+      ],
+      'dedupe': [
+          {'name':'duplicate-one', 'scenario': {'events':[{'id':'a','amount':2},{'id':'a','amount':2}]}, 'expected': {'entries':{'a':2},'total':2}},
+          {'name':'interleaved-duplicates', 'scenario': {'events':[{'id':'a','amount':2},{'id':'b','amount':3},{'id':'a','amount':2}]}, 'expected': {'entries':{'a':2,'b':3},'total':5}},
+          {'name':'duplicate-after-new', 'scenario': {'events':[{'id':'c','amount':1},{'id':'c','amount':1},{'id':'a','amount':4}]}, 'expected': {'entries':{'c':1,'a':4},'total':5}},
+      ],
       'lost-update': [
           {'name': 'zero-plus-one-plus-one', 'scenario': {'initial': 0, 'deltas': [1, 1]}, 'expected': {'final_state': 2, 'threads_completed': 2}},
           {'name': 'seven-plus-two-plus-five', 'scenario': {'initial': 7, 'deltas': [2, 5]}, 'expected': {'final_state': 14, 'threads_completed': 2}},

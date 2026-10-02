@@ -12,11 +12,14 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import signal
+import shutil
 import subprocess
 import sys
 import tempfile
 import threading
-import shutil
+import time
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +35,30 @@ def _digest_tree(root: Path) -> str:
         raise RuntimeError("worker snapshot implementation unavailable")
     module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
     return module._digest_tree(root, exclude_git=True)
+
+
+def materialize_task(repo_root: Path, source_commit: str, task_id: str, group: str, destination: Path) -> dict[str, Any]:
+    """Bind fixed H inputs, then create one generated task repository."""
+    generator_path = repo_root / "benchmarks" / "mission-vs-goal" / "generate_complex_fixtures.py"
+    catalog_path = repo_root / "benchmarks" / "mission-vs-goal" / "complex-fixtures" / "catalog.json"
+    for path in (generator_path, catalog_path):
+        shown = subprocess.run(["git", "show", f"{source_commit}:{path.relative_to(repo_root)}"], cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        if shown.returncode != 0 or shown.stdout != path.read_bytes():
+            raise ValueError("fixture source does not match the declared commit")
+    spec = importlib.util.spec_from_file_location("complex_fixture_generator", generator_path)
+    generator = importlib.util.module_from_spec(spec); spec.loader.exec_module(generator)
+    files = generator.task_template(task_id, group)
+    task_root = destination / task_id; task_root.mkdir(parents=True)
+    for name, content in files.items():
+        (task_root / name).write_text(content, encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=destination, check=True)
+    subprocess.run(["git", "config", "user.email", "fixture@example.invalid"], cwd=destination, check=True)
+    subprocess.run(["git", "config", "user.name", "fixture"], cwd=destination, check=True)
+    subprocess.run(["git", "add", task_id], cwd=destination, check=True)
+    subprocess.run(["git", "commit", "-qm", "generated fixture"], cwd=destination, check=True)
+    generated_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=destination, text=True, capture_output=True, check=True).stdout.strip()
+    return {"source_commit": source_commit, "input_digest": generator.template_digest(task_id, group), "task_id": task_id,
+            "generated_commit": generated_commit, "task_root": task_id, "worker_digest": _digest_tree(task_root)}
 
 
 def load_catalog(root: Path) -> list[dict[str, Any]]:
@@ -61,9 +88,9 @@ print(json.dumps(module.execute(json.loads(sys.argv[2])), sort_keys=True))
 '''
 
 
-def _materialize_candidate(source: Path, destination: Path) -> Path:
+def _materialize_candidate(source: Path, destination: Path) -> tuple[Path, str]:
     """Copy only a stable regular-file candidate tree for one evaluator run."""
-    _digest_tree(source)
+    source_digest = _digest_tree(source)
     destination.mkdir()
     for path in source.rglob("*"):
         if path.is_dir():
@@ -72,61 +99,98 @@ def _materialize_candidate(source: Path, destination: Path) -> Path:
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(path, target)
-    _digest_tree(destination)
-    return destination
+    destination_digest = _digest_tree(destination)
+    if _digest_tree(source) != source_digest or destination_digest != source_digest:
+        raise ValueError("candidate snapshot changed during materialization")
+    return destination, source_digest
 
 
-def _run_bounded(command: list[str], *, timeout_seconds: float) -> tuple[int | None, bytes, bool, bool]:
+def _run_bounded(command: list[str], *, timeout_seconds: float) -> tuple[int | None, bytes, bool, bool, bool]:
     """Run one evaluator child with bounded in-memory stdout/stderr collection."""
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process = subprocess.Popen(
+        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        start_new_session=os.name == "posix",
+    )
     captured = {"stdout": bytearray(), "stderr": bytearray()}
     exceeded = threading.Event()
+
+    def terminate_group() -> None:
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGKILL)
+            elif process.poll() is None:
+                process.kill()
+        except (PermissionError, ProcessLookupError):
+            if process.poll() is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
 
     def consume(name: str, stream: Any) -> None:
         while chunk := stream.read(8192):
             if len(captured[name]) + len(chunk) > MAX_EVALUATOR_OUTPUT_BYTES:
                 exceeded.set()
-                process.kill()
+                terminate_group()
                 return
             captured[name].extend(chunk)
 
     readers = [threading.Thread(target=consume, args=(name, stream), daemon=True) for name, stream in (("stdout", process.stdout), ("stderr", process.stderr))]
     for reader in readers:
         reader.start()
+    deadline = time.monotonic() + timeout_seconds
     timed_out = False
-    try:
-        process.wait(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired:
+    while process.poll() is None and time.monotonic() < deadline:
+        try:
+            process.wait(timeout=max(0.001, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            pass
+    if process.poll() is None:
         timed_out = True
-        process.kill()
+        terminate_group()
         process.wait()
     for reader in readers:
-        reader.join()
-    return process.returncode, bytes(captured["stdout"]), timed_out, exceeded.is_set()
+        reader.join(timeout=max(0, deadline - time.monotonic()))
+    incomplete = any(reader.is_alive() for reader in readers)
+    if incomplete:
+        terminate_group()
+        for stream in (process.stdout, process.stderr):
+            stream.close()
+        for reader in readers:
+            reader.join(timeout=0.1)
+    return process.returncode, bytes(captured["stdout"]), timed_out, exceeded.is_set(), incomplete
 
 
 def evaluate_candidate(root: Path, entry: dict[str, Any], candidate: Path, timeout_seconds: float = 3.0) -> dict[str, Any]:
     """Observe one candidate in a fresh process and preserve non-pass states."""
-    base = {"task_id": entry.get("id"), "family": entry.get("family"), "version": entry.get("version"),
-            "candidate_digest": _digest_tree(candidate) if candidate.is_dir() else None}
+    base = {"task_id": entry.get("id"), "family": entry.get("family"), "version": entry.get("version"), "candidate_digest": None}
     checks = entry.get("checks")
     if not isinstance(checks, list) or not checks:
         return {**base, "status": "failed", "reason": "no_evaluation_cases", "case_count": 0, "cases": []}
     if not candidate.is_dir():
         return {**base, "status": "failed", "reason": "candidate_missing", "case_count": len(checks), "cases": []}
+    try:
+        initial_digest = _digest_tree(candidate)
+    except ValueError:
+        return {**base, "status": "failed", "reason": "candidate_invalid", "case_count": len(checks), "cases": []}
+    base["candidate_digest"] = initial_digest
     with tempfile.TemporaryDirectory(prefix="mission-complex-evaluator-") as temporary:
         runner = Path(temporary) / "runner.py"; runner.write_text(_runner_source(), encoding="utf-8")
         try:
             cases = []
             for check in checks:
                 scenario = check.get("scenario", check.get("operations"))
-                materialized = _materialize_candidate(candidate, Path(temporary) / f"candidate-{len(cases)}")
-                returncode, stdout, timed_out, output_exceeded = _run_bounded(
+                materialized, snapshot_digest = _materialize_candidate(candidate, Path(temporary) / f"candidate-{len(cases)}")
+                if snapshot_digest != initial_digest:
+                    return {**base, "status": "failed", "reason": "candidate_changed", "case_count": len(checks), "cases": cases}
+                returncode, stdout, timed_out, output_exceeded, incomplete = _run_bounded(
                     [sys.executable, "-I", str(runner), str(materialized), json.dumps(scenario)],
                     timeout_seconds=timeout_seconds,
                 )
                 if timed_out:
                     return {**base, "status": "blocked", "reason": "evaluator_timeout", "case_count": len(checks), "cases": cases}
+                if incomplete:
+                    return {**base, "status": "blocked", "reason": "evaluator_reader_incomplete", "case_count": len(checks), "cases": cases}
                 if output_exceeded:
                     return {**base, "status": "failed", "reason": "evaluator_output_too_large", "case_count": len(checks), "cases": cases}
                 if returncode != 0:
@@ -138,11 +202,26 @@ def evaluate_candidate(root: Path, entry: dict[str, Any], candidate: Path, timeo
                 cases.append({"name": check.get("name"), "passed": actual == check.get("expected")})
         except ValueError:
             return {**base, "status": "failed", "reason": "candidate_invalid", "case_count": len(checks), "cases": cases}
+    try:
+        final_digest = _digest_tree(candidate)
+    except ValueError:
+        return {**base, "status": "failed", "reason": "candidate_invalid", "case_count": len(checks), "cases": cases}
+    if final_digest != initial_digest:
+        return {**base, "status": "failed", "reason": "candidate_changed", "case_count": len(checks), "cases": cases}
     if len(cases) != len(checks) or not cases:
         return {**base, "status": "failed", "reason": "evaluator_cases_invalid", "case_count": len(cases), "cases": cases}
     return {**base, "status": "passed" if all(case["passed"] for case in cases) else "failed",
             "reason": None if all(case["passed"] for case in cases) else "contract_mismatch",
             "case_count": len(cases), "cases": cases}
+
+
+def evaluate_assignment(catalog_root: Path, entry: dict[str, Any], task_root: Path, exported_task_root: Path, timeout_seconds: float = 3.0) -> dict[str, Any]:
+    """Evaluate one explicit task root against its separately exported task root."""
+    task_id = entry.get("id")
+    if not isinstance(task_id, str) or task_root.name != task_id or exported_task_root.name != task_id:
+        return {"task_id": task_id, "family": entry.get("family"), "version": entry.get("version"), "candidate_digest": None,
+                "status": "failed", "reason": "assignment_task_root_mismatch", "case_count": 0, "cases": []}
+    return evaluate_candidate(catalog_root, entry, exported_task_root, timeout_seconds)
 
 
 def run_public_smoke(candidate: Path) -> dict[str, Any]:

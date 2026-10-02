@@ -1,2 +1,2 @@
 from service import execute
-assert isinstance(execute([]), dict)
+assert isinstance(execute({}), dict)

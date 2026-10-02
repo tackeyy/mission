@@ -1,2 +1,2 @@
 from service import execute
-assert isinstance(execute([]), dict)
+assert execute({'payload': {'amount': 1, 'unit': 'minor'}})['minor_total'] == 1

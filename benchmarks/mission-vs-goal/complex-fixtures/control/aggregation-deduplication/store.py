@@ -1,3 +1,4 @@
-class Store:
-    def __init__(self): self.items = {}; self.sent = []; self.total = 0
-    def snapshot(self): return {'items': self.items, 'sent': self.sent, 'total': self.total}
+class Aggregate:
+    def __init__(self): self.entries = {}
+    def apply(self, event): self.entries.setdefault(event['id'], event['amount'])
+    def snapshot(self): return {'entries': dict(self.entries), 'total': sum(self.entries.values())}

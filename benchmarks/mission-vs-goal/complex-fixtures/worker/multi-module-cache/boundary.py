@@ -1,2 +1,2 @@
-def normalise(operation):
-    return dict(operation)
+def normalise(request):
+    return dict(request)

@@ -1,3 +1,5 @@
-class Store:
-    def __init__(self): self.items = {}; self.sent = []; self.total = 0
-    def snapshot(self): return {'items': self.items, 'sent': self.sent, 'total': self.total}
+class EffectStore:
+    def __init__(self, state): self.effects = dict(state)
+    def apply(self, event):
+        self.effects.setdefault(event['id'], event['amount'])
+    def snapshot(self): return dict(self.effects)
