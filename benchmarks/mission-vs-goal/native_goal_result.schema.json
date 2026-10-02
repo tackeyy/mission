@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "native Goal benchmark result",
+  "type": "object",
+  "required": ["schema", "run_id", "assignment_id", "task_id", "arm", "outcome", "fidelity", "manifest"],
+  "properties": {
+    "schema": {"const": "native-goal-benchmark-result/1"},
+    "run_id": {"$ref": "#/$defs/nonempty"}, "assignment_id": {"$ref": "#/$defs/nonempty"}, "task_id": {"$ref": "#/$defs/nonempty"},
+    "arm": {"enum": ["codex_native_goal", "claude_code_native_goal", "mission"]},
+    "outcome": {"enum": ["completed", "failed", "blocked", "unsupported", "not_started"]},
+    "fidelity": {"enum": ["verified", "unverified", "not_applicable"]},
+    "reason": {"type": ["string", "null"]}, "manifest": {"type": "object"},
+    "config_matches": {"type": "boolean"}, "package_prepared": {"type": "boolean"}
+  },
+  "allOf": [{
+    "if": {"properties": {"fidelity": {"const": "verified"}}, "required": ["fidelity"]},
+    "then": {"required": ["config_matches", "package_prepared"], "properties": {"config_matches": {"const": true}, "package_prepared": {"const": true}, "manifest": {"$ref": "#/$defs/comparable_manifest"}}}
+  }],
+  "$defs": {
+    "nonempty": {"type": "string", "minLength": 1},
+    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "comparable_manifest": {
+      "type": "object", "required": ["package", "source", "task_snapshot", "provider_version", "conditions", "worker_export"],
+      "properties": {
+        "package": {"type": "object", "required": ["sha256"], "properties": {"sha256": {"$ref": "#/$defs/sha256"}}},
+        "source": {"type": "object", "required": ["sha256"], "properties": {"sha256": {"$ref": "#/$defs/sha256"}}},
+        "task_snapshot": {"type": "object", "required": ["expected", "observed", "clean", "matches"], "properties": {"expected": {"$ref": "#/$defs/commit"}, "observed": {"$ref": "#/$defs/commit"}, "clean": {"const": true}, "matches": {"const": true}}},
+        "provider_version": {"$ref": "#/$defs/nonempty"},
+        "conditions": {"type": "object", "required": ["model_id", "effort", "permissions"], "properties": {"model_id": {"$ref": "#/$defs/nonempty"}, "effort": {"$ref": "#/$defs/nonempty"}, "permissions": {"$ref": "#/$defs/nonempty"}}},
+        "worker_export": {"type": "object", "required": ["source_commit", "export_commit", "allowlist_count", "initial_sha256", "candidate_sha256"], "properties": {"source_commit": {"$ref": "#/$defs/commit"}, "export_commit": {"$ref": "#/$defs/commit"}, "allowlist_count": {"type": "integer", "minimum": 1}, "initial_sha256": {"$ref": "#/$defs/sha256"}, "candidate_sha256": {"$ref": "#/$defs/sha256"}}}
+      }
+    }
+  },
+  "additionalProperties": true
+}
