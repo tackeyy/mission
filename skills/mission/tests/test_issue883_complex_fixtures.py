@@ -324,6 +324,20 @@ def test_evaluator_records_invalid_entries_and_bounded_non_json_values(tmp_path)
     assert record["status"] == "failed"
     assert record["reason"] == "evaluation_case_non_json"
 
+
+def test_evaluator_records_os_startup_failure_for_a_large_json_scenario(tmp_path):
+    module = _load()
+    root = ROOT / "benchmarks" / "mission-vs-goal" / "complex-fixtures"
+    entry = next(entry for entry in module.load_catalog(root) if entry["id"] == "compatibility-legacy-default")
+    candidate = _materialize(module, tmp_path, entry["id"], "reference")
+    oversized = {**entry, "checks": [{"name": "startup-limit", "scenario": "x" * 2_000_000, "expected": None}]}
+
+    record = module.evaluate_candidate(root, oversized, candidate)
+
+    assert record["status"] == "failed"
+    assert record["reason"] == "evaluator_process_unavailable"
+    assert record["cases"] == []
+
     deep = None
     for _ in range(80):
         deep = [deep]

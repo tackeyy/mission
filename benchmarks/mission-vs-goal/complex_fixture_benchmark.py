@@ -340,10 +340,13 @@ def evaluate_candidate(root: Path, entry: Any, candidate: Path, timeout_seconds:
                 materialized, snapshot_digest = _materialize_candidate(candidate, Path(temporary) / f"candidate-{len(cases)}")
                 if snapshot_digest != initial_digest or (expected_candidate_digest is not None and snapshot_digest != expected_candidate_digest):
                     return {**base, "status": "failed", "reason": "candidate_changed", "case_count": len(checks), "cases": cases}
-                returncode, stdout, timed_out, output_exceeded, incomplete = _run_bounded(
-                    [sys.executable, "-I", str(runner), str(materialized), json.dumps(scenario)],
-                    timeout_seconds=timeout_seconds,
-                )
+                try:
+                    returncode, stdout, timed_out, output_exceeded, incomplete = _run_bounded(
+                        [sys.executable, "-I", str(runner), str(materialized), json.dumps(scenario)],
+                        timeout_seconds=timeout_seconds,
+                    )
+                except OSError:
+                    return {**base, "status": "failed", "reason": "evaluator_process_unavailable", "case_count": len(checks), "cases": cases}
                 if timed_out:
                     return {**base, "status": "blocked", "reason": "evaluator_timeout", "case_count": len(checks), "cases": cases}
                 if output_exceeded:
