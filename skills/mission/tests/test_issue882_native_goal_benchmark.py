@@ -7,6 +7,8 @@ import tarfile
 import time
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[3]
 MODULE_PATH = ROOT / "benchmarks" / "mission-vs-goal" / "native_goal_benchmark.py"
@@ -491,7 +493,7 @@ def test_probe_records_malformed_goal_status_without_losing_the_failure(tmp_path
     assert result["reason"] == "goal_status_malformed"
 
 
-def test_probe_does_not_treat_unobserved_completion_as_verified(tmp_path, monkeypatch):
+def test_probe_preserves_unobserved_completion_failure_when_goal_remains_active(tmp_path, monkeypatch):
     probe = _load_probe()
     class FakeRpc:
         def __init__(self, *_args): self.events = []
@@ -499,7 +501,7 @@ def test_probe_does_not_treat_unobserved_completion_as_verified(tmp_path, monkey
             if method == "thread/start": return {"thread": {"id": "t"}, "model": "m", "reasoningEffort": "low", "activePermissionProfile": {"id": "p"}}
             if method == "thread/goal/set": return {"goal": {"threadId": "t", "objective": params["objective"], "status": "active", "createdAt": 1}}
             if method == "turn/start": return {"turn": {"id": "turn"}}
-            if method == "thread/goal/get": return {"goal": {"threadId": "t", "objective": "o\n\nAcceptance criterion: a", "status": "complete", "createdAt": 1}}
+            if method == "thread/goal/get": return {"goal": {"threadId": "t", "objective": "o\n\nAcceptance criterion: a", "status": "active", "createdAt": 1}}
             if method == "thread/goal/clear": return {"cleared": True}
             return {}
         def wait_for_event(self, *_args): return False
@@ -509,6 +511,70 @@ def test_probe_does_not_treat_unobserved_completion_as_verified(tmp_path, monkey
     assert result["fidelity"] == "unverified"
     assert result["outcome"] == "failed"
     assert result["reason"] == "turn_completion_unobserved"
+    assert result["turn_completed"] is False
+
+
+def test_probe_reports_turn_limit_after_observed_active_turn(tmp_path, monkeypatch):
+    probe = _load_probe()
+    class FakeRpc:
+        def __init__(self, *_args):
+            self.events = [
+                {"method": "turn/started", "params": {"threadId": "t", "turnId": "turn"}},
+                {"method": "turn/completed", "params": {"threadId": "t", "turnId": "turn"}},
+            ]
+        def request(self, method, params):
+            if method == "thread/start": return {"thread": {"id": "t"}, "model": "m", "reasoningEffort": "low", "activePermissionProfile": {"id": "p"}}
+            if method == "thread/goal/set": return {"goal": {"threadId": "t", "objective": params["objective"], "status": "active", "createdAt": 1}}
+            if method == "turn/start": return {"turn": {"id": "turn"}}
+            if method == "thread/goal/get": return {"goal": {"threadId": "t", "objective": "o\n\nAcceptance criterion: a", "status": "active", "createdAt": 1}}
+            if method == "thread/goal/clear": return {"cleared": True}
+            return {}
+        def wait_for_event(self, *_args): return True
+        def close(self): pass
+    monkeypatch.setattr(probe, "RpcProcess", FakeRpc)
+
+    result = probe.probe_codex(tmp_path, "o", "a", 1, None, 1, "m", "low", "p")
+
+    assert result["turn_completed"] is True
+    assert result["fidelity"] == "verified"
+    assert result["outcome"] == "blocked"
+    assert result["reason"] == "assignment_turn_limit"
+
+
+@pytest.mark.parametrize(
+    ("events", "observed_created_at", "expected_reason"),
+    [
+        ([
+            {"method": "turn/started", "params": {"threadId": "t", "turnId": "turn"}},
+            {"method": "turn/completed", "params": {"threadId": "t", "turnId": "turn"}},
+        ], 2, "goal_identity_mismatch"),
+        ([
+            {"method": "turn/completed", "params": {"threadId": "t", "turnId": "turn"}},
+            {"method": "turn/started", "params": {"threadId": "t", "turnId": "turn"}},
+        ], 1, "turn_not_completed"),
+    ],
+    ids=["generation-mismatch", "reverse-turn-events"],
+)
+def test_probe_does_not_promote_invalid_active_goal_to_turn_limit(tmp_path, monkeypatch, events, observed_created_at, expected_reason):
+    probe = _load_probe()
+    class FakeRpc:
+        def __init__(self, *_args): self.events = events
+        def request(self, method, params):
+            if method == "thread/start": return {"thread": {"id": "t"}, "model": "m", "reasoningEffort": "low", "activePermissionProfile": {"id": "p"}}
+            if method == "thread/goal/set": return {"goal": {"threadId": "t", "objective": params["objective"], "status": "active", "createdAt": 1}}
+            if method == "turn/start": return {"turn": {"id": "turn"}}
+            if method == "thread/goal/get": return {"goal": {"threadId": "t", "objective": "o\n\nAcceptance criterion: a", "status": "active", "createdAt": observed_created_at}}
+            if method == "thread/goal/clear": return {"cleared": True}
+            return {}
+        def wait_for_event(self, *_args): return True
+        def close(self): pass
+    monkeypatch.setattr(probe, "RpcProcess", FakeRpc)
+
+    result = probe.probe_codex(tmp_path, "o", "a", 1, None, 1, "m", "low", "p")
+
+    assert result["fidelity"] == "unverified"
+    assert result["outcome"] == "failed"
+    assert result["reason"] == expected_reason
 
 
 def test_codex_mission_uses_listed_fixed_skill_as_a_native_input(tmp_path, monkeypatch):

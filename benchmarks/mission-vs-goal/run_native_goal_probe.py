@@ -216,8 +216,8 @@ def probe_codex(worktree: Path, objective: str, acceptance: str, timeout: float,
             if isinstance(observation["goal_status"], str) and observation["goal_status"] in {"complete", "budgetLimited", "usageLimited"}:
                 break
         assert observation is not None
-        if observation["goal_status"] == "active":
-            observation = {**observation, "outcome": "blocked", "reason": "assignment_turn_limit"}
+        if observation["goal_status"] == "active" and observation["reason"] == "goal_not_complete":
+            observation = {**observation, "fidelity": "verified", "outcome": "blocked", "reason": "assignment_turn_limit"}
         if not config_matches and observation["fidelity"] == "verified":
             observation = {**observation, "fidelity": "unverified", "reason": "execution_config_mismatch"}
         try:
