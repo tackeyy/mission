@@ -1,0 +1,36 @@
+{
+  "source_head": "ed1d1c2723c55c08f06a82d6e397b164323b5b59",
+  "model_benchmark_executed": false,
+  "product_modified": false,
+  "offline_tests": {
+    "files": [
+      "skills/mission/tests/test_benchmark_package.py",
+      "skills/mission/tests/test_doc_consistency.py"
+    ],
+    "passed": 93,
+    "warnings": 1,
+    "exit_code": 0,
+    "reported_duration_seconds": 2.79,
+    "raw_log_sha256": "20f91b406da6bb409eac48c2c14d28e5034213ad7e26de4f715d2f647f80e4a6"
+  },
+  "report_link_checks": {
+    "checked": 17,
+    "errors": []
+  },
+  "hypothetical_repair_model": {
+    "p_initial": 0.2,
+    "d": 0.8,
+    "r": 0.9,
+    "u": 0.001,
+    "rates": [
+      0.2,
+      0.05679999999999999,
+      0.016847199999999993
+    ],
+    "ratio": 11.871408898808117,
+    "is_measured": false
+  },
+  "report_sha256": "b90123fd2eadbb0edd4fd75b50c376d8a04e4391ad2cf52528c34b0c5fe881f0",
+  "phase": "initial_investigation",
+  "followup_issue": "https://github.com/tackeyy/mission/issues/876"
+}
