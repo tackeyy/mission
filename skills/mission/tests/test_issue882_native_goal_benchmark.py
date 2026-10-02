@@ -253,6 +253,7 @@ def test_codex_probe_uses_goal_protocol_and_preserves_budget_limited_outcome(tmp
     result = probe.probe_codex(tmp_path, "do work", "artifact exists", 1, 5, 2, "model-a", "high", "workspace")
 
     assert [name for name, _params in fake.calls] == ["initialize", "thread/start", "thread/goal/set", "turn/start", "thread/goal/get", "thread/goal/clear"]
+    assert fake.calls[0][1]["capabilities"] == {"experimentalApi": True}
     assert fake.calls[2][1]["tokenBudget"] == 5
     assert result["outcome"] == "blocked"
     assert result["reason"] == "goal_budget_limited"

@@ -138,7 +138,7 @@ def probe_codex(worktree: Path, objective: str, acceptance: str, timeout: float,
     rpc = RpcProcess(["codex", "app-server", "--stdio"], timeout)
     observation: dict | None = None
     try:
-        rpc.request("initialize", {"clientInfo": {"name": "mission-native-goal-benchmark", "version": "1"}, "capabilities": {}})
+        rpc.request("initialize", {"clientInfo": {"name": "mission-native-goal-benchmark", "version": "1"}, "capabilities": {"experimentalApi": True}})
         thread_started = rpc.request("thread/start", {"cwd": str(worktree), "model": model, "permissions": permissions})
         thread_id = _thread_id(thread_started)
         observed_config = {key: thread_started.get(key) for key in ("model", "modelProvider", "reasoningEffort", "activePermissionProfile", "sandbox")}
