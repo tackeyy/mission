@@ -324,6 +324,13 @@ def test_evaluator_records_invalid_entries_and_bounded_non_json_values(tmp_path)
     assert record["status"] == "failed"
     assert record["reason"] == "evaluation_case_non_json"
 
+    deep = None
+    for _ in range(80):
+        deep = [deep]
+    record = module.evaluate_candidate(root, {**entry, "checks": [{"name": "deep", "scenario": deep, "expected": None}]}, candidate)
+    assert record["status"] == "failed"
+    assert record["reason"] == "evaluation_case_non_json"
+
 
 def test_evaluator_records_os_startup_failure_for_a_large_json_scenario(tmp_path):
     module = _load()
@@ -337,13 +344,6 @@ def test_evaluator_records_os_startup_failure_for_a_large_json_scenario(tmp_path
     assert record["status"] == "failed"
     assert record["reason"] == "evaluator_process_unavailable"
     assert record["cases"] == []
-
-    deep = None
-    for _ in range(80):
-        deep = [deep]
-    record = module.evaluate_candidate(root, {**entry, "checks": [{"name": "deep", "scenario": deep, "expected": None}]}, candidate)
-    assert record["status"] == "failed"
-    assert record["reason"] == "evaluation_case_non_json"
 
 
 def test_public_smoke_returns_a_failure_record_for_timeout_and_reaps_group_child(tmp_path):
