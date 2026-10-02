@@ -213,7 +213,7 @@ def probe_codex(worktree: Path, objective: str, acceptance: str, timeout: float,
             if not completed:
                 observation = {**observation, "fidelity": "unverified", "outcome": "failed", "reason": "turn_completion_unobserved"}
                 break
-            if observation["goal_status"] in {"complete", "budgetLimited", "usageLimited"}:
+            if isinstance(observation["goal_status"], str) and observation["goal_status"] in {"complete", "budgetLimited", "usageLimited"}:
                 break
         assert observation is not None
         if observation["goal_status"] == "active":
@@ -287,7 +287,8 @@ def _current_mission_state(worktree: Path, session_id: object, started_ns: int) 
             state = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if isinstance(state, dict) and state.get("session_id") in {session_id, f"cc-{session_id}"}:
+        observed_session_id = state.get("session_id") if isinstance(state, dict) else None
+        if isinstance(observed_session_id, str) and observed_session_id in {session_id, f"cc-{session_id}"}:
             return {key: state.get(key) for key in ("session_id", "passes", "halt_reason", "loop_active", "mission_id")}
     return None
 
@@ -308,7 +309,8 @@ def _fresh_mission_state(worktree: Path, started_ns: int, thread_id: str) -> dic
         # ``cx-<thread id>``. A fresh file alone can be another assignment, so
         # bind the state and its filename to the started host thread. The
         # terminal event itself is separately bound by wait_for_event.
-        if (not isinstance(state, dict) or state.get("session_id") != expected_session_id
+        session_id = state.get("session_id") if isinstance(state, dict) else None
+        if (not isinstance(session_id, str) or session_id != expected_session_id
                 or candidate.stem != expected_session_id):
             continue
         return {key: state.get(key) for key in ("session_id", "passes", "halt_reason", "loop_active", "mission_id")}
@@ -337,6 +339,7 @@ def main() -> int:
     parser.add_argument("--arm", choices=("goal", "mission"), default="goal")
     parser.add_argument("--objective", required=True)
     parser.add_argument("--task-id", required=True)
+    parser.add_argument("--assignment-id", required=True)
     parser.add_argument("--acceptance-criterion", required=True)
     parser.add_argument("--starting-commit", required=True)
     parser.add_argument("--mission-source-commit", required=True)
@@ -414,9 +417,9 @@ def main() -> int:
             except ValueError:
                 manifest["worker_export"]["candidate_state"] = "stale"
                 observation = {**observation, "fidelity": "unverified", "outcome": "failed", "reason": "candidate_snapshot_invalid"}
-            write_record(output, {"schema": NATIVE_SCHEMA, "run_id": output.stem, "task_id": args.task_id, "arm": label, "manifest": manifest, "package_prepared": package_prepared, **observation})
+            write_record(output, {"schema": NATIVE_SCHEMA, "run_id": output.stem, "assignment_id": args.assignment_id, "task_id": args.task_id, "arm": label, "manifest": manifest, "package_prepared": package_prepared, **observation})
     except (OSError, RuntimeError, ValueError, shutil.ReadError) as exc:
-        write_record(output, {"schema": NATIVE_SCHEMA, "run_id": output.stem, "task_id": args.task_id, "arm": label,
+        write_record(output, {"schema": NATIVE_SCHEMA, "run_id": output.stem, "assignment_id": args.assignment_id, "task_id": args.task_id, "arm": label,
                               "manifest": {"schema": "native-goal-benchmark-manifest/1", "state": "unprepared"},
                               "package_prepared": False, "outcome": "failed", "fidelity": "not_applicable",
                               "reason": "package_prepare_failed", "error_type": type(exc).__name__})

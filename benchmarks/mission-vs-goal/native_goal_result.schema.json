@@ -2,10 +2,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "native Goal benchmark result",
   "type": "object",
-  "required": ["schema", "run_id", "task_id", "arm", "outcome", "fidelity", "manifest"],
+  "required": ["schema", "run_id", "assignment_id", "task_id", "arm", "outcome", "fidelity", "manifest"],
   "properties": {
     "schema": {"const": "native-goal-benchmark-result/1"},
-    "run_id": {"$ref": "#/$defs/nonempty"}, "task_id": {"$ref": "#/$defs/nonempty"},
+    "run_id": {"$ref": "#/$defs/nonempty"}, "assignment_id": {"$ref": "#/$defs/nonempty"}, "task_id": {"$ref": "#/$defs/nonempty"},
     "arm": {"enum": ["codex_native_goal", "claude_code_native_goal", "mission"]},
     "outcome": {"enum": ["completed", "failed", "blocked", "unsupported", "not_started"]},
     "fidelity": {"enum": ["verified", "unverified", "not_applicable"]},
@@ -13,7 +13,7 @@
     "config_matches": {"type": "boolean"}, "package_prepared": {"type": "boolean"}
   },
   "allOf": [{
-    "if": {"anyOf": [{"properties": {"fidelity": {"const": "verified"}}, "required": ["fidelity"]}, {"properties": {"outcome": {"const": "completed"}}, "required": ["outcome"]}]},
+    "if": {"properties": {"fidelity": {"const": "verified"}}, "required": ["fidelity"]},
     "then": {"required": ["config_matches", "package_prepared"], "properties": {"config_matches": {"const": true}, "package_prepared": {"const": true}, "manifest": {"$ref": "#/$defs/comparable_manifest"}}}
   }],
   "$defs": {

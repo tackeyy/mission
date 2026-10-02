@@ -74,10 +74,13 @@ def observe_codex_goal(
     base["native_goal_observed"] = True
     if not expected_turn_ids or started_index is None or completed_index is None or completed_index < started_index:
         return {**base, "fidelity": "unverified", "outcome": "failed", "reason": "turn_not_completed"}
-    if observed.get("status") in {"budgetLimited", "usageLimited"}:
-        reason = "goal_budget_limited" if observed["status"] == "budgetLimited" else "goal_usage_limited"
+    status = observed.get("status")
+    if not isinstance(status, str):
+        return {**base, "fidelity": "unverified", "outcome": "failed", "reason": "goal_status_malformed"}
+    if status in {"budgetLimited", "usageLimited"}:
+        reason = "goal_budget_limited" if status == "budgetLimited" else "goal_usage_limited"
         return {**base, "fidelity": "verified", "outcome": "blocked", "reason": reason}
-    if observed.get("status") != "complete":
+    if status != "complete":
         return {**base, "fidelity": "unverified", "outcome": "failed", "reason": "goal_not_complete"}
     return {**base, "fidelity": "verified", "outcome": "completed", "reason": None}
 

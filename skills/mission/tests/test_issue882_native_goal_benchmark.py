@@ -74,6 +74,21 @@ def test_completed_goal_and_completed_turn_produce_verified_fidelity():
     assert result["tokens_used"] == 9
 
 
+def test_codex_goal_records_malformed_status_as_a_failed_observation():
+    module = _load()
+    active = {"threadId": "t", "objective": "o", "status": "active", "createdAt": 1}
+    malformed = {"threadId": "t", "objective": "o", "status": [], "createdAt": 1}
+
+    result = module.observe_codex_goal(
+        "t", "o", {"goal": active}, {"goal": malformed},
+        [{"method": "turn/started", "params": {"threadId": "t", "turnId": "turn"}}, {"method": "turn/completed", "params": {"threadId": "t", "turnId": "turn"}}], {"turn"},
+    )
+
+    assert result["fidelity"] == "unverified"
+    assert result["outcome"] == "failed"
+    assert result["reason"] == "goal_status_malformed"
+
+
 def test_budget_limited_native_goal_is_a_verified_blocked_outcome():
     module = _load()
     active = {"threadId": "t-1", "objective": "inspect", "status": "active", "createdAt": 1}
@@ -415,6 +430,23 @@ def test_mission_state_requires_the_current_codex_session_binding(tmp_path):
     assert probe._fresh_mission_state(tmp_path, started, "wrong") is None
 
 
+def test_mission_state_ignores_malformed_session_id(tmp_path):
+    probe = _load_probe()
+    sessions = tmp_path / ".mission-state" / "sessions"; sessions.mkdir(parents=True)
+    (sessions / "cx-thread.json").write_text(json.dumps({"session_id": [], "passes": True}), encoding="utf-8")
+
+    assert probe._fresh_mission_state(tmp_path, 0, "thread") is None
+
+
+def test_claude_mission_state_ignores_malformed_session_id(tmp_path):
+    probe = _load_probe()
+    root = tmp_path / ".mission-state" / "sessions"; root.mkdir(parents=True)
+    state = root / "thread.json"
+    state.write_text(json.dumps({"session_id": [], "passes": True}), encoding="utf-8")
+
+    assert probe._current_mission_state(tmp_path, "thread", 0) is None
+
+
 def test_probe_binds_completed_event_and_retains_malformed_clear(tmp_path, monkeypatch):
     probe = _load_probe()
     class FakeRpc:
@@ -435,6 +467,28 @@ def test_probe_binds_completed_event_and_retains_malformed_clear(tmp_path, monke
     assert fake.wait_calls == [("turn/completed", "t", "turn")]
     assert result["outcome"] == "completed"
     assert result["cleanup_error"] == "malformed_clear_response"
+
+
+def test_probe_records_malformed_goal_status_without_losing_the_failure(tmp_path, monkeypatch):
+    probe = _load_probe()
+    class FakeRpc:
+        def __init__(self, *_args):
+            self.events = [{"method": "turn/started", "params": {"threadId": "t", "turnId": "turn"}}, {"method": "turn/completed", "params": {"threadId": "t", "turnId": "turn"}}]
+        def request(self, method, params):
+            if method == "thread/start": return {"thread": {"id": "t"}, "model": "m", "reasoningEffort": "low", "activePermissionProfile": {"id": "p"}}
+            if method == "thread/goal/set": return {"goal": {"threadId": "t", "objective": params["objective"], "status": "active", "createdAt": 1}}
+            if method == "turn/start": return {"turn": {"id": "turn"}}
+            if method == "thread/goal/get": return {"goal": {"threadId": "t", "objective": "o\n\nAcceptance criterion: a", "status": [], "createdAt": 1}}
+            if method == "thread/goal/clear": return {"cleared": True}
+            return {}
+        def wait_for_event(self, *_args): return True
+        def close(self): pass
+    monkeypatch.setattr(probe, "RpcProcess", FakeRpc)
+
+    result = probe.probe_codex(tmp_path, "o", "a", 1, None, 1, "m", "low", "p")
+
+    assert result["outcome"] == "failed"
+    assert result["reason"] == "goal_status_malformed"
 
 
 def test_probe_does_not_treat_unobserved_completion_as_verified(tmp_path, monkeypatch):
@@ -521,7 +575,7 @@ def test_schema_rejects_incomplete_or_inconsistent_comparable_evidence():
     import jsonschema
     schema = json.loads((ROOT / "benchmarks" / "mission-vs-goal" / "native_goal_result.schema.json").read_text())
     digest = "sha256:" + "a" * 64
-    record = {"schema": "native-goal-benchmark-result/1", "run_id": "run", "task_id": "task", "arm": "mission", "outcome": "completed", "fidelity": "verified", "config_matches": True, "package_prepared": True,
+    record = {"schema": "native-goal-benchmark-result/1", "run_id": "run", "assignment_id": "assignment", "task_id": "task", "arm": "mission", "outcome": "completed", "fidelity": "verified", "config_matches": True, "package_prepared": True,
               "manifest": {"package": {"sha256": digest}, "source": {"sha256": digest}, "provider_version": "v1", "task_snapshot": {"expected": "a" * 40, "observed": "a" * 40, "clean": True, "matches": True}, "conditions": {"model_id": "m", "effort": "low", "permissions": "p"}, "worker_export": {"source_commit": "a" * 40, "export_commit": "b" * 40, "allowlist_count": 1, "initial_sha256": digest, "candidate_sha256": digest}}}
     jsonschema.validate(record, schema)
     for path, value in ((["manifest", "package"], None), (["manifest", "package", "sha256"], ""), (["manifest", "task_snapshot", "clean"], False), (["config_matches"], False)):
@@ -535,6 +589,10 @@ def test_schema_rejects_incomplete_or_inconsistent_comparable_evidence():
         else:
             raise AssertionError(f"comparable record accepted invalid {path}")
 
+    unverified_completion = json.loads(json.dumps(record))
+    unverified_completion.update({"fidelity": "unverified", "config_matches": False, "reason": "execution_config_mismatch"})
+    jsonschema.validate(unverified_completion, schema)
+
 
 def test_protocol_error_classification_requires_goal_method_and_jsonrpc_code():
     probe = _load_probe()
@@ -545,7 +603,7 @@ def test_protocol_error_classification_requires_goal_method_and_jsonrpc_code():
 
 def test_cli_main_rejects_nonfinite_values_and_accepts_finite_control(tmp_path, monkeypatch):
     probe = _load_probe()
-    base = ["probe", "--host", "codex", "--objective", "o", "--task-id", "t", "--acceptance-criterion", "a", "--starting-commit", "a" * 40, "--mission-source-repo", str(tmp_path), "--mission-source-commit", "a" * 40, "--model-id", "m", "--effort", "low", "--permissions", "p", "--worktree", str(tmp_path), "--output", str(tmp_path / "record.json")]
+    base = ["probe", "--host", "codex", "--objective", "o", "--task-id", "t", "--assignment-id", "assignment", "--acceptance-criterion", "a", "--starting-commit", "a" * 40, "--mission-source-repo", str(tmp_path), "--mission-source-commit", "a" * 40, "--model-id", "m", "--effort", "low", "--permissions", "p", "--worktree", str(tmp_path), "--output", str(tmp_path / "record.json")]
     for flag, value in (("--timeout-seconds", "nan"), ("--timeout-seconds", "inf"), ("--max-budget-usd", "nan"), ("--max-budget-usd", "inf")):
         monkeypatch.setattr(sys, "argv", [*base, flag, value])
         try: probe.main()
@@ -554,7 +612,9 @@ def test_cli_main_rejects_nonfinite_values_and_accepts_finite_control(tmp_path, 
     monkeypatch.setattr(probe, "_task_snapshot", lambda _path: {"observed": "a" * 40, "clean": True})
     monkeypatch.setattr(sys, "argv", [*base, "--timeout-seconds", "1", "--max-budget-usd", "0.1"])
     assert probe.main() == 0
-    assert json.loads((tmp_path / "record.json").read_text())["outcome"] == "failed"
+    record = json.loads((tmp_path / "record.json").read_text())
+    assert record["outcome"] == "failed"
+    assert record["assignment_id"] == "assignment"
 
 
 def test_cli_main_records_goal_protocol_unavailable_separately_from_runtime_error(tmp_path, monkeypatch):
@@ -566,7 +626,7 @@ def test_cli_main_records_goal_protocol_unavailable_separately_from_runtime_erro
     monkeypatch.setattr(probe, "initialize_worker_export_repository", lambda _root: "b" * 40)
     monkeypatch.setattr(probe, "worker_export_manifest", lambda _root: {"schema": "mission-worker-export/1", "sha256": "sha256:test"})
     monkeypatch.setattr(probe, "_task_snapshot", lambda _path: {"observed": "a" * 40, "clean": True}); monkeypatch.setattr(probe, "_codex_version", lambda: "test")
-    base = ["probe", "--host", "codex", "--objective", "o", "--task-id", "t", "--acceptance-criterion", "a", "--starting-commit", "a" * 40, "--mission-source-repo", str(tmp_path), "--mission-source-commit", "a" * 40, "--model-id", "m", "--effort", "low", "--permissions", "p", "--worktree", str(tmp_path), "--worker-allow-path", "fixture"]
+    base = ["probe", "--host", "codex", "--objective", "o", "--task-id", "t", "--assignment-id", "assignment", "--acceptance-criterion", "a", "--starting-commit", "a" * 40, "--mission-source-repo", str(tmp_path), "--mission-source-commit", "a" * 40, "--model-id", "m", "--effort", "low", "--permissions", "p", "--worktree", str(tmp_path), "--worker-allow-path", "fixture"]
     for name, error, outcome in (("unsupported", probe.RpcProtocolError("thread/goal/set", -32601, "Method not found"), "unsupported"), ("runtime", OSError("-32601"), "failed")):
         monkeypatch.setattr(probe, "probe_codex", lambda *_args, error=error: (_ for _ in ()).throw(error))
         output = tmp_path / f"{name}.json"; monkeypatch.setattr(sys, "argv", [*base, "--output", str(output)])
@@ -587,7 +647,7 @@ def test_cli_main_keeps_candidate_worker_tree_after_provider_returns(tmp_path, m
     monkeypatch.setattr(probe, "probe_codex", run_worker); monkeypatch.setattr(probe, "_codex_version", lambda: "test")
     monkeypatch.setattr(probe, "_task_snapshot", lambda _path: {"observed": "a" * 40, "clean": True})
     output = tmp_path / "record.json"
-    argv = ["probe", "--host", "codex", "--objective", "o", "--task-id", "t", "--acceptance-criterion", "a", "--starting-commit", "a" * 40, "--mission-source-repo", str(tmp_path), "--mission-source-commit", "a" * 40, "--model-id", "m", "--effort", "low", "--permissions", "p", "--worktree", str(tmp_path), "--worker-allow-path", "fixture.txt", "--output", str(output)]
+    argv = ["probe", "--host", "codex", "--objective", "o", "--task-id", "t", "--assignment-id", "assignment", "--acceptance-criterion", "a", "--starting-commit", "a" * 40, "--mission-source-repo", str(tmp_path), "--mission-source-commit", "a" * 40, "--model-id", "m", "--effort", "low", "--permissions", "p", "--worktree", str(tmp_path), "--worker-allow-path", "fixture.txt", "--output", str(output)]
     monkeypatch.setattr(sys, "argv", argv)
     assert probe.main() == 0
     candidate = tmp_path / "candidates" / "record" / "candidate.md"
@@ -607,7 +667,7 @@ def test_cli_main_keeps_invalid_candidate_but_marks_snapshot_stale(tmp_path, mon
     monkeypatch.setattr(probe, "create_worker_export", worker); monkeypatch.setattr(probe, "probe_codex", run_worker); monkeypatch.setattr(probe, "_codex_version", lambda: "test")
     monkeypatch.setattr(probe, "_task_snapshot", lambda _path: {"observed": "a" * 40, "clean": True})
     output = tmp_path / "record.json"
-    argv = ["probe", "--host", "codex", "--objective", "o", "--task-id", "t", "--acceptance-criterion", "a", "--starting-commit", "a" * 40, "--mission-source-repo", str(tmp_path), "--mission-source-commit", "a" * 40, "--model-id", "m", "--effort", "low", "--permissions", "p", "--worktree", str(tmp_path), "--worker-allow-path", "fixture.txt", "--output", str(output)]
+    argv = ["probe", "--host", "codex", "--objective", "o", "--task-id", "t", "--assignment-id", "assignment", "--acceptance-criterion", "a", "--starting-commit", "a" * 40, "--mission-source-repo", str(tmp_path), "--mission-source-commit", "a" * 40, "--model-id", "m", "--effort", "low", "--permissions", "p", "--worktree", str(tmp_path), "--worker-allow-path", "fixture.txt", "--output", str(output)]
     monkeypatch.setattr(sys, "argv", argv)
     assert probe.main() == 0
     record = json.loads(output.read_text())
