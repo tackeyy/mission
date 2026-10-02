@@ -106,3 +106,39 @@ def test_public_schema_explains_ledger_criterion_and_policy_binding(tmp_path, ru
     assert "requirements[].classification" in schema["enums"]
     assert "criteria[].command_id" in schema["fields"]
     assert "coverage pending" in schema["fields"]["criteria[]"]
+
+
+@pytest.mark.parametrize("path", [".", "./out", "a//out", "reports/./out", "..\\secret", "C:\\secret"])
+def test_rejects_noncanonical_or_windows_target_path_without_writing(tmp_path, run_cli, path):
+    run_cli("init", "acceptance contract", "--force-mission", cwd=tmp_path, check=True)
+    contract = _contract(); contract["criteria"][0]["target_path"] = path
+    source = tmp_path / "contract.json"; source.write_text(json.dumps(contract), encoding="utf-8")
+    result = run_cli("acceptance-contract", "import", "--input", str(source), cwd=tmp_path)
+    assert result.returncode != 0
+    assert "acceptance_contract" not in json.loads(run_cli("get", cwd=tmp_path).stdout)
+
+
+def test_accepts_canonical_unicode_space_and_hidden_target_path(tmp_path, run_cli):
+    run_cli("init", "acceptance contract", "--force-mission", cwd=tmp_path, check=True)
+    contract = _contract(); contract["criteria"][0]["target_path"] = "成果物/.hidden file.json"
+    source = tmp_path / "contract.json"; source.write_text(json.dumps(contract), encoding="utf-8")
+    assert run_cli("acceptance-contract", "import", "--input", str(source), cwd=tmp_path).returncode == 0
+
+
+def test_codepoint_spans_accept_non_bmp_and_combining_text(tmp_path, run_cli):
+    run_cli("init", "acceptance contract", "--force-mission", cwd=tmp_path, check=True)
+    text = "😀e\u0301"; contract = _contract(); contract["requirement_text"] = text
+    contract["requirement_digest"] = "sha256:" + __import__("hashlib").sha256(text.encode()).hexdigest()
+    contract["requirements"] = [{"id": "R1", "start": 0, "end": 1, "text": "😀", "classification": "obligation"}, {"id": "R2", "start": 1, "end": 3, "text": "e\u0301", "classification": "context"}]
+    contract["criteria"][0]["requirement_ids"] = ["R1"]
+    source = tmp_path / "contract.json"; source.write_text(json.dumps(contract), encoding="utf-8")
+    assert run_cli("acceptance-contract", "import", "--input", str(source), cwd=tmp_path).returncode == 0
+
+
+def test_rejects_5000_digit_json_number_as_controlled_input(tmp_path, run_cli):
+    run_cli("init", "acceptance contract", "--force-mission", cwd=tmp_path, check=True)
+    raw = json.dumps(_contract()).replace('"revision": 1', '"revision": ' + '9' * 5000)
+    source = tmp_path / "contract.json"; source.write_text(raw, encoding="utf-8")
+    result = run_cli("acceptance-contract", "import", "--input", str(source), cwd=tmp_path)
+    assert result.returncode != 0
+    assert "internal-error" not in result.stdout
