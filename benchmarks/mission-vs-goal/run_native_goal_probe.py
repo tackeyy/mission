@@ -154,7 +154,16 @@ def probe_codex(worktree: Path, objective: str, acceptance: str, timeout: float,
             rpc.request("skills/extraRoots/set", {"extraRoots": [str(package_root / "skills")]})
             listed = rpc.request("skills/list", {"cwds": [str(worktree)], "forceReload": True})
             entries = listed.get("data", []) if isinstance(listed, dict) else []
-            matched = any(isinstance(entry, dict) and any(isinstance(skill, dict) and skill.get("path") == str(skill_path) for skill in entry.get("skills", [])) for entry in entries)
+            expected = skill_path.resolve()
+            def is_expected_skill(skill: object) -> bool:
+                if not isinstance(skill, dict) or not isinstance(skill.get("path"), str):
+                    return False
+                try:
+                    candidate = Path(skill["path"]).resolve()
+                    return candidate == expected and candidate.is_file() and candidate.samefile(expected)
+                except OSError:
+                    return False
+            matched = any(isinstance(entry, dict) and any(is_expected_skill(skill) for skill in entry.get("skills", [])) for entry in entries)
             if not matched:
                 return {"native_goal_observed": False, "fidelity": "unverified", "outcome": "failed", "reason": "package_skill_unobserved", "observed_config": observed_config, "config_matches": config_matches}
             skill_input = [{"type": "skill", "name": "mission", "path": str(skill_path)}]
