@@ -120,12 +120,11 @@ def explicit_paths_are_supported(argv, env):
         if not isinstance(value, str):
             return True
         candidate = unquote(value)
-        values = [candidate]
-        if "=" in candidate:
-            prefix, assigned = candidate.split("=", 1)
-            values.extend((prefix, assigned))
-        for item in values:
-            if item.startswith("@") and path_unsupported(item[1:]):
+        parts = candidate.split("=")
+        values = [candidate, *("=".join(parts[index:]) for index in range(1, len(parts)))]
+        for raw_item in values:
+            item = raw_item.strip().strip("'\"").strip()
+            if item.startswith("@") and path_unsupported(item[1:].strip().strip("'\"").strip()):
                 return True
             if item.startswith("-") and not item.startswith("--"):
                 compact = item[1:]

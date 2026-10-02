@@ -147,6 +147,47 @@ def test_runner_rejects_undeclared_path_arguments_and_binds_repro_kind(tmp_path)
     assert counterexample["repro_input_digest"] != finding["repro_input_digest"]
 
 
+def test_runner_rejects_external_pytest_module_nested_in_override_assignment(tmp_path):
+    import pytest
+    from mission_application.verification_runner import VerificationRunnerError, capture_candidate, execute_candidate
+
+    _commit_candidate(tmp_path, {"app.py": "x = 1"})
+    external = tmp_path.parent / "external_pytest_module"
+    package = external / "test_external"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "test_receipt.py").write_text("def test_external_receipt():\n    assert True\n", encoding="utf-8")
+    command = {
+        "argv": [sys.executable, "-m", "pytest", f"--override-ini=pythonpath={external}", "--pyargs", "test_external", "--junitxml=result.xml", "-q"],
+        "timeout_sec": 5, "output_limit": 4096, "kind": "test", "env": {},
+        "test_report": {"format": "junit-xml", "path": "result.xml"},
+    }
+
+    with pytest.raises(VerificationRunnerError, match="verifier-explicit-path-unsupported"):
+        execute_candidate(capture_candidate(tmp_path, declared_untracked=()), command, relative_cwd=".")
+
+
+def test_runner_rejects_external_pytest_module_nested_in_environment_assignment(tmp_path):
+    import pytest
+    from mission_application.verification_runner import VerificationRunnerError, capture_candidate, execute_candidate
+
+    _commit_candidate(tmp_path, {"app.py": "x = 1"})
+    external = tmp_path.parent / "external_pytest_environment"
+    package = external / "test_external_env"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "test_receipt.py").write_text("def test_external_receipt():\n    assert True\n", encoding="utf-8")
+    command = {
+        "argv": [sys.executable, "-m", "pytest", "--junitxml=result.xml", "-q"],
+        "timeout_sec": 5, "output_limit": 4096, "kind": "test",
+        "env": {"PYTEST_ADDOPTS": f"--override-ini='pythonpath={external}' --pyargs test_external_env"},
+        "test_report": {"format": "junit-xml", "path": "result.xml"},
+    }
+
+    with pytest.raises(VerificationRunnerError, match="verifier-explicit-path-unsupported"):
+        execute_candidate(capture_candidate(tmp_path, declared_untracked=()), command, relative_cwd=".")
+
+
 def test_runner_persists_facts_when_materialized_input_becomes_special_file(tmp_path):
     from mission_application.verification_runner import capture_candidate, execute_candidate
 
