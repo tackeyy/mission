@@ -70,8 +70,11 @@ def _target(root: Path, path: str) -> Path:
     target = root
     for part in path.split("/"):
         target = target / part
-        if target.exists() and target.is_symlink():
-            raise VerificationRunnerError("candidate-symlink")
+        try:
+            if target.exists() and target.is_symlink():
+                raise VerificationRunnerError("candidate-symlink")
+        except OSError as exc:
+            raise VerificationRunnerError("candidate-path-unavailable") from exc
     return target
 
 
@@ -83,6 +86,8 @@ def _read(root: Path, path: str, mode: int, *, required: bool, max_bytes: int | 
         if required:
             return CandidateFile(path, mode, None)
         raise VerificationRunnerError("declared-output-missing") from None
+    except OSError as exc:
+        raise VerificationRunnerError("candidate-read-invalid") from exc
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
         raise VerificationRunnerError("candidate-special-file")
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
@@ -212,9 +217,17 @@ def _explicit_paths_are_bound(command) -> bool:
     """Only argv[0] is a frozen toolchain path; other path inputs are refused."""
     import os
     from urllib.parse import unquote, urlsplit
+    def path_unsafe(candidate):
+        return bool(urlsplit(candidate).scheme) or candidate.startswith("/") or (len(candidate) >= 3 and candidate[0].isalpha() and candidate[1:3] in {":/", ":\\"}) or any(part == ".." for part in candidate.replace("\\", "/").split("/"))
+
     def unsafe(value):
         candidate = unquote(value.split("=", 1)[-1])
-        return bool(urlsplit(candidate).scheme) or candidate.startswith("/") or (len(candidate) >= 3 and candidate[0].isalpha() and candidate[1:3] in {":/", ":\\"}) or any(part == ".." for part in candidate.replace("\\", "/").split("/"))
+        if candidate.startswith("@"):
+            return path_unsafe(candidate[1:])
+        if candidate.startswith("-") and not candidate.startswith("--"):
+            compact = candidate[1:]
+            return "/" in compact or ".." in compact
+        return path_unsafe(candidate)
     return not any(unsafe(value) for value in command["argv"][1:]) and not any(unsafe(part) for value in command.get("env", {}).values() for part in value.split(os.pathsep))
 
 
@@ -273,6 +286,15 @@ def _executed_count(command, root: Path) -> tuple[int | None, bool]:
     except (ValueError, TypeError):
         return None, False
     root_stats = {name: sum(record[name] for record in records if record["parent"] is None) for name in ("tests", "failures", "errors", "skipped")}
+    if root_stats["tests"] > 65536:
+        return None, False
+    if root_element.tag == "testsuites":
+        try:
+            for name in ("tests", "failures", "errors", "skipped"):
+                if name in root_element.attrib and int(root_element.attrib[name]) != root_stats[name]:
+                    return None, False
+        except (ValueError, TypeError):
+            return None, False
     return root_stats["tests"] - root_stats["skipped"], root_stats["failures"] == root_stats["errors"] == 0
 
 
@@ -396,7 +418,7 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
             observed = tuple(_read(root, item.path, item.mode, required=True) for item in candidate.files)
             candidate_stale = _digest(observed) != candidate.digest
             observation_reason = "candidate-stale" if candidate_stale else None
-        except VerificationRunnerError:
+        except (VerificationRunnerError, OSError):
             candidate_stale = True
             observation_reason = "candidate-observation-invalid"
     output_truncated = output_truncated or timed_out

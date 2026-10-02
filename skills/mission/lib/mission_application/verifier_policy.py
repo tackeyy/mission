@@ -113,9 +113,17 @@ def _validate_explicit_paths(argv, env):
     import os
     from urllib.parse import unquote, urlsplit
 
+    def path_unsupported(candidate):
+        return bool(urlsplit(candidate).scheme) or candidate.startswith("/") or (len(candidate) >= 3 and candidate[0].isalpha() and candidate[1:3] in {":/", ":\\"}) or any(part == ".." for part in candidate.replace("\\", "/").split("/"))
+
     def unsupported(value):
         candidate = unquote(value.split("=", 1)[-1])
-        return bool(urlsplit(candidate).scheme) or candidate.startswith("/") or (len(candidate) >= 3 and candidate[0].isalpha() and candidate[1:3] in {":/", ":\\"}) or any(part == ".." for part in candidate.replace("\\", "/").split("/"))
+        if candidate.startswith("@"):
+            return path_unsupported(candidate[1:])
+        if candidate.startswith("-") and not candidate.startswith("--"):
+            compact = candidate[1:]
+            return "/" in compact or ".." in compact
+        return path_unsupported(candidate)
 
     if any(unsupported(value) for value in argv[1:]) or any(unsupported(part) for value in env.values() for part in value.split(os.pathsep)):
         raise VerifierPolicyError("verifier-policy-explicit-path-unsupported")

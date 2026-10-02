@@ -125,7 +125,7 @@ def test_policy_rejects_absolute_and_escape_path_shapes_outside_toolchain():
     import pytest
     from mission_application.verifier_policy import VerifierPolicyError, validate
 
-    for argv, env in ((["python", "--helper=/tmp/helper.py"], {}), (["python", "../helper.py"], {}), (["python", "file:%2f%2f%2fprivate%2ftmp%2fhelper.py"], {}), (["python", "https://example.invalid/input"], {}), (["python", "http://example.invalid/input"], {}), (["python", "C:\\host\\helper.py"], {}), (["python", "-c", "pass"], {"CONFIG": "/tmp/config"}), (["python", "-c", "pass"], {"PYTHONPATH": "relative:/tmp/host"}), (["python", "-c", "pass"], {"INPUT": "https://example.invalid/input"})):
+    for argv, env in ((["python", "--helper=/tmp/helper.py"], {}), (["python", "../helper.py"], {}), (["python", "-c/tmp/external.ini"], {}), (["python", "-qI/tmp/external"], {}), (["python", "@/tmp/external"], {}), (["python", "@../external"], {}), (["python", "file:%2f%2f%2fprivate%2ftmp%2fhelper.py"], {}), (["python", "https://example.invalid/input"], {}), (["python", "http://example.invalid/input"], {}), (["python", "C:\\host\\helper.py"], {}), (["python", "-c", "pass"], {"CONFIG": "/tmp/config"}), (["python", "-c", "pass"], {"PYTHONPATH": "relative:/tmp/host"}), (["python", "-c", "pass"], {"INPUT": "https://example.invalid/input"})):
         policy = _policy()
         policy["commands"][0]["argv"] = [policy["commands"][0]["toolchain"]["path"], *argv[1:]]
         policy["commands"][0]["env"] = env

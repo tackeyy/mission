@@ -119,10 +119,13 @@ def test_test_report_must_be_fresh_valid_and_successful(tmp_path):
 
     clean = capture_candidate(tmp_path, declared_untracked=())
     deep = "<testsuite>" * 65 + "<testcase/>" + "</testsuite>" * 65
-    for report in ("<testsuite><testcase><failure/></testcase></testsuite>", "<unknown><testsuite><testcase/></testsuite></unknown>", "<testsuite tests='2'><testcase/></testsuite>", deep):
+    for report in ("<testsuite><testcase><failure/></testcase></testsuite>", "<unknown><testsuite><testcase/></testsuite></unknown>", "<testsuite tests='2'><testcase/></testsuite>", "<testsuites tests='1' failures='1'><testsuite><testcase/></testsuite></testsuites>", deep):
         command = {**base, "argv": ["python3", "-c", "from pathlib import Path; Path('fresh.xml').write_text(" + repr(report) + ")"], "test_report": {"format": "junit-xml", "path": "fresh.xml"}}
         outcome = execute_candidate(clean, command, relative_cwd=".")
         assert outcome["status"] == "failed"
+
+    oversized = {**base, "argv": ["python3", "-c", "from pathlib import Path; c='<testcase/>' * 32769; Path('fresh.xml').write_text('<testsuites><testsuite>'+c+'</testsuite><testsuite>'+c+'</testsuite></testsuites>')"], "test_report": {"format": "junit-xml", "path": "fresh.xml"}}
+    assert execute_candidate(clean, oversized, relative_cwd=".")["status"] == "failed"
 
 
 def test_runner_rejects_undeclared_path_arguments_and_binds_repro_kind(tmp_path):
@@ -150,3 +153,21 @@ def test_runner_persists_facts_when_materialized_input_becomes_special_file(tmp_
     assert outcome["status"] == "blocked"
     assert outcome["exit_code"] == 0
     assert outcome["block_reason"] == "candidate-observation-invalid"
+
+
+def test_runner_converts_permission_denied_after_execution_to_blocked_facts(tmp_path, monkeypatch):
+    import mission_application.verification_runner as runner
+
+    _commit_candidate(tmp_path, {"app.py": "x = 1"})
+    candidate = runner.capture_candidate(tmp_path, declared_untracked=())
+    original = runner._read
+
+    def denied(*args, **kwargs):
+        raise PermissionError(13, "denied")
+
+    monkeypatch.setattr(runner, "_read", denied)
+    outcome = runner.execute_candidate(candidate, {"argv": ["python3", "-c", "print('done')"], "timeout_sec": 5, "output_limit": 8, "kind": "command", "env": {}}, relative_cwd=".")
+    assert outcome["status"] == "blocked"
+    assert outcome["exit_code"] == 0
+    assert outcome["block_reason"] == "candidate-observation-invalid"
+    monkeypatch.setattr(runner, "_read", original)
