@@ -39,7 +39,7 @@ def validate(value):
         raise VerifierPolicyError("verifier-policy-commands-invalid")
     result = {}
     for command in commands:
-        allowed = {"id", "argv", "relative_cwd", "timeout_sec", "output_limit", "kind", "env", "declared_untracked", "executed_count_pattern"}
+        allowed = {"id", "argv", "relative_cwd", "timeout_sec", "output_limit", "kind", "env", "declared_untracked", "executed_count_pattern", "toolchain_path", "replay"}
         if not isinstance(command, dict) or set(command) not in ({"id", "argv", "relative_cwd", "timeout_sec", "output_limit", "kind", "env", "declared_untracked"}, allowed):
             raise VerifierPolicyError("verifier-policy-command-invalid")
         identifier = _text(command["id"], "verifier-policy-command-id-invalid")
@@ -53,6 +53,13 @@ def validate(value):
             raise VerifierPolicyError("verifier-policy-test-adapter-invalid")
         if command["kind"] == "command" and pattern is not None:
             raise VerifierPolicyError("verifier-policy-command-invalid")
+        toolchain = command.get("toolchain_path")
+        if toolchain is not None and (not isinstance(toolchain, str) or not toolchain.startswith("/") or "\x00" in toolchain):
+            raise VerifierPolicyError("verifier-policy-toolchain-invalid")
+        replay = command.get("replay")
+        if replay is not None:
+            if not isinstance(replay, dict) or set(replay) != {"command_id", "max_bytes", "allowed_artifact_kinds"} or not isinstance(replay["command_id"], str) or not replay["command_id"] or type(replay["max_bytes"]) is not int or not 0 < replay["max_bytes"] <= 1048576 or not isinstance(replay["allowed_artifact_kinds"], list) or not replay["allowed_artifact_kinds"] or not all(isinstance(item, str) and item for item in replay["allowed_artifact_kinds"]):
+                raise VerifierPolicyError("verifier-policy-replay-invalid")
         _relative(command["relative_cwd"], "verifier-policy-cwd-invalid")
         if not isinstance(command["env"], dict) or not all(isinstance(key, str) and key and isinstance(item, str) for key, item in command["env"].items()):
             raise VerifierPolicyError("verifier-policy-env-invalid")

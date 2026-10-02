@@ -11,7 +11,7 @@ from mission_application.verification_runner import (
 from acceptance_contract import digest as contract_digest
 
 
-def run_contract_verifier(state, *, project_root, criterion_id):
+def run_contract_verifier(state, *, project_root, criterion_id, repro_input=None):
     """Execute one contract criterion without accepting caller-declared results."""
     if not isinstance(state, dict):
         raise EvidenceFailure("verification-state-invalid")
@@ -26,6 +26,16 @@ def run_contract_verifier(state, *, project_root, criterion_id):
     command = commands.get(criteria[0].get("command_id")) if isinstance(commands, dict) else None
     if not isinstance(command, dict):
         raise EvidenceFailure("verification-command-unregistered")
+    replay = command.get("replay")
+    if repro_input is not None:
+        if not isinstance(replay, dict):
+            return _blocked_receipt(contract, policy, criterion_id, command, "replay-unsupported")
+        if not isinstance(repro_input, dict) or set(repro_input) != {"artifact_kind", "relative_path", "content"} or repro_input["artifact_kind"] not in replay["allowed_artifact_kinds"] or not isinstance(repro_input["content"], str) or len(repro_input["content"].encode()) > replay["max_bytes"]:
+            return _blocked_receipt(contract, policy, criterion_id, command, "replay-input-invalid")
+        replay_command = commands.get(replay["command_id"])
+        if not isinstance(replay_command, dict):
+            return _blocked_receipt(contract, policy, criterion_id, command, "replay-unsupported")
+        command = replay_command
     try:
         candidate = capture_candidate(project_root, declared_untracked=command["declared_untracked"])
         outcome = execute_candidate(candidate, command, relative_cwd=command["relative_cwd"])
@@ -54,3 +64,8 @@ def run_contract_verifier(state, *, project_root, criterion_id):
         "status": outcome["status"],
         "runner_provenance": "mission-public-cli/1",
     }
+
+
+def _blocked_receipt(contract, policy, criterion_id, command, reason):
+    import hashlib
+    return {"schema": "mission-verification-receipt/1", "contract_digest": contract_digest({key: value for key, value in contract.items() if key not in {"imported_at", "verifier_policy"}}), "criterion_id": criterion_id, "candidate_digest": "sha256:" + "0" * 64, "verifier_policy_digest": policy["digest"], "verifier_definition_digest": verifier_definition_digest(command), "argv": list(command["argv"]), "relative_cwd": command["relative_cwd"], "started_at": "1970-01-01T00:00:00Z", "finished_at": "1970-01-01T00:00:00Z", "exit_code": None, "timed_out": False, "executed_count": None, "output_digest": "sha256:" + hashlib.sha256(reason.encode()).hexdigest(), "status": "blocked", "runner_provenance": "mission-public-cli/1"}

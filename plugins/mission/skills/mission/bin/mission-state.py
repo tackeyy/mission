@@ -13921,7 +13921,13 @@ def cmd_verification_run(args):
         reader = _legacy_lifecycle_repository(cwd, sf, stamp=False, strict_read=True)
         with reader.transaction():
             state = reader.load()
-        receipt = run_contract_verifier(state, project_root=cwd, criterion_id=args.criterion)
+        repro_input = None
+        if args.repro_input:
+            try:
+                repro_input = json.loads(Path(args.repro_input).read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise EvidenceFailure("replay-input-invalid") from exc
+        receipt = run_contract_verifier(state, project_root=cwd, criterion_id=args.criterion, repro_input=repro_input)
         caller_id, arguments = _compatibility_operation_arguments(
             {"criterion_id": args.criterion, "candidate_digest": receipt["candidate_digest"], "receipt_status": receipt["status"]},
             target_digest="", require_caller=False,
@@ -16445,6 +16451,7 @@ def _add_review_parsers(subparsers) -> None:
     p_verify_record.set_defaults(func=cmd_verification_record)
     p_verify_run = verify_sub.add_parser("run", help="凍結済み verifier を実行し receipt を記録")
     p_verify_run.add_argument("--criterion", required=True)
+    p_verify_run.add_argument("--repro-input", default=None, help="policy 登録済み replay 用の JSON input")
     p_verify_run.set_defaults(func=cmd_verification_run, command_outcome_tracking=True)
     p_verify_claims = verify_sub.add_parser("claims", help="implementation claim ledger を生成")
     p_verify_claims.add_argument("--iteration", type=int, required=True)
