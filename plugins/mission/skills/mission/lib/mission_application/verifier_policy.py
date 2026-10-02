@@ -125,11 +125,16 @@ def explicit_paths_are_supported(argv, env):
         if not isinstance(value, str):
             return True
         candidate = unquote(value)
-        parts = candidate.split("=")
-        values = [candidate, *("=".join(parts[index:]) for index in range(1, len(parts)))]
+        values = [candidate]
+        for part in candidate.split("="):
+            values.append(part)
         if split_option_value and "=" in candidate:
             try:
-                values.extend(shlex.split(candidate.split("=", 1)[1]))
+                for token in shlex.split(candidate.split("=", 1)[1]):
+                    values.append(token)
+                    for part in token.split("="):
+                        values.append(part)
+                        values.extend(shlex.split(part))
             except ValueError:
                 return True
         for raw_item in values:
@@ -149,12 +154,15 @@ def explicit_paths_are_supported(argv, env):
 
     def inline_python_source(index):
         executable = Path(argv[0]).name.lower() if isinstance(argv[0], str) else ""
-        return index > 1 and argv[index - 1] == "-c" and "-m" not in argv[1:index] and re.fullmatch(r"python(?:\d+(?:\.\d+)*)?(?:\.exe)?", executable) is not None
+        return index == 2 and argv[1] == "-c" and re.fullmatch(r"python(?:\d+(?:\.\d+)*)?(?:\.exe)?", executable) is not None
+
+    def pytest_option_value(values, index):
+        return index > 0 and values[index - 1] in {"--override-ini", "-o"}
 
     for index, value in enumerate(argv[1:], start=1):
         if inline_python_source(index):
             continue
-        if unsupported(value, split_option_value=isinstance(value, str) and value.startswith("--")):
+        if unsupported(value, split_option_value=isinstance(value, str) and (value.startswith("--") or pytest_option_value(argv, index))):
             return False
     for key, value in env.items():
         if key == "PYTEST_ADDOPTS":
@@ -162,8 +170,9 @@ def explicit_paths_are_supported(argv, env):
                 values = shlex.split(value)
             except ValueError:
                 return False
-            if any(unsupported(item, split_option_value=item.startswith("--")) for item in values):
-                return False
+            for index, item in enumerate(values):
+                if unsupported(item, split_option_value=item.startswith("--") or pytest_option_value(values, index)):
+                    return False
         elif any(unsupported(part) for part in value.split(os.pathsep)):
             return False
     return True

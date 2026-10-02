@@ -147,6 +147,19 @@ def test_runner_rejects_undeclared_path_arguments_and_binds_repro_kind(tmp_path)
     assert counterexample["repro_input_digest"] != finding["repro_input_digest"]
 
 
+def test_runner_rejects_external_path_after_script_option(tmp_path):
+    import pytest
+    from mission_application.verification_runner import VerificationRunnerError, capture_candidate, execute_candidate
+
+    _commit_candidate(tmp_path, {"script.py": "from pathlib import Path\nimport sys\nprint(Path(sys.argv[sys.argv.index('-c') + 1]).read_text())\n"})
+    external = tmp_path.parent / "external-script-option.ini"
+    external.write_text("external", encoding="utf-8")
+    command = {"argv": [sys.executable, "script.py", "-c", str(external)], "timeout_sec": 5, "output_limit": 128, "kind": "command", "env": {}}
+
+    with pytest.raises(VerificationRunnerError, match="verifier-explicit-path-unsupported"):
+        execute_candidate(capture_candidate(tmp_path, declared_untracked=()), command, relative_cwd=".")
+
+
 def test_runner_rejects_external_pytest_module_nested_in_override_assignment(tmp_path):
     import pytest
     from mission_application.verification_runner import VerificationRunnerError, capture_candidate, execute_candidate
