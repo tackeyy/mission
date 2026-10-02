@@ -1,0 +1,203 @@
+{
+  "schema": "mission-complex-fixtures/1",
+  "tasks": [
+    {
+      "id": "multi-module-cache",
+      "family": "multi_module",
+      "version": "complex-fixture-v1",
+      "requirement": "A cache invalidation crosses parser and service modules.",
+      "dependency": "boundary.py -> service.py",
+      "realistic_failure": "A write returns a stale cached value after an update.",
+      "checks": [
+        {
+          "name": "external-contract",
+          "expected": {
+            "value": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "multi-module-unit-boundary",
+      "family": "multi_module",
+      "version": "complex-fixture-v1",
+      "requirement": "A boundary conversion preserves currency units across modules.",
+      "dependency": "boundary.py -> service.py",
+      "realistic_failure": "A cents value is exposed as whole currency.",
+      "checks": [
+        {
+          "name": "external-contract",
+          "expected": {
+            "amount": 12.5
+          }
+        }
+      ]
+    },
+    {
+      "id": "compatibility-legacy-default",
+      "family": "compatibility",
+      "version": "complex-fixture-v1",
+      "requirement": "Legacy and current payloads retain their documented default.",
+      "dependency": "boundary.py -> service.py",
+      "realistic_failure": "A legacy payload loses its compatibility default.",
+      "checks": [
+        {
+          "name": "external-contract",
+          "expected": {
+            "state": "open"
+          }
+        }
+      ]
+    },
+    {
+      "id": "compatibility-versioned-field",
+      "family": "compatibility",
+      "version": "complex-fixture-v1",
+      "requirement": "A versioned boundary maps an old field to its current meaning.",
+      "dependency": "boundary.py -> service.py",
+      "realistic_failure": "A renamed field is silently ignored by the current consumer.",
+      "checks": [
+        {
+          "name": "external-contract",
+          "expected": {
+            "priority": "high"
+          }
+        }
+      ]
+    },
+    {
+      "id": "partial-failure-rollback",
+      "family": "partial_failure",
+      "version": "complex-fixture-v1",
+      "requirement": "A failed batch does not leave partial persistent state.",
+      "dependency": "boundary.py -> service.py",
+      "realistic_failure": "A partial write remains visible after a later operation fails.",
+      "checks": [
+        {
+          "name": "external-contract",
+          "expected": {
+            "stored": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "partial-failure-selective-retry",
+      "family": "partial_failure",
+      "version": "complex-fixture-v1",
+      "requirement": "A retry executes only operations that were not accepted.",
+      "dependency": "boundary.py -> service.py",
+      "realistic_failure": "A retry repeats an already accepted external operation.",
+      "checks": [
+        {
+          "name": "external-contract",
+          "expected": {
+            "sent": [
+              "first",
+              "second"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "rerun-idempotency-key",
+      "family": "rerun",
+      "version": "complex-fixture-v1",
+      "requirement": "Replaying the same event preserves one logical effect.",
+      "dependency": "boundary.py -> service.py",
+      "realistic_failure": "A repeated event is charged twice.",
+      "checks": [
+        {
+          "name": "external-contract",
+          "expected": {
+            "charges": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "rerun-resume-watermark",
+      "family": "rerun",
+      "version": "complex-fixture-v1",
+      "requirement": "Resume starts after the persisted watermark.",
+      "dependency": "boundary.py -> service.py",
+      "realistic_failure": "Resume processes the previously committed item again.",
+      "checks": [
+        {
+          "name": "external-contract",
+          "expected": {
+            "processed": [
+              "b",
+              "c"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "aggregation-cancellation",
+      "family": "aggregation",
+      "version": "complex-fixture-v1",
+      "requirement": "Cancellation is reflected in the aggregate state.",
+      "dependency": "boundary.py -> service.py",
+      "realistic_failure": "A cancellation leaves an obsolete positive total.",
+      "checks": [
+        {
+          "name": "external-contract",
+          "expected": {
+            "total": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "aggregation-deduplication",
+      "family": "aggregation",
+      "version": "complex-fixture-v1",
+      "requirement": "Duplicate delivery does not inflate an aggregate.",
+      "dependency": "boundary.py -> service.py",
+      "realistic_failure": "A duplicate event is counted twice.",
+      "checks": [
+        {
+          "name": "external-contract",
+          "expected": {
+            "total": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "concurrency-lost-update",
+      "family": "concurrency",
+      "version": "complex-fixture-v1",
+      "requirement": "A deterministic barrier preserves both concurrent increments.",
+      "dependency": "boundary.py -> service.py",
+      "realistic_failure": "Two writers read the same value and one increment is lost.",
+      "checks": [
+        {
+          "name": "external-contract",
+          "expected": {
+            "count": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "concurrency-order-independent",
+      "family": "concurrency",
+      "version": "complex-fixture-v1",
+      "requirement": "Concurrent order does not change the canonical result.",
+      "dependency": "boundary.py -> service.py",
+      "realistic_failure": "Arrival order chooses a non-canonical winner.",
+      "checks": [
+        {
+          "name": "external-contract",
+          "expected": {
+            "winner": "canonical"
+          }
+        }
+      ]
+    }
+  ]
+}
