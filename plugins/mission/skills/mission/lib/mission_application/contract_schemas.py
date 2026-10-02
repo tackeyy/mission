@@ -94,6 +94,45 @@ def review_contract_schema() -> dict:
     return copy.deepcopy(_review_contract_schema(REVIEW_SCORE_KEYS, REVIEW_SEVERITIES))
 
 
+def acceptance_contract_schema() -> dict:
+    """Return the public schema for immutable acceptance contract import."""
+    from acceptance_contract import REVIEW_POLICY, SCHEMA
+
+    return {
+        "schema": "mission-contract-schema/1",
+        "contract": "acceptance-contract-import",
+        "required": ["schema", "mission_id", "requirement_text", "requirement_digest", "revision", "review_policy", "requirements", "criteria", "coverage"],
+        "enums": {
+            "schema": [SCHEMA],
+            "review_policy": [REVIEW_POLICY],
+            "coverage.status": ["pending"],
+            "requirements[].classification": ["obligation", "context"],
+            "criteria[].verification_kind": ["command"],
+        },
+        "fields": {
+            "mission_id": "non-empty mission or session identifier; must equal the state mission_id or session_id",
+            "requirement_text": "non-empty UTF-8 text without NUL or surrogate code points",
+            "requirement_digest": "sha256:<64 lowercase hexadecimal>, computed from requirement_text UTF-8 bytes",
+            "revision": "integer at least 1",
+            "requirements[]": "contiguous ledger entries covering requirement_text exactly",
+            "requirements[].id": "unique non-empty identifier",
+            "requirements[].start / end": "integer Unicode codepoint indexes; start begins at the previous end and end is greater than start",
+            "requirements[].text": "exact substring of requirement_text from start through end",
+            "requirements[].classification": "obligation or context",
+            "criteria[]": "non-empty list of unique acceptance criteria; unmapped obligations remain retained with coverage pending",
+            "criteria[].id": "unique non-empty identifier",
+            "criteria[].requirement_ids": "non-empty list of identifiers from requirements[]",
+            "criteria[].expected": "non-empty expected result",
+            "criteria[].required": "boolean",
+            "criteria[].prohibited_side_effects": "list of non-empty strings",
+            "criteria[].verification_kind": "command",
+            "criteria[].target_path": "normalized non-absolute project-relative path",
+            "criteria[].command_id": "non-empty frozen verifier-policy identifier; its registered policy is resolved when a verification receipt is recorded",
+            "coverage": 'exactly {"status":"pending"} at import',
+        },
+    }
+
+
 def contract_schema_for(contract: str) -> dict:
     """Return one published contract by name."""
     from plan_contract import contract_schema as plan_contract_schema
@@ -102,6 +141,8 @@ def contract_schema_for(contract: str) -> dict:
         return plan_contract_schema()
     if contract == "review-import":
         return review_contract_schema()
+    if contract == "acceptance-contract-import":
+        return acceptance_contract_schema()
     raise ValueError("unknown contract: {}".format(contract))
 
 

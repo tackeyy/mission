@@ -251,6 +251,14 @@ class RecordVerification:
 
 
 @dataclass(frozen=True)
+class ImportAcceptanceContract:
+    """Install one immutable acceptance contract for a mission."""
+
+    at: str
+    contract: FrozenJsonObject
+
+
+@dataclass(frozen=True)
 class CanonicalPlanObservation:
     path: str
     digest: str
@@ -411,6 +419,7 @@ GENERIC_SET_DEDICATED_FIELDS = frozenset(
         "context_manifests",
         "claims_ledgers",
         "verification_history",
+        "acceptance_contract",
     }
 )
 
@@ -432,6 +441,7 @@ Command = Union[
     Reactivate,
     RecordArtifactPublication,
     RecordVerification,
+    ImportAcceptanceContract,
     RecordExecutorStep,
     RecordSpecialistRecommendation,
     RejectExecutorHandoff,
@@ -460,6 +470,7 @@ _COMMAND_TYPES = {
     Reactivate: "reactivate",
     RecordArtifactPublication: "record-artifact-publication",
     RecordVerification: "record-verification",
+    ImportAcceptanceContract: "acceptance-contract-import",
     RecordExecutorStep: "executor-handoff-record-step",
     RecordSpecialistRecommendation: "specialists-record-recommendation",
     RejectExecutorHandoff: "executor-handoff-reject-canonical-drift",
