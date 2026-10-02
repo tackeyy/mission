@@ -111,11 +111,11 @@ def validate(value):
 def _validate_explicit_paths(argv, env):
     """Reject path-shaped command inputs that the snapshot cannot bind."""
     import os
-    from urllib.parse import unquote
+    from urllib.parse import unquote, urlsplit
 
     def unsupported(value):
         candidate = unquote(value.split("=", 1)[-1])
-        return candidate.lower().startswith("file:") or candidate.startswith("/") or (len(candidate) >= 3 and candidate[0].isalpha() and candidate[1:3] in {":/", ":\\"}) or any(part == ".." for part in candidate.replace("\\", "/").split("/"))
+        return bool(urlsplit(candidate).scheme) or candidate.startswith("/") or (len(candidate) >= 3 and candidate[0].isalpha() and candidate[1:3] in {":/", ":\\"}) or any(part == ".." for part in candidate.replace("\\", "/").split("/"))
 
     if any(unsupported(value) for value in argv[1:]) or any(unsupported(part) for value in env.values() for part in value.split(os.pathsep)):
         raise VerifierPolicyError("verifier-policy-explicit-path-unsupported")

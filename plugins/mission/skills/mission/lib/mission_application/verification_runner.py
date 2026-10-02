@@ -211,10 +211,10 @@ def _toolchain_matches(command) -> bool:
 def _explicit_paths_are_bound(command) -> bool:
     """Only argv[0] is a frozen toolchain path; other path inputs are refused."""
     import os
-    from urllib.parse import unquote
+    from urllib.parse import unquote, urlsplit
     def unsafe(value):
         candidate = unquote(value.split("=", 1)[-1])
-        return candidate.lower().startswith("file:") or candidate.startswith("/") or (len(candidate) >= 3 and candidate[0].isalpha() and candidate[1:3] in {":/", ":\\"}) or any(part == ".." for part in candidate.replace("\\", "/").split("/"))
+        return bool(urlsplit(candidate).scheme) or candidate.startswith("/") or (len(candidate) >= 3 and candidate[0].isalpha() and candidate[1:3] in {":/", ":\\"}) or any(part == ".." for part in candidate.replace("\\", "/").split("/"))
     return not any(unsafe(value) for value in command["argv"][1:]) and not any(unsafe(part) for value in command.get("env", {}).values() for part in value.split(os.pathsep))
 
 
