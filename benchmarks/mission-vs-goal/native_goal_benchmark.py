@@ -14,48 +14,20 @@ import json
 import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Iterable
 
 
 BENCH_DIR = Path(__file__).resolve().parent
 HISTORICAL_RESULT_SCHEMA = BENCH_DIR / "result.schema.json"
 NATIVE_SCHEMA = "native-goal-benchmark-result/1"
 MANIFEST_SCHEMA = "native-goal-benchmark-manifest/1"
-CODEX_REQUIRED_OPERATIONS = frozenset({"thread/goal/set", "thread/goal/get", "thread/goal/clear", "turn/start"})
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _UNSAFE_TRACE = ("/Users/", "/.codex/memories/", "/.claude/projects/")
 _EMAIL_RE = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
 _BEARER_RE = re.compile(r"(?i)\bbearer\s+[^\s\"']+")
-
-
-def _methods(value: Any) -> set[str]:
-    """Collect JSON-RPC method strings from a schema-shaped value."""
-    found: set[str] = set()
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if key in {"method", "methods", "enum", "const"}:
-                values = item if isinstance(item, list) else [item]
-                found.update(v for v in values if isinstance(v, str) and "/" in v)
-            found.update(_methods(item))
-    elif isinstance(value, list):
-        for item in value:
-            found.update(_methods(item))
-    return found
-
-
-def detect_codex_capability(schema: dict[str, Any], provider_version: str | None) -> dict[str, Any]:
-    """Return native support only when every required app-server operation exists."""
-    available = _methods(schema)
-    missing = sorted(CODEX_REQUIRED_OPERATIONS - available)
-    return {
-        "provider": "codex-app-server",
-        "provider_version": provider_version,
-        "supported": not missing,
-        "missing_operations": missing,
-        "fallback": None,
-    }
 
 
 def _goal(response: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -106,33 +78,6 @@ def observe_codex_goal(
     return {**base, "fidelity": "verified", "outcome": "completed", "reason": None}
 
 
-def run_codex_adapter(
-    rpc: Callable[[str, dict[str, Any]], dict[str, Any]], thread_id: str, objective: str,
-    events: Iterable[dict[str, Any]], token_budget: int | None = None,
-) -> dict[str, Any]:
-    """Execute official app-server set/get/turn calls through an injected transport.
-
-    The caller owns process lifecycle and captures only sanitised protocol facts.
-    Clear is intentionally attempted after the read-back and its result is retained.
-    """
-    payload: dict[str, Any] = {"threadId": thread_id, "objective": objective, "status": "active"}
-    if token_budget is not None:
-        payload["tokenBudget"] = token_budget
-    set_response = rpc("thread/goal/set", payload)
-    turn_response = rpc("turn/start", {"threadId": thread_id, "input": [{"type": "text", "text": objective}]})
-    turn = turn_response.get("turn") if isinstance(turn_response, dict) else None
-    turn_id = turn.get("id") if isinstance(turn, dict) else None
-    get_response = rpc("thread/goal/get", {"threadId": thread_id})
-    observation = observe_codex_goal(thread_id, objective, set_response, get_response, events, {turn_id} if isinstance(turn_id, str) else set())
-    try:
-        clear_response = rpc("thread/goal/clear", {"threadId": thread_id})
-    except Exception as exc:
-        return {**observation, "goal_cleared": False, "cleanup_error": type(exc).__name__}
-    if not isinstance(clear_response, dict):
-        return {**observation, "goal_cleared": False, "cleanup_error": "malformed_clear_response"}
-    return {**observation, "goal_cleared": bool(clear_response.get("cleared")), "cleanup_error": None}
-
-
 def observe_claude_goal(invocation: str, returncode: int, result: dict[str, Any] | None) -> dict[str, Any]:
     """Require an official `/goal` invocation plus terminal structured output."""
     result = result if isinstance(result, dict) else {}
@@ -146,19 +91,32 @@ def observe_claude_goal(invocation: str, returncode: int, result: dict[str, Any]
     return {"native_goal_observed": invoked, "fidelity": "unverified", "outcome": "failed", "reason": reason}
 
 
-def preserve_assignment_outcomes(plan: Iterable[tuple[str, str]], records: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Materialise every planned cell; missing runs are data, never silently omitted."""
-    by_cell: dict[tuple[str, str], list[dict[str, Any]]] = {}
+def preserve_assignment_outcomes(plan: Iterable[tuple[str, str, str]], records: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Materialise every uniquely identified assignment without dropping attempts."""
+    by_assignment: dict[str, dict[str, Any]] = {}
     for record in records:
-        by_cell.setdefault((record.get("task_id"), record.get("arm")), []).append(dict(record))
+        assignment_id = record.get("assignment_id")
+        if not isinstance(assignment_id, str) or not assignment_id or assignment_id in by_assignment:
+            raise ValueError("records require distinct assignment_id values")
+        by_assignment[assignment_id] = dict(record)
     outcomes = []
-    for task_id, arm in plan:
-        matching = by_cell.get((task_id, arm), [])
-        outcomes.extend(matching)
-        if not matching:
+    planned: set[str] = set()
+    for assignment_id, task_id, arm in plan:
+        if not assignment_id or assignment_id in planned:
+            raise ValueError("plan requires distinct assignment_id values")
+        planned.add(assignment_id)
+        record = by_assignment.pop(assignment_id, None)
+        if record is not None:
+            if record.get("task_id") != task_id or record.get("arm") != arm:
+                raise ValueError("assignment record does not match its planned cell")
+            outcomes.append(record)
+        else:
             outcomes.append({
-            "task_id": task_id, "arm": arm, "outcome": "not_started", "reason": "missing_assignment_record",
+            "assignment_id": assignment_id, "task_id": task_id, "arm": arm,
+            "outcome": "not_started", "reason": "missing_assignment_record",
             })
+    if by_assignment:
+        raise ValueError("records include assignment_id outside the plan")
     return outcomes
 
 
@@ -166,10 +124,13 @@ def _digest_file(path: Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _digest_tree(root: Path) -> str:
+def _digest_tree(root: Path, *, exclude_git: bool = False) -> str:
     digest = hashlib.sha256()
     for path in sorted(path for path in root.rglob("*") if path.is_file()):
-        rel = path.relative_to(root).as_posix().encode("utf-8")
+        relative = path.relative_to(root)
+        if exclude_git and ".git" in relative.parts:
+            continue
+        rel = relative.as_posix().encode("utf-8")
         content = path.read_bytes()
         digest.update(len(rel).to_bytes(8, "big")); digest.update(rel)
         digest.update(len(content).to_bytes(8, "big")); digest.update(content)
@@ -228,36 +189,66 @@ def create_worker_export(repo_root: Path, starting_commit: str, output_path: Pat
     if not _COMMIT_RE.fullmatch(starting_commit) or not paths:
         raise ValueError("immutable commit and worker allowlist are required")
     output_path.mkdir(parents=True, exist_ok=False)
+    completed = False
+    archive: Path | None = None
     with tempfile.NamedTemporaryFile(prefix=".worker-export-", suffix=".tar", dir=output_path.parent, delete=False) as temporary:
         archive = Path(temporary.name)
         result = subprocess.run(["git", "archive", "--format=tar", starting_commit], cwd=repo_root, stdout=temporary, stderr=subprocess.PIPE, check=False)
     try:
         if result.returncode != 0:
             raise RuntimeError("task export archive failed")
-        shutil.unpack_archive(str(archive), str(output_path), format="tar")
         allowed: list[Path] = []
         for raw_path in paths:
             relative = Path(raw_path)
             if relative.is_absolute() or ".." in relative.parts or not relative.parts:
                 raise ValueError("worker allowlist path escapes export")
-            target = output_path / relative
-            if not target.exists() or target.is_symlink():
-                raise ValueError("worker allowlist path absent from export")
             allowed.append(relative)
-        for target in sorted((path for path in output_path.rglob("*") if path.is_file() or path.is_symlink()), reverse=True):
-            relative = target.relative_to(output_path)
-            if not any(relative == prefix or prefix in relative.parents for prefix in allowed):
-                target.unlink()
-        for directory in sorted((path for path in output_path.rglob("*") if path.is_dir()), reverse=True):
-            if not any(directory.iterdir()):
-                directory.rmdir()
+        with tarfile.open(archive, "r") as source:
+            members = source.getmembers()
+            names: set[Path] = set()
+            for member in members:
+                relative = Path(member.name)
+                if (relative.is_absolute() or not relative.parts or ".." in relative.parts
+                        or member.issym() or member.islnk() or not (member.isfile() or member.isdir())
+                        or relative in names):
+                    raise ValueError("unsafe archive member in worker export")
+                names.add(relative)
+            for prefix in allowed:
+                if not any(name == prefix or prefix in name.parents for name in names):
+                    raise ValueError("worker allowlist path absent from export")
+            retained = [member for member in members if any(Path(member.name) == prefix or prefix in Path(member.name).parents for prefix in allowed)]
+            source.extractall(output_path, members=retained, filter="data")
+        if any(path.is_symlink() for path in output_path.rglob("*")):
+            raise RuntimeError("worker export retained a link")
+        completed = True
         return output_path
     finally:
-        archive.unlink(missing_ok=True)
+        if archive is not None:
+            archive.unlink(missing_ok=True)
+        if not completed:
+            shutil.rmtree(output_path, ignore_errors=True)
 
 
 def worker_export_manifest(worker_root: Path) -> dict[str, Any]:
-    return {"schema": "mission-worker-export/1", "sha256": _digest_tree(worker_root)}
+    return {"schema": "mission-worker-export/1", "sha256": _digest_tree(worker_root, exclude_git=True)}
+
+
+def initialize_worker_export_repository(worker_root: Path) -> str:
+    """Give the filtered export its own history-free revision scope."""
+    commands = (
+        ["git", "init", "--quiet"],
+        ["git", "add", "--all"],
+        ["git", "-c", "user.name=benchmark", "-c", "user.email=benchmark@invalid", "commit", "--quiet", "-m", "benchmark export"],
+    )
+    for command in commands:
+        result = subprocess.run(command, cwd=worker_root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        if result.returncode != 0:
+            raise RuntimeError("worker export repository initialization failed")
+    result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=worker_root, text=True, capture_output=True, check=False)
+    commit = result.stdout.strip()
+    if result.returncode != 0 or not _COMMIT_RE.fullmatch(commit):
+        raise RuntimeError("worker export commit unavailable")
+    return commit
 
 
 def write_record(path: Path, record: dict[str, Any]) -> None:

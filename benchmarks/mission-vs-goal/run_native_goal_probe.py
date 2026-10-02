@@ -22,7 +22,7 @@ import threading
 from pathlib import Path
 
 from native_goal_benchmark import (
-    NATIVE_SCHEMA, create_immutable_package, create_worker_export, immutable_manifest, observe_claude_goal, worker_export_manifest,
+    NATIVE_SCHEMA, create_immutable_package, create_worker_export, immutable_manifest, initialize_worker_export_repository, observe_claude_goal, worker_export_manifest,
     observe_codex_goal, write_record,
 )
 
@@ -380,8 +380,16 @@ def main() -> int:
             })
             manifest["task_snapshot"] = {"expected": args.starting_commit, **actual_snapshot, "matches": actual_snapshot["observed"] == args.starting_commit and actual_snapshot["clean"]}
             manifest["mission_source_commit"] = args.mission_source_commit
-            worker_root = create_worker_export(worktree, args.starting_commit, Path(temporary) / "worker", args.worker_allow_path)
-            manifest["worker_export"] = {"source_commit": args.starting_commit, "allowlist_count": len(args.worker_allow_path), **worker_export_manifest(worker_root)}
+            candidate_root = output.parent / "candidates" / output.stem
+            worker_root = create_worker_export(worktree, args.starting_commit, candidate_root, args.worker_allow_path)
+            export_commit = initialize_worker_export_repository(worker_root)
+            manifest["worker_export"] = {
+                "source_commit": args.starting_commit,
+                "export_commit": export_commit,
+                "allowlist_count": len(args.worker_allow_path),
+                "candidate_path": str(candidate_root.relative_to(output.parent)),
+                "initial_sha256": worker_export_manifest(worker_root)["sha256"],
+            }
             package_prepared = (package_root / "plugins" / "mission" / "skills" / "mission" / "SKILL.md").is_file()
             if not manifest["task_snapshot"]["clean"]:
                 observation = {"native_goal_observed": False, "fidelity": "not_applicable", "outcome": "failed", "reason": "task_snapshot_dirty"}
@@ -401,6 +409,7 @@ def main() -> int:
                         observation = {"native_goal_observed": False, "fidelity": "not_applicable", "outcome": "unsupported", "reason": "native_goal_protocol_unavailable", "error_type": type(exc).__name__}
                     else:
                         observation = {"native_goal_observed": False, "fidelity": "unverified", "outcome": "failed", "reason": "adapter_execution_failed", "error_type": type(exc).__name__}
+            manifest["worker_export"]["candidate_sha256"] = worker_export_manifest(worker_root)["sha256"]
             write_record(output, {"schema": NATIVE_SCHEMA, "run_id": output.stem, "task_id": args.task_id, "arm": label, "manifest": manifest, "package_prepared": package_prepared, **observation})
     except (OSError, RuntimeError, ValueError, shutil.ReadError) as exc:
         write_record(output, {"schema": NATIVE_SCHEMA, "run_id": output.stem, "task_id": args.task_id, "arm": label,

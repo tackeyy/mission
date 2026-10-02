@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import sys
+import tarfile
 import time
 from pathlib import Path
 
@@ -28,27 +29,6 @@ def _load_probe():
         return module
     finally:
         sys.path.pop(0)
-
-
-def test_codex_schema_requires_native_goal_and_turn_operations():
-    module = _load()
-    schema = {"methods": ["thread/goal/set", "thread/goal/get", "thread/goal/clear", "turn/start"]}
-
-    observation = module.detect_codex_capability(schema, "0.158.0")
-
-    assert observation["supported"] is True
-    assert observation["missing_operations"] == []
-    assert observation["provider_version"] == "0.158.0"
-
-
-def test_codex_missing_native_operation_is_unsupported_not_prompt_fallback():
-    module = _load()
-
-    observation = module.detect_codex_capability({"methods": ["turn/start"]}, "0.158.0")
-
-    assert observation["supported"] is False
-    assert observation["fallback"] is None
-    assert "thread/goal/set" in observation["missing_operations"]
 
 
 def test_event_without_completed_goal_is_not_native_completion():
@@ -156,8 +136,8 @@ def test_codex_goal_rejects_missing_created_at_and_turn_identity():
 
 def test_assignment_outcomes_keep_every_assigned_cell_and_failure():
     module = _load()
-    plan = [("task-a", "codex_native_goal"), ("task-a", "mission"), ("task-b", "mission")]
-    records = [{"task_id": "task-a", "arm": "codex_native_goal", "outcome": "unsupported"}]
+    plan = [("a-goal", "task-a", "codex_native_goal"), ("a-mission", "task-a", "mission"), ("b-mission", "task-b", "mission")]
+    records = [{"assignment_id": "a-goal", "task_id": "task-a", "arm": "codex_native_goal", "outcome": "unsupported"}]
 
     outcomes = module.preserve_assignment_outcomes(plan, records)
 
@@ -168,10 +148,26 @@ def test_assignment_outcomes_keep_every_assigned_cell_and_failure():
 def test_assignment_outcomes_preserve_repeated_attempts_for_one_cell():
     module = _load()
     outcomes = module.preserve_assignment_outcomes(
-        [("task-a", "mission")],
-        [{"run_id": "one", "task_id": "task-a", "arm": "mission", "outcome": "failed"}, {"run_id": "two", "task_id": "task-a", "arm": "mission", "outcome": "completed"}],
+        [("one", "task-a", "mission"), ("two", "task-a", "mission")],
+        [{"assignment_id": "two", "task_id": "task-a", "arm": "mission", "outcome": "completed"}, {"assignment_id": "one", "task_id": "task-a", "arm": "mission", "outcome": "failed"}],
     )
-    assert [(item["run_id"], item["outcome"]) for item in outcomes] == [("one", "failed"), ("two", "completed")]
+    assert [(item["assignment_id"], item["outcome"]) for item in outcomes] == [("one", "failed"), ("two", "completed")]
+
+
+def test_assignment_outcomes_rejects_duplicate_or_unplanned_assignment_ids():
+    module = _load()
+    try:
+        module.preserve_assignment_outcomes([("one", "task", "mission"), ("one", "task", "mission")], [])
+    except ValueError as exc:
+        assert "distinct assignment_id" in str(exc)
+    else:
+        raise AssertionError("duplicate plan ids must not duplicate an outcome")
+    try:
+        module.preserve_assignment_outcomes([("one", "task", "mission")], [{"assignment_id": "other", "task_id": "task", "arm": "mission"}])
+    except ValueError as exc:
+        assert "outside" in str(exc)
+    else:
+        raise AssertionError("an unplanned record must not disappear")
 
 
 def test_immutable_manifest_binds_commit_package_and_source_digests(tmp_path):
@@ -229,12 +225,13 @@ def test_worker_export_requires_an_allowlist_and_excludes_unlisted_files(tmp_pat
     source = tmp_path / "source"; source.mkdir()
     destination = tmp_path / "worker"
     def fake_run(_command, **kwargs):
-        kwargs["stdout"].write(b"tar")
+        with tarfile.open(fileobj=kwargs["stdout"], mode="w") as archive:
+            for name, content in (("answer-data.json", b"secret"), ("fixture.txt", b"safe")):
+                member = tarfile.TarInfo(name); member.size = len(content)
+                import io
+                archive.addfile(member, io.BytesIO(content))
         return type("Result", (), {"returncode": 0, "stderr": b""})()
-    def unpack(_archive, target, **_kwargs):
-        Path(target, "answer-data.json").write_text("secret", encoding="utf-8")
-        Path(target, "fixture.txt").write_text("safe", encoding="utf-8")
-    monkeypatch.setattr(module.subprocess, "run", fake_run); monkeypatch.setattr(module.shutil, "unpack_archive", unpack)
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
     try:
         module.create_worker_export(source, "a" * 40, destination, [])
     except ValueError:
@@ -245,6 +242,41 @@ def test_worker_export_requires_an_allowlist_and_excludes_unlisted_files(tmp_pat
     assert not (destination / "answer-data.json").exists()
     assert (destination / "fixture.txt").read_text() == "safe"
     assert module.worker_export_manifest(destination)["sha256"].startswith("sha256:")
+
+
+def test_worker_export_rejects_link_members_before_extracting(tmp_path, monkeypatch):
+    module = _load()
+    def fake_run(_command, **kwargs):
+        with tarfile.open(fileobj=kwargs["stdout"], mode="w") as archive:
+            member = tarfile.TarInfo("fixture-link"); member.type = tarfile.SYMTYPE; member.linkname = "outside"
+            archive.addfile(member)
+        return type("Result", (), {"returncode": 0, "stderr": b""})()
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    try:
+        module.create_worker_export(tmp_path, "a" * 40, tmp_path / "worker", ["fixture-link"])
+    except ValueError as exc:
+        assert "unsafe archive" in str(exc)
+    else:
+        raise AssertionError("link archive entries must not reach the worker")
+
+
+def test_worker_export_initializes_one_commit_without_source_history(tmp_path):
+    import subprocess
+    module = _load()
+    worker = tmp_path / "worker"; worker.mkdir(); (worker / "fixture.txt").write_text("safe", encoding="utf-8")
+    commit = module.initialize_worker_export_repository(worker)
+    count = subprocess.run(["git", "rev-list", "--count", "HEAD"], cwd=worker, text=True, capture_output=True, check=True).stdout.strip()
+    assert len(commit) == 40 and count == "1"
+
+
+def test_worker_export_repository_satisfies_mission_revision_scope(tmp_path):
+    module = _load()
+    worker = tmp_path / "worker"; worker.mkdir(); (worker / "fixture.txt").write_text("safe", encoding="utf-8")
+    commit = module.initialize_worker_export_repository(worker)
+    state_path = ROOT / "skills" / "mission" / "bin" / "mission-state.py"
+    spec = importlib.util.spec_from_file_location("mission_state_export_scope", state_path)
+    state = importlib.util.module_from_spec(spec); spec.loader.exec_module(state)
+    state._validate_revision_scope(worker, {"kind": "git", "base_sha": commit, "head_sha": commit})
 
 
 def test_write_record_rejects_personal_paths_before_persisting(tmp_path):
@@ -352,34 +384,6 @@ def test_claude_mission_probe_uses_the_same_fixed_plugin_package(tmp_path, monke
     assert result["reason"] == "mission_state_unobserved"
     assert str(package) in seen["command"]
     assert seen["command"][-1].startswith("/mission do work")
-
-
-def test_clear_failure_is_recorded_after_terminal_observation():
-    module = _load()
-    def rpc(method, _params):
-        if method == "thread/goal/set": return {"goal": {"threadId": "t", "objective": "o", "status": "active", "createdAt": 1}}
-        if method == "turn/start": return {"turn": {"id": "turn"}}
-        if method == "thread/goal/get": return {"goal": {"threadId": "t", "objective": "o", "status": "complete", "createdAt": 1}}
-        if method == "thread/goal/clear": raise RuntimeError("clear")
-        return {}
-    result = module.run_codex_adapter(rpc, "t", "o", [{"method": "turn/started", "params": {"threadId": "t", "turnId": "turn"}}, {"method": "turn/completed", "params": {"threadId": "t", "turnId": "turn"}}])
-    assert result["outcome"] == "completed"
-    assert result["goal_cleared"] is False
-    assert result["cleanup_error"] == "RuntimeError"
-
-
-def test_malformed_clear_result_is_retained_by_helper():
-    module = _load()
-    def rpc(method, _params):
-        if method == "thread/goal/set": return {"goal": {"threadId": "t", "objective": "o", "status": "active", "createdAt": 1}}
-        if method == "turn/start": return {"turn": {"id": "turn"}}
-        if method == "thread/goal/get": return {"goal": {"threadId": "t", "objective": "o", "status": "complete", "createdAt": 1}}
-        if method == "thread/goal/clear": return []
-        return {}
-    result = module.run_codex_adapter(rpc, "t", "o", [{"method": "turn/started", "params": {"threadId": "t", "turnId": "turn"}}, {"method": "turn/completed", "params": {"threadId": "t", "turnId": "turn"}}])
-    assert result["outcome"] == "completed"
-    assert result["goal_cleared"] is False
-    assert result["cleanup_error"] == "malformed_clear_response"
 
 
 def test_mission_state_requires_the_current_codex_session_binding(tmp_path):
@@ -496,6 +500,25 @@ def test_new_schema_accepts_unsupported_and_keeps_historical_schema_separate():
     assert module.HISTORICAL_RESULT_SCHEMA.name == "result.schema.json"
 
 
+def test_schema_rejects_incomplete_or_inconsistent_comparable_evidence():
+    import jsonschema
+    schema = json.loads((ROOT / "benchmarks" / "mission-vs-goal" / "native_goal_result.schema.json").read_text())
+    digest = "sha256:" + "a" * 64
+    record = {"schema": "native-goal-benchmark-result/1", "run_id": "run", "task_id": "task", "arm": "mission", "outcome": "completed", "fidelity": "verified", "config_matches": True, "package_prepared": True,
+              "manifest": {"package": {"sha256": digest}, "source": {"sha256": digest}, "provider_version": "v1", "task_snapshot": {"expected": "a" * 40, "observed": "a" * 40, "clean": True, "matches": True}, "conditions": {"model_id": "m", "effort": "low", "permissions": "p"}, "worker_export": {"source_commit": "a" * 40, "export_commit": "b" * 40, "allowlist_count": 1, "initial_sha256": digest, "candidate_sha256": digest}}}
+    jsonschema.validate(record, schema)
+    for path, value in ((["manifest", "package"], None), (["manifest", "package", "sha256"], ""), (["manifest", "task_snapshot", "clean"], False), (["config_matches"], False)):
+        invalid = json.loads(json.dumps(record)); target = invalid
+        for key in path[:-1]: target = target[key]
+        target[path[-1]] = value
+        try:
+            jsonschema.validate(invalid, schema)
+        except jsonschema.ValidationError:
+            pass
+        else:
+            raise AssertionError(f"comparable record accepted invalid {path}")
+
+
 def test_protocol_error_classification_requires_goal_method_and_jsonrpc_code():
     probe = _load_probe()
     assert probe._unsupported_goal_protocol(probe.RpcProtocolError("thread/goal/set", -32601, "Method not found")) is True
@@ -523,6 +546,7 @@ def test_cli_main_records_goal_protocol_unavailable_separately_from_runtime_erro
     def unpack(_archive, destination, **_kwargs): (Path(destination) / "plugins" / "mission" / "skills" / "mission").mkdir(parents=True); (Path(destination) / "plugins" / "mission" / "skills" / "mission" / "SKILL.md").write_text("x")
     monkeypatch.setattr(probe, "create_immutable_package", package); monkeypatch.setattr(probe.shutil, "unpack_archive", unpack)
     monkeypatch.setattr(probe, "create_worker_export", lambda source, _commit, destination, _allow: source)
+    monkeypatch.setattr(probe, "initialize_worker_export_repository", lambda _root: "b" * 40)
     monkeypatch.setattr(probe, "worker_export_manifest", lambda _root: {"schema": "mission-worker-export/1", "sha256": "sha256:test"})
     monkeypatch.setattr(probe, "_task_snapshot", lambda _path: {"observed": "a" * 40, "clean": True}); monkeypatch.setattr(probe, "_codex_version", lambda: "test")
     base = ["probe", "--host", "codex", "--objective", "o", "--task-id", "t", "--acceptance-criterion", "a", "--starting-commit", "a" * 40, "--mission-source-repo", str(tmp_path), "--mission-source-commit", "a" * 40, "--model-id", "m", "--effort", "low", "--permissions", "p", "--worktree", str(tmp_path), "--worker-allow-path", "fixture"]
@@ -531,3 +555,25 @@ def test_cli_main_records_goal_protocol_unavailable_separately_from_runtime_erro
         output = tmp_path / f"{name}.json"; monkeypatch.setattr(sys, "argv", [*base, "--output", str(output)])
         assert probe.main() == 0
         assert json.loads(output.read_text())["outcome"] == outcome
+
+
+def test_cli_main_keeps_candidate_worker_tree_after_provider_returns(tmp_path, monkeypatch):
+    probe = _load_probe()
+    def package(_repo, _commit, output): output.write_bytes(b"tar"); return output
+    def unpack(_archive, destination, **_kwargs):
+        skill = Path(destination) / "plugins" / "mission" / "skills" / "mission"; skill.mkdir(parents=True); (skill / "SKILL.md").write_text("x")
+    def worker(_source, _commit, destination, _allow): destination.mkdir(parents=True); (destination / "fixture.txt").write_text("before"); return destination
+    digests = iter(["sha256:" + "a" * 64, "sha256:" + "b" * 64])
+    def run_worker(destination, *_args): (destination / "candidate.md").write_text("after"); return {"outcome": "failed", "fidelity": "unverified", "reason": "fixture"}
+    monkeypatch.setattr(probe, "create_immutable_package", package); monkeypatch.setattr(probe.shutil, "unpack_archive", unpack)
+    monkeypatch.setattr(probe, "create_worker_export", worker); monkeypatch.setattr(probe, "worker_export_manifest", lambda _root: {"sha256": next(digests)})
+    monkeypatch.setattr(probe, "probe_codex", run_worker); monkeypatch.setattr(probe, "_codex_version", lambda: "test")
+    monkeypatch.setattr(probe, "_task_snapshot", lambda _path: {"observed": "a" * 40, "clean": True})
+    output = tmp_path / "record.json"
+    argv = ["probe", "--host", "codex", "--objective", "o", "--task-id", "t", "--acceptance-criterion", "a", "--starting-commit", "a" * 40, "--mission-source-repo", str(tmp_path), "--mission-source-commit", "a" * 40, "--model-id", "m", "--effort", "low", "--permissions", "p", "--worktree", str(tmp_path), "--worker-allow-path", "fixture.txt", "--output", str(output)]
+    monkeypatch.setattr(sys, "argv", argv)
+    assert probe.main() == 0
+    candidate = tmp_path / "candidates" / "record" / "candidate.md"
+    assert candidate.read_text() == "after"
+    manifest = json.loads(output.read_text())["manifest"]["worker_export"]
+    assert manifest["candidate_path"] == "candidates/record" and manifest["initial_sha256"] != manifest["candidate_sha256"]
