@@ -63,7 +63,8 @@ class RpcProcess:
             if message is None: break
             if message.get("id") == request_id:
                 if "error" in message:
-                    raise RuntimeError(f"app-server {method} failed: {message['error']}")
+                    error = message["error"] if isinstance(message["error"], dict) else {}
+                    raise RpcProtocolError(method, error.get("code"), error.get("message"))
                 return message.get("result", {})
             if isinstance(message.get("method"), str):
                 # Store names and identity only; raw turn text is never an artifact.
@@ -127,10 +128,15 @@ def _thread_id(response: dict) -> str:
     return value
 
 
+class RpcProtocolError(RuntimeError):
+    def __init__(self, method: str, code: object, message: object):
+        self.method, self.code = method, code
+        super().__init__(f"app-server {method} failed: {message}")
+
+
 def _unsupported_goal_protocol(exc: Exception) -> bool:
     """Recognise the official JSON-RPC missing-method response without fallback."""
-    text = str(exc).casefold()
-    return "method not found" in text or "-32601" in text
+    return isinstance(exc, RpcProtocolError) and exc.method.startswith("thread/goal/") and exc.code == -32601
 
 
 def _codex_version() -> str:

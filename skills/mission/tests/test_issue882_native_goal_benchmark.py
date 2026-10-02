@@ -374,7 +374,8 @@ def test_new_schema_accepts_unsupported_and_keeps_historical_schema_separate():
     assert module.HISTORICAL_RESULT_SCHEMA.name == "result.schema.json"
 
 
-def test_probe_rejects_nonfinite_budgets_and_classifies_missing_goal_protocol():
+def test_protocol_error_classification_requires_goal_method_and_jsonrpc_code():
     probe = _load_probe()
-    assert probe._unsupported_goal_protocol(RuntimeError("code -32601: Method not found")) is True
-    assert probe._unsupported_goal_protocol(RuntimeError("socket closed")) is False
+    assert probe._unsupported_goal_protocol(probe.RpcProtocolError("thread/goal/set", -32601, "Method not found")) is True
+    assert probe._unsupported_goal_protocol(probe.RpcProtocolError("thread/start", -32601, "Method not found")) is False
+    assert probe._unsupported_goal_protocol(OSError("-32601")) is False
