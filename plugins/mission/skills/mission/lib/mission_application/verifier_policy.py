@@ -111,6 +111,7 @@ def validate(value):
 def explicit_paths_are_supported(argv, env):
     """Return whether command inputs contain only snapshot-bindable path shapes."""
     import os
+    import re
     import shlex
     from urllib.parse import unquote, urlsplit
 
@@ -145,8 +146,13 @@ def explicit_paths_are_supported(argv, env):
 
     if not isinstance(argv, list) or not isinstance(env, dict) or not all(isinstance(value, str) for value in env.values()):
         return False
+
+    def inline_python_source(index):
+        executable = Path(argv[0]).name.lower() if isinstance(argv[0], str) else ""
+        return index > 1 and argv[index - 1] == "-c" and "-m" not in argv[1:index] and re.fullmatch(r"python(?:\d+(?:\.\d+)*)?(?:\.exe)?", executable) is not None
+
     for index, value in enumerate(argv[1:], start=1):
-        if index > 1 and argv[index - 1] == "-c":
+        if inline_python_source(index):
             continue
         if unsupported(value, split_option_value=isinstance(value, str) and value.startswith("--")):
             return False
