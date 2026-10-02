@@ -126,6 +126,24 @@ def test_mark_pass_saved_document_is_unchanged(tmp_path):
     assert repository.saved["terminal_outcome"] == "completed_pass"
 
 
+def test_mark_pass_rejects_contract_with_pending_coverage(tmp_path):
+    from mission_application.review import MarkPassRequest, ReviewFailure, mark_pass
+
+    state = _review_state(tmp_path)
+    state["acceptance_contract"] = {"coverage": {"status": "pending"}}
+    repository = _RecordingRepository(state)
+
+    with pytest.raises(ReviewFailure) as raised:
+        mark_pass(
+            repository,
+            MarkPassRequest(False, None, False, "", "2030-08-23T00:00:00Z"),
+            _pass_services(_load_cli_module("issue879_pending_contract")),
+        )
+
+    assert raised.value.reason == "acceptance-coverage-pending"
+    assert repository.saved is None
+
+
 def test_mark_pass_force_path_preserves_approval_binding(tmp_path):
     from mission_application.review import MarkPassRequest, mark_pass
 

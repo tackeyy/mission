@@ -982,10 +982,23 @@ def _maximum_agreement_delta(payload: dict[str, object]) -> float | None:
     return maximum
 
 
+def _acceptance_completion_ready(state: MissionState) -> None:
+    """Keep contract-enabled sessions pending until typed coverage exists."""
+    document = _evidence_document(state)
+    contract = document.get("acceptance_contract")
+    if contract is None:
+        return
+    if not isinstance(contract, dict):
+        raise _Rejected("acceptance-contract-invalid")
+    if contract.get("coverage") != {"status": "valid"}:
+        raise _Rejected("acceptance-coverage-pending")
+
+
 def _mark_pass(state: MissionState, raw_command: object) -> Transition:
     command = raw_command
     assert isinstance(command, MarkPass)
     control = _active_control(state)
+    _acceptance_completion_ready(state)
     if type(command.force) is not bool:
         raise _Rejected("invalid-force-flag")
     if command.force:
