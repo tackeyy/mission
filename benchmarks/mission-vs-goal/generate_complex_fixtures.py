@@ -18,19 +18,43 @@ DEPENDENCIES = {
 }
 
 TASKS = [
-    ("multi-module-cache", "multi_module", "A cache invalidation crosses parser and service modules.", "A write returns a stale cached value after an update.", "return {'value': old}", "return {'value': cache[key]}", {"value": 2}),
-    ("multi-module-unit-boundary", "multi_module", "A boundary conversion preserves currency units across modules.", "A cents value is exposed as whole currency.", "return {'amount': cents}", "return {'amount': cents / 100}", {"amount": 12.5}),
-    ("compatibility-legacy-default", "compatibility", "Legacy and current payloads retain their documented default.", "A legacy payload loses its compatibility default.", "return {'state': raw.get('state', 'unknown')}", "return {'state': raw.get('state', 'open')}", {"state": "open"}),
-    ("compatibility-versioned-field", "compatibility", "A versioned boundary maps an old field to its current meaning.", "A renamed field is silently ignored by the current consumer.", "return {'priority': raw.get('priority', 'normal')}", "return {'priority': raw.get('priority', raw.get('urgency', 'normal'))}", {"priority": "high"}),
-    ("partial-failure-rollback", "partial_failure", "A failed batch does not leave partial persistent state.", "A partial write remains visible after a later operation fails.", "return {'stored': ['first']}", "return {'stored': []}", {"stored": []}),
-    ("partial-failure-selective-retry", "partial_failure", "A retry executes only operations that were not accepted.", "A retry repeats an already accepted external operation.", "return {'sent': ['first', 'first', 'second']}", "return {'sent': ['first', 'second']}", {"sent": ["first", "second"]}),
-    ("rerun-idempotency-key", "rerun", "Replaying the same event preserves one logical effect.", "A repeated event is charged twice.", "return {'charges': 2}", "return {'charges': 1}", {"charges": 1}),
-    ("rerun-resume-watermark", "rerun", "Resume starts after the persisted watermark.", "Resume processes the previously committed item again.", "return {'processed': ['b', 'b', 'c']}", "return {'processed': ['b', 'c']}", {"processed": ["b", "c"]}),
-    ("aggregation-cancellation", "aggregation", "Cancellation is reflected in the aggregate state.", "A cancellation leaves an obsolete positive total.", "return {'total': 3}", "return {'total': 0}", {"total": 0}),
-    ("aggregation-deduplication", "aggregation", "Duplicate delivery does not inflate an aggregate.", "A duplicate event is counted twice.", "return {'total': 4}", "return {'total': 2}", {"total": 2}),
-    ("concurrency-lost-update", "concurrency", "A deterministic barrier preserves both concurrent increments.", "Two writers read the same value and one increment is lost.", "return {'count': 1}", "return {'count': 2}", {"count": 2}),
-    ("concurrency-order-independent", "concurrency", "Concurrent order does not change the canonical result.", "Arrival order chooses a non-canonical winner.", "return {'winner': 'late'}", "return {'winner': 'canonical'}", {"winner": "canonical"}),
+    ("multi-module-cache", "multi_module", "A cache invalidation crosses parser and service modules.", "A write returns a stale cached value after an update."),
+    ("multi-module-unit-boundary", "multi_module", "A boundary conversion preserves currency units across modules.", "A cents value is exposed as whole currency."),
+    ("compatibility-legacy-default", "compatibility", "Legacy and current payloads retain their documented default.", "A legacy payload loses its compatibility default."),
+    ("compatibility-versioned-field", "compatibility", "A versioned boundary maps an old field to its current meaning.", "A renamed field is silently ignored by the current consumer."),
+    ("partial-failure-rollback", "partial_failure", "A failed batch does not leave partial persistent state.", "A partial write remains visible after a later operation fails."),
+    ("partial-failure-selective-retry", "partial_failure", "A retry executes only operations that were not accepted.", "A retry repeats an already accepted external operation."),
+    ("rerun-idempotency-key", "rerun", "Replaying the same event preserves one logical effect.", "A repeated event is charged twice."),
+    ("rerun-resume-watermark", "rerun", "Resume starts after the persisted watermark.", "Resume processes the previously committed item again."),
+    ("aggregation-cancellation", "aggregation", "Cancellation is reflected in the aggregate state.", "A cancellation leaves an obsolete positive total."),
+    ("aggregation-deduplication", "aggregation", "Duplicate delivery does not inflate an aggregate.", "A duplicate event is counted twice."),
+    ("concurrency-lost-update", "concurrency", "A deterministic barrier preserves both concurrent increments.", "Two writers read the same value and one increment is lost."),
+    ("concurrency-order-independent", "concurrency", "Concurrent order does not change the canonical result.", "Arrival order chooses a non-canonical winner."),
 ]
+
+TASK_MODES = {
+    "multi-module-cache": "cache", "multi-module-unit-boundary": "units",
+    "compatibility-legacy-default": "legacy", "compatibility-versioned-field": "rename",
+    "partial-failure-rollback": "rollback", "partial-failure-selective-retry": "retry",
+    "rerun-idempotency-key": "idempotent", "rerun-resume-watermark": "resume",
+    "aggregation-cancellation": "cancel", "aggregation-deduplication": "dedupe",
+    "concurrency-lost-update": "lost-update", "concurrency-order-independent": "ordering",
+}
+
+TASK_CONTRACTS = {
+    "multi-module-cache": "Input: an initial key/value mapping and ordered read/write operations. Output: observed reads and final storage state. A write must invalidate that key's cached value without affecting other keys.",
+    "multi-module-unit-boundary": "Input: an amount labelled major or minor plus a minor-unit fee. Output: the total in minor units and its major-unit display. Conversion occurs once at the boundary.",
+    "compatibility-legacy-default": "Input: a versioned payload with an optional state. Output: persisted state and version. Version 1 defaults to open; later versions default to pending; an explicit state wins.",
+    "compatibility-versioned-field": "Input: a payload with priority and/or legacy urgency. Output: persisted priority. Priority wins when present; otherwise urgency supplies the legacy value; otherwise normal applies.",
+    "partial-failure-rollback": "Input: existing records, ordered writes, and an optional fault position. Output: commit status and stored state. A fault leaves the complete pre-batch state intact.",
+    "partial-failure-selective-retry": "Input: accepted identifiers, delivery rounds, and identifiers that fail once. Output: attempts and accepted identifiers. Accepted work is never resent; failed work alone is retried.",
+    "rerun-idempotency-key": "Input: persisted effects and event calls, optionally reloading between calls. Output: effects by event id and total. Repeating an id preserves one logical effect across reloads.",
+    "rerun-resume-watermark": "Input: persisted watermark/processed ids and event runs, optionally reloading between runs. Output: watermark and processed ids. Offsets at or below the watermark are not processed again.",
+    "aggregation-cancellation": "Input: add and cancel events. Output: retained entries and their total. Cancelling one id removes only that id; an unknown cancellation has no effect.",
+    "aggregation-deduplication": "Input: delivery events with ids and amounts. Output: entries and total. Repeated delivery of an id must not inflate its aggregate.",
+    "concurrency-lost-update": "Input: an initial count and exactly two integer deltas. Output: final count and completed-thread count. Both concurrent updates must be reflected after the barrier.",
+    "concurrency-order-independent": "Input: two ranked candidates and their arrival order. Output: canonical winner and completed-thread count. The lowest rank, then identifier, wins regardless of arrival order.",
+}
 
 def concurrency_files(task_id: str, broken: bool, requirement: str) -> dict[str, str]:
     if task_id == "concurrency-lost-update":
@@ -95,7 +119,7 @@ def execute(request):
 
 assert execute({"initial": 0, "deltas": [0, 0]})["threads_completed"] == 2
 ''',
-            "README.md": f"# {task_id}\n\nContract: {requirement}\n\nThe service receives an initial count and two deltas. It must return the final count and report that both worker threads completed.\n",
+            "README.md": f"# {task_id}\n\nRequirement: {requirement}\n\nContract: {TASK_CONTRACTS[task_id]}\n",
         }
     store = '''from threading import Lock
 
@@ -171,14 +195,17 @@ def execute(request):
 
 assert execute({"candidates": [{"id": "x", "rank": 1}, {"id": "y", "rank": 2}], "arrival_order": ["x", "y"]})["threads_completed"] == 2
 ''',
-        "README.md": f"# {task_id}\n\nContract: {requirement}\n\nThe service registers two ranked candidates in the supplied arrival order. It must return the canonical winner (lowest rank, then identifier) and report that both worker threads completed.\n",
+        "README.md": f"# {task_id}\n\nRequirement: {requirement}\n\nContract: {TASK_CONTRACTS[task_id]}\n",
     }
 
 
 def stateful_files(task_id: str, broken: bool, requirement: str) -> dict[str, str]:
     """Render task-specific worker code; only the evaluator owns case data."""
     common = {
-        "README.md": f"# {task_id}\n\nContract: {requirement}\n",
+        "README.md": (
+            f"# {task_id}\n\nRequirement: {requirement}\n\n"
+            f"Contract: {TASK_CONTRACTS[task_id]}\n"
+        ),
     }
     if task_id == "multi-module-cache":
         common.update({
@@ -257,54 +284,11 @@ def stateful_files(task_id: str, broken: bool, requirement: str) -> dict[str, st
     return common
 
 
-def files(mode: str, broken: bool, task_id: str, requirement: str, failure: str) -> dict[str, str]:
-    if mode == "lost-update" or mode == "ordering":
+def files(task_id: str, broken: bool, requirement: str) -> dict[str, str]:
+    """Render only task-specific implementations; no mode switch reaches workers."""
+    if TASK_MODES[task_id] in {"lost-update", "ordering"}:
         return concurrency_files(task_id, broken, requirement)
-    if task_id:
-        return stateful_files(task_id, broken, requirement)
-    return {
-        "boundary.py": "def normalise(operation):\n    return dict(operation)\n",
-        "store.py": "class Store:\n    def __init__(self): self.items = {}; self.sent = []; self.total = 0\n    def snapshot(self): return {'items': self.items, 'sent': self.sent, 'total': self.total}\n",
-        "service.py": f'''from boundary import normalise
-from store import Store
-MODE = {mode!r}; BROKEN = {broken!r}
-
-def execute(operations):
-    store = Store(); seen = set(); watermark = 0
-    for raw in operations:
-        op = normalise(raw); kind = op['kind']
-        if MODE == 'cache':
-            if kind == 'write' and (BROKEN and op['key'] in store.items): pass
-            elif kind == 'write': store.items[op['key']] = op['value']
-        elif MODE == 'units':
-            if kind == 'amount': store.items['amount'] = op['cents'] if BROKEN else op['cents'] / 100
-        elif MODE == 'legacy':
-            if kind == 'payload': store.items['state'] = op.get('state', 'unknown' if BROKEN else 'open')
-        elif MODE == 'rename':
-            if kind == 'payload': store.items['priority'] = op.get('priority', 'normal' if BROKEN else op.get('urgency', 'normal'))
-        elif MODE == 'rollback':
-            if kind == 'put': store.items[op['key']] = op['value']
-            if kind == 'fail' and not BROKEN: store.items.clear()
-        elif MODE == 'retry':
-            if kind == 'send' and (BROKEN or op['id'] not in seen): store.sent.append(op['id']); seen.add(op['id'])
-        elif MODE == 'idempotent':
-            if kind == 'charge' and (BROKEN or op['id'] not in seen): store.total += op['amount']; seen.add(op['id'])
-        elif MODE == 'resume':
-            if kind == 'event' and (op['offset'] >= watermark if BROKEN else op['offset'] > watermark): store.sent.append(op['id']); watermark = max(watermark, op['offset'])
-        elif MODE == 'cancel':
-            if kind == 'add': store.total += op['amount']
-            if kind == 'cancel' and not BROKEN: store.total -= op['amount']
-        elif MODE == 'dedupe':
-            if kind == 'add' and (BROKEN or op['id'] not in seen): store.total += op['amount']; seen.add(op['id'])
-        elif MODE == 'lost-update':
-            if kind == 'increment': store.total = 1 if BROKEN else store.total + op['amount']
-        elif MODE == 'ordering':
-            if kind == 'candidate': store.items['winner'] = op['name'] if BROKEN else min(store.items.get('winner', op['name']), op['name'])
-    return store.snapshot()
-''',
-        "public_smoke.py": "from service import execute\nassert isinstance(execute([]), dict)\n",
-        "README.md": f"# {task_id}\n\nRequirement: {requirement}\n\nThe starter has a defect: {failure}\nRepair the observable contract without weakening the public smoke check.\n",
-    }
+    return stateful_files(task_id, broken, requirement)
 
 def write_tree(root: Path, data: dict[str, str]) -> None:
     root.mkdir(parents=True, exist_ok=True)
@@ -317,12 +301,11 @@ def write_tree(root: Path, data: dict[str, str]) -> None:
 
 def task_template(task_id: str, group: str) -> dict[str, str]:
     """Return one reproducible fixture tree without writing it to the source tree."""
-    for known_id, _, requirement, failure, *_ in TASKS:
+    for known_id, _, requirement, _ in TASKS:
         if known_id == task_id:
             if group not in {"worker", "reference", "control"}:
                 raise ValueError("unknown fixture group")
-            mode = {'multi-module-cache':'cache','multi-module-unit-boundary':'units','compatibility-legacy-default':'legacy','compatibility-versioned-field':'rename','partial-failure-rollback':'rollback','partial-failure-selective-retry':'retry','rerun-idempotency-key':'idempotent','rerun-resume-watermark':'resume','aggregation-cancellation':'cancel','aggregation-deduplication':'dedupe','concurrency-lost-update':'lost-update','concurrency-order-independent':'ordering'}[task_id]
-            return files(mode, group == "worker", task_id, requirement, failure)
+            return files(task_id, group == "worker", requirement)
     raise ValueError("unknown fixture task")
 
 
@@ -332,7 +315,8 @@ def template_digest(task_id: str, group: str) -> str:
         digest.update(name.encode("utf-8")); digest.update(b"\0"); digest.update(content.encode("utf-8")); digest.update(b"\0")
     return "sha256:" + digest.hexdigest()
 
-def main() -> None:
+def render_catalog() -> dict[str, object]:
+    """Return evaluator-owned cases from this generator's single source of truth."""
     catalog = []
     cases = {
       'cache': [
@@ -395,15 +379,22 @@ def main() -> None:
           {'name': 'b-over-c-by-rank', 'scenario': {'candidates': [{'id': 'b', 'rank': 1}, {'id': 'c', 'rank': 2}], 'arrival_order': ['c', 'b']}, 'expected': {'winner': {'id': 'b', 'rank': 1}, 'threads_completed': 2}},
           {'name': 'same-rank-id-tie-break-in-reverse-arrival-order', 'scenario': {'candidates': [{'id': 'a', 'rank': 4}, {'id': 'z', 'rank': 4}], 'arrival_order': ['a', 'z']}, 'expected': {'winner': {'id': 'a', 'rank': 4}, 'threads_completed': 2}},
       ], }
-    for task_id, family, requirement, failure, broken, repaired, expected in TASKS:
-        mode = {'multi-module-cache':'cache','multi-module-unit-boundary':'units','compatibility-legacy-default':'legacy','compatibility-versioned-field':'rename','partial-failure-rollback':'rollback','partial-failure-selective-retry':'retry','rerun-idempotency-key':'idempotent','rerun-resume-watermark':'resume','aggregation-cancellation':'cancel','aggregation-deduplication':'dedupe','concurrency-lost-update':'lost-update','concurrency-order-independent':'ordering'}[task_id]
-        for group, is_broken in (("worker", True), ("reference", False), ("control", False)):
-            write_tree(ROOT / group / task_id, files(mode, is_broken, task_id, requirement, failure))
+    for task_id, family, requirement, failure in TASKS:
+        mode = TASK_MODES[task_id]
         catalog.append({"id": task_id, "family": family, "version": "complex-fixture-v1", "requirement": requirement,
                         "dependency": DEPENDENCIES[family],
                         "realistic_failure": failure, "checks": cases[mode]})
-    (ROOT / "catalog.json").parent.mkdir(parents=True, exist_ok=True)
-    (ROOT / "catalog.json").write_text(json.dumps({"schema": "mission-complex-fixtures/1", "tasks": catalog}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return {"schema": "mission-complex-fixtures/1", "tasks": catalog}
+
+
+def render_catalog_bytes() -> bytes:
+    return (json.dumps(render_catalog(), indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def main() -> None:
+    for task_id, _, requirement, _ in TASKS:
+        for group, is_broken in (("worker", True), ("reference", False), ("control", False)):
+            write_tree(ROOT / group / task_id, files(task_id, is_broken, requirement))
     (ROOT / "README.md").write_text("""# Complex repair fixtures
 
 This development cohort contains twelve neutral repositories: two tasks in each

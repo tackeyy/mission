@@ -148,20 +148,14 @@ def test_templates_render_worker_reference_and_control_without_hidden_flags():
     spec.loader.exec_module(generator)
     root = ROOT / "benchmarks" / "mission-vs-goal" / "complex-fixtures"
 
-    modes = {
-        "multi-module-cache": "cache", "multi-module-unit-boundary": "units",
-        "compatibility-legacy-default": "legacy", "compatibility-versioned-field": "rename",
-        "partial-failure-rollback": "rollback", "partial-failure-selective-retry": "retry",
-        "rerun-idempotency-key": "idempotent", "rerun-resume-watermark": "resume",
-        "aggregation-cancellation": "cancel", "aggregation-deduplication": "dedupe",
-        "concurrency-lost-update": "lost-update", "concurrency-order-independent": "ordering",
-    }
     for group in ("worker", "reference", "control"):
-        for task_id, _, requirement, failure, *_ in generator.TASKS:
-            expected = generator.files(modes[task_id], group == "worker", task_id, requirement, failure)
+        for task_id, _, requirement, _ in generator.TASKS:
+            expected = generator.files(task_id, group == "worker", requirement=requirement)
             assert {"README.md", "boundary.py", "service.py"} <= set(expected)
             assert "MODE" not in "\n".join(expected.values())
             assert "BROKEN" not in "\n".join(expected.values())
+            assert "Input:" in expected["README.md"]
+            assert "Output:" in expected["README.md"]
 
 
 def test_assignment_requires_matching_source_and_export_task_roots(tmp_path):
@@ -186,7 +180,17 @@ def test_materializer_binds_current_source_commit_and_creates_one_task_repo(tmp_
     assert record["source_commit"] == commit
     assert record["task_id"] == "concurrency-lost-update"
     assert record["generated_commit"]
+    assert record["generator_digest"].startswith("sha256:")
+    assert record["catalog_digest"].startswith("sha256:")
+    assert record["generated_digest"] == record["worker_digest"]
     assert record["worker_digest"].startswith("sha256:")
+
+
+def test_export_rejects_a_caller_catalog_root_that_is_not_the_fixed_source(tmp_path):
+    module = _load()
+    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, capture_output=True, check=True).stdout.strip()
+    with __import__("pytest").raises(ValueError, match="catalog root"):
+        module.export_worker_fixtures(ROOT, commit, tmp_path / "worker", tmp_path / "other")
 
 
 def test_evaluator_rejects_a_snapshot_change_without_discarding_its_record(monkeypatch, tmp_path):

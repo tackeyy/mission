@@ -13,18 +13,31 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import selectors
 import signal
 import shutil
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 from pathlib import Path
 from typing import Any
 
 
 MAX_EVALUATOR_OUTPUT_BYTES = 65536
+
+
+def _digest_bytes(value: bytes) -> str:
+    return "sha256:" + __import__("hashlib").sha256(value).hexdigest()
+
+
+def _load_generator(path: Path) -> Any:
+    spec = importlib.util.spec_from_file_location("complex_fixture_generator", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("complex fixture generator unavailable")
+    generator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generator)
+    return generator
 
 
 def _digest_tree(root: Path) -> str:
@@ -40,13 +53,16 @@ def _digest_tree(root: Path) -> str:
 def materialize_task(repo_root: Path, source_commit: str, task_id: str, group: str, destination: Path) -> dict[str, Any]:
     """Bind fixed H inputs, then create one generated task repository."""
     generator_path = repo_root / "benchmarks" / "mission-vs-goal" / "generate_complex_fixtures.py"
-    catalog_path = repo_root / "benchmarks" / "mission-vs-goal" / "complex-fixtures" / "catalog.json"
-    for path in (generator_path, catalog_path):
-        shown = subprocess.run(["git", "show", f"{source_commit}:{path.relative_to(repo_root)}"], cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-        if shown.returncode != 0 or shown.stdout != path.read_bytes():
-            raise ValueError("fixture source does not match the declared commit")
-    spec = importlib.util.spec_from_file_location("complex_fixture_generator", generator_path)
-    generator = importlib.util.module_from_spec(spec); spec.loader.exec_module(generator)
+    shown = subprocess.run(
+        ["git", "show", f"{source_commit}:{generator_path.relative_to(repo_root)}"],
+        cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    if shown.returncode != 0 or shown.stdout != generator_path.read_bytes():
+        raise ValueError("fixture generator does not match the declared commit")
+    generator = _load_generator(generator_path)
+    catalog_bytes = generator.render_catalog_bytes()
+    if task_id not in {entry["id"] for entry in generator.render_catalog()["tasks"]}:
+        raise ValueError("unknown fixture task")
     files = generator.task_template(task_id, group)
     task_root = destination / task_id; task_root.mkdir(parents=True)
     for name, content in files.items():
@@ -57,12 +73,23 @@ def materialize_task(repo_root: Path, source_commit: str, task_id: str, group: s
     subprocess.run(["git", "add", task_id], cwd=destination, check=True)
     subprocess.run(["git", "commit", "-qm", "generated fixture"], cwd=destination, check=True)
     generated_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=destination, text=True, capture_output=True, check=True).stdout.strip()
-    return {"source_commit": source_commit, "input_digest": generator.template_digest(task_id, group), "task_id": task_id,
-            "generated_commit": generated_commit, "task_root": task_id, "worker_digest": _digest_tree(task_root)}
+    generated_digest = _digest_tree(task_root)
+    return {
+        "source_commit": source_commit,
+        "generator_digest": _digest_bytes(shown.stdout),
+        "catalog_digest": _digest_bytes(catalog_bytes),
+        "input_digest": generator.template_digest(task_id, group),
+        "task_id": task_id,
+        "generated_commit": generated_commit,
+        "task_root": task_id,
+        "generated_digest": generated_digest,
+        "worker_digest": generated_digest,
+    }
 
 
 def load_catalog(root: Path) -> list[dict[str, Any]]:
-    raw = json.loads((root / "catalog.json").read_text(encoding="utf-8"))
+    generator = _load_generator(root.parent / "generate_complex_fixtures.py")
+    raw = generator.render_catalog()
     tasks = raw.get("tasks") if isinstance(raw, dict) else None
     if not isinstance(tasks, list) or not all(isinstance(task, dict) for task in tasks):
         raise ValueError("complex fixture catalog is malformed")
@@ -106,13 +133,13 @@ def _materialize_candidate(source: Path, destination: Path) -> tuple[Path, str]:
 
 
 def _run_bounded(command: list[str], *, timeout_seconds: float) -> tuple[int | None, bytes, bool, bool, bool]:
-    """Run one evaluator child with bounded in-memory stdout/stderr collection."""
+    """Bound child, pipes, and reader lifetime without blocking on stream close."""
     process = subprocess.Popen(
         command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         start_new_session=os.name == "posix",
     )
     captured = {"stdout": bytearray(), "stderr": bytearray()}
-    exceeded = threading.Event()
+    exceeded = False
 
     def terminate_group() -> None:
         try:
@@ -127,38 +154,37 @@ def _run_bounded(command: list[str], *, timeout_seconds: float) -> tuple[int | N
                 except ProcessLookupError:
                     pass
 
-    def consume(name: str, stream: Any) -> None:
-        while chunk := stream.read(8192):
-            if len(captured[name]) + len(chunk) > MAX_EVALUATOR_OUTPUT_BYTES:
-                exceeded.set()
-                terminate_group()
-                return
-            captured[name].extend(chunk)
-
-    readers = [threading.Thread(target=consume, args=(name, stream), daemon=True) for name, stream in (("stdout", process.stdout), ("stderr", process.stderr))]
-    for reader in readers:
-        reader.start()
     deadline = time.monotonic() + timeout_seconds
     timed_out = False
-    while process.poll() is None and time.monotonic() < deadline:
-        try:
-            process.wait(timeout=max(0.001, deadline - time.monotonic()))
-        except subprocess.TimeoutExpired:
-            pass
+    selector = selectors.DefaultSelector()
+    for name, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
+        selector.register(stream, selectors.EVENT_READ, name)
+    while time.monotonic() < deadline:
+        remaining = max(0, deadline - time.monotonic())
+        for key, _ in selector.select(min(remaining, 0.02)):
+            chunk = os.read(key.fileobj.fileno(), 8192)
+            if not chunk:
+                selector.unregister(key.fileobj)
+                continue
+            name = key.data
+            if len(captured[name]) + len(chunk) > MAX_EVALUATOR_OUTPUT_BYTES:
+                exceeded = True
+                terminate_group()
+                break
+            captured[name].extend(chunk)
+        if exceeded:
+            break
+        if process.poll() is not None and not selector.get_map():
+            break
     if process.poll() is None:
         timed_out = True
         terminate_group()
-        process.wait()
-    for reader in readers:
-        reader.join(timeout=max(0, deadline - time.monotonic()))
-    incomplete = any(reader.is_alive() for reader in readers)
-    if incomplete:
-        terminate_group()
-        for stream in (process.stdout, process.stderr):
-            stream.close()
-        for reader in readers:
-            reader.join(timeout=0.1)
-    return process.returncode, bytes(captured["stdout"]), timed_out, exceeded.is_set(), incomplete
+    shutdown_deadline = time.monotonic() + 0.1
+    while process.poll() is None and time.monotonic() < shutdown_deadline:
+        time.sleep(0.002)
+    incomplete = bool(selector.get_map())
+    selector.close()
+    return process.poll(), bytes(captured["stdout"]), timed_out, exceeded, incomplete
 
 
 def evaluate_candidate(root: Path, entry: dict[str, Any], candidate: Path, timeout_seconds: float = 3.0) -> dict[str, Any]:
@@ -189,10 +215,10 @@ def evaluate_candidate(root: Path, entry: dict[str, Any], candidate: Path, timeo
                 )
                 if timed_out:
                     return {**base, "status": "blocked", "reason": "evaluator_timeout", "case_count": len(checks), "cases": cases}
-                if incomplete:
-                    return {**base, "status": "blocked", "reason": "evaluator_reader_incomplete", "case_count": len(checks), "cases": cases}
                 if output_exceeded:
                     return {**base, "status": "failed", "reason": "evaluator_output_too_large", "case_count": len(checks), "cases": cases}
+                if incomplete:
+                    return {**base, "status": "blocked", "reason": "evaluator_reader_incomplete", "case_count": len(checks), "cases": cases}
                 if returncode != 0:
                     return {**base, "status": "failed", "reason": "evaluator_execution_failed", "case_count": len(checks), "cases": cases}
                 try:
@@ -232,14 +258,17 @@ def run_public_smoke(candidate: Path) -> dict[str, Any]:
     return {"status": "passed" if completed.returncode == 0 else "failed"}
 
 
-def export_worker_fixtures(repo_root: Path, starting_commit: str, destination: Path, catalog_root: Path) -> Path:
+def export_worker_fixtures(repo_root: Path, starting_commit: str, destination: Path, catalog_root: Path | None = None) -> Path:
     """Generate one-task repos, then use #882's unchanged positive export."""
     module_path = repo_root / "benchmarks" / "mission-vs-goal" / "native_goal_benchmark.py"
     spec = importlib.util.spec_from_file_location("native_goal_worker_export", module_path)
     if spec is None or spec.loader is None:
         raise RuntimeError("worker export implementation unavailable")
     module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
-    entries = load_catalog(catalog_root)
+    generated_catalog_root = repo_root / "benchmarks" / "mission-vs-goal" / "complex-fixtures"
+    if catalog_root is not None and catalog_root.resolve() != generated_catalog_root.resolve():
+        raise ValueError("caller-supplied catalog root is not the fixed fixture source")
+    entries = load_catalog(generated_catalog_root)
     destination.mkdir(parents=True, exist_ok=False)
     manifest = []
     for entry in entries:
