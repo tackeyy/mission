@@ -131,6 +131,18 @@ def test_codex_events_must_start_then_complete_on_the_target_thread():
         assert result["outcome"] == "failed"
 
 
+def test_codex_goal_generation_and_turn_identity_must_match():
+    module = _load()
+    created = {"threadId": "t", "objective": "o", "status": "active", "createdAt": 1}
+    observed = {"threadId": "t", "objective": "o", "status": "complete", "createdAt": 2}
+    result = module.observe_codex_goal("t", "o", {"goal": created}, {"goal": observed}, [])
+    assert result["reason"] == "goal_identity_mismatch"
+    observed["createdAt"] = 1
+    events = [{"method": "turn/started", "params": {"threadId": "t", "turnId": "other"}}, {"method": "turn/completed", "params": {"threadId": "t", "turnId": "other"}}]
+    result = module.observe_codex_goal("t", "o", {"goal": created}, {"goal": observed}, events, {"expected"})
+    assert result["reason"] == "turn_not_completed"
+
+
 def test_assignment_outcomes_keep_every_assigned_cell_and_failure():
     module = _load()
     plan = [("task-a", "codex_native_goal"), ("task-a", "mission"), ("task-b", "mission")]
@@ -223,13 +235,14 @@ def test_codex_probe_uses_goal_protocol_and_preserves_budget_limited_outcome(tmp
 
     class FakeRpc:
         def __init__(self, *_args):
-            self.events = [{"method": "turn/started", "params": {"threadId": "thread-1"}}, {"method": "turn/completed", "params": {"threadId": "thread-1"}}]
+            self.events = [{"method": "turn/started", "params": {"threadId": "thread-1", "turnId": "turn-1"}}, {"method": "turn/completed", "params": {"threadId": "thread-1", "turnId": "turn-1"}}]
             self.calls = []
         def request(self, method, params):
             self.calls.append((method, params))
             if method == "thread/start": return {"thread": {"id": "thread-1"}}
             if method == "thread/goal/set": return {"goal": {"threadId": "thread-1", "objective": params["objective"], "status": "active"}}
             if method == "thread/goal/get": return {"goal": {"threadId": "thread-1", "objective": fake.calls[2][1]["objective"], "status": "budgetLimited", "tokenBudget": 5}}
+            if method == "turn/start": return {"turn": {"id": "turn-1"}}
             if method == "thread/goal/clear": return {"cleared": True}
             return {}
         def wait_for_event(self, method): return method == "turn/completed"
@@ -237,13 +250,15 @@ def test_codex_probe_uses_goal_protocol_and_preserves_budget_limited_outcome(tmp
 
     fake = FakeRpc()
     monkeypatch.setattr(probe, "RpcProcess", lambda *_args: fake)
-    result = probe.probe_codex(tmp_path, "do work", "artifact exists", 1, 5, 2)
+    result = probe.probe_codex(tmp_path, "do work", "artifact exists", 1, 5, 2, "model-a", "high", "workspace")
 
     assert [name for name, _params in fake.calls] == ["initialize", "thread/start", "thread/goal/set", "turn/start", "thread/goal/get", "thread/goal/clear"]
     assert fake.calls[2][1]["tokenBudget"] == 5
     assert result["outcome"] == "blocked"
     assert result["reason"] == "goal_budget_limited"
     assert "Acceptance criterion: artifact exists" in fake.calls[2][1]["objective"]
+    assert fake.calls[3][1]["model"] == "model-a"
+    assert fake.calls[3][1]["effort"] == "high"
 
 
 def test_claude_probe_passes_official_goal_and_fixed_plugin_package(tmp_path, monkeypatch):
@@ -295,6 +310,34 @@ def test_clear_failure_is_recorded_after_terminal_observation():
     assert result["outcome"] == "completed"
     assert result["goal_cleared"] is False
     assert result["cleanup_error"] == "RuntimeError"
+
+
+def test_codex_mission_uses_listed_fixed_skill_as_a_native_input(tmp_path, monkeypatch):
+    probe = _load_probe()
+    package = tmp_path / "package"
+    skill = package / "skills" / "mission" / "SKILL.md"
+    skill.parent.mkdir(parents=True); skill.write_text("skill", encoding="utf-8")
+
+    class FakeRpc:
+        def __init__(self, *_args): self.events = [{"method": "turn/started", "params": {"threadId": "t", "turnId": "turn"}}, {"method": "turn/completed", "params": {"threadId": "t", "turnId": "turn"}}]; self.calls = []
+        def request(self, method, params):
+            self.calls.append((method, params))
+            if method == "thread/start": return {"thread": {"id": "t"}, "model": "m", "reasoningEffort": "high", "activePermissionProfile": {"id": "p"}}
+            if method == "skills/list": return {"data": [{"skills": [{"path": str(skill)}]}]}
+            if method == "thread/goal/set": return {"goal": {"threadId": "t", "objective": params["objective"], "status": "active"}}
+            if method == "thread/goal/get": return {"goal": {"threadId": "t", "objective": self.calls[4][1]["objective"], "status": "complete"}}
+            if method == "turn/start": return {"turn": {"id": "turn"}}
+            if method == "thread/goal/clear": return {"cleared": True}
+            return {}
+        def wait_for_event(self, _method): return True
+        def close(self): pass
+    fake = FakeRpc(); monkeypatch.setattr(probe, "RpcProcess", lambda *_args: fake)
+    result = probe.probe_codex(tmp_path, "work", "accepted", 1, None, 1, "m", "high", "p", "mission", package)
+    assert result["outcome"] == "completed"
+    assert result["package_delivery"] == "skill_input"
+    assert any(name == "skills/extraRoots/set" for name, _ in fake.calls)
+    turn = next(params for name, params in fake.calls if name == "turn/start")
+    assert turn["input"][0] == {"type": "skill", "name": "mission", "path": str(skill)}
 
 
 def test_new_schema_accepts_unsupported_and_keeps_historical_schema_separate():

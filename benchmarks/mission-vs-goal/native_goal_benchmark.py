@@ -66,12 +66,16 @@ def observe_codex_goal(
     set_response: dict[str, Any] | None,
     get_response: dict[str, Any] | None,
     events: Iterable[dict[str, Any]],
+    expected_turn_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     """Verify set/get identity and terminal state independently from events."""
     created, observed = _goal(set_response), _goal(get_response)
-    target_events = [event.get("method") for event in events if isinstance(event, dict) and isinstance(event.get("params"), dict) and event["params"].get("threadId") == thread_id]
-    started_index = next((index for index, method in enumerate(target_events) if method == "turn/started"), None)
-    completed_index = next((index for index, method in enumerate(target_events) if method == "turn/completed"), None)
+    target_events = [event for event in events if isinstance(event, dict) and isinstance(event.get("params"), dict) and event["params"].get("threadId") == thread_id]
+    if expected_turn_ids is not None:
+        target_events = [event for event in target_events if event["params"].get("turnId") in expected_turn_ids]
+    target_methods = [event.get("method") for event in target_events]
+    started_index = next((index for index, method in enumerate(target_methods) if method == "turn/started"), None)
+    completed_index = next((index for index, method in enumerate(target_methods) if method == "turn/completed"), None)
     base = {
         "native_goal_observed": False,
         "goal_thread_id": observed.get("threadId") if observed else None,
@@ -83,7 +87,7 @@ def observe_codex_goal(
     }
     if created is None or observed is None:
         return {**base, "fidelity": "unverified", "outcome": "failed", "reason": "goal_not_observed"}
-    if any(goal.get("threadId") != thread_id or goal.get("objective") != objective for goal in (created, observed)):
+    if any(goal.get("threadId") != thread_id or goal.get("objective") != objective for goal in (created, observed)) or created.get("createdAt") != observed.get("createdAt"):
         return {**base, "fidelity": "unverified", "outcome": "failed", "reason": "goal_identity_mismatch"}
     base["native_goal_observed"] = True
     if started_index is None or completed_index is None or completed_index < started_index:
