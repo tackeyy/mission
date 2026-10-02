@@ -43,7 +43,12 @@ def load(raw: bytes) -> dict:
 
 
 def _text(value: object, code: str) -> str:
-    if not isinstance(value, str) or not value.strip() or "\x00" in value:
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or "\x00" in value
+        or any(0xD800 <= ord(character) <= 0xDFFF for character in value)
+    ):
         raise AcceptanceContractError(code)
     return value
 
@@ -77,7 +82,6 @@ def validate(value: object) -> dict:
         raise AcceptanceContractError("contract-empty")
     cursor = 0
     required_ids: set[str] = set()
-    obligations: set[str] = set()
     for item in requirements:
         if not isinstance(item, dict) or set(item) != {"id", "start", "end", "text", "classification"}:
             raise AcceptanceContractError("requirement-entry-invalid")
@@ -91,13 +95,10 @@ def validate(value: object) -> dict:
             raise AcceptanceContractError("requirement-span-text-invalid")
         if item["classification"] not in {"obligation", "context"}:
             raise AcceptanceContractError("requirement-classification-invalid")
-        if item["classification"] == "obligation":
-            obligations.add(identifier)
         cursor = item["end"]
     if cursor != len(text):
         raise AcceptanceContractError("requirement-coverage-invalid")
     criterion_ids: set[str] = set()
-    mapped: set[str] = set()
     for item in criteria:
         if not isinstance(item, dict) or set(item) != {"id", "requirement_ids", "expected", "required", "prohibited_side_effects", "verification_kind", "target_path", "command_id"}:
             raise AcceptanceContractError("criterion-entry-invalid")
@@ -108,15 +109,12 @@ def validate(value: object) -> dict:
         ids = item["requirement_ids"]
         if not isinstance(ids, list) or not ids or any(not isinstance(x, str) or x not in required_ids for x in ids):
             raise AcceptanceContractError("criterion-requirements-invalid")
-        mapped.update(ids)
         _text(item["expected"], "criterion-expected-invalid")
         if type(item["required"]) is not bool or not isinstance(item["prohibited_side_effects"], list) or not all(isinstance(x, str) and x.strip() for x in item["prohibited_side_effects"]):
             raise AcceptanceContractError("criterion-fields-invalid")
         if item["verification_kind"] != "command" or not isinstance(item["command_id"], str) or not item["command_id"].strip():
             raise AcceptanceContractError("criterion-verifier-invalid")
         _path(item["target_path"])
-    if not obligations <= mapped:
-        raise AcceptanceContractError("obligation-unmapped")
     if value["coverage"] != {"status": "pending"}:
         raise AcceptanceContractError("coverage-invalid")
     normalized = json.loads(canonical_bytes(value))
@@ -130,4 +128,11 @@ def digest(contract: dict) -> str:
 def status(contract: object) -> dict:
     if not isinstance(contract, dict):
         return {"present": False}
-    return {"present": True, "digest": digest(contract), "coverage": contract.get("coverage"), "criteria": len(contract.get("criteria") or [])}
+    return {
+        "present": True,
+        "digest": digest(contract),
+        "coverage": contract.get("coverage"),
+        "requirement_text": contract.get("requirement_text"),
+        "requirements": contract.get("requirements"),
+        "criteria": contract.get("criteria"),
+    }

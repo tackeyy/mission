@@ -23,6 +23,7 @@ from mission_application.evidence_publication import (
 from mission_kernel.commands import (
     ClaimsLedgerEffectClaim,
     GenerateClaimsLedger,
+    ImportAcceptanceContract,
     ClearProgress,
     Command,
     ContextManifestEffectClaim,
@@ -226,6 +227,21 @@ def execute_evidence_operation(repository: object, prepare) -> dict:
     elif isinstance(command, ClearProgress):
         if "progress" in source:
             raise EvidenceFailure("progress-projection-mismatch")
+    elif isinstance(command, ImportAcceptanceContract):
+        stored = source.get("acceptance_contract")
+        if not isinstance(stored, dict):
+            raise EvidenceFailure("acceptance-contract-projection-mismatch")
+        expected = command.contract.thaw()
+        observed = dict(stored)
+        observed.pop("imported_at", None)
+        if observed != expected:
+            raise EvidenceFailure("acceptance-contract-projection-mismatch")
+        if replayed:
+            payload["acceptance_contract"] = {
+                **copy.deepcopy(observed), "digest": "sha256:" + hashlib.sha256(
+                    encode_json_value(freeze_json_value(observed))
+                ).hexdigest(),
+            }
     elif isinstance(command, GenerateContextManifest):
         record = (source.get("context_manifests") or {}).get(
             str(command.iteration)

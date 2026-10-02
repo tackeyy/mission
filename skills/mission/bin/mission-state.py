@@ -230,9 +230,9 @@ from mission_application.evidence import (  # noqa: E402
     verify_published_evidence_effects,
 )
 from mission_application.acceptance import (  # noqa: E402
-    AcceptanceContractImportRequest,
-    acceptance_contract_status,
-    run_acceptance_contract_import,
+    AcceptanceContractCliServices,
+    run_acceptance_contract_import_cli,
+    run_acceptance_contract_status_cli,
 )
 from mission_application.planning import (  # noqa: E402
     EXECUTOR_HANDOFF_ABORT_REASONS,
@@ -8337,6 +8337,16 @@ _EVIDENCE_CLI_SERVICES = EvidenceCliServices(
 )
 
 
+_ACCEPTANCE_CONTRACT_CLI_SERVICES = AcceptanceContractCliServices(
+    resolve_state_file,
+    _legacy_lifecycle_repository,
+    iso_now,
+    _artifact_cli_fail,
+    _compatibility_operation_arguments,
+    _canonical_compatibility_operation,
+)
+
+
 _ARTIFACT_CLI_SERVICES = ArtifactCliServices(
     resolve_state_file,
     _artifact_path,
@@ -13911,33 +13921,11 @@ def cmd_verification_claims(args):
 
 
 def cmd_acceptance_contract_import(args):
-    cwd = Path.cwd()
-    sf = resolve_state_file(cwd)
-    if not sf.exists():
-        raise SystemExit("acceptance-contract-state-missing")
-    try:
-        raw = Path(args.input).read_bytes()
-        result = run_acceptance_contract_import(
-            AcceptanceContractImportRequest(iso_now(), raw),
-            _legacy_lifecycle_repository(cwd, sf, stamp=True, pre_admit_lease=True),
-        )
-    except (EvidenceFailure, OSError) as exc:
-        raise SystemExit(getattr(exc, "code", str(exc))) from exc
-    print(json.dumps({"ok": True, **result}, ensure_ascii=False, indent=2))
+    print(run_acceptance_contract_import_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES))
 
 
 def cmd_acceptance_contract_status(args):
-    cwd = Path.cwd()
-    sf = resolve_state_file(cwd)
-    if not sf.exists():
-        raise SystemExit("acceptance-contract-state-missing")
-    repository = _legacy_lifecycle_repository(cwd, sf, stamp=False, strict_read=True)
-    with repository.transaction():
-        data = repository.load()
-    try:
-        print(json.dumps(acceptance_contract_status(data), ensure_ascii=False, indent=2))
-    except EvidenceFailure as exc:
-        raise SystemExit(exc.code) from exc
+    print(run_acceptance_contract_status_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES))
 
 
 def cmd_review_finalize(args):

@@ -364,6 +364,9 @@ def apply_acceptance_contract(state: Mapping[str, object], command: ImportAccept
     if "acceptance_contract" in document:
         raise EvidenceRuleError("acceptance-contract-already-imported")
     entry = project_acceptance_contract(command)
+    mission_id = document.get("mission_id") or document.get("session_id")
+    if entry["mission_id"] != mission_id:
+        raise EvidenceRuleError("acceptance-contract-mission-mismatch")
     document["acceptance_contract"] = entry
     document["updated_at"] = entry["imported_at"]
     return document, entry
