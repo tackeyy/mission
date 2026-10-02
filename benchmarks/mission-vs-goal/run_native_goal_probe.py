@@ -22,7 +22,7 @@ import threading
 from pathlib import Path
 
 from native_goal_benchmark import (
-    NATIVE_SCHEMA, create_immutable_package, immutable_manifest, observe_claude_goal,
+    NATIVE_SCHEMA, create_immutable_package, create_worker_export, immutable_manifest, observe_claude_goal, worker_export_manifest,
     observe_codex_goal, write_record,
 )
 
@@ -73,7 +73,7 @@ class RpcProcess:
                 self.events.append({"method": message["method"], "params": {"threadId": params.get("threadId"), "turnId": turn.get("id")}})
         raise TimeoutError(f"app-server assignment deadline expired during {method}")
 
-    def wait_for_event(self, method: str) -> bool:
+    def wait_for_event(self, method: str, thread_id: str | None = None, turn_id: str | None = None) -> bool:
         while time.monotonic() < self.deadline:
             message = self._next_message()
             if message is None: break
@@ -81,7 +81,9 @@ class RpcProcess:
                 params = message.get("params") if isinstance(message.get("params"), dict) else {}
                 turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
                 self.events.append({"method": message["method"], "params": {"threadId": params.get("threadId"), "turnId": turn.get("id")}})
-                if message["method"] == method:
+                if (message["method"] == method
+                        and (thread_id is None or params.get("threadId") == thread_id)
+                        and (turn_id is None or turn.get("id") == turn_id)):
                     return True
         return False
 
@@ -181,10 +183,14 @@ def probe_codex(worktree: Path, objective: str, acceptance: str, timeout: float,
                 return {"native_goal_observed": False, "fidelity": "unverified", "outcome": "failed", "reason": "package_skill_unobserved", "observed_config": observed_config, "config_matches": config_matches}
             skill_input = [{"type": "skill", "name": "mission", "path": str(skill_path)}]
             state_started_ns = time.time_ns()
-            rpc.request("turn/start", {"threadId": thread_id, "model": model, "effort": effort, "permissions": permissions, "input": [*skill_input, {"type": "text", "text": assignment}]})
-            rpc.wait_for_event("turn/completed")
-            state = _fresh_mission_state(worktree, state_started_ns)
+            started = rpc.request("turn/start", {"threadId": thread_id, "model": model, "effort": effort, "permissions": permissions, "input": [*skill_input, {"type": "text", "text": assignment}]})
+            turn = started.get("turn") if isinstance(started, dict) else None
+            turn_id = turn.get("id") if isinstance(turn, dict) else None
+            completed = isinstance(turn_id, str) and bool(turn_id) and rpc.wait_for_event("turn/completed", thread_id, turn_id)
+            state = _fresh_mission_state(worktree, state_started_ns, thread_id) if completed else None
             base = {"native_goal_observed": False, "package_delivery": "skill_input", "budget_enforcement": "unavailable", "observed_config": observed_config, "config_matches": config_matches}
+            if not completed:
+                return {**base, "fidelity": "unverified", "outcome": "failed", "reason": "turn_completion_unobserved", "mission_state": None}
             if state and state.get("passes") is True and config_matches:
                 return {**base, "fidelity": "verified", "outcome": "completed", "reason": None, "mission_state": state}
             if state and isinstance(state.get("halt_reason"), str) and state["halt_reason"] and config_matches:
@@ -201,20 +207,25 @@ def probe_codex(worktree: Path, objective: str, acceptance: str, timeout: float,
             turn_id = turn.get("id") if isinstance(turn, dict) else None
             if not isinstance(turn_id, str) or not turn_id:
                 raise RuntimeError("turn_identity_unobserved")
-            rpc.wait_for_event("turn/completed")
+            completed = rpc.wait_for_event("turn/completed", thread_id, turn_id)
             get_response = rpc.request("thread/goal/get", {"threadId": thread_id})
             observation = observe_codex_goal(thread_id, assignment, set_response, get_response, rpc.events, {turn_id})
+            if not completed:
+                observation = {**observation, "fidelity": "unverified", "outcome": "failed", "reason": "turn_completion_unobserved"}
+                break
             if observation["goal_status"] in {"complete", "budgetLimited", "usageLimited"}:
                 break
         assert observation is not None
         if observation["goal_status"] == "active":
-            observation = {**observation, "fidelity": "verified", "outcome": "blocked", "reason": "assignment_turn_limit"}
+            observation = {**observation, "outcome": "blocked", "reason": "assignment_turn_limit"}
         if not config_matches and observation["fidelity"] == "verified":
             observation = {**observation, "fidelity": "unverified", "reason": "execution_config_mismatch"}
         try:
             clear_response = rpc.request("thread/goal/clear", {"threadId": thread_id})
         except (OSError, RuntimeError, TimeoutError) as exc:
             return {**observation, "goal_cleared": False, "cleanup_error": type(exc).__name__, "observed_config": observed_config, "config_matches": config_matches, "budget_enforcement": "goal_native" if arm == "goal" else "unavailable", "package_delivery": "skill_input" if arm == "mission" else None, "stderr_bytes": getattr(rpc, "stderr_bytes", 0), "stderr_truncated": getattr(rpc, "stderr_truncated", False)}
+        if not isinstance(clear_response, dict):
+            return {**observation, "goal_cleared": False, "cleanup_error": "malformed_clear_response", "observed_config": observed_config, "config_matches": config_matches, "budget_enforcement": "goal_native", "package_delivery": None, "stderr_bytes": getattr(rpc, "stderr_bytes", 0), "stderr_truncated": getattr(rpc, "stderr_truncated", False)}
         return {**observation, "goal_cleared": bool(clear_response.get("cleared")), "cleanup_error": None, "observed_config": observed_config, "config_matches": config_matches, "budget_enforcement": "goal_native" if arm == "goal" else "unavailable", "package_delivery": "skill_input" if arm == "mission" else None, "stderr_bytes": getattr(rpc, "stderr_bytes", 0), "stderr_truncated": getattr(rpc, "stderr_truncated", False)}
     finally:
         rpc.close()
@@ -281,20 +292,27 @@ def _current_mission_state(worktree: Path, session_id: object, started_ns: int) 
     return None
 
 
-def _fresh_mission_state(worktree: Path, started_ns: int) -> dict | None:
+def _fresh_mission_state(worktree: Path, started_ns: int, thread_id: str) -> dict | None:
     root = worktree / ".mission-state" / "sessions"
     if not root.is_dir():
         return None
-    candidates = [path for path in root.glob("*.json") if path.stat().st_mtime_ns >= started_ns]
-    if len(candidates) != 1:
-        return None
-    try:
-        state = json.loads(candidates[0].read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(state, dict):
-        return None
-    return {key: state.get(key) for key in ("session_id", "passes", "halt_reason", "loop_active", "mission_id")}
+    expected_session_id = f"cx-{thread_id}"
+    for candidate in root.glob("*.json"):
+        try:
+            if candidate.stat().st_mtime_ns < started_ns:
+                continue
+            state = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        # mission-state derives Codex session_id from CODEX_THREAD_ID as
+        # ``cx-<thread id>``. A fresh file alone can be another assignment, so
+        # bind the state and its filename to the started host thread. The
+        # terminal event itself is separately bound by wait_for_event.
+        if (not isinstance(state, dict) or state.get("session_id") != expected_session_id
+                or candidate.stem != expected_session_id):
+            continue
+        return {key: state.get(key) for key in ("session_id", "passes", "halt_reason", "loop_active", "mission_id")}
+    return None
 
 
 def _commit_at(worktree: Path) -> str:
@@ -332,6 +350,8 @@ def main() -> int:
     parser.add_argument("--token-budget", type=int, default=None)
     parser.add_argument("--max-budget-usd", type=float, default=None)
     parser.add_argument("--max-turns", type=int, default=2)
+    parser.add_argument("--worker-allow-path", action="append", default=[],
+                        help="repo-relative task-contract path retained in the immutable worker export; repeat for each path")
     args = parser.parse_args()
     if not math.isfinite(args.timeout_seconds) or args.timeout_seconds <= 0:
         parser.error("--timeout-seconds must be finite and positive")
@@ -360,6 +380,8 @@ def main() -> int:
             })
             manifest["task_snapshot"] = {"expected": args.starting_commit, **actual_snapshot, "matches": actual_snapshot["observed"] == args.starting_commit and actual_snapshot["clean"]}
             manifest["mission_source_commit"] = args.mission_source_commit
+            worker_root = create_worker_export(worktree, args.starting_commit, Path(temporary) / "worker", args.worker_allow_path)
+            manifest["worker_export"] = {"source_commit": args.starting_commit, "allowlist_count": len(args.worker_allow_path), **worker_export_manifest(worker_root)}
             package_prepared = (package_root / "plugins" / "mission" / "skills" / "mission" / "SKILL.md").is_file()
             if not manifest["task_snapshot"]["clean"]:
                 observation = {"native_goal_observed": False, "fidelity": "not_applicable", "outcome": "failed", "reason": "task_snapshot_dirty"}
@@ -368,10 +390,10 @@ def main() -> int:
             else:
                 try:
                     if args.host == "codex":
-                        observation = probe_codex(worktree, args.objective, args.acceptance_criterion, args.timeout_seconds, args.token_budget, args.max_turns, args.model_id, args.effort, args.permissions, args.arm, package_root)
+                        observation = probe_codex(worker_root, args.objective, args.acceptance_criterion, args.timeout_seconds, args.token_budget, args.max_turns, args.model_id, args.effort, args.permissions, args.arm, package_root)
                         manifest["provider_version"] = _codex_version()
                     else:
-                        observation = probe_claude(worktree, package_root, args.objective, args.acceptance_criterion, args.timeout_seconds, args.max_budget_usd, args.arm, args.model_id, args.effort, args.permissions)
+                        observation = probe_claude(worker_root, package_root, args.objective, args.acceptance_criterion, args.timeout_seconds, args.max_budget_usd, args.arm, args.model_id, args.effort, args.permissions)
                         version = subprocess.run(["claude", "--version"], text=True, capture_output=True, check=False)
                         manifest["provider_version"] = version.stdout.strip() if version.returncode == 0 else None
                 except (OSError, RuntimeError, TimeoutError) as exc:

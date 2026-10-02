@@ -13,5 +13,15 @@
     "reason": {"type": ["string", "null"]},
     "manifest": {"type": "object"}
   },
+  "allOf": [
+    {
+      "if": {"properties": {"fidelity": {"const": "verified"}}, "required": ["fidelity"]},
+      "then": {"properties": {"manifest": {"required": ["package", "source", "task_snapshot", "provider_version", "conditions", "worker_export"], "properties": {"package": {"required": ["sha256"]}, "source": {"required": ["sha256"]}, "task_snapshot": {"required": ["expected", "observed", "clean", "matches"]}, "conditions": {"required": ["model_id", "effort", "permissions"]}, "worker_export": {"required": ["schema", "sha256", "source_commit", "allowlist_count"]}}}}}
+    },
+    {
+      "if": {"properties": {"outcome": {"const": "completed"}}, "required": ["outcome"]},
+      "then": {"properties": {"manifest": {"required": ["package", "source", "task_snapshot", "provider_version", "conditions", "worker_export"], "properties": {"package": {"required": ["sha256"]}, "source": {"required": ["sha256"]}, "task_snapshot": {"required": ["expected", "observed", "clean", "matches"]}, "conditions": {"required": ["model_id", "effort", "permissions"]}, "worker_export": {"required": ["schema", "sha256", "source_commit", "allowlist_count"]}}}}}
+    }
+  ],
   "additionalProperties": true
 }

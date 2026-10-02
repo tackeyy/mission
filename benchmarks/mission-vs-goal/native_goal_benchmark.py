@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -25,6 +26,8 @@ MANIFEST_SCHEMA = "native-goal-benchmark-manifest/1"
 CODEX_REQUIRED_OPERATIONS = frozenset({"thread/goal/set", "thread/goal/get", "thread/goal/clear", "turn/start"})
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _UNSAFE_TRACE = ("/Users/", "/.codex/memories/", "/.claude/projects/")
+_EMAIL_RE = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
+_BEARER_RE = re.compile(r"(?i)\bbearer\s+[^\s\"']+")
 
 
 def _methods(value: Any) -> set[str]:
@@ -87,10 +90,13 @@ def observe_codex_goal(
     }
     if created is None or observed is None:
         return {**base, "fidelity": "unverified", "outcome": "failed", "reason": "goal_not_observed"}
-    if any(goal.get("threadId") != thread_id or goal.get("objective") != objective for goal in (created, observed)) or created.get("createdAt") != observed.get("createdAt"):
+    created_at = created.get("createdAt") if created else None
+    if (not isinstance(created_at, int) or isinstance(created_at, bool) or created_at < 0
+            or any(goal.get("threadId") != thread_id or goal.get("objective") != objective for goal in (created, observed))
+            or observed.get("createdAt") != created_at):
         return {**base, "fidelity": "unverified", "outcome": "failed", "reason": "goal_identity_mismatch"}
     base["native_goal_observed"] = True
-    if started_index is None or completed_index is None or completed_index < started_index:
+    if not expected_turn_ids or started_index is None or completed_index is None or completed_index < started_index:
         return {**base, "fidelity": "unverified", "outcome": "failed", "reason": "turn_not_completed"}
     if observed.get("status") in {"budgetLimited", "usageLimited"}:
         reason = "goal_budget_limited" if observed["status"] == "budgetLimited" else "goal_usage_limited"
@@ -113,13 +119,17 @@ def run_codex_adapter(
     if token_budget is not None:
         payload["tokenBudget"] = token_budget
     set_response = rpc("thread/goal/set", payload)
-    rpc("turn/start", {"threadId": thread_id, "input": [{"type": "text", "text": objective}]})
+    turn_response = rpc("turn/start", {"threadId": thread_id, "input": [{"type": "text", "text": objective}]})
+    turn = turn_response.get("turn") if isinstance(turn_response, dict) else None
+    turn_id = turn.get("id") if isinstance(turn, dict) else None
     get_response = rpc("thread/goal/get", {"threadId": thread_id})
-    observation = observe_codex_goal(thread_id, objective, set_response, get_response, events)
+    observation = observe_codex_goal(thread_id, objective, set_response, get_response, events, {turn_id} if isinstance(turn_id, str) else set())
     try:
         clear_response = rpc("thread/goal/clear", {"threadId": thread_id})
     except Exception as exc:
         return {**observation, "goal_cleared": False, "cleanup_error": type(exc).__name__}
+    if not isinstance(clear_response, dict):
+        return {**observation, "goal_cleared": False, "cleanup_error": "malformed_clear_response"}
     return {**observation, "goal_cleared": bool(clear_response.get("cleared")), "cleanup_error": None}
 
 
@@ -138,13 +148,17 @@ def observe_claude_goal(invocation: str, returncode: int, result: dict[str, Any]
 
 def preserve_assignment_outcomes(plan: Iterable[tuple[str, str]], records: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """Materialise every planned cell; missing runs are data, never silently omitted."""
-    by_cell = {(record.get("task_id"), record.get("arm")): dict(record) for record in records}
+    by_cell: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for record in records:
+        by_cell.setdefault((record.get("task_id"), record.get("arm")), []).append(dict(record))
     outcomes = []
     for task_id, arm in plan:
-        record = by_cell.get((task_id, arm))
-        outcomes.append(record if record is not None else {
+        matching = by_cell.get((task_id, arm), [])
+        outcomes.extend(matching)
+        if not matching:
+            outcomes.append({
             "task_id": task_id, "arm": arm, "outcome": "not_started", "reason": "missing_assignment_record",
-        })
+            })
     return outcomes
 
 
@@ -203,9 +217,62 @@ def create_immutable_package(repo_root: Path, starting_commit: str, output_path:
     return output_path
 
 
+def create_worker_export(repo_root: Path, starting_commit: str, output_path: Path, allowed_paths: Iterable[str]) -> Path:
+    """Create the only task tree handed to a worker from an explicit allowlist.
+
+    Every retained source file must be beneath a task-contract allowlist path.
+    This is a positive, mechanically checked export boundary rather than a
+    filename blocklist; its tree digest is recorded by the caller.
+    """
+    paths = list(allowed_paths)
+    if not _COMMIT_RE.fullmatch(starting_commit) or not paths:
+        raise ValueError("immutable commit and worker allowlist are required")
+    output_path.mkdir(parents=True, exist_ok=False)
+    with tempfile.NamedTemporaryFile(prefix=".worker-export-", suffix=".tar", dir=output_path.parent, delete=False) as temporary:
+        archive = Path(temporary.name)
+        result = subprocess.run(["git", "archive", "--format=tar", starting_commit], cwd=repo_root, stdout=temporary, stderr=subprocess.PIPE, check=False)
+    try:
+        if result.returncode != 0:
+            raise RuntimeError("task export archive failed")
+        shutil.unpack_archive(str(archive), str(output_path), format="tar")
+        allowed: list[Path] = []
+        for raw_path in paths:
+            relative = Path(raw_path)
+            if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+                raise ValueError("worker allowlist path escapes export")
+            target = output_path / relative
+            if not target.exists() or target.is_symlink():
+                raise ValueError("worker allowlist path absent from export")
+            allowed.append(relative)
+        for target in sorted((path for path in output_path.rglob("*") if path.is_file() or path.is_symlink()), reverse=True):
+            relative = target.relative_to(output_path)
+            if not any(relative == prefix or prefix in relative.parents for prefix in allowed):
+                target.unlink()
+        for directory in sorted((path for path in output_path.rglob("*") if path.is_dir()), reverse=True):
+            if not any(directory.iterdir()):
+                directory.rmdir()
+        return output_path
+    finally:
+        archive.unlink(missing_ok=True)
+
+
+def worker_export_manifest(worker_root: Path) -> dict[str, Any]:
+    return {"schema": "mission-worker-export/1", "sha256": _digest_tree(worker_root)}
+
+
 def write_record(path: Path, record: dict[str, Any]) -> None:
     """Persist one sanitised assignment record without replacing earlier evidence."""
-    serialised = json.dumps(record, ensure_ascii=False, sort_keys=True)
+    def sanitise(value: Any, key: str | None = None) -> Any:
+        if key in {"objective", "acceptance_criterion"} and isinstance(value, str):
+            return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+        if isinstance(value, dict):
+            return {name: sanitise(item, name) for name, item in value.items()}
+        if isinstance(value, list):
+            return [sanitise(item) for item in value]
+        if isinstance(value, str):
+            return _EMAIL_RE.sub("[redacted-email]", _BEARER_RE.sub("[redacted-bearer]", value))
+        return value
+    serialised = json.dumps(sanitise(record), ensure_ascii=False, sort_keys=True)
     if any(marker in serialised for marker in _UNSAFE_TRACE):
         raise ValueError("unsafe trace data in benchmark record")
     path.parent.mkdir(parents=True, exist_ok=True)
