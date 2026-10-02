@@ -13,6 +13,7 @@ from .commands import (
     GenerateContextManifest,
     GenerateClaimsLedger,
     RecordVerification,
+    ImportAcceptanceContract,
     UpdateProgress,
     VerificationCheck,
 )
@@ -343,4 +344,29 @@ def apply_verification_record(
     history.append(entry)
     document["verification_history"] = history
     document["updated_at"] = entry["recorded_at"]
+    return document, entry
+
+
+def project_acceptance_contract(command: ImportAcceptanceContract) -> dict:
+    from acceptance_contract import validate
+    at = _text(command.at, "acceptance-contract-timestamp-invalid")
+    if not isinstance(command.contract, type(command.contract)):
+        raise EvidenceRuleError("acceptance-contract-invalid")
+    try:
+        contract = validate(command.contract.thaw())
+    except (AttributeError, ValueError) as exc:
+        raise EvidenceRuleError("acceptance-contract-invalid") from exc
+    return {**contract, "imported_at": at}
+
+
+def apply_acceptance_contract(state: Mapping[str, object], command: ImportAcceptanceContract) -> tuple[dict, dict]:
+    document = copy.deepcopy(dict(state))
+    if "acceptance_contract" in document:
+        raise EvidenceRuleError("acceptance-contract-already-imported")
+    entry = project_acceptance_contract(command)
+    mission_id = document.get("mission_id") or document.get("session_id")
+    if entry["mission_id"] != mission_id:
+        raise EvidenceRuleError("acceptance-contract-mission-mismatch")
+    document["acceptance_contract"] = entry
+    document["updated_at"] = entry["imported_at"]
     return document, entry

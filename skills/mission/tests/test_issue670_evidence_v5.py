@@ -3,6 +3,31 @@
 import json
 
 
+def _acceptance_contract(mission_id):
+    import hashlib
+
+    text = "Preserve every stated obligation."
+    return {
+        "schema": "mission-acceptance-contract/1",
+        "mission_id": mission_id,
+        "requirement_text": text,
+        "requirement_digest": "sha256:" + hashlib.sha256(text.encode()).hexdigest(),
+        "revision": 1,
+        "review_policy": "fresh-required",
+        "requirements": [
+            {"id": "R1", "start": 0, "end": len(text), "text": text, "classification": "obligation"}
+        ],
+        "criteria": [
+            {
+                "id": "AC1", "requirement_ids": ["R1"], "expected": "contract retained",
+                "required": True, "prohibited_side_effects": [], "verification_kind": "command",
+                "target_path": "reports/receipt.json", "command_id": "project-test",
+            }
+        ],
+        "coverage": {"status": "pending"},
+    }
+
+
 def _v5_env(tmp_path):
     """v5 state 生成用: MISSION_* を絞り、version-skew 警告も抑制する。"""
     return {
@@ -90,6 +115,34 @@ def test_v5_artifact_and_progress_commands_publish_and_update_state(tmp_path, ru
         )
 
     assert (tmp_path / "reports" / "artifact.md").exists()
+
+
+def test_v5_acceptance_import_rejects_foreign_or_replacement_contracts(tmp_path, run_cli):
+    """The v5 route persists the typed command only for its own mission once."""
+    from mission_persistence.fenced_commit import LocalFencedRepository
+
+    env = {**_init_v5(run_cli, tmp_path), "MISSION_OPERATION_ID": "acceptance-import"}
+    repository = LocalFencedRepository(tmp_path / ".mission-state")
+    before = json.loads(repository.read("test").state_bytes)
+    foreign = tmp_path / "foreign.json"
+    foreign.write_text(json.dumps(_acceptance_contract("foreign")), encoding="utf-8")
+    rejected = run_cli("acceptance-contract", "import", "--input", str(foreign), cwd=tmp_path, env_extra=env)
+    assert rejected.returncode != 0
+    assert "acceptance_contract" not in json.loads(repository.read("test").state_bytes)
+
+    source = tmp_path / "contract.json"
+    source.write_text(json.dumps(_acceptance_contract(before["mission_id"])), encoding="utf-8")
+    accepted = run_cli("acceptance-contract", "import", "--input", str(source), cwd=tmp_path, env_extra=env)
+    assert accepted.returncode == 0, accepted.stderr
+    stored = json.loads(repository.read("test").state_bytes)["acceptance_contract"]
+
+    replay = run_cli("acceptance-contract", "import", "--input", str(source), cwd=tmp_path, env_extra=env)
+    assert replay.returncode == 0, replay.stderr
+    assert json.loads(replay.stdout) == json.loads(accepted.stdout)
+
+    replacement = run_cli("acceptance-contract", "import", "--input", str(source), cwd=tmp_path, env_extra={**env, "MISSION_OPERATION_ID": "replacement"})
+    assert replacement.returncode != 0
+    assert json.loads(repository.read("test").state_bytes)["acceptance_contract"] == stored
 
 
 def test_v5_publication_rolls_back_when_the_commit_fails():
