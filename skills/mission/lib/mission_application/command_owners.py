@@ -41,6 +41,8 @@ COMMAND_OWNER_REGISTRY = {
         "artifact init",
         "artifact publish",
         "artifact render",
+        "acceptance-contract import",
+        "acceptance-contract status",
         "context-manifest",
         "progress clear",
         "progress update",
