@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "native Goal benchmark result",
+  "type": "object",
+  "required": ["schema", "run_id", "task_id", "arm", "outcome", "fidelity", "manifest"],
+  "properties": {
+    "schema": {"const": "native-goal-benchmark-result/1"},
+    "run_id": {"type": "string"},
+    "task_id": {"type": "string"},
+    "arm": {"enum": ["codex_native_goal", "claude_code_native_goal", "mission"]},
+    "outcome": {"enum": ["completed", "failed", "blocked", "unsupported", "not_started"]},
+    "fidelity": {"enum": ["verified", "unverified", "not_applicable"]},
+    "reason": {"type": ["string", "null"]},
+    "manifest": {"type": "object"}
+  },
+  "additionalProperties": true
+}
