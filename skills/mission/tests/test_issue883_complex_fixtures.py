@@ -25,6 +25,13 @@ def _materialize(module, tmp_path, task_id, group):
     return destination / task_id
 
 
+def _materialize_record(module, tmp_path, task_id, group):
+    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, capture_output=True, check=True).stdout.strip()
+    destination = tmp_path / f"{task_id}-{group}"
+    record = module.materialize_task(ROOT, commit, task_id, group, destination)
+    return record, destination / task_id
+
+
 def test_complex_fixture_catalog_has_two_tasks_for_each_required_family():
     module = _load()
     catalog = module.load_catalog(ROOT / "benchmarks" / "mission-vs-goal" / "complex-fixtures")
@@ -168,19 +175,23 @@ def test_templates_render_worker_reference_and_control_without_hidden_flags():
             assert all(";" not in content for name, content in expected.items() if name.endswith(".py"))
 
 
-def test_assignment_requires_matching_source_and_export_task_roots(tmp_path):
+def test_assignment_requires_fixed_manifest_worker_and_candidate_envelope(tmp_path):
     module = _load()
-    root = ROOT / "benchmarks" / "mission-vs-goal" / "complex-fixtures"
-    entry = next(entry for entry in module.load_catalog(root) if entry["id"] == "concurrency-lost-update")
-
-    task_root = _materialize(module, tmp_path, entry["id"], "worker")
-    exported_root = _materialize(module, tmp_path, entry["id"], "reference")
-    record = module.evaluate_assignment(root, entry, task_root, exported_root)
+    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, capture_output=True, check=True).stdout.strip()
+    assignment, worker = _materialize_record(module, tmp_path, "concurrency-lost-update", "worker")
+    _, repair = _materialize_record(module, tmp_path, "concurrency-lost-update", "reference")
+    envelope = module.freeze_candidate(assignment, repair)
+    record = module.evaluate_assignment(ROOT, commit, assignment, worker, repair, envelope)
     assert record["status"] == "passed"
 
-    record = module.evaluate_assignment(root, entry, tmp_path / "wrong", exported_root)
+    record = module.evaluate_assignment(ROOT, commit, assignment, tmp_path / "wrong", repair, envelope)
     assert record["status"] == "failed"
-    assert record["reason"] == "assignment_task_root_mismatch"
+    assert record["reason"] == "assignment_worker_mismatch"
+
+    altered = {**envelope, "candidate_digest": assignment["worker_digest"]}
+    record = module.evaluate_assignment(ROOT, commit, assignment, worker, repair, altered)
+    assert record["status"] == "failed"
+    assert record["reason"] == "candidate_digest_mismatch"
 
 
 def test_materializer_binds_current_source_commit_and_creates_one_task_repo(tmp_path):
@@ -221,6 +232,43 @@ def test_evaluator_rejects_a_snapshot_change_without_discarding_its_record(monke
     assert record["status"] == "failed"
     assert record["reason"] == "candidate_changed"
     assert record["cases"] == []
+
+
+def test_evaluator_distinguishes_json_boolean_from_number_and_rejects_invalid_cases(tmp_path):
+    module = _load()
+    root = ROOT / "benchmarks" / "mission-vs-goal" / "complex-fixtures"
+    entry = next(entry for entry in module.load_catalog(root) if entry["id"] == "compatibility-legacy-default")
+    candidate = _materialize(module, tmp_path, entry["id"], "reference")
+    (candidate / "service.py").write_text("def execute(value): return {'state': 'open', 'version': True}\n", encoding="utf-8")
+    record = module.evaluate_candidate(root, entry, candidate)
+    assert record["status"] == "failed"
+    assert record["reason"] == "contract_mismatch"
+
+    for checks, reason in (([None], "evaluation_case_invalid"), ([{"name": "missing", "scenario": {}}], "evaluation_case_invalid"), ([{"name": "nan", "scenario": float("nan"), "expected": None}], "evaluation_case_non_json")):
+        record = module.evaluate_candidate(root, {**entry, "checks": checks}, candidate)
+        assert record["status"] == "failed"
+        assert record["reason"] == reason
+
+
+def test_public_smoke_returns_a_failure_record_for_timeout_and_reaps_group_child(tmp_path):
+    module = _load()
+    candidate = tmp_path / "candidate"; candidate.mkdir()
+    survivor = tmp_path / "survivor"
+    descendant = f"import pathlib, time; time.sleep(.35); pathlib.Path({str(survivor)!r}).write_text('alive')"
+    (candidate / "public_smoke.py").write_text(
+        "import subprocess, sys\n" + f"subprocess.Popen([sys.executable, '-c', {descendant!r}])\n" + "raise SystemExit(0)\n",
+        encoding="utf-8",
+    )
+    original = module._run_bounded
+    module._run_bounded = lambda command, timeout_seconds: original(command, timeout_seconds=0.05)
+    try:
+        record = module.run_public_smoke(candidate)
+    finally:
+        module._run_bounded = original
+    assert record["status"] == "failed"
+    assert record["reason"] == "smoke_reader_incomplete"
+    time.sleep(0.45)
+    assert not survivor.exists()
 
 
 def test_bounded_runner_reaps_a_parent_exit_descendant_holding_a_pipe(tmp_path):

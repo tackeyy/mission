@@ -51,6 +51,19 @@ def _load_verified_generator(path: Path, source: bytes) -> Any:
     return module
 
 
+def _fixed_generator(repo_root: Path, source_commit: str) -> tuple[Any, bytes]:
+    if not _COMMIT_RE.fullmatch(source_commit):
+        raise ValueError("fixture source commit must be a full immutable SHA")
+    generator_path = repo_root / "benchmarks" / "mission-vs-goal" / "generate_complex_fixtures.py"
+    shown = subprocess.run(
+        ["git", "show", f"{source_commit}:{generator_path.relative_to(repo_root)}"],
+        cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    if shown.returncode != 0 or shown.stdout != generator_path.read_bytes():
+        raise ValueError("fixture generator does not match the declared commit")
+    return _load_verified_generator(generator_path, shown.stdout), shown.stdout
+
+
 def _digest_tree(root: Path) -> str:
     """Use #882's regular-file, no-link snapshot boundary verbatim."""
     source = Path(__file__).with_name("native_goal_benchmark.py")
@@ -63,16 +76,7 @@ def _digest_tree(root: Path) -> str:
 
 def materialize_task(repo_root: Path, source_commit: str, task_id: str, group: str, destination: Path) -> dict[str, Any]:
     """Bind fixed H inputs, then create one generated task repository."""
-    if not _COMMIT_RE.fullmatch(source_commit):
-        raise ValueError("fixture source commit must be a full immutable SHA")
-    generator_path = repo_root / "benchmarks" / "mission-vs-goal" / "generate_complex_fixtures.py"
-    shown = subprocess.run(
-        ["git", "show", f"{source_commit}:{generator_path.relative_to(repo_root)}"],
-        cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-    )
-    if shown.returncode != 0 or shown.stdout != generator_path.read_bytes():
-        raise ValueError("fixture generator does not match the declared commit")
-    generator = _load_verified_generator(generator_path, shown.stdout)
+    generator, generator_bytes = _fixed_generator(repo_root, source_commit)
     catalog_bytes = generator.render_catalog_bytes()
     catalog = generator.render_catalog()
     entries = {entry["id"]: entry for entry in catalog["tasks"]}
@@ -92,7 +96,7 @@ def materialize_task(repo_root: Path, source_commit: str, task_id: str, group: s
     generated_digest = _digest_tree(task_root)
     input_identity = _digest_bytes(json.dumps({
         "source_commit": source_commit,
-        "generator_digest": _digest_bytes(shown.stdout),
+        "generator_digest": _digest_bytes(generator_bytes),
         "catalog_digest": _digest_bytes(catalog_bytes),
         "task_id": task_id,
         "family": entry["family"],
@@ -101,7 +105,7 @@ def materialize_task(repo_root: Path, source_commit: str, task_id: str, group: s
     }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
     return {
         "source_commit": source_commit,
-        "generator_digest": _digest_bytes(shown.stdout),
+        "generator_digest": _digest_bytes(generator_bytes),
         "catalog_digest": _digest_bytes(catalog_bytes),
         "input_digest": generator.template_digest(task_id, group),
         "input_manifest_identity": input_identity,
@@ -143,6 +147,46 @@ sys.path.insert(0, candidate)
 spec.loader.exec_module(module)
 print(json.dumps(module.execute(json.loads(sys.argv[2])), sort_keys=True))
 '''
+
+
+def _json_value(value: Any) -> bool:
+    if value is None or isinstance(value, (str, bool, int)):
+        return True
+    if isinstance(value, float):
+        return value == value and value not in (float("inf"), float("-inf"))
+    if isinstance(value, list):
+        return all(_json_value(item) for item in value)
+    if isinstance(value, dict):
+        return all(isinstance(key, str) and _json_value(item) for key, item in value.items())
+    return False
+
+
+def _json_equal(actual: Any, expected: Any) -> bool:
+    if isinstance(actual, bool) or isinstance(expected, bool):
+        return type(actual) is type(expected) and actual == expected
+    if isinstance(actual, (int, float)) and isinstance(expected, (int, float)):
+        return actual == expected
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(actual, list):
+        return len(actual) == len(expected) and all(_json_equal(left, right) for left, right in zip(actual, expected))
+    if isinstance(actual, dict):
+        return actual.keys() == expected.keys() and all(_json_equal(actual[key], expected[key]) for key in actual)
+    return actual == expected
+
+
+def _entry_error(entry: Any) -> str | None:
+    if not isinstance(entry, dict):
+        return "evaluation_entry_invalid"
+    checks = entry.get("checks")
+    if not isinstance(checks, list) or not checks:
+        return "no_evaluation_cases"
+    for check in checks:
+        if not isinstance(check, dict) or not isinstance(check.get("name"), str) or "scenario" not in check or "expected" not in check:
+            return "evaluation_case_invalid"
+        if not _json_value(check["scenario"]) or not _json_value(check["expected"]):
+            return "evaluation_case_non_json"
+    return None
 
 
 def _materialize_candidate(source: Path, destination: Path) -> tuple[Path, str]:
@@ -234,9 +278,10 @@ def _run_bounded(command: list[str], *, timeout_seconds: float) -> tuple[int | N
 def evaluate_candidate(root: Path, entry: dict[str, Any], candidate: Path, timeout_seconds: float = 3.0) -> dict[str, Any]:
     """Observe one candidate in a fresh process and preserve non-pass states."""
     base = {"task_id": entry.get("id"), "family": entry.get("family"), "version": entry.get("version"), "candidate_digest": None}
-    checks = entry.get("checks")
-    if not isinstance(checks, list) or not checks:
-        return {**base, "status": "failed", "reason": "no_evaluation_cases", "case_count": 0, "cases": []}
+    error = _entry_error(entry)
+    checks = entry.get("checks") if isinstance(entry, dict) else []
+    if error is not None:
+        return {**base, "status": "failed", "reason": error, "case_count": 0, "cases": []}
     if not candidate.is_dir():
         return {**base, "status": "failed", "reason": "candidate_missing", "case_count": len(checks), "cases": []}
     try:
@@ -249,7 +294,7 @@ def evaluate_candidate(root: Path, entry: dict[str, Any], candidate: Path, timeo
         try:
             cases = []
             for check in checks:
-                scenario = check.get("scenario", check.get("operations"))
+                scenario = check["scenario"]
                 materialized, snapshot_digest = _materialize_candidate(candidate, Path(temporary) / f"candidate-{len(cases)}")
                 if snapshot_digest != initial_digest:
                     return {**base, "status": "failed", "reason": "candidate_changed", "case_count": len(checks), "cases": cases}
@@ -267,10 +312,12 @@ def evaluate_candidate(root: Path, entry: dict[str, Any], candidate: Path, timeo
                     return {**base, "status": "failed", "reason": "evaluator_execution_failed", "case_count": len(checks), "cases": cases}
                 try:
                     actual = json.loads(stdout)
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, TypeError, ValueError):
                     return {**base, "status": "failed", "reason": "evaluator_output_invalid", "case_count": len(checks), "cases": cases}
-                cases.append({"name": check.get("name"), "passed": actual == check.get("expected")})
-        except ValueError:
+                if not _json_value(actual):
+                    return {**base, "status": "failed", "reason": "evaluator_output_invalid", "case_count": len(checks), "cases": cases}
+                cases.append({"name": check["name"], "passed": _json_equal(actual, check["expected"])})
+        except (TypeError, ValueError):
             return {**base, "status": "failed", "reason": "candidate_invalid", "case_count": len(checks), "cases": cases}
     try:
         final_digest = _digest_tree(candidate)
@@ -285,21 +332,50 @@ def evaluate_candidate(root: Path, entry: dict[str, Any], candidate: Path, timeo
             "case_count": len(cases), "cases": cases}
 
 
-def evaluate_assignment(catalog_root: Path, entry: dict[str, Any], task_root: Path, exported_task_root: Path, timeout_seconds: float = 3.0) -> dict[str, Any]:
-    """Evaluate one explicit task root against its separately exported task root."""
-    task_id = entry.get("id")
-    if not isinstance(task_id, str) or task_root.name != task_id or exported_task_root.name != task_id:
-        return {"task_id": task_id, "family": entry.get("family"), "version": entry.get("version"), "candidate_digest": None,
-                "status": "failed", "reason": "assignment_task_root_mismatch", "case_count": 0, "cases": []}
-    return evaluate_candidate(catalog_root, entry, exported_task_root, timeout_seconds)
+def freeze_candidate(assignment: dict[str, Any], candidate: Path) -> dict[str, Any]:
+    """Create the externally-owned candidate envelope after worker completion."""
+    digest = _digest_tree(candidate)
+    return {key: assignment[key] for key in ("task_id", "family", "version", "source_commit", "generator_digest", "catalog_digest", "input_manifest_identity")} | {"candidate_digest": digest}
+
+
+def evaluate_assignment(repo_root: Path, source_commit: str, assignment: dict[str, Any], worker_root: Path, candidate_root: Path, candidate_envelope: dict[str, Any], timeout_seconds: float = 3.0) -> dict[str, Any]:
+    """Evaluate a frozen candidate only when worker provenance matches fixed inputs."""
+    base = {"task_id": assignment.get("task_id") if isinstance(assignment, dict) else None, "family": assignment.get("family") if isinstance(assignment, dict) else None, "version": assignment.get("version") if isinstance(assignment, dict) else None, "candidate_digest": None, "status": "failed", "reason": "assignment_invalid", "case_count": 0, "cases": []}
+    try:
+        generator, generator_bytes = _fixed_generator(repo_root, source_commit)
+        catalog_bytes = generator.render_catalog_bytes()
+        entries = {entry["id"]: entry for entry in generator.render_catalog()["tasks"]}
+        task_id = assignment["task_id"]
+        entry = entries[task_id]
+        expected = {"source_commit": source_commit, "generator_digest": _digest_bytes(generator_bytes), "catalog_digest": _digest_bytes(catalog_bytes), "task_id": task_id, "family": entry["family"], "version": entry["version"], "fixture_group": "worker", "task_root": task_id, "input_digest": generator.template_digest(task_id, "worker")}
+        if any(assignment.get(key) != value for key, value in expected.items()):
+            return {**base, "reason": "assignment_manifest_mismatch"}
+        if not worker_root.is_dir() or worker_root.name != task_id or _digest_tree(worker_root) != assignment.get("worker_digest"):
+            return {**base, "reason": "assignment_worker_mismatch"}
+        envelope_keys = ("task_id", "family", "version", "source_commit", "generator_digest", "catalog_digest", "input_manifest_identity")
+        if not isinstance(candidate_envelope, dict) or any(candidate_envelope.get(key) != assignment.get(key) for key in envelope_keys):
+            return {**base, "reason": "candidate_envelope_mismatch"}
+        if not candidate_root.is_dir() or _digest_tree(candidate_root) != candidate_envelope.get("candidate_digest"):
+            return {**base, "reason": "candidate_digest_mismatch"}
+    except (KeyError, TypeError, ValueError):
+        return base
+    return evaluate_candidate(repo_root / "benchmarks" / "mission-vs-goal" / "complex-fixtures", entry, candidate_root, timeout_seconds)
 
 
 def run_public_smoke(candidate: Path) -> dict[str, Any]:
-    completed = subprocess.run(
-        [sys.executable, "-I", "-c", "import runpy, sys; sys.path.insert(0, sys.argv[1]); runpy.run_path(sys.argv[1] + '/public_smoke.py')", str(candidate)],
-        cwd=candidate, text=True, capture_output=True, timeout=3, check=False,
-    )
-    return {"status": "passed" if completed.returncode == 0 else "failed"}
+    try:
+        returncode, _output, timed_out, exceeded, incomplete = _run_bounded(
+            [sys.executable, "-I", "-c", "import runpy, sys; sys.path.insert(0, sys.argv[1]); runpy.run_path(sys.argv[1] + '/public_smoke.py')", str(candidate)], timeout_seconds=3,
+        )
+    except OSError:
+        return {"status": "failed", "reason": "smoke_process_unavailable"}
+    if timed_out:
+        return {"status": "failed", "reason": "smoke_timeout"}
+    if exceeded:
+        return {"status": "failed", "reason": "smoke_output_too_large"}
+    if incomplete:
+        return {"status": "failed", "reason": "smoke_reader_incomplete"}
+    return {"status": "passed" if returncode == 0 else "failed", "reason": None if returncode == 0 else "smoke_execution_failed"}
 
 
 def export_worker_fixtures(repo_root: Path, starting_commit: str, destination: Path, catalog_root: Path | None = None) -> Path:
