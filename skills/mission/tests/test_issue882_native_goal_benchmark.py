@@ -393,3 +393,17 @@ def test_cli_main_rejects_nonfinite_values_and_accepts_finite_control(tmp_path, 
     monkeypatch.setattr(sys, "argv", [*base, "--timeout-seconds", "1", "--max-budget-usd", "0.1"])
     assert probe.main() == 0
     assert json.loads((tmp_path / "record.json").read_text())["outcome"] == "failed"
+
+
+def test_cli_main_records_goal_protocol_unavailable_separately_from_runtime_error(tmp_path, monkeypatch):
+    probe = _load_probe()
+    def package(_repo, _commit, output): output.write_bytes(b"tar"); return output
+    def unpack(_archive, destination, **_kwargs): (Path(destination) / "plugins" / "mission" / "skills" / "mission").mkdir(parents=True); (Path(destination) / "plugins" / "mission" / "skills" / "mission" / "SKILL.md").write_text("x")
+    monkeypatch.setattr(probe, "create_immutable_package", package); monkeypatch.setattr(probe.shutil, "unpack_archive", unpack)
+    monkeypatch.setattr(probe, "_task_snapshot", lambda _path: {"observed": "a" * 40, "clean": True}); monkeypatch.setattr(probe, "_codex_version", lambda: "test")
+    base = ["probe", "--host", "codex", "--objective", "o", "--task-id", "t", "--acceptance-criterion", "a", "--starting-commit", "a" * 40, "--mission-source-repo", str(tmp_path), "--mission-source-commit", "a" * 40, "--model-id", "m", "--effort", "low", "--permissions", "p", "--worktree", str(tmp_path)]
+    for name, error, outcome in (("unsupported", probe.RpcProtocolError("thread/goal/set", -32601, "Method not found"), "unsupported"), ("runtime", OSError("-32601"), "failed")):
+        monkeypatch.setattr(probe, "probe_codex", lambda *_args, error=error: (_ for _ in ()).throw(error))
+        output = tmp_path / f"{name}.json"; monkeypatch.setattr(sys, "argv", [*base, "--output", str(output)])
+        assert probe.main() == 0
+        assert json.loads(output.read_text())["outcome"] == outcome
