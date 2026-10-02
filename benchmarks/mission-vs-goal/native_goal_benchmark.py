@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -63,9 +65,11 @@ def observe_codex_goal(
     if created is None or observed is None:
         return {**base, "fidelity": "unverified", "outcome": "failed", "reason": "goal_not_observed"}
     created_at = created.get("createdAt") if created else None
+    observed_created_at = observed.get("createdAt") if observed else None
     if (not isinstance(created_at, int) or isinstance(created_at, bool) or created_at < 0
+            or not isinstance(observed_created_at, int) or isinstance(observed_created_at, bool) or observed_created_at < 0
             or any(goal.get("threadId") != thread_id or goal.get("objective") != objective for goal in (created, observed))
-            or observed.get("createdAt") != created_at):
+            or observed_created_at != created_at):
         return {**base, "fidelity": "unverified", "outcome": "failed", "reason": "goal_identity_mismatch"}
     base["native_goal_observed"] = True
     if not expected_turn_ids or started_index is None or completed_index is None or completed_index < started_index:
@@ -125,15 +129,59 @@ def _digest_file(path: Path) -> str:
 
 
 def _digest_tree(root: Path, *, exclude_git: bool = False) -> str:
+    """Hash a stable regular-file tree without following links."""
+    try:
+        root_stat = root.lstat()
+    except OSError as exc:
+        raise ValueError("candidate tree unavailable") from exc
+    if not stat.S_ISDIR(root_stat.st_mode) or stat.S_ISLNK(root_stat.st_mode):
+        raise ValueError("candidate tree is not a regular directory")
+    files: list[tuple[Path, os.stat_result]] = []
+    directories: list[tuple[Path, os.stat_result]] = [(root, root_stat)]
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        try:
+            entries = list(os.scandir(directory))
+        except OSError as exc:
+            raise ValueError("candidate tree unreadable") from exc
+        for entry in entries:
+            relative = Path(entry.path).relative_to(root)
+            if exclude_git and ".git" in relative.parts:
+                continue
+            try:
+                item = entry.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise ValueError("candidate tree changed during snapshot") from exc
+            path = Path(entry.path)
+            if stat.S_ISDIR(item.st_mode):
+                directories.append((path, item)); pending.append(path)
+            elif stat.S_ISREG(item.st_mode) and item.st_nlink == 1:
+                files.append((path, item))
+            else:
+                raise ValueError("candidate tree contains link or special entry")
     digest = hashlib.sha256()
-    for path in sorted(path for path in root.rglob("*") if path.is_file()):
+    for path, before in sorted(files):
         relative = path.relative_to(root)
-        if exclude_git and ".git" in relative.parts:
-            continue
         rel = relative.as_posix().encode("utf-8")
-        content = path.read_bytes()
+        try:
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(descriptor, "rb") as stream:
+                content = stream.read()
+            after = path.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise ValueError("candidate tree changed during snapshot") from exc
+        if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns):
+            raise ValueError("candidate tree changed during snapshot")
         digest.update(len(rel).to_bytes(8, "big")); digest.update(rel)
         digest.update(len(content).to_bytes(8, "big")); digest.update(content)
+    for path, before in directories:
+        try:
+            after = path.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise ValueError("candidate tree changed during snapshot") from exc
+        if (after.st_dev, after.st_ino, after.st_mtime_ns) != (before.st_dev, before.st_ino, before.st_mtime_ns):
+            raise ValueError("candidate tree changed during snapshot")
     return "sha256:" + digest.hexdigest()
 
 

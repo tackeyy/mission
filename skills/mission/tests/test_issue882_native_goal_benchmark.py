@@ -122,6 +122,11 @@ def test_codex_goal_generation_and_turn_identity_must_match():
     events = [{"method": "turn/started", "params": {"threadId": "t", "turnId": "other"}}, {"method": "turn/completed", "params": {"threadId": "t", "turnId": "other"}}]
     result = module.observe_codex_goal("t", "o", {"goal": created}, {"goal": observed}, events, {"expected"})
     assert result["reason"] == "turn_not_completed"
+    for invalid in (True, 1.0):
+        result = module.observe_codex_goal("t", "o", {"goal": created}, {"goal": {**observed, "createdAt": invalid}}, events, {"other"})
+        assert result["reason"] == "goal_identity_mismatch"
+        result = module.observe_codex_goal("t", "o", {"goal": {**created, "createdAt": invalid}}, {"goal": observed}, events, {"other"})
+        assert result["reason"] == "goal_identity_mismatch"
 
 
 def test_codex_goal_rejects_missing_created_at_and_turn_identity():
@@ -258,6 +263,18 @@ def test_worker_export_rejects_link_members_before_extracting(tmp_path, monkeypa
         assert "unsafe archive" in str(exc)
     else:
         raise AssertionError("link archive entries must not reach the worker")
+
+
+def test_worker_export_manifest_rejects_post_run_external_link(tmp_path):
+    module = _load()
+    worker = tmp_path / "worker"; worker.mkdir(); (worker / "fixture.txt").write_text("safe", encoding="utf-8")
+    (worker / "outside").symlink_to("/etc/hosts")
+    try:
+        module.worker_export_manifest(worker)
+    except ValueError as exc:
+        assert "link or special" in str(exc)
+    else:
+        raise AssertionError("post-run links must not be digested")
 
 
 def test_worker_export_initializes_one_commit_without_source_history(tmp_path):
@@ -577,3 +594,23 @@ def test_cli_main_keeps_candidate_worker_tree_after_provider_returns(tmp_path, m
     assert candidate.read_text() == "after"
     manifest = json.loads(output.read_text())["manifest"]["worker_export"]
     assert manifest["candidate_path"] == "candidates/record" and manifest["initial_sha256"] != manifest["candidate_sha256"]
+
+
+def test_cli_main_keeps_invalid_candidate_but_marks_snapshot_stale(tmp_path, monkeypatch):
+    probe = _load_probe()
+    def package(_repo, _commit, output): output.write_bytes(b"tar"); return output
+    def unpack(_archive, destination, **_kwargs):
+        skill = Path(destination) / "plugins" / "mission" / "skills" / "mission"; skill.mkdir(parents=True); (skill / "SKILL.md").write_text("x")
+    def worker(_source, _commit, destination, _allow): destination.mkdir(parents=True); (destination / "fixture.txt").write_text("safe"); return destination
+    def run_worker(destination, *_args): (destination / "outside").symlink_to("/etc/hosts"); return {"outcome": "completed", "fidelity": "verified", "reason": None, "config_matches": True}
+    monkeypatch.setattr(probe, "create_immutable_package", package); monkeypatch.setattr(probe.shutil, "unpack_archive", unpack)
+    monkeypatch.setattr(probe, "create_worker_export", worker); monkeypatch.setattr(probe, "probe_codex", run_worker); monkeypatch.setattr(probe, "_codex_version", lambda: "test")
+    monkeypatch.setattr(probe, "_task_snapshot", lambda _path: {"observed": "a" * 40, "clean": True})
+    output = tmp_path / "record.json"
+    argv = ["probe", "--host", "codex", "--objective", "o", "--task-id", "t", "--acceptance-criterion", "a", "--starting-commit", "a" * 40, "--mission-source-repo", str(tmp_path), "--mission-source-commit", "a" * 40, "--model-id", "m", "--effort", "low", "--permissions", "p", "--worktree", str(tmp_path), "--worker-allow-path", "fixture.txt", "--output", str(output)]
+    monkeypatch.setattr(sys, "argv", argv)
+    assert probe.main() == 0
+    record = json.loads(output.read_text())
+    assert record["outcome"] == "failed" and record["reason"] == "candidate_snapshot_invalid"
+    assert record["manifest"]["worker_export"]["candidate_state"] == "stale"
+    assert (tmp_path / "candidates" / "record" / "outside").is_symlink()

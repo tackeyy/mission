@@ -409,7 +409,11 @@ def main() -> int:
                         observation = {"native_goal_observed": False, "fidelity": "not_applicable", "outcome": "unsupported", "reason": "native_goal_protocol_unavailable", "error_type": type(exc).__name__}
                     else:
                         observation = {"native_goal_observed": False, "fidelity": "unverified", "outcome": "failed", "reason": "adapter_execution_failed", "error_type": type(exc).__name__}
-            manifest["worker_export"]["candidate_sha256"] = worker_export_manifest(worker_root)["sha256"]
+            try:
+                manifest["worker_export"]["candidate_sha256"] = worker_export_manifest(worker_root)["sha256"]
+            except ValueError:
+                manifest["worker_export"]["candidate_state"] = "stale"
+                observation = {**observation, "fidelity": "unverified", "outcome": "failed", "reason": "candidate_snapshot_invalid"}
             write_record(output, {"schema": NATIVE_SCHEMA, "run_id": output.stem, "task_id": args.task_id, "arm": label, "manifest": manifest, "package_prepared": package_prepared, **observation})
     except (OSError, RuntimeError, ValueError, shutil.ReadError) as exc:
         write_record(output, {"schema": NATIVE_SCHEMA, "run_id": output.stem, "task_id": args.task_id, "arm": label,
