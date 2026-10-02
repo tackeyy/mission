@@ -1,6 +1,8 @@
 """Bounded actual-worktree snapshots for registered verification commands."""
 from __future__ import annotations
 
+from acceptance_contract import verifier_definition_digest
+
 import contextlib
 import hashlib
 import os
@@ -189,14 +191,6 @@ def materialize_candidate(candidate):
             target.write_bytes(item.content)
             os.chmod(target, item.mode)
         yield root
-
-
-def verifier_definition_digest(command) -> str:
-    """Return a stable identity for one frozen verifier definition."""
-    import json
-
-    raw = json.dumps(command, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
 def _toolchain_matches(command) -> bool:

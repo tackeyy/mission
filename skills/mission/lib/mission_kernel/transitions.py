@@ -1014,8 +1014,7 @@ def _acceptance_completion_ready(state: MissionState) -> None:
     if not isinstance(commands, dict) or not isinstance(policy_digest, str):
         raise _Rejected("acceptance-contract-invalid")
     try:
-        from acceptance_contract import canonical_contract_digest
-        from mission_application.verification_runner import verifier_definition_digest
+        from acceptance_contract import canonical_contract_digest, verifier_definition_digest
         contract_digest = canonical_contract_digest(contract)
     except (TypeError, ValueError):
         raise _Rejected("acceptance-contract-invalid")
