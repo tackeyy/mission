@@ -180,6 +180,7 @@ from mission_application.review import (  # noqa: E402
     MarkPassRequest,
     MarkPassServices,
     ReviewFailure,
+    capture_acceptance_candidates,
     legacy_manual_score_ref,
     legacy_review_input_ref,
     mark_pass as run_mark_pass,
@@ -235,7 +236,6 @@ from mission_application.acceptance import (  # noqa: E402
     run_acceptance_contract_status_cli,
 )
 from mission_application.verifier_policy import load as load_verifier_policy  # noqa: E402
-from mission_application.verification_runner import capture_candidate  # noqa: E402
 from mission_application.verification_execution import (  # noqa: E402
     VerificationReceiptCliRequest,
     VerificationReceiptCliServices,
@@ -14206,33 +14206,6 @@ def _validate_pass_specialist_gate(data: dict, specialist_waiver: str) -> None:
         )
 
 
-def _capture_acceptance_candidates(cwd: Path, data: dict) -> dict[str, str]:
-    contract = data.get("acceptance_contract")
-    if contract is None:
-        return {}
-    if not isinstance(contract, dict):
-        raise ValueError("acceptance-contract-invalid")
-    criteria = contract.get("criteria")
-    policy = contract.get("verifier_policy")
-    commands = policy.get("commands") if isinstance(policy, dict) else None
-    if not isinstance(criteria, list) or not isinstance(commands, dict):
-        raise ValueError("acceptance-contract-invalid")
-    candidates = {}
-    for criterion in criteria:
-        if not isinstance(criterion, dict) or criterion.get("required") is not True:
-            continue
-        identifier = criterion.get("id")
-        command = commands.get(criterion.get("command_id"))
-        if not isinstance(identifier, str) or not isinstance(command, dict):
-            raise ValueError("acceptance-contract-invalid")
-        candidates[identifier] = capture_candidate(
-            cwd,
-            declared_untracked=command.get("declared_untracked", ()),
-            external_inputs=command.get("external_inputs", ()),
-        ).digest
-    return candidates
-
-
 def cmd_mark_passes(args):
     """Delegate evidence validation and completion authority to A2 + kernel."""
     cwd = Path.cwd()
@@ -14263,7 +14236,7 @@ def cmd_mark_passes(args):
                 transition_phase=_transition_phase,
                 optional_unclosed_skills=_unclosed_optional_specialist_skills,
                 selection_id=_current_selection_id,
-                capture_acceptance_candidates=lambda data: _capture_acceptance_candidates(cwd, data),
+                capture_acceptance_candidates=lambda data: capture_acceptance_candidates(cwd, data, load_verifier_policy),
                 early_stop_evaluation=lambda data, latest, at: _early_stop_evaluation(
                     cwd, data, latest, at, getattr(args, "early_stop_rationale", None)
                 ),

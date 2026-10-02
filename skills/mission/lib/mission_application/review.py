@@ -26,6 +26,38 @@ from .ports import LegacyMissionRepository
 from .compatibility import compatibility_delta
 
 
+def capture_acceptance_candidates(project_root, data: dict, load_policy: Callable) -> dict[str, str]:
+    """Recapture each required verifier candidate only under its frozen policy."""
+    contract = data.get("acceptance_contract")
+    if contract is None:
+        return {}
+    if not isinstance(contract, dict):
+        raise ValueError("acceptance-contract-invalid")
+    policy = contract.get("verifier_policy")
+    commands = policy.get("commands") if isinstance(policy, dict) else None
+    if not isinstance(commands, dict) or load_policy(project_root).get("digest") != policy.get("digest"):
+        raise ValueError("verifier-policy-stale")
+    criteria = contract.get("criteria")
+    if not isinstance(criteria, list):
+        raise ValueError("acceptance-contract-invalid")
+    from mission_application.verification_runner import capture_candidate
+
+    result = {}
+    for criterion in criteria:
+        if not isinstance(criterion, dict) or criterion.get("required") is not True:
+            continue
+        identifier = criterion.get("id")
+        command = commands.get(criterion.get("command_id"))
+        if not isinstance(identifier, str) or not isinstance(command, dict):
+            raise ValueError("acceptance-contract-invalid")
+        result[identifier] = capture_candidate(
+            project_root,
+            declared_untracked=command["declared_untracked"],
+            external_inputs=command["external_inputs"],
+        ).digest
+    return result
+
+
 REVIEW_COMMAND_OWNERS = {
     "aggregate-reviews": "A2.review",
     "closeout": "A2.review",
