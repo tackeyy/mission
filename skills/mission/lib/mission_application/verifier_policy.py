@@ -39,8 +39,9 @@ def validate(value):
         raise VerifierPolicyError("verifier-policy-commands-invalid")
     result = {}
     for command in commands:
-        allowed = {"id", "argv", "relative_cwd", "timeout_sec", "output_limit", "kind", "env", "declared_untracked", "executed_count_pattern", "toolchain_path", "replay"}
-        if not isinstance(command, dict) or set(command) not in ({"id", "argv", "relative_cwd", "timeout_sec", "output_limit", "kind", "env", "declared_untracked"}, allowed):
+        required = {"id", "argv", "relative_cwd", "timeout_sec", "output_limit", "kind", "env", "declared_untracked"}
+        optional = {"executed_count_pattern", "toolchain_path", "replay"}
+        if not isinstance(command, dict) or not required <= set(command) or not set(command) <= required | optional:
             raise VerifierPolicyError("verifier-policy-command-invalid")
         identifier = _text(command["id"], "verifier-policy-command-id-invalid")
         argv = command["argv"]
@@ -58,8 +59,9 @@ def validate(value):
             raise VerifierPolicyError("verifier-policy-toolchain-invalid")
         replay = command.get("replay")
         if replay is not None:
-            if not isinstance(replay, dict) or set(replay) != {"command_id", "max_bytes", "allowed_artifact_kinds"} or not isinstance(replay["command_id"], str) or not replay["command_id"] or type(replay["max_bytes"]) is not int or not 0 < replay["max_bytes"] <= 1048576 or not isinstance(replay["allowed_artifact_kinds"], list) or not replay["allowed_artifact_kinds"] or not all(isinstance(item, str) and item for item in replay["allowed_artifact_kinds"]):
+            if not isinstance(replay, dict) or set(replay) != {"command_id", "max_bytes", "allowed_artifact_kinds", "relative_path"} or not isinstance(replay["command_id"], str) or not replay["command_id"] or type(replay["max_bytes"]) is not int or not 0 < replay["max_bytes"] <= 1048576 or not isinstance(replay["allowed_artifact_kinds"], list) or not replay["allowed_artifact_kinds"] or not all(isinstance(item, str) and item for item in replay["allowed_artifact_kinds"]):
                 raise VerifierPolicyError("verifier-policy-replay-invalid")
+            _relative(replay["relative_path"], "verifier-policy-replay-invalid")
         _relative(command["relative_cwd"], "verifier-policy-cwd-invalid")
         if not isinstance(command["env"], dict) or not all(isinstance(key, str) and key and isinstance(item, str) for key, item in command["env"].items()):
             raise VerifierPolicyError("verifier-policy-env-invalid")
@@ -89,9 +91,16 @@ def freeze(policy, *, command_ids, expected_digest):
     if not isinstance(policy, dict) or policy.get("digest") != expected_digest or not isinstance(policy.get("commands"), dict):
         raise VerifierPolicyError("verifier-policy-digest-mismatch")
     selected = {}
-    for identifier in command_ids:
+    pending = list(command_ids)
+    while pending:
+        identifier = pending.pop()
+        if identifier in selected:
+            continue
         command = policy["commands"].get(identifier)
         if command is None:
             raise VerifierPolicyError("verifier-policy-command-unregistered")
         selected[identifier] = command
+        replay = command.get("replay")
+        if replay is not None:
+            pending.append(replay["command_id"])
     return {"digest": policy["digest"], "commands": selected}

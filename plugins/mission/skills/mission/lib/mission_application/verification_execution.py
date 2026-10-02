@@ -30,7 +30,7 @@ def run_contract_verifier(state, *, project_root, criterion_id, repro_input=None
     if repro_input is not None:
         if not isinstance(replay, dict):
             return _blocked_receipt(contract, policy, criterion_id, command, "replay-unsupported")
-        if not isinstance(repro_input, dict) or set(repro_input) != {"artifact_kind", "relative_path", "content"} or repro_input["artifact_kind"] not in replay["allowed_artifact_kinds"] or not isinstance(repro_input["content"], str) or len(repro_input["content"].encode()) > replay["max_bytes"]:
+        if not isinstance(repro_input, dict) or set(repro_input) != {"artifact_kind", "content"} or repro_input["artifact_kind"] not in replay["allowed_artifact_kinds"] or not isinstance(repro_input["content"], str) or len(repro_input["content"].encode()) > replay["max_bytes"]:
             return _blocked_receipt(contract, policy, criterion_id, command, "replay-input-invalid")
         replay_command = commands.get(replay["command_id"])
         if not isinstance(replay_command, dict):
@@ -38,7 +38,9 @@ def run_contract_verifier(state, *, project_root, criterion_id, repro_input=None
         command = replay_command
     try:
         candidate = capture_candidate(project_root, declared_untracked=command["declared_untracked"])
-        replay_file = None if repro_input is None else (repro_input["relative_path"], repro_input["content"].encode())
+        replay_file = None if repro_input is None else (replay["relative_path"], repro_input["content"].encode())
+        if replay_file is not None and replay_file[0] in {item.path for item in candidate.files}:
+            return _blocked_receipt(contract, policy, criterion_id, command, "replay-input-path-conflict")
         outcome = execute_candidate(candidate, command, relative_cwd=command["relative_cwd"], repro_input=replay_file)
         # The source must still be the candidate after process execution.  A
         # mutable worktree never receives a successful receipt.
@@ -47,6 +49,7 @@ def run_contract_verifier(state, *, project_root, criterion_id, repro_input=None
         raise EvidenceFailure(str(exc)) from exc
     if current.digest != candidate.digest:
         outcome["status"] = "blocked"
+        outcome["block_reason"] = "candidate-stale"
     return {
         "schema": "mission-verification-receipt/1",
         "contract_digest": contract_digest({key: value for key, value in contract.items() if key not in {"imported_at", "verifier_policy"}}),
@@ -65,9 +68,10 @@ def run_contract_verifier(state, *, project_root, criterion_id, repro_input=None
         "status": outcome["status"],
         "runner_provenance": "mission-public-cli/1",
         "repro_input_digest": outcome["repro_input_digest"],
+        "block_reason": outcome["block_reason"],
     }
 
 
 def _blocked_receipt(contract, policy, criterion_id, command, reason):
     import hashlib
-    return {"schema": "mission-verification-receipt/1", "contract_digest": contract_digest({key: value for key, value in contract.items() if key not in {"imported_at", "verifier_policy"}}), "criterion_id": criterion_id, "candidate_digest": "sha256:" + "0" * 64, "verifier_policy_digest": policy["digest"], "verifier_definition_digest": verifier_definition_digest(command), "argv": list(command["argv"]), "relative_cwd": command["relative_cwd"], "started_at": "1970-01-01T00:00:00Z", "finished_at": "1970-01-01T00:00:00Z", "exit_code": None, "timed_out": False, "executed_count": None, "output_digest": "sha256:" + hashlib.sha256(reason.encode()).hexdigest(), "status": "blocked", "runner_provenance": "mission-public-cli/1", "repro_input_digest": None}
+    return {"schema": "mission-verification-receipt/1", "contract_digest": contract_digest({key: value for key, value in contract.items() if key not in {"imported_at", "verifier_policy"}}), "criterion_id": criterion_id, "candidate_digest": "sha256:" + "0" * 64, "verifier_policy_digest": policy["digest"], "verifier_definition_digest": verifier_definition_digest(command), "argv": list(command["argv"]), "relative_cwd": command["relative_cwd"], "started_at": "1970-01-01T00:00:00Z", "finished_at": "1970-01-01T00:00:00Z", "exit_code": None, "timed_out": False, "executed_count": None, "output_digest": "sha256:" + hashlib.sha256(reason.encode()).hexdigest(), "status": "blocked", "runner_provenance": "mission-public-cli/1", "repro_input_digest": None, "block_reason": reason}

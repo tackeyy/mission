@@ -214,13 +214,14 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
         assert child.stdout is not None
         selector.register(child.stdout, selectors.EVENT_READ)
         deadline = time.monotonic() + timeout
-        while selector.get_map():
+        while selector.get_map() or child.poll() is None:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                timed_out = True
-                os.killpg(child.pid, signal.SIGKILL)
+                if child.poll() is None:
+                    timed_out = True
+                    os.killpg(child.pid, signal.SIGKILL)
                 remaining = 0.1
-            for key, _event in selector.select(remaining):
+            for key, _event in selector.select(min(remaining, 0.1)):
                 chunk = os.read(key.fd, 65536)
                 if not chunk:
                     selector.unregister(key.fileobj)
@@ -230,15 +231,13 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
         exit_code = None if timed_out else child.returncode
         selector.close()
         observed = tuple(_read(root, item.path, item.mode, required=True) for item in candidate.files)
-        if _digest(observed) != candidate.digest:
-            timed_out = True
-            exit_code = None
+        candidate_stale = _digest(observed) != candidate.digest
     output = bytes(output)
     after = candidate.digest
     if before != after:
         raise VerificationRunnerError("candidate-mutated")
     count = _executed_count(command, output)
-    passed = not timed_out and exit_code == 0 and (command.get("kind") != "test" or (count is not None and count > 0))
+    passed = not timed_out and not candidate_stale and exit_code == 0 and (command.get("kind") != "test" or (count is not None and count > 0))
     return {
         "started_at": started,
         "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
@@ -246,6 +245,7 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
         "timed_out": timed_out,
         "executed_count": count,
         "output_digest": "sha256:" + hashlib.sha256(output).hexdigest(),
-        "status": "passed" if passed else "failed" if not timed_out else "blocked",
+        "status": "passed" if passed else "blocked" if timed_out or candidate_stale else "failed",
+        "block_reason": "timeout" if timed_out else "candidate-stale" if candidate_stale else None,
         "repro_input_digest": repro_digest,
     }

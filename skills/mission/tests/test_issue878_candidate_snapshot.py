@@ -40,7 +40,11 @@ def test_runner_bounds_output_times_out_and_rejects_zero_test_count(tmp_path):
     subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True)
     subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-qm", "base"], cwd=tmp_path, check=True)
     candidate = capture_candidate(tmp_path, declared_untracked=())
-    timeout = execute_candidate(candidate, {"argv": ["python3", "-c", "import time; time.sleep(2)"], "timeout_sec": 1, "output_limit": 8, "kind": "command", "env": {}}, relative_cwd=".")
+    timeout = execute_candidate(candidate, {"argv": ["python3", "-c", "import os, time; os.close(1); os.close(2); time.sleep(2)"], "timeout_sec": 1, "output_limit": 8, "kind": "command", "env": {}}, relative_cwd=".")
     assert timeout["status"] == "blocked" and timeout["timed_out"] is True
     zero = execute_candidate(candidate, {"argv": ["python3", "-c", "print('0 tests')"], "timeout_sec": 5, "output_limit": 4, "kind": "test", "executed_count_pattern": r"(\\d+) tests", "env": {}}, relative_cwd=".")
     assert zero["status"] == "failed" and zero["executed_count"] == 0
+    mutation = execute_candidate(candidate, {"argv": ["python3", "-c", "from pathlib import Path; Path('app.py').write_text('mutated')"], "timeout_sec": 5, "output_limit": 8, "kind": "command", "env": {}}, relative_cwd=".")
+    assert mutation["status"] == "blocked"
+    assert mutation["exit_code"] == 0 and mutation["timed_out"] is False
+    assert mutation["block_reason"] == "candidate-stale"

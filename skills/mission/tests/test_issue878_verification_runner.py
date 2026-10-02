@@ -15,6 +15,21 @@ def _policy():
     }
 
 
+def _replay_policy():
+    policy = _policy()
+    policy["commands"][0]["replay"] = {
+        "command_id": "replay-test", "max_bytes": 64,
+        "allowed_artifact_kinds": ["counterexample"], "relative_path": "repro.json",
+    }
+    policy["commands"].append({
+        "id": "replay-test",
+        "argv": ["python3", "-c", "from pathlib import Path; assert Path('repro.json').read_text() == 'proof'"],
+        "relative_cwd": ".", "timeout_sec": 5, "output_limit": 4096,
+        "kind": "command", "env": {}, "declared_untracked": [],
+    })
+    return policy
+
+
 def _contract(mission_id):
     text = "Run the registered verifier."
     return {
@@ -72,3 +87,114 @@ def test_public_runner_records_process_bound_receipt(tmp_path, run_cli):
     assert receipt["argv"] == _policy()["commands"][0]["argv"]
     stored = json.loads(run_cli("get", cwd=tmp_path).stdout)
     assert stored["verification_receipts"][-1] == receipt
+
+
+def test_public_runner_binds_replay_input_to_frozen_replay_command_and_receipt(tmp_path, run_cli):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "tracked.txt").write_text("candidate", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-qm", "base"], cwd=tmp_path, check=True)
+    run_cli("init", "verification runner", "--force-mission", cwd=tmp_path, check=True)
+    policy_dir = tmp_path / ".mission"; policy_dir.mkdir()
+    policy = _replay_policy()
+    encoded = json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()
+    (policy_dir / "verifiers.json").write_bytes(encoded)
+    state = json.loads(run_cli("get", cwd=tmp_path).stdout)
+    contract = _contract(state["mission_id"])
+    contract["verifier_policy_digest"] = "sha256:" + hashlib.sha256(encoded).hexdigest()
+    source = tmp_path / "contract.json"; source.write_text(json.dumps(contract), encoding="utf-8")
+    assert run_cli("acceptance-contract", "import", "--input", str(source), cwd=tmp_path).returncode == 0
+    repro = tmp_path / "repro.json"
+    repro.write_text(json.dumps({"artifact_kind": "counterexample", "content": "proof"}), encoding="utf-8")
+
+    result = run_cli("verification", "run", "--criterion", "AC1", "--repro-input", str(repro), cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads(result.stdout)["receipt"]
+    assert receipt["status"] == "passed"
+    assert receipt["argv"] == policy["commands"][1]["argv"]
+    assert receipt["repro_input_digest"] == "sha256:" + hashlib.sha256(b"repro.json\0proof").hexdigest()
+    assert receipt["block_reason"] is None
+
+    repro.write_text(json.dumps({"artifact_kind": "counterexample", "content": "x" * 65}), encoding="utf-8")
+    rejected = run_cli("verification", "run", "--criterion", "AC1", "--repro-input", str(repro), cwd=tmp_path)
+    assert rejected.returncode == 0, rejected.stderr
+    assert json.loads(rejected.stdout)["receipt"]["status"] == "blocked"
+    assert json.loads(rejected.stdout)["receipt"]["block_reason"] == "replay-input-invalid"
+
+
+def test_receipt_record_refuses_to_overwrite_a_non_history_value():
+    import pytest
+    from mission_kernel.commands import RecordVerificationReceipt
+    from mission_kernel.evidence import EvidenceRuleError, apply_verification_receipt
+    from mission_kernel.json_codec import freeze_json_value
+
+    digest = "sha256:" + "0" * 64
+    receipt = {
+        "schema": "mission-verification-receipt/1", "contract_digest": digest,
+        "criterion_id": "AC1", "candidate_digest": digest,
+        "verifier_policy_digest": digest, "verifier_definition_digest": digest,
+        "argv": ["true"], "relative_cwd": ".", "started_at": "2026-01-01T00:00:00Z",
+        "finished_at": "2026-01-01T00:00:00Z", "exit_code": 0, "timed_out": False,
+        "executed_count": None, "output_digest": digest, "status": "passed",
+        "runner_provenance": "mission-public-cli/1", "repro_input_digest": None,
+        "block_reason": None,
+    }
+
+    with pytest.raises(EvidenceRuleError, match="verification-receipt-history-invalid"):
+        apply_verification_receipt(
+            {"verification_receipts": {"caller": "declared"}},
+            RecordVerificationReceipt("2026-01-01T00:00:00Z", freeze_json_value(receipt)),
+        )
+
+
+def test_public_runner_rejects_live_policy_drift_before_creating_a_receipt(tmp_path, run_cli):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "tracked.txt").write_text("candidate", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-qm", "base"], cwd=tmp_path, check=True)
+    run_cli("init", "verification runner", "--force-mission", cwd=tmp_path, check=True)
+    policy_dir = tmp_path / ".mission"; policy_dir.mkdir()
+    encoded = json.dumps(_policy(), sort_keys=True, separators=(",", ":")).encode()
+    policy_path = policy_dir / "verifiers.json"; policy_path.write_bytes(encoded)
+    state = json.loads(run_cli("get", cwd=tmp_path).stdout)
+    contract = _contract(state["mission_id"])
+    contract["verifier_policy_digest"] = "sha256:" + hashlib.sha256(encoded).hexdigest()
+    source = tmp_path / "contract.json"; source.write_text(json.dumps(contract), encoding="utf-8")
+    assert run_cli("acceptance-contract", "import", "--input", str(source), cwd=tmp_path).returncode == 0
+    policy_path.write_bytes(encoded + b"\n")
+
+    result = run_cli("verification", "run", "--criterion", "AC1", cwd=tmp_path)
+
+    assert result.returncode != 0
+    assert "verifier-policy-stale" in result.stderr
+    assert "verification_receipts" not in json.loads(run_cli("get", cwd=tmp_path).stdout)
+
+
+def test_same_operation_retry_runs_the_verifier_again_and_rejects_a_different_receipt(tmp_path, run_cli):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "tracked.txt").write_text("candidate", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-qm", "base"], cwd=tmp_path, check=True)
+    run_cli("init", "verification runner", "--force-mission", cwd=tmp_path, check=True)
+    counter = tmp_path / "process-count.txt"
+    policy = _policy()
+    policy["commands"][0]["argv"] = ["python3", "-c", f"from pathlib import Path; p=Path({str(counter)!r}); p.write_text(str(int(p.read_text() if p.exists() else '0') + 1))"]
+    policy_dir = tmp_path / ".mission"; policy_dir.mkdir()
+    encoded = json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()
+    (policy_dir / "verifiers.json").write_bytes(encoded)
+    state = json.loads(run_cli("get", cwd=tmp_path).stdout)
+    contract = _contract(state["mission_id"])
+    contract["verifier_policy_digest"] = "sha256:" + hashlib.sha256(encoded).hexdigest()
+    source = tmp_path / "contract.json"; source.write_text(json.dumps(contract), encoding="utf-8")
+    assert run_cli("acceptance-contract", "import", "--input", str(source), cwd=tmp_path).returncode == 0
+    retry_env = {"MISSION_OPERATION_ID": "receipt-retry"}
+
+    first = run_cli("verification", "run", "--criterion", "AC1", cwd=tmp_path, env_extra=retry_env)
+    second = run_cli("verification", "run", "--criterion", "AC1", cwd=tmp_path, env_extra=retry_env)
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode != 0
+    assert "verification-receipt-projection-mismatch" in second.stderr
+    assert counter.read_text(encoding="utf-8") == "2"
+    assert len(json.loads(run_cli("get", cwd=tmp_path).stdout)["verification_receipts"]) == 1

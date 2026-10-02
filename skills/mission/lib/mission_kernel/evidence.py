@@ -353,7 +353,7 @@ _RECEIPT_FIELDS = {
     "verifier_policy_digest", "verifier_definition_digest", "argv",
     "relative_cwd", "started_at", "finished_at", "exit_code", "timed_out",
     "executed_count", "output_digest", "status", "runner_provenance",
-    "repro_input_digest",
+    "repro_input_digest", "block_reason",
 }
 
 
@@ -382,6 +382,11 @@ def project_verification_receipt(command: RecordVerificationReceipt) -> dict:
         raise EvidenceRuleError("verification-receipt-invalid")
     if receipt.get("repro_input_digest") is not None and (not isinstance(receipt["repro_input_digest"], str) or __import__("re").fullmatch(r"sha256:[0-9a-f]{64}", receipt["repro_input_digest"]) is None):
         raise EvidenceRuleError("verification-receipt-invalid")
+    if receipt["status"] == "blocked":
+        if not isinstance(receipt.get("block_reason"), str) or not receipt["block_reason"]:
+            raise EvidenceRuleError("verification-receipt-invalid")
+    elif receipt.get("block_reason") is not None:
+        raise EvidenceRuleError("verification-receipt-invalid")
     if not isinstance(receipt.get("runner_provenance"), str) or not receipt["runner_provenance"]:
         raise EvidenceRuleError("verification-receipt-invalid")
     if receipt["status"] == "passed" and (receipt["timed_out"] or receipt["exit_code"] != 0):
@@ -393,7 +398,12 @@ def apply_verification_receipt(state: Mapping[str, object], command: RecordVerif
     document = copy.deepcopy(dict(state))
     entry = project_verification_receipt(command)
     history = document.get("verification_receipts")
-    history = copy.deepcopy(history) if isinstance(history, list) else []
+    if history is None:
+        history = []
+    elif not isinstance(history, list) or not all(isinstance(item, dict) for item in history):
+        raise EvidenceRuleError("verification-receipt-history-invalid")
+    else:
+        history = copy.deepcopy(history)
     history.append(entry)
     document["verification_receipts"] = history
     document["updated_at"] = entry["recorded_at"]
