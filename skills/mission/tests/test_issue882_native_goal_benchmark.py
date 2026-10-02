@@ -372,3 +372,9 @@ def test_new_schema_accepts_unsupported_and_keeps_historical_schema_separate():
 
     assert schema["properties"]["outcome"]["enum"] == ["completed", "failed", "blocked", "unsupported", "not_started"]
     assert module.HISTORICAL_RESULT_SCHEMA.name == "result.schema.json"
+
+
+def test_probe_rejects_nonfinite_budgets_and_classifies_missing_goal_protocol():
+    probe = _load_probe()
+    assert probe._unsupported_goal_protocol(RuntimeError("code -32601: Method not found")) is True
+    assert probe._unsupported_goal_protocol(RuntimeError("socket closed")) is False

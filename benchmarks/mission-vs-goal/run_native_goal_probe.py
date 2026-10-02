@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import math
 import selectors
 import shutil
 import subprocess
@@ -124,6 +125,12 @@ def _thread_id(response: dict) -> str:
     if not isinstance(value, str) or not value:
         raise RuntimeError("thread/start did not return a thread id")
     return value
+
+
+def _unsupported_goal_protocol(exc: Exception) -> bool:
+    """Recognise the official JSON-RPC missing-method response without fallback."""
+    text = str(exc).casefold()
+    return "method not found" in text or "-32601" in text
 
 
 def _codex_version() -> str:
@@ -320,12 +327,12 @@ def main() -> int:
     parser.add_argument("--max-budget-usd", type=float, default=None)
     parser.add_argument("--max-turns", type=int, default=2)
     args = parser.parse_args()
-    if args.timeout_seconds <= 0:
-        parser.error("--timeout-seconds must be positive")
+    if not math.isfinite(args.timeout_seconds) or args.timeout_seconds <= 0:
+        parser.error("--timeout-seconds must be finite and positive")
     if args.token_budget is not None and args.token_budget <= 0:
         parser.error("--token-budget must be positive")
-    if args.max_budget_usd is not None and args.max_budget_usd <= 0:
-        parser.error("--max-budget-usd must be positive")
+    if args.max_budget_usd is not None and (not math.isfinite(args.max_budget_usd) or args.max_budget_usd <= 0):
+        parser.error("--max-budget-usd must be finite and positive")
     if args.max_turns <= 0:
         parser.error("--max-turns must be positive")
     worktree = Path(args.worktree).resolve()
@@ -362,7 +369,10 @@ def main() -> int:
                         version = subprocess.run(["claude", "--version"], text=True, capture_output=True, check=False)
                         manifest["provider_version"] = version.stdout.strip() if version.returncode == 0 else None
                 except (OSError, RuntimeError, TimeoutError) as exc:
-                    observation = {"native_goal_observed": False, "fidelity": "unverified", "outcome": "failed", "reason": "adapter_execution_failed", "error_type": type(exc).__name__}
+                    if args.host == "codex" and args.arm == "goal" and _unsupported_goal_protocol(exc):
+                        observation = {"native_goal_observed": False, "fidelity": "not_applicable", "outcome": "unsupported", "reason": "native_goal_protocol_unavailable", "error_type": type(exc).__name__}
+                    else:
+                        observation = {"native_goal_observed": False, "fidelity": "unverified", "outcome": "failed", "reason": "adapter_execution_failed", "error_type": type(exc).__name__}
             write_record(output, {"schema": NATIVE_SCHEMA, "run_id": output.stem, "task_id": args.task_id, "arm": label, "manifest": manifest, "package_prepared": package_prepared, **observation})
     except (OSError, RuntimeError, ValueError, shutil.ReadError) as exc:
         write_record(output, {"schema": NATIVE_SCHEMA, "run_id": output.stem, "task_id": args.task_id, "arm": label,
