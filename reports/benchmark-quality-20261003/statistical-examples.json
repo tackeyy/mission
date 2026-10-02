@@ -1,0 +1,60 @@
+{
+  "kind": "illustrative calculations only; not experiment results",
+  "alpha_per_bound": 0.0125,
+  "method": "exact binomial marginal bounds plus Bonferroni across four bounds (two hosts)",
+  "examples": [
+    {
+      "n": 100,
+      "goal_fail": 20,
+      "mission_fail": 2,
+      "point_ratio": 0.1,
+      "goal_lower": 0.1181020797761192,
+      "mission_upper": 0.07877547354578288,
+      "rr_upper": 0.6670117384479088,
+      "tenfold_supported": false
+    },
+    {
+      "n": 100,
+      "goal_fail": 20,
+      "mission_fail": 0,
+      "point_ratio": 0.0,
+      "goal_lower": 0.1181020797761192,
+      "mission_upper": 0.0428740302384385,
+      "rr_upper": 0.3630251924412582,
+      "tenfold_supported": false
+    },
+    {
+      "n": 300,
+      "goal_fail": 60,
+      "mission_fail": 0,
+      "point_ratio": 0.0,
+      "goal_lower": 0.15059085671166622,
+      "mission_upper": 0.014500594315008091,
+      "rr_upper": 0.09629133289793373,
+      "tenfold_supported": true
+    },
+    {
+      "n": 1000,
+      "goal_fail": 200,
+      "mission_fail": 10,
+      "point_ratio": 0.05,
+      "goal_lower": 0.17230923323600278,
+      "mission_upper": 0.019632994176744953,
+      "rr_upper": 0.11394046510470328,
+      "tenfold_supported": false
+    },
+    {
+      "n": 1000,
+      "goal_fail": 300,
+      "mission_fail": 10,
+      "point_ratio": 0.03333333333333333,
+      "goal_lower": 0.2678153073342173,
+      "mission_upper": 0.019632994176744953,
+      "rr_upper": 0.07330796126691953,
+      "tenfold_supported": true
+    }
+  ],
+  "zero_fail_n100_one_sided_95": 0.029513049607039932,
+  "f1_ratio": 1.0174825174825175,
+  "max_possible_f1_ratio": 1.1655011655011656
+}

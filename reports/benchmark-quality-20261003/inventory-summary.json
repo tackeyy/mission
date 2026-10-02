@@ -1,0 +1,158 @@
+{
+  "head": "ed1d1c2723c55c08f06a82d6e397b164323b5b59",
+  "total_files": 2301,
+  "text_files": 2299,
+  "bytes": 27543457,
+  "lines": 366824,
+  "python_files": 504,
+  "python_definitions": 11675,
+  "mirror_files": 126,
+  "mirror_mismatches": [],
+  "groups": {
+    ".agents": {
+      "files": 1,
+      "bytes": 499,
+      "lines": 21
+    },
+    ".claude-plugin": {
+      "files": 2,
+      "bytes": 1139,
+      "lines": 32
+    },
+    ".codex-plugin": {
+      "files": 1,
+      "bytes": 232,
+      "lines": 6
+    },
+    ".github": {
+      "files": 13,
+      "bytes": 37612,
+      "lines": 1008
+    },
+    ".gitignore": {
+      "files": 1,
+      "bytes": 418,
+      "lines": 20
+    },
+    ".gitleaks.toml": {
+      "files": 1,
+      "bytes": 3395,
+      "lines": 54
+    },
+    ".mission": {
+      "files": 1,
+      "bytes": 85,
+      "lines": 4
+    },
+    "AGENTS.md": {
+      "files": 1,
+      "bytes": 12618,
+      "lines": 217
+    },
+    "CHANGELOG.ja.md": {
+      "files": 1,
+      "bytes": 98992,
+      "lines": 550
+    },
+    "CHANGELOG.md": {
+      "files": 1,
+      "bytes": 88203,
+      "lines": 550
+    },
+    "CLAUDE.md": {
+      "files": 1,
+      "bytes": 494,
+      "lines": 9
+    },
+    "CODE_OF_CONDUCT.ja.md": {
+      "files": 1,
+      "bytes": 1258,
+      "lines": 33
+    },
+    "CODE_OF_CONDUCT.md": {
+      "files": 1,
+      "bytes": 1234,
+      "lines": 38
+    },
+    "CONTRIBUTING.ja.md": {
+      "files": 1,
+      "bytes": 6087,
+      "lines": 145
+    },
+    "CONTRIBUTING.md": {
+      "files": 1,
+      "bytes": 5257,
+      "lines": 151
+    },
+    "LICENSE": {
+      "files": 1,
+      "bytes": 1070,
+      "lines": 21
+    },
+    "LICENSE.ja.md": {
+      "files": 1,
+      "bytes": 1295,
+      "lines": 11
+    },
+    "Makefile": {
+      "files": 1,
+      "bytes": 3500,
+      "lines": 60
+    },
+    "README.ja.md": {
+      "files": 1,
+      "bytes": 23596,
+      "lines": 398
+    },
+    "README.md": {
+      "files": 1,
+      "bytes": 21666,
+      "lines": 454
+    },
+    "SECURITY.ja.md": {
+      "files": 1,
+      "bytes": 1428,
+      "lines": 43
+    },
+    "SECURITY.md": {
+      "files": 1,
+      "bytes": 1268,
+      "lines": 46
+    },
+    "benchmarks": {
+      "files": 1534,
+      "bytes": 12571213,
+      "lines": 66891
+    },
+    "claude-hooks": {
+      "files": 1,
+      "bytes": 254,
+      "lines": 15
+    },
+    "docs": {
+      "files": 123,
+      "bytes": 3000767,
+      "lines": 20710
+    },
+    "plugins": {
+      "files": 129,
+      "bytes": 3357552,
+      "lines": 75623
+    },
+    "reports": {
+      "files": 15,
+      "bytes": 78160,
+      "lines": 1220
+    },
+    "scripts": {
+      "files": 14,
+      "bytes": 271205,
+      "lines": 6457
+    },
+    "skills": {
+      "files": 450,
+      "bytes": 7952960,
+      "lines": 192037
+    }
+  }
+}
