@@ -234,6 +234,7 @@ from mission_application.acceptance import (  # noqa: E402
     run_acceptance_contract_import_cli,
     run_acceptance_contract_status_cli,
 )
+from mission_application.verifier_policy import load as load_verifier_policy  # noqa: E402
 from mission_application.planning import (  # noqa: E402
     EXECUTOR_HANDOFF_ABORT_REASONS,
     EXECUTOR_HANDOFF_COMMAND_NAMES,
@@ -8344,6 +8345,7 @@ _ACCEPTANCE_CONTRACT_CLI_SERVICES = AcceptanceContractCliServices(
     _artifact_cli_fail,
     _compatibility_operation_arguments,
     _canonical_compatibility_operation,
+    load_verifier_policy,
 )
 
 
