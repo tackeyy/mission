@@ -348,7 +348,7 @@ def test_evaluator_records_os_startup_failure_for_a_large_json_scenario(tmp_path
     assert record["cases"] == []
 
 
-def test_public_smoke_reaps_a_parent_exited_child_that_holds_the_pipe(tmp_path):
+def test_public_smoke_reaps_a_parent_exited_child_that_holds_the_pipe(monkeypatch, tmp_path):
     module = _load()
     candidate = tmp_path / "candidate"; candidate.mkdir()
     parent_exited = tmp_path / "parent-exited"
@@ -357,9 +357,10 @@ def test_public_smoke_reaps_a_parent_exited_child_that_holds_the_pipe(tmp_path):
     os.mkfifo(gate)
     descendant = (
         "import os, pathlib, sys\n"
-        + "os.write(int(sys.argv[1]), b'R')\n"
         + f"gate = os.open({str(gate)!r}, os.O_RDONLY)\n"
-        + "os.read(gate, 1)\n"
+        + "os.write(int(sys.argv[1]), b'R')\n"
+        + "while not os.read(gate, 1):\n"
+        + "    pass\n"
         + f"pathlib.Path({str(survivor)!r}).write_text('alive')\n"
     )
     (candidate / "public_smoke.py").write_text(
@@ -372,7 +373,19 @@ def test_public_smoke_reaps_a_parent_exited_child_that_holds_the_pipe(tmp_path):
         + f"pathlib.Path({str(parent_exited)!r}).write_text('exited')\n",
         encoding="utf-8",
     )
-    record = module.run_public_smoke(candidate)
+    gate_keeper = os.open(gate, os.O_RDWR | os.O_NONBLOCK)
+    actual_popen = module.subprocess.Popen
+
+    def parent_exited_popen(*args, **kwargs):
+        process = actual_popen(*args, **kwargs)
+        process.wait(timeout=1)
+        return process
+
+    monkeypatch.setattr(module.subprocess, "Popen", parent_exited_popen)
+    try:
+        record = module.run_public_smoke(candidate)
+    finally:
+        os.close(gate_keeper)
 
     assert record["status"] == "failed"
     assert record["reason"] == "smoke_reader_incomplete"

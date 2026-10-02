@@ -274,6 +274,17 @@ def _run_bounded(command: list[str], *, timeout_seconds: float) -> tuple[int | N
                 except ProcessLookupError:
                     pass
 
+    def group_exists() -> bool:
+        if os.name != "posix":
+            return process.poll() is None
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
     deadline = time.monotonic() + timeout_seconds
     timed_out = False
     selector = selectors.DefaultSelector()
@@ -304,8 +315,11 @@ def _run_bounded(command: list[str], *, timeout_seconds: float) -> tuple[int | N
         terminate_group()
 
     shutdown_deadline = time.monotonic() + 0.1
-    while process.poll() is None and time.monotonic() < shutdown_deadline:
+    while time.monotonic() < shutdown_deadline:
+        if process.poll() is not None and not group_exists():
+            break
         time.sleep(0.002)
+    incomplete = incomplete or group_exists()
     selector.close()
     for stream in (process.stdout, process.stderr):
         try:
