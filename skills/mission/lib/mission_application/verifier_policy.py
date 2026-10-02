@@ -92,18 +92,37 @@ def validate(value):
             raise VerifierPolicyError("verifier-policy-output-invalid")
         for output in outputs:
             _relative(output, "verifier-policy-output-invalid")
+        if command["kind"] == "test" and any(_paths_conflict(report["path"], path) for path in [*target_paths, *outputs]):
+            raise VerifierPolicyError("verifier-policy-test-report-input-conflict")
         result[identifier] = {key: command[key] for key in sorted(command)}
+    for command in result.values():
+        replay = command.get("replay")
+        if replay is None:
+            continue
+        target = result.get(replay["command_id"])
+        if target is None:
+            raise VerifierPolicyError("verifier-policy-replay-invalid")
+        report = target.get("test_report")
+        if isinstance(report, dict) and _paths_conflict(replay["relative_path"], report["path"]):
+            raise VerifierPolicyError("verifier-policy-replay-report-conflict")
     return result
 
 
 def _validate_explicit_paths(argv, env):
     """Reject path-shaped command inputs that the snapshot cannot bind."""
-    def unsupported(value):
-        candidate = value.split("=", 1)[-1]
-        return candidate.startswith("/") or any(part == ".." for part in candidate.split("/"))
+    import os
+    from urllib.parse import unquote
 
-    if any(unsupported(value) for value in argv[1:]) or any(unsupported(value) for value in env.values()):
+    def unsupported(value):
+        candidate = unquote(value.split("=", 1)[-1])
+        return candidate.lower().startswith("file:") or candidate.startswith("/") or (len(candidate) >= 3 and candidate[0].isalpha() and candidate[1:3] in {":/", ":\\"}) or any(part == ".." for part in candidate.replace("\\", "/").split("/"))
+
+    if any(unsupported(value) for value in argv[1:]) or any(unsupported(part) for value in env.values() for part in value.split(os.pathsep)):
         raise VerifierPolicyError("verifier-policy-explicit-path-unsupported")
+
+
+def _paths_conflict(left, right):
+    return left == right or left.startswith(right + "/") or right.startswith(left + "/")
 
 
 def load(project_root, *, user_path=None):

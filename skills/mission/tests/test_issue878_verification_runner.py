@@ -36,6 +36,15 @@ def _replay_policy():
     return policy
 
 
+def _junit_policy(report):
+    policy = _policy()
+    command = policy["commands"][0]
+    command["kind"] = "test"
+    command["test_report"] = {"format": "junit-xml", "path": "result.xml"}
+    command["argv"] = [command["toolchain"]["path"], "-c", "from pathlib import Path; Path('result.xml').write_text(" + repr(report) + ")"]
+    return policy
+
+
 def _contract(mission_id):
     text = "Run the registered verifier."
     return {
@@ -93,12 +102,33 @@ def test_policy_rejects_absolute_and_escape_path_shapes_outside_toolchain():
     import pytest
     from mission_application.verifier_policy import VerifierPolicyError, validate
 
-    for argv, env in ((["python", "--helper=/tmp/helper.py"], {}), (["python", "../helper.py"], {}), (["python", "-c", "pass"], {"CONFIG": "/tmp/config"})):
+    for argv, env in ((["python", "--helper=/tmp/helper.py"], {}), (["python", "../helper.py"], {}), (["python", "file:%2f%2f%2fprivate%2ftmp%2fhelper.py"], {}), (["python", "C:\\host\\helper.py"], {}), (["python", "-c", "pass"], {"CONFIG": "/tmp/config"}), (["python", "-c", "pass"], {"PYTHONPATH": "relative:/tmp/host"})):
         policy = _policy()
         policy["commands"][0]["argv"] = [policy["commands"][0]["toolchain"]["path"], *argv[1:]]
         policy["commands"][0]["env"] = env
         with pytest.raises(VerifierPolicyError, match="verifier-policy-explicit-path-unsupported"):
             validate(policy)
+
+
+def test_policy_rejects_replay_input_that_can_forge_a_test_report():
+    import pytest
+    from mission_application.verifier_policy import VerifierPolicyError, validate
+
+    policy = _replay_policy()
+    policy["commands"][1]["kind"] = "test"
+    policy["commands"][1]["test_report"] = {"format": "junit-xml", "path": "repro.json"}
+    with pytest.raises(VerifierPolicyError, match="verifier-policy-replay-report-conflict"):
+        validate(policy)
+
+
+def test_policy_rejects_test_report_that_overlaps_declared_input():
+    import pytest
+    from mission_application.verifier_policy import VerifierPolicyError, validate
+
+    policy = _junit_policy("<testsuite><testcase/></testsuite>")
+    policy["commands"][0]["external_inputs"] = [{"kind": "local-file", "source_path": "fixture.xml", "target_path": "result.xml"}]
+    with pytest.raises(VerifierPolicyError, match="verifier-policy-test-report-input-conflict"):
+        validate(policy)
 
 
 def test_public_runner_records_process_bound_receipt(tmp_path, run_cli):
@@ -129,6 +159,28 @@ def test_public_runner_records_process_bound_receipt(tmp_path, run_cli):
     assert import_digest == status_digest == receipt["contract_digest"]
     stored = json.loads(run_cli("get", cwd=tmp_path).stdout)
     assert stored["verification_receipts"][-1] == receipt
+
+
+def test_public_runner_records_failed_junit_report_as_failed_receipt(tmp_path, run_cli):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "tracked.txt").write_text("candidate", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-qm", "base"], cwd=tmp_path, check=True)
+    run_cli("init", "verification runner", "--force-mission", cwd=tmp_path, check=True)
+    policy = _junit_policy("<testsuite><testcase><failure/></testcase></testsuite>")
+    encoded = json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()
+    policy_dir = tmp_path / ".mission"; policy_dir.mkdir()
+    (policy_dir / "verifiers.json").write_bytes(encoded)
+    state = json.loads(run_cli("get", cwd=tmp_path).stdout)
+    contract = _contract(state["mission_id"])
+    contract["verifier_policy_digest"] = "sha256:" + hashlib.sha256(encoded).hexdigest()
+    source = tmp_path / "contract.json"; source.write_text(json.dumps(contract), encoding="utf-8")
+    assert run_cli("acceptance-contract", "import", "--input", str(source), cwd=tmp_path).returncode == 0
+
+    result = run_cli("verification", "run", "--criterion", "AC1", cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["receipt"]["status"] == "failed"
 
 
 def test_public_runner_binds_replay_input_to_frozen_replay_command_and_receipt(tmp_path, run_cli):

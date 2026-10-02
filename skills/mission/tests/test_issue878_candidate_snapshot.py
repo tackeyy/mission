@@ -107,6 +107,28 @@ def test_test_runner_uses_declared_junit_report_not_console_text(tmp_path):
     assert outcome["observed_output_bytes"] > 4
 
 
+def test_test_report_must_be_fresh_valid_and_successful(tmp_path):
+    import pytest
+    from mission_application.verification_runner import VerificationRunnerError, capture_candidate, execute_candidate
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "app.py").write_text("x = 1", encoding="utf-8")
+    (tmp_path / "result.xml").write_text("<testsuite><testcase/></testsuite>", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py", "result.xml"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-qm", "base"], cwd=tmp_path, check=True)
+    candidate = capture_candidate(tmp_path, declared_untracked=())
+    base = {"argv": ["python3", "-c", "pass"], "timeout_sec": 5, "output_limit": 8, "kind": "test", "env": {}, "test_report": {"format": "junit-xml", "path": "result.xml"}}
+    with pytest.raises(VerificationRunnerError, match="test-report-input-conflict"):
+        execute_candidate(candidate, base, relative_cwd=".")
+
+    clean = capture_candidate(tmp_path, declared_untracked=())
+    deep = "<testsuite>" * 65 + "<testcase/>" + "</testsuite>" * 65
+    for report in ("<testsuite><testcase><failure/></testcase></testsuite>", "<unknown><testsuite><testcase/></testsuite></unknown>", "<testsuite tests='2'><testcase/></testsuite>", deep):
+        command = {**base, "argv": ["python3", "-c", "from pathlib import Path; Path('fresh.xml').write_text(" + repr(report) + ")"], "test_report": {"format": "junit-xml", "path": "fresh.xml"}}
+        outcome = execute_candidate(clean, command, relative_cwd=".")
+        assert outcome["status"] == "failed"
+
+
 def test_runner_rejects_undeclared_path_arguments_and_binds_repro_kind(tmp_path):
     import pytest
     from mission_application.verification_runner import VerificationRunnerError, capture_candidate, execute_candidate

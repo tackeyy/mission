@@ -75,7 +75,7 @@ def _target(root: Path, path: str) -> Path:
     return target
 
 
-def _read(root: Path, path: str, mode: int, *, required: bool) -> CandidateFile:
+def _read(root: Path, path: str, mode: int, *, required: bool, max_bytes: int | None = None) -> CandidateFile:
     target = _target(root, path)
     try:
         info = target.lstat()
@@ -92,6 +92,8 @@ def _read(root: Path, path: str, mode: int, *, required: bool) -> CandidateFile:
             opened = os.fstat(handle.fileno())
             if (opened.st_dev, opened.st_ino, opened.st_mode, opened.st_nlink) != (info.st_dev, info.st_ino, info.st_mode, info.st_nlink):
                 raise VerificationRunnerError("candidate-changed-during-read")
+            if max_bytes is not None and opened.st_size > max_bytes:
+                raise VerificationRunnerError("candidate-read-too-large")
             content = handle.read()
             final = os.fstat(handle.fileno())
             if (final.st_dev, final.st_ino, final.st_size, final.st_mtime_ns, final.st_ctime_ns) != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns):
@@ -208,30 +210,70 @@ def _toolchain_matches(command) -> bool:
 
 def _explicit_paths_are_bound(command) -> bool:
     """Only argv[0] is a frozen toolchain path; other path inputs are refused."""
+    import os
+    from urllib.parse import unquote
     def unsafe(value):
-        candidate = value.split("=", 1)[-1]
-        return candidate.startswith("/") or any(part == ".." for part in candidate.split("/"))
-    return not any(unsafe(value) for value in command["argv"][1:]) and not any(unsafe(value) for value in command.get("env", {}).values())
+        candidate = unquote(value.split("=", 1)[-1])
+        return candidate.lower().startswith("file:") or candidate.startswith("/") or (len(candidate) >= 3 and candidate[0].isalpha() and candidate[1:3] in {":/", ":\\"}) or any(part == ".." for part in candidate.replace("\\", "/").split("/"))
+    return not any(unsafe(value) for value in command["argv"][1:]) and not any(unsafe(part) for value in command.get("env", {}).values() for part in value.split(os.pathsep))
 
 
-def _executed_count(command, root: Path) -> int | None:
-    """Read the policy-registered JUnit report, never presentational output."""
+def _executed_count(command, root: Path) -> tuple[int | None, bool]:
+    """Read a fresh, bounded JUnit report and verify its reported outcome."""
     if command.get("kind") != "test":
-        return None
+        return None, True
     report = command.get("test_report")
     if not isinstance(report, dict) or report.get("format") != "junit-xml":
-        return None
+        return None, False
     try:
-        source = _read(root, _relative(report.get("path")), 0, required=False)
+        source = _read(root, _relative(report.get("path")), 0, required=False, max_bytes=1048576)
         if source.content is None:
-            return None
+            return None, False
         root_element = ET.fromstring(source.content)
     except (ET.ParseError, VerificationRunnerError, TypeError):
-        return None
-    suites = [root_element] if root_element.tag == "testsuite" else root_element.findall("testsuite")
-    if not suites:
-        return None
-    return sum(1 for suite in suites for case in suite.findall("testcase") if case.find("skipped") is None)
+        return None, False
+    if root_element.tag == "testsuite":
+        suites = [root_element]
+    elif root_element.tag == "testsuites" and all(child.tag == "testsuite" for child in root_element):
+        suites = list(root_element)
+    else:
+        return None, False
+    records = []
+    stack = [(suite, None, 1) for suite in reversed(suites)]
+    try:
+        while stack:
+            suite, parent, depth = stack.pop()
+            if depth > 64 or len(records) >= 4096:
+                return None, False
+            record = {"suite": suite, "parent": parent, "tests": 0, "failures": 0, "errors": 0, "skipped": 0}
+            index = len(records)
+            records.append(record)
+            for child in suite:
+                if child.tag == "testcase":
+                    if any(item.tag not in {"failure", "error", "skipped", "system-out", "system-err"} for item in child):
+                        return None, False
+                    record["tests"] += 1
+                    record["failures"] += child.find("failure") is not None
+                    record["errors"] += child.find("error") is not None
+                    record["skipped"] += child.find("skipped") is not None
+                    if record["tests"] > 65536:
+                        return None, False
+                elif child.tag == "testsuite":
+                    stack.append((child, index, depth + 1))
+                elif child.tag not in {"properties", "system-out", "system-err"}:
+                    return None, False
+        for record in reversed(records):
+            if record["parent"] is not None:
+                for name in ("tests", "failures", "errors", "skipped"):
+                    records[record["parent"]][name] += record[name]
+        for record in records:
+            for name in ("tests", "failures", "errors", "skipped"):
+                if name in record["suite"].attrib and int(record["suite"].attrib[name]) != record[name]:
+                    return None, False
+    except (ValueError, TypeError):
+        return None, False
+    root_stats = {name: sum(record[name] for record in records if record["parent"] is None) for name in ("tests", "failures", "errors", "skipped")}
+    return root_stats["tests"] - root_stats["skipped"], root_stats["failures"] == root_stats["errors"] == 0
 
 
 def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
@@ -250,6 +292,14 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
         raise VerificationRunnerError("verifier-definition-invalid")
     if not _explicit_paths_are_bound(command):
         raise VerificationRunnerError("verifier-explicit-path-unsupported")
+    report_path = None
+    if command.get("kind") == "test":
+        report = command.get("test_report")
+        if not isinstance(report, dict) or report.get("format") != "junit-xml":
+            raise VerificationRunnerError("test-report-invalid")
+        report_path = _relative(report.get("path"))
+        if any(_paths_conflict(report_path, item.path) for item in candidate.files):
+            raise VerificationRunnerError("test-report-input-conflict")
     before = candidate.digest
     started = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     if not _toolchain_matches(command):
@@ -266,6 +316,8 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
                 raise VerificationRunnerError("repro-input-invalid")
             if any(_paths_conflict(path, item.path) for item in candidate.files):
                 raise VerificationRunnerError("repro-input-path-conflict")
+            if report_path is not None and _paths_conflict(path, report_path):
+                raise VerificationRunnerError("test-report-input-conflict")
             target = _target(root, path)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
@@ -339,7 +391,7 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
             exit_code = child.returncode
         selector.close()
         stdout.close()
-        count = _executed_count(command, root)
+        count, report_successful = _executed_count(command, root)
         try:
             observed = tuple(_read(root, item.path, item.mode, required=True) for item in candidate.files)
             candidate_stale = _digest(observed) != candidate.digest
@@ -352,7 +404,7 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
     if before != after:
         raise VerificationRunnerError("candidate-mutated")
     toolchain_stale = not _toolchain_matches(command)
-    passed = not timed_out and not candidate_stale and not toolchain_stale and exit_code == 0 and (command.get("kind") != "test" or (count is not None and count > 0))
+    passed = not timed_out and not candidate_stale and not toolchain_stale and exit_code == 0 and (command.get("kind") != "test" or (count is not None and count > 0 and report_successful))
     return {
         "started_at": started,
         "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
