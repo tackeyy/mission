@@ -156,6 +156,7 @@ def test_templates_render_worker_reference_and_control_without_hidden_flags():
             assert "BROKEN" not in "\n".join(expected.values())
             assert "Input:" in expected["README.md"]
             assert "Output:" in expected["README.md"]
+            assert all(";" not in content for name, content in expected.items() if name.endswith(".py"))
 
 
 def test_assignment_requires_matching_source_and_export_task_roots(tmp_path):

@@ -2,6 +2,7 @@
 """Generate neutral #883 worker, repair, and control repositories deterministically."""
 from __future__ import annotations
 
+import ast
 import json
 import hashlib
 from pathlib import Path
@@ -281,7 +282,10 @@ def stateful_files(task_id: str, broken: bool, requirement: str) -> dict[str, st
         })
     else:
         raise ValueError(f"unknown stateful task: {task_id}")
-    return common
+    return {
+        name: ast.unparse(ast.parse(content)) + "\n" if name.endswith(".py") else content
+        for name, content in common.items()
+    }
 
 
 def files(task_id: str, broken: bool, requirement: str) -> dict[str, str]:

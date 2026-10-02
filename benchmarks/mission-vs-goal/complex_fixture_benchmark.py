@@ -176,7 +176,7 @@ def _run_bounded(command: list[str], *, timeout_seconds: float) -> tuple[int | N
             break
         if process.poll() is not None and not selector.get_map():
             break
-    if process.poll() is None:
+    if process.poll() is None and not exceeded:
         timed_out = True
         terminate_group()
     shutdown_deadline = time.monotonic() + 0.1
