@@ -158,6 +158,16 @@ def probe_codex(worktree: Path, objective: str, acceptance: str, timeout: float,
             if not matched:
                 return {"native_goal_observed": False, "fidelity": "unverified", "outcome": "failed", "reason": "package_skill_unobserved", "observed_config": observed_config, "config_matches": config_matches}
             skill_input = [{"type": "skill", "name": "mission", "path": str(skill_path)}]
+            state_started_ns = time.time_ns()
+            rpc.request("turn/start", {"threadId": thread_id, "model": model, "effort": effort, "permissions": permissions, "input": [*skill_input, {"type": "text", "text": assignment}]})
+            rpc.wait_for_event("turn/completed")
+            state = _fresh_mission_state(worktree, state_started_ns)
+            base = {"native_goal_observed": False, "package_delivery": "skill_input", "budget_enforcement": "unavailable", "observed_config": observed_config, "config_matches": config_matches}
+            if state and state.get("passes") is True and config_matches:
+                return {**base, "fidelity": "verified", "outcome": "completed", "reason": None, "mission_state": state}
+            if state and isinstance(state.get("halt_reason"), str) and state["halt_reason"] and config_matches:
+                return {**base, "fidelity": "verified", "outcome": "blocked", "reason": "mission_halted", "mission_state": state}
+            return {**base, "fidelity": "unverified", "outcome": "failed", "reason": "mission_state_unobserved" if state is None else "execution_config_mismatch", "mission_state": state}
         goal = {"threadId": thread_id, "objective": assignment, "status": "active"}
         if token_budget is not None:
             goal["tokenBudget"] = token_budget
@@ -243,6 +253,22 @@ def _current_mission_state(worktree: Path, session_id: object, started_ns: int) 
         if isinstance(state, dict) and state.get("session_id") in {session_id, f"cc-{session_id}"}:
             return {key: state.get(key) for key in ("session_id", "passes", "halt_reason", "loop_active", "mission_id")}
     return None
+
+
+def _fresh_mission_state(worktree: Path, started_ns: int) -> dict | None:
+    root = worktree / ".mission-state" / "sessions"
+    if not root.is_dir():
+        return None
+    candidates = [path for path in root.glob("*.json") if path.stat().st_mtime_ns >= started_ns]
+    if len(candidates) != 1:
+        return None
+    try:
+        state = json.loads(candidates[0].read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(state, dict):
+        return None
+    return {key: state.get(key) for key in ("session_id", "passes", "halt_reason", "loop_active", "mission_id")}
 
 
 def _commit_at(worktree: Path) -> str:

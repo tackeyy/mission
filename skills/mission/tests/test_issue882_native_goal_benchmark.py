@@ -334,12 +334,14 @@ def test_codex_mission_uses_listed_fixed_skill_as_a_native_input(tmp_path, monke
         def close(self): pass
     fake = FakeRpc(); monkeypatch.setattr(probe, "RpcProcess", lambda *_args: fake)
     result = probe.probe_codex(tmp_path, "work", "accepted", 1, None, 1, "m", "high", "p", "mission", package)
-    assert result["outcome"] == "completed"
+    assert result["outcome"] == "failed"
     assert result["package_delivery"] == "skill_input"
+    assert result["reason"] == "mission_state_unobserved"
     roots = next(params for name, params in fake.calls if name == "skills/extraRoots/set")
     assert roots == {"extraRoots": [str(package / "skills")]}
     turn = next(params for name, params in fake.calls if name == "turn/start")
     assert turn["input"][0] == {"type": "skill", "name": "mission", "path": str(skill)}
+    assert not any(name.startswith("thread/goal/") for name, _ in fake.calls)
 
 
 def test_codex_config_mismatch_is_not_verified_even_when_goal_completes(tmp_path, monkeypatch):
