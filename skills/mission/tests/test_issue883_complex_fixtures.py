@@ -196,6 +196,12 @@ def test_materializer_binds_current_source_commit_and_creates_one_task_repo(tmp_
     assert record["worker_digest"].startswith("sha256:")
 
 
+def test_materializer_rejects_a_mutable_source_ref(tmp_path):
+    module = _load()
+    with __import__("pytest").raises(ValueError, match="full immutable SHA"):
+        module.materialize_task(ROOT, "HEAD", "concurrency-lost-update", "worker", tmp_path / "generated")
+
+
 def test_export_rejects_a_caller_catalog_root_that_is_not_the_fixed_source(tmp_path):
     module = _load()
     commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, capture_output=True, check=True).stdout.strip()
@@ -220,12 +226,17 @@ def test_evaluator_rejects_a_snapshot_change_without_discarding_its_record(monke
 def test_bounded_runner_reaps_a_parent_exit_descendant_holding_a_pipe(tmp_path):
     module = _load()
     pid_path = tmp_path / "descendant.pid"
+    survivor_path = tmp_path / "descendant-survived"
+    descendant = (
+        "import pathlib, time; time.sleep(.35); "
+        f"pathlib.Path({str(survivor_path)!r}).write_text('alive')"
+    )
     command = [
         sys.executable,
         "-c",
         (
             "import pathlib, subprocess, sys; "
-            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(5)']); "
+            f"child = subprocess.Popen([sys.executable, '-c', {descendant!r}]); "
             f"pathlib.Path({str(pid_path)!r}).write_text(str(child.pid))"
         ),
     ]
@@ -234,6 +245,6 @@ def test_bounded_runner_reaps_a_parent_exit_descendant_holding_a_pipe(tmp_path):
 
     assert incomplete
     assert time.monotonic() - started < 0.5
-    child_pid = int(pid_path.read_text())
-    with __import__("pytest").raises(ProcessLookupError):
-        __import__("os").kill(child_pid, 0)
+    assert int(pid_path.read_text()) > 0
+    time.sleep(0.45)
+    assert not survivor_path.exists()

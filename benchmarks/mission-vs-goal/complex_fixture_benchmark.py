@@ -13,6 +13,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import selectors
 import signal
 import shutil
@@ -20,11 +21,13 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 from pathlib import Path
 from typing import Any
 
 
 MAX_EVALUATOR_OUTPUT_BYTES = 65536
+_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 def _digest_bytes(value: bytes) -> str:
@@ -40,6 +43,14 @@ def _load_generator(path: Path) -> Any:
     return generator
 
 
+def _load_verified_generator(path: Path, source: bytes) -> Any:
+    """Execute only the exact generator bytes already bound to a commit."""
+    module = types.ModuleType("complex_fixture_generator_verified")
+    module.__file__ = str(path)
+    exec(compile(source, str(path), "exec"), module.__dict__)
+    return module
+
+
 def _digest_tree(root: Path) -> str:
     """Use #882's regular-file, no-link snapshot boundary verbatim."""
     source = Path(__file__).with_name("native_goal_benchmark.py")
@@ -52,6 +63,8 @@ def _digest_tree(root: Path) -> str:
 
 def materialize_task(repo_root: Path, source_commit: str, task_id: str, group: str, destination: Path) -> dict[str, Any]:
     """Bind fixed H inputs, then create one generated task repository."""
+    if not _COMMIT_RE.fullmatch(source_commit):
+        raise ValueError("fixture source commit must be a full immutable SHA")
     generator_path = repo_root / "benchmarks" / "mission-vs-goal" / "generate_complex_fixtures.py"
     shown = subprocess.run(
         ["git", "show", f"{source_commit}:{generator_path.relative_to(repo_root)}"],
@@ -59,7 +72,7 @@ def materialize_task(repo_root: Path, source_commit: str, task_id: str, group: s
     )
     if shown.returncode != 0 or shown.stdout != generator_path.read_bytes():
         raise ValueError("fixture generator does not match the declared commit")
-    generator = _load_generator(generator_path)
+    generator = _load_verified_generator(generator_path, shown.stdout)
     catalog_bytes = generator.render_catalog_bytes()
     catalog = generator.render_catalog()
     entries = {entry["id"]: entry for entry in catalog["tasks"]}
