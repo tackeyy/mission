@@ -142,7 +142,9 @@ def probe_codex(worktree: Path, objective: str, acceptance: str, timeout: float,
         thread_started = rpc.request("thread/start", {"cwd": str(worktree), "model": model, "permissions": permissions})
         thread_id = _thread_id(thread_started)
         observed_config = {key: thread_started.get(key) for key in ("model", "modelProvider", "reasoningEffort", "activePermissionProfile", "sandbox")}
-        config_matches = observed_config["model"] == model and observed_config["reasoningEffort"] in {None, effort}
+        profile = observed_config["activePermissionProfile"]
+        profile_id = profile.get("id") if isinstance(profile, dict) else None
+        config_matches = observed_config["model"] == model and observed_config["reasoningEffort"] == effort and profile_id == permissions
         assignment = f"{objective}\n\nAcceptance criterion: {acceptance}"
         skill_input: list[dict] = []
         if arm == "mission":
@@ -175,11 +177,13 @@ def probe_codex(worktree: Path, objective: str, acceptance: str, timeout: float,
         assert observation is not None
         if observation["goal_status"] == "active":
             observation = {**observation, "fidelity": "verified", "outcome": "blocked", "reason": "assignment_turn_limit"}
+        if not config_matches and observation["fidelity"] == "verified":
+            observation = {**observation, "fidelity": "unverified", "reason": "execution_config_mismatch"}
         try:
             clear_response = rpc.request("thread/goal/clear", {"threadId": thread_id})
         except (OSError, RuntimeError, TimeoutError) as exc:
-            return {**observation, "goal_cleared": False, "cleanup_error": type(exc).__name__, "observed_config": observed_config, "config_matches": config_matches, "package_delivery": "skill_input" if arm == "mission" else None, "stderr_bytes": getattr(rpc, "stderr_bytes", 0), "stderr_truncated": getattr(rpc, "stderr_truncated", False)}
-        return {**observation, "goal_cleared": bool(clear_response.get("cleared")), "cleanup_error": None, "observed_config": observed_config, "config_matches": config_matches, "package_delivery": "skill_input" if arm == "mission" else None, "stderr_bytes": getattr(rpc, "stderr_bytes", 0), "stderr_truncated": getattr(rpc, "stderr_truncated", False)}
+            return {**observation, "goal_cleared": False, "cleanup_error": type(exc).__name__, "observed_config": observed_config, "config_matches": config_matches, "budget_enforcement": "goal_native" if arm == "goal" else "unavailable", "package_delivery": "skill_input" if arm == "mission" else None, "stderr_bytes": getattr(rpc, "stderr_bytes", 0), "stderr_truncated": getattr(rpc, "stderr_truncated", False)}
+        return {**observation, "goal_cleared": bool(clear_response.get("cleared")), "cleanup_error": None, "observed_config": observed_config, "config_matches": config_matches, "budget_enforcement": "goal_native" if arm == "goal" else "unavailable", "package_delivery": "skill_input" if arm == "mission" else None, "stderr_bytes": getattr(rpc, "stderr_bytes", 0), "stderr_truncated": getattr(rpc, "stderr_truncated", False)}
     finally:
         rpc.close()
 

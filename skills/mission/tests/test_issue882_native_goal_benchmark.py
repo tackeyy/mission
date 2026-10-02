@@ -239,7 +239,7 @@ def test_codex_probe_uses_goal_protocol_and_preserves_budget_limited_outcome(tmp
             self.calls = []
         def request(self, method, params):
             self.calls.append((method, params))
-            if method == "thread/start": return {"thread": {"id": "thread-1"}}
+            if method == "thread/start": return {"thread": {"id": "thread-1"}, "model": "model-a", "reasoningEffort": "high", "activePermissionProfile": {"id": "workspace"}}
             if method == "thread/goal/set": return {"goal": {"threadId": "thread-1", "objective": params["objective"], "status": "active"}}
             if method == "thread/goal/get": return {"goal": {"threadId": "thread-1", "objective": fake.calls[2][1]["objective"], "status": "budgetLimited", "tokenBudget": 5}}
             if method == "turn/start": return {"turn": {"id": "turn-1"}}
@@ -340,6 +340,27 @@ def test_codex_mission_uses_listed_fixed_skill_as_a_native_input(tmp_path, monke
     assert roots == {"extraRoots": [str(package / "skills")]}
     turn = next(params for name, params in fake.calls if name == "turn/start")
     assert turn["input"][0] == {"type": "skill", "name": "mission", "path": str(skill)}
+
+
+def test_codex_config_mismatch_is_not_verified_even_when_goal_completes(tmp_path, monkeypatch):
+    probe = _load_probe()
+    class FakeRpc:
+        def __init__(self, *_args): self.events = [{"method": "turn/started", "params": {"threadId": "t", "turnId": "turn"}}, {"method": "turn/completed", "params": {"threadId": "t", "turnId": "turn"}}]
+        def request(self, method, params):
+            if method == "thread/start": return {"thread": {"id": "t"}, "model": "other", "reasoningEffort": "low", "activePermissionProfile": {"id": "p"}}
+            if method == "thread/goal/set": return {"goal": {"threadId": "t", "objective": params["objective"], "status": "active"}}
+            if method == "turn/start": return {"turn": {"id": "turn"}}
+            if method == "thread/goal/get": return {"goal": {"threadId": "t", "objective": "work\n\nAcceptance criterion: accepted", "status": "complete"}}
+            if method == "thread/goal/clear": return {"cleared": True}
+            return {}
+        def wait_for_event(self, _): return True
+        def close(self): pass
+    monkeypatch.setattr(probe, "RpcProcess", FakeRpc)
+    result = probe.probe_codex(tmp_path, "work", "accepted", 1, 1, 1, "requested", "low", "p")
+    assert result["outcome"] == "completed"
+    assert result["fidelity"] == "unverified"
+    assert result["reason"] == "execution_config_mismatch"
+    assert result["budget_enforcement"] == "goal_native"
 
 
 def test_new_schema_accepts_unsupported_and_keeps_historical_schema_separate():
