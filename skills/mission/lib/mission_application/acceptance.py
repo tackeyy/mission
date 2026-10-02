@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from acceptance_contract import AcceptanceContractError, digest, load, status
+from acceptance_contract import AcceptanceContractError, canonical_contract_digest, digest, load, status
 from mission_application.evidence import PreparedEvidenceOperation, execute_evidence_operation
 from mission_application.cli_operation import CliOperationRejected, prepare_cli_operation
 from mission_application.artifact import EvidenceFailure
@@ -55,7 +55,7 @@ def prepare_acceptance_contract_import(state: object, *, now: object, raw: objec
             raise EvidenceFailure(str(exc)) from exc
     frozen = freeze_json_value(contract)
     command = ImportAcceptanceContract(now, frozen)
-    result = {"acceptance_contract": {**copy.deepcopy(contract), "digest": digest(contract)}}
+    result = {"acceptance_contract": {**copy.deepcopy(contract), "digest": canonical_contract_digest(contract)}}
     return PreparedEvidenceOperation(command, (), result, volatile_fields=("imported_at",))
 
 
@@ -82,10 +82,10 @@ def acceptance_contract_status(state: object) -> dict:
     if not isinstance(contract, dict):
         return status(None)
     stored = dict(contract)
-    stored.pop("imported_at", None)
     binding = stored.pop("verifier_policy", None)
     result = status(stored)
     if result["present"]:
+        result["digest"] = canonical_contract_digest(contract)
         result["imported_at"] = contract.get("imported_at")
         result["verifier_policy"] = binding
     return result

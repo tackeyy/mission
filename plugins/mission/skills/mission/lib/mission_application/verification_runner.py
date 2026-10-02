@@ -34,7 +34,7 @@ class CandidateSnapshot:
 
 
 def _relative(path: str) -> str:
-    if not isinstance(path, str) or not path or "\x00" in path or path.startswith("/") or "\\" in path or len(path) >= 2 and path[1] == ":" or any(part in {"", ".", ".."} for part in path.split("/")):
+    if not isinstance(path, str) or not path or "\x00" in path or any(0xD800 <= ord(character) <= 0xDFFF for character in path) or path.startswith("/") or "\\" in path or len(path) >= 2 and path[1] == ":" or any(part in {"", ".", ".."} for part in path.split("/")):
         raise VerificationRunnerError("candidate-path-invalid")
     return path
 
@@ -116,6 +116,22 @@ def _digest(files) -> str:
     return "sha256:" + digest.hexdigest()
 
 
+def _paths_conflict(left: str, right: str) -> bool:
+    return left == right or left.startswith(right + "/") or right.startswith(left + "/")
+
+
+def _validate_materialized_paths(files) -> None:
+    paths = {_relative(item.path) for item in files}
+    if len(paths) != len(files):
+        raise VerificationRunnerError("candidate-path-conflict")
+    for path in paths:
+        parent = path
+        while "/" in parent:
+            parent = parent.rsplit("/", 1)[0]
+            if parent in paths:
+                raise VerificationRunnerError("candidate-path-conflict")
+
+
 def capture_candidate(root, *, declared_untracked, external_inputs=()) -> CandidateSnapshot:
     root = Path(root).resolve()
     tracked = _tracked(root)
@@ -130,7 +146,7 @@ def capture_candidate(root, *, declared_untracked, external_inputs=()) -> Candid
             raise VerificationRunnerError("declared-output-tracked")
         files.append(_read(root, path, 0, required=False))
     for item in external_inputs:
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or item.get("kind") != "local-file":
             raise VerificationRunnerError("external-input-invalid")
         source = _relative(item.get("source_path"))
         target = _relative(item.get("target_path"))
@@ -142,13 +158,15 @@ def capture_candidate(root, *, declared_untracked, external_inputs=()) -> Candid
             raise VerificationRunnerError("external-input-invalid") from exc
         files.append(CandidateFile(target, source_file.mode, source_file.content))
     files.sort(key=lambda item: item.path)
+    _validate_materialized_paths(files)
     return CandidateSnapshot(tuple(files), _digest(files))
 
 
 @contextlib.contextmanager
 def materialize_candidate(candidate):
-    if not isinstance(candidate, CandidateSnapshot) or len({item.path for item in candidate.files}) != len(candidate.files) or candidate.digest != _digest(candidate.files):
+    if not isinstance(candidate, CandidateSnapshot) or candidate.digest != _digest(candidate.files):
         raise VerificationRunnerError("candidate-digest-invalid")
+    _validate_materialized_paths(candidate.files)
     with tempfile.TemporaryDirectory(prefix="mission-verification-") as raw:
         root = Path(raw).resolve()
         for item in candidate.files:
@@ -227,6 +245,11 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
         repro_digest = None
         if repro_input is not None:
             path, content = repro_input
+            path = _relative(path)
+            if not isinstance(content, bytes):
+                raise VerificationRunnerError("repro-input-invalid")
+            if any(_paths_conflict(path, item.path) for item in candidate.files):
+                raise VerificationRunnerError("repro-input-path-conflict")
             target = _target(root, path)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
@@ -255,7 +278,8 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
         output = bytearray()
         selector = selectors.DefaultSelector()
         assert child.stdout is not None
-        selector.register(child.stdout, selectors.EVENT_READ)
+        stdout = child.stdout
+        selector.register(stdout, selectors.EVENT_READ)
         deadline = time.monotonic() + timeout
         while selector.get_map() or child.poll() is None:
             remaining = deadline - time.monotonic()
@@ -264,8 +288,11 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
                     timed_out = True
                     try:
                         os.killpg(child.pid, signal.SIGKILL)
-                    except ProcessLookupError:
+                    except OSError:
                         pass
+                    selector.close()
+                    stdout.close()
+                    break
                 remaining = 0.1
             for key, _event in selector.select(min(remaining, 0.1)):
                 chunk = os.read(key.fd, 65536)
@@ -273,9 +300,19 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
                     selector.unregister(key.fileobj)
                 elif len(output) < limit:
                     output.extend(chunk[:limit - len(output)])
-        child.wait()
-        exit_code = child.returncode
+        try:
+            child.wait(timeout=0.2)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            exit_code = child.poll()
+        else:
+            exit_code = child.returncode
         selector.close()
+        stdout.close()
         observed = tuple(_read(root, item.path, item.mode, required=True) for item in candidate.files)
         candidate_stale = _digest(observed) != candidate.digest
     output = bytes(output)

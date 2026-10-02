@@ -25,6 +25,8 @@ def _text(value, code):
 
 def _relative(value, code):
     value = _text(value, code)
+    if any(0xD800 <= ord(character) <= 0xDFFF for character in value):
+        raise VerifierPolicyError(code)
     if value.startswith("/") or "\\" in value or len(value) >= 2 and value[1] == ":" or any(part in {"", ".", ".."} for part in value.split("/")):
         if value != ".":
             raise VerifierPolicyError(code)
@@ -56,6 +58,8 @@ def validate(value):
             raise VerifierPolicyError("verifier-policy-command-invalid")
         pattern = command.get("executed_count_pattern")
         if command["kind"] == "test" and (not isinstance(pattern, str) or not pattern or len(pattern) > 512):
+            raise VerifierPolicyError("verifier-policy-test-adapter-invalid")
+        if command["kind"] == "test" and pattern != r"(\d+) tests":
             raise VerifierPolicyError("verifier-policy-test-adapter-invalid")
         if command["kind"] == "command" and pattern is not None:
             raise VerifierPolicyError("verifier-policy-command-invalid")

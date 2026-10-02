@@ -1,5 +1,6 @@
 """#878 candidate snapshot regression tests."""
 import subprocess
+import time
 
 
 def test_snapshot_uses_dirty_tracked_bytes_and_fresh_materialization(tmp_path):
@@ -30,6 +31,8 @@ def test_rejects_forged_escape_and_distinguishes_deleted_file_from_dash():
     with pytest.raises(VerificationRunnerError, match="candidate-digest-invalid"):
         with materialize_candidate(CandidateSnapshot(dash, _digest(deleted))):
             pass
+    with pytest.raises(VerificationRunnerError, match="candidate-path-invalid"):
+        _digest((CandidateFile("bad\ud800", 0o644, b"x"),))
 
 
 def test_snapshot_materializes_declared_local_input_and_rejects_target_collision(tmp_path):
@@ -47,6 +50,18 @@ def test_snapshot_materializes_declared_local_input_and_rejects_target_collision
         assert (directory / "bound" / "input.txt").read_text(encoding="utf-8") == "bound"
     with pytest.raises(VerificationRunnerError, match="external-input-target-conflict"):
         capture_candidate(tmp_path, declared_untracked=(), external_inputs=[{"kind": "local-file", "source_path": "input.txt", "target_path": "tracked.txt"}])
+    (tmp_path / "other.txt").write_text("other", encoding="utf-8")
+    (tmp_path / "third.txt").write_text("third", encoding="utf-8")
+    with pytest.raises(VerificationRunnerError, match="candidate-path-conflict"):
+        capture_candidate(tmp_path, declared_untracked=(), external_inputs=[
+            {"kind": "local-file", "source_path": "input.txt", "target_path": "bound"},
+            {"kind": "local-file", "source_path": "other.txt", "target_path": "bound-other"},
+            {"kind": "local-file", "source_path": "third.txt", "target_path": "bound/input.txt"},
+        ])
+    with pytest.raises(VerificationRunnerError, match="candidate-path-conflict"):
+        capture_candidate(tmp_path, declared_untracked=(), external_inputs=[
+            {"kind": "local-file", "source_path": "input.txt", "target_path": "tracked.txt/input.txt"},
+        ])
 
 
 def test_runner_bounds_output_times_out_and_rejects_zero_test_count(tmp_path):
@@ -59,8 +74,10 @@ def test_runner_bounds_output_times_out_and_rejects_zero_test_count(tmp_path):
     candidate = capture_candidate(tmp_path, declared_untracked=())
     timeout = execute_candidate(candidate, {"argv": ["python3", "-c", "import os, time; os.close(1); os.close(2); time.sleep(2)"], "timeout_sec": 1, "output_limit": 8, "kind": "command", "env": {}}, relative_cwd=".")
     assert timeout["status"] == "blocked" and timeout["timed_out"] is True
-    descendant = execute_candidate(candidate, {"argv": ["python3", "-c", "import subprocess, sys; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(2)'])"], "timeout_sec": 1, "output_limit": 8, "kind": "command", "env": {}}, relative_cwd=".")
+    started = time.monotonic()
+    descendant = execute_candidate(candidate, {"argv": ["python3", "-c", "import subprocess, sys; subprocess.Popen([sys.executable, '-c', 'import os, time; os.setsid(); time.sleep(2)'])"], "timeout_sec": 1, "output_limit": 8, "kind": "command", "env": {}}, relative_cwd=".")
     assert descendant["status"] == "blocked" and descendant["timed_out"] is True
+    assert time.monotonic() - started < 1.8
     zero = execute_candidate(candidate, {"argv": ["python3", "-c", "print('0 tests')"], "timeout_sec": 5, "output_limit": 4, "kind": "test", "executed_count_pattern": r"(\\d+) tests", "env": {}}, relative_cwd=".")
     assert zero["status"] == "failed" and zero["executed_count"] == 0
     mutation = execute_candidate(candidate, {"argv": ["python3", "-c", "from pathlib import Path; Path('app.py').write_text('mutated')"], "timeout_sec": 5, "output_limit": 8, "kind": "command", "env": {}}, relative_cwd=".")

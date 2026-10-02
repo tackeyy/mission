@@ -77,6 +77,18 @@ def test_legacy_verifier_policy_schema_is_explicitly_unsupported():
         validate({"schema": "mission-verifier-policy/1", "commands": []})
 
 
+def test_policy_rejects_unbounded_test_count_pattern_before_process_execution():
+    import pytest
+    from mission_application.verifier_policy import VerifierPolicyError, validate
+
+    policy = _policy()
+    policy["commands"][0]["kind"] = "test"
+    policy["commands"][0]["executed_count_pattern"] = "("
+
+    with pytest.raises(VerifierPolicyError, match="verifier-policy-test-adapter-invalid"):
+        validate(policy)
+
+
 def test_public_runner_records_process_bound_receipt(tmp_path, run_cli):
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     (tmp_path / "tracked.txt").write_text("candidate", encoding="utf-8")
@@ -90,7 +102,8 @@ def test_public_runner_records_process_bound_receipt(tmp_path, run_cli):
     contract = _contract(state["mission_id"])
     contract["verifier_policy_digest"] = "sha256:" + hashlib.sha256(encoded).hexdigest()
     source = tmp_path / "contract.json"; source.write_text(json.dumps(contract), encoding="utf-8")
-    assert run_cli("acceptance-contract", "import", "--input", str(source), cwd=tmp_path).returncode == 0
+    imported = run_cli("acceptance-contract", "import", "--input", str(source), cwd=tmp_path)
+    assert imported.returncode == 0
 
     result = run_cli("verification", "run", "--criterion", "AC1", cwd=tmp_path)
 
@@ -99,6 +112,9 @@ def test_public_runner_records_process_bound_receipt(tmp_path, run_cli):
     assert receipt["schema"] == "mission-verification-receipt/1"
     assert receipt["status"] == "passed"
     assert receipt["argv"] == _policy()["commands"][0]["argv"]
+    import_digest = json.loads(imported.stdout)["acceptance_contract"]["digest"]
+    status_digest = json.loads(run_cli("acceptance-contract", "status", cwd=tmp_path).stdout)["digest"]
+    assert import_digest == status_digest == receipt["contract_digest"]
     stored = json.loads(run_cli("get", cwd=tmp_path).stdout)
     assert stored["verification_receipts"][-1] == receipt
 
@@ -135,6 +151,33 @@ def test_public_runner_binds_replay_input_to_frozen_replay_command_and_receipt(t
     assert rejected.returncode == 0, rejected.stderr
     assert json.loads(rejected.stdout)["receipt"]["status"] == "blocked"
     assert json.loads(rejected.stdout)["receipt"]["block_reason"] == "replay-input-invalid"
+
+
+def test_public_runner_blocks_replay_path_prefix_collision(tmp_path, run_cli):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "tracked.txt").write_text("candidate", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-qm", "base"], cwd=tmp_path, check=True)
+    run_cli("init", "verification runner", "--force-mission", cwd=tmp_path, check=True)
+    policy_dir = tmp_path / ".mission"; policy_dir.mkdir()
+    policy = _replay_policy()
+    policy["commands"][0]["replay"]["relative_path"] = "tracked.txt/repro.json"
+    encoded = json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()
+    (policy_dir / "verifiers.json").write_bytes(encoded)
+    state = json.loads(run_cli("get", cwd=tmp_path).stdout)
+    contract = _contract(state["mission_id"])
+    contract["verifier_policy_digest"] = "sha256:" + hashlib.sha256(encoded).hexdigest()
+    source = tmp_path / "contract.json"; source.write_text(json.dumps(contract), encoding="utf-8")
+    assert run_cli("acceptance-contract", "import", "--input", str(source), cwd=tmp_path).returncode == 0
+    repro = tmp_path / "repro.json"
+    repro.write_text(json.dumps({"artifact_kind": "counterexample", "content": "proof"}), encoding="utf-8")
+
+    result = run_cli("verification", "run", "--criterion", "AC1", "--repro-input", str(repro), cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads(result.stdout)["receipt"]
+    assert receipt["status"] == "blocked"
+    assert receipt["block_reason"] == "replay-input-path-conflict"
 
 
 def test_receipt_record_refuses_to_overwrite_a_non_history_value():

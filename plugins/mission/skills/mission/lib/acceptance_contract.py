@@ -140,6 +140,16 @@ def digest(contract: dict) -> str:
     return "sha256:" + hashlib.sha256(canonical_bytes(contract)).hexdigest()
 
 
+def canonical_contract_digest(contract: dict) -> str:
+    """Identify the imported contract independently of frozen runtime binding."""
+    if not isinstance(contract, dict):
+        raise AcceptanceContractError("contract-digest-invalid")
+    identity = dict(contract)
+    identity.pop("imported_at", None)
+    identity.pop("verifier_policy", None)
+    return digest(identity)
+
+
 def status(contract: object) -> dict:
     if not isinstance(contract, dict):
         return {"present": False}
