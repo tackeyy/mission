@@ -2,9 +2,9 @@
 
 import importlib.util
 import json
+import os
 import sys
 import tarfile
-import time
 from pathlib import Path
 
 import pytest
@@ -423,13 +423,54 @@ def test_claude_mission_probe_uses_the_same_fixed_plugin_package(tmp_path, monke
 def test_mission_state_requires_the_current_codex_session_binding(tmp_path):
     probe = _load_probe()
     sessions = tmp_path / ".mission-state" / "sessions"; sessions.mkdir(parents=True)
-    started = time.time_ns()
-    (sessions / "cx-thread.json").write_text(json.dumps({"session_id": "cx-thread", "mission_id": "m", "passes": True, "loop_active": False}), encoding="utf-8")
-    assert probe._fresh_mission_state(tmp_path, started, "thread") is not None
-    (sessions / "cx-other.json").write_text(json.dumps({"session_id": "cx-other", "mission_id": "other", "passes": True}), encoding="utf-8")
-    assert probe._fresh_mission_state(tmp_path, started, "other") is not None
-    (sessions / "cx-wrong.json").write_text(json.dumps({"session_id": "cx-not-wrong", "mission_id": "wrong", "passes": True}), encoding="utf-8")
-    assert probe._fresh_mission_state(tmp_path, started, "wrong") is None
+    fresh_ns = 10_000_000_000
+    stale_ns = 9_000_000_000
+
+    def write_state(name, payload, mtime_ns):
+        path = sessions / name
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        os.utime(path, ns=(mtime_ns, mtime_ns))
+        return path, path.stat().st_mtime_ns
+
+    current, current_mtime = write_state(
+        "cx-thread.json",
+        {"session_id": "cx-thread", "mission_id": "m", "passes": True, "loop_active": False},
+        fresh_ns,
+    )
+    other, other_mtime = write_state(
+        "cx-other.json",
+        {"session_id": "cx-other", "mission_id": "other", "passes": True},
+        fresh_ns,
+    )
+    started_ns = min(current_mtime, other_mtime)
+    assert probe._fresh_mission_state(tmp_path, started_ns, "thread")["session_id"] == "cx-thread"
+    assert probe._fresh_mission_state(tmp_path, started_ns, "other")["session_id"] == "cx-other"
+    current.unlink()
+    other.unlink()
+
+    stale, stale_mtime = write_state(
+        "cx-stale.json",
+        {"session_id": "cx-stale", "mission_id": "stale", "passes": True},
+        stale_ns,
+    )
+    assert stale_mtime < current_mtime
+    assert probe._fresh_mission_state(tmp_path, current_mtime, "stale") is None
+    stale.unlink()
+
+    _wrong_name, wrong_name_mtime = write_state(
+        "cx-unrelated.json",
+        {"session_id": "cx-filename", "mission_id": "filename", "passes": True},
+        fresh_ns,
+    )
+    assert probe._fresh_mission_state(tmp_path, wrong_name_mtime, "filename") is None
+    (sessions / "cx-unrelated.json").unlink()
+
+    _wrong_payload, wrong_payload_mtime = write_state(
+        "cx-wrong.json",
+        {"session_id": "cx-not-wrong", "mission_id": "wrong", "passes": True},
+        fresh_ns,
+    )
+    assert probe._fresh_mission_state(tmp_path, wrong_payload_mtime, "wrong") is None
 
 
 def test_mission_state_ignores_malformed_session_id(tmp_path):
