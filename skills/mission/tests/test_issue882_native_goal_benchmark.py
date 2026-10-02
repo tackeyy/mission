@@ -463,6 +463,14 @@ def test_mission_state_requires_the_current_codex_session_binding(tmp_path):
         fresh_ns,
     )
     assert probe._fresh_mission_state(tmp_path, wrong_name_mtime, "thread") is None
+    (sessions / "cx-unrelated.json").unlink()
+
+    _wrong_payload, wrong_payload_mtime = write_state(
+        "cx-wrong.json",
+        {"session_id": "cx-not-wrong", "mission_id": "wrong", "passes": True},
+        fresh_ns,
+    )
+    assert probe._fresh_mission_state(tmp_path, wrong_payload_mtime, "wrong") is None
 
 
 def test_mission_state_ignores_malformed_session_id(tmp_path):
