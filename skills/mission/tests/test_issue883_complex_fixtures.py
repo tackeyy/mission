@@ -18,6 +18,13 @@ def _load():
     return module
 
 
+def _materialize(module, tmp_path, task_id, group):
+    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, capture_output=True, check=True).stdout.strip()
+    destination = tmp_path / f"{task_id}-{group}"
+    module.materialize_task(ROOT, commit, task_id, group, destination)
+    return destination / task_id
+
+
 def test_complex_fixture_catalog_has_two_tasks_for_each_required_family():
     module = _load()
     catalog = module.load_catalog(ROOT / "benchmarks" / "mission-vs-goal" / "complex-fixtures")
@@ -32,15 +39,15 @@ def test_complex_fixture_catalog_has_two_tasks_for_each_required_family():
     assert all(len(entry["checks"]) >= 3 for entry in catalog)
 
 
-def test_starters_fail_but_reference_repairs_and_good_controls_pass_external_evaluation():
+def test_starters_fail_but_reference_repairs_and_good_controls_pass_external_evaluation(tmp_path):
     module = _load()
     root = ROOT / "benchmarks" / "mission-vs-goal" / "complex-fixtures"
     catalog = module.load_catalog(root)
 
     for entry in catalog:
-        starter = module.evaluate_candidate(root, entry, root / "worker" / entry["id"])
-        repair = module.evaluate_candidate(root, entry, root / "reference" / entry["id"])
-        control = module.evaluate_candidate(root, entry, root / "control" / entry["id"])
+        starter = module.evaluate_candidate(root, entry, _materialize(module, tmp_path, entry["id"], "worker"))
+        repair = module.evaluate_candidate(root, entry, _materialize(module, tmp_path, entry["id"], "reference"))
+        control = module.evaluate_candidate(root, entry, _materialize(module, tmp_path, entry["id"], "control"))
         assert starter["status"] == "failed", entry["id"]
         assert repair["status"] == "passed", entry["id"]
         assert control["status"] == "passed", entry["id"]
@@ -52,11 +59,11 @@ def test_starters_fail_but_reference_repairs_and_good_controls_pass_external_eva
             assert record["case_count"] > 0
 
 
-def test_worker_fixture_has_no_evaluator_or_reference_material_and_public_smoke_is_separate():
+def test_worker_fixture_has_no_evaluator_or_reference_material_and_public_smoke_is_separate(tmp_path):
     module = _load()
     root = ROOT / "benchmarks" / "mission-vs-goal" / "complex-fixtures"
     for entry in module.load_catalog(root):
-        worker = root / "worker" / entry["id"]
+        worker = _materialize(module, tmp_path, entry["id"], "worker")
         names = {path.name for path in worker.rglob("*")}
         assert {"README.md", "public_smoke.py", "boundary.py", "service.py"} <= names
         assert not {"evaluator.json", "reference", "control", "answer-key"} & names
@@ -71,7 +78,7 @@ def test_evaluator_fails_closed_for_no_cases_and_timeout(monkeypatch, tmp_path):
     root = ROOT / "benchmarks" / "mission-vs-goal" / "complex-fixtures"
     entry = module.load_catalog(root)[0]
     no_cases = {**entry, "checks": []}
-    record = module.evaluate_candidate(root, no_cases, root / "worker" / entry["id"])
+    record = module.evaluate_candidate(root, no_cases, _materialize(module, tmp_path, entry["id"], "worker"))
     assert record["status"] == "failed"
     assert record["reason"] == "no_evaluation_cases"
 
@@ -92,7 +99,7 @@ def test_worker_export_uses_the_positive_allowlist_from_native_goal_benchmark(tm
     assert not any("catalog.json" in path or "evaluator" in path for path in paths)
 
 
-def test_concurrency_tasks_use_real_shared_state_and_evaluator_owned_scenarios():
+def test_concurrency_tasks_use_real_shared_state_and_evaluator_owned_scenarios(tmp_path):
     module = _load()
     root = ROOT / "benchmarks" / "mission-vs-goal" / "complex-fixtures"
     entries = {entry["id"]: entry for entry in module.load_catalog(root)}
@@ -106,7 +113,7 @@ def test_concurrency_tasks_use_real_shared_state_and_evaluator_owned_scenarios()
     assert all("scenario" in check for check in (*lost_update["checks"], *ordering["checks"]))
 
     for task_id in ("concurrency-lost-update", "concurrency-order-independent"):
-        worker = root / "worker" / task_id
+        worker = _materialize(module, tmp_path, task_id, "worker")
         source = "\n".join(path.read_text(encoding="utf-8") for path in worker.glob("*.py"))
         assert "MODE" not in source
         assert "BROKEN" not in source
@@ -131,7 +138,7 @@ def test_evaluator_materializes_candidate_and_bounds_output(tmp_path):
     assert before == {path.name: path.read_bytes() for path in candidate.iterdir() if path.is_file()}
 
 
-def test_materializations_match_the_generator():
+def test_templates_render_worker_reference_and_control_without_hidden_flags():
     generator_path = ROOT / "benchmarks" / "mission-vs-goal" / "generate_complex_fixtures.py"
     spec = importlib.util.spec_from_file_location("generate_complex_fixtures", generator_path)
     generator = importlib.util.module_from_spec(spec)
@@ -149,8 +156,9 @@ def test_materializations_match_the_generator():
     for group in ("worker", "reference", "control"):
         for task_id, _, requirement, failure, *_ in generator.TASKS:
             expected = generator.files(modes[task_id], group == "worker", task_id, requirement, failure)
-            actual = {path.name: path.read_text(encoding="utf-8") for path in (root / group / task_id).iterdir() if path.is_file()}
-            assert actual == expected
+            assert {"README.md", "boundary.py", "service.py"} <= set(expected)
+            assert "MODE" not in "\n".join(expected.values())
+            assert "BROKEN" not in "\n".join(expected.values())
 
 
 def test_assignment_requires_matching_source_and_export_task_roots(tmp_path):
@@ -158,10 +166,12 @@ def test_assignment_requires_matching_source_and_export_task_roots(tmp_path):
     root = ROOT / "benchmarks" / "mission-vs-goal" / "complex-fixtures"
     entry = next(entry for entry in module.load_catalog(root) if entry["id"] == "concurrency-lost-update")
 
-    record = module.evaluate_assignment(root, entry, root / "worker" / entry["id"], root / "reference" / entry["id"])
+    task_root = _materialize(module, tmp_path, entry["id"], "worker")
+    exported_root = _materialize(module, tmp_path, entry["id"], "reference")
+    record = module.evaluate_assignment(root, entry, task_root, exported_root)
     assert record["status"] == "passed"
 
-    record = module.evaluate_assignment(root, entry, tmp_path / "wrong", root / "reference" / entry["id"])
+    record = module.evaluate_assignment(root, entry, tmp_path / "wrong", exported_root)
     assert record["status"] == "failed"
     assert record["reason"] == "assignment_task_root_mismatch"
 
@@ -176,11 +186,11 @@ def test_materializer_binds_current_source_commit_and_creates_one_task_repo(tmp_
     assert record["worker_digest"].startswith("sha256:")
 
 
-def test_evaluator_rejects_a_snapshot_change_without_discarding_its_record(monkeypatch):
+def test_evaluator_rejects_a_snapshot_change_without_discarding_its_record(monkeypatch, tmp_path):
     module = _load()
     root = ROOT / "benchmarks" / "mission-vs-goal" / "complex-fixtures"
     entry = next(entry for entry in module.load_catalog(root) if entry["id"] == "concurrency-lost-update")
-    candidate = root / "worker" / entry["id"]
+    candidate = _materialize(module, tmp_path, entry["id"], "worker")
     monkeypatch.setattr(module, "_materialize_candidate", lambda *args: (candidate, "sha256:changed"))
 
     record = module.evaluate_candidate(root, entry, candidate)
