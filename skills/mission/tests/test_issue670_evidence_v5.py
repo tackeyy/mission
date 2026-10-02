@@ -139,6 +139,7 @@ def test_v5_acceptance_import_rejects_foreign_or_replacement_contracts(tmp_path,
     replay = run_cli("acceptance-contract", "import", "--input", str(source), cwd=tmp_path, env_extra=env)
     assert replay.returncode == 0, replay.stderr
     assert json.loads(replay.stdout) == json.loads(accepted.stdout)
+    assert json.loads(replay.stdout)["acceptance_contract"]["digest"] == json.loads(run_cli("acceptance-contract", "status", cwd=tmp_path, env_extra=env).stdout)["digest"]
 
     replacement = run_cli("acceptance-contract", "import", "--input", str(source), cwd=tmp_path, env_extra={**env, "MISSION_OPERATION_ID": "replacement"})
     assert replacement.returncode != 0

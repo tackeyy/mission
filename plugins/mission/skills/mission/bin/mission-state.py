@@ -234,6 +234,12 @@ from mission_application.acceptance import (  # noqa: E402
     run_acceptance_contract_import_cli,
     run_acceptance_contract_status_cli,
 )
+from mission_application.verifier_policy import load as load_verifier_policy  # noqa: E402
+from mission_application.verification_execution import (  # noqa: E402
+    VerificationReceiptCliRequest,
+    VerificationReceiptCliServices,
+    run_verification_receipt_cli,
+)
 from mission_application.planning import (  # noqa: E402
     EXECUTOR_HANDOFF_ABORT_REASONS,
     EXECUTOR_HANDOFF_COMMAND_NAMES,
@@ -8344,6 +8350,17 @@ _ACCEPTANCE_CONTRACT_CLI_SERVICES = AcceptanceContractCliServices(
     _artifact_cli_fail,
     _compatibility_operation_arguments,
     _canonical_compatibility_operation,
+    load_verifier_policy,
+)
+
+
+_VERIFICATION_RECEIPT_CLI_SERVICES = VerificationReceiptCliServices(
+    resolve_state_file,
+    _legacy_lifecycle_repository,
+    load_verifier_policy,
+    _compatibility_operation_arguments,
+    _canonical_compatibility_operation,
+    iso_now,
 )
 
 
@@ -13906,6 +13923,19 @@ def cmd_verification_record(args):
     print(json.dumps({"ok": True, **result}, ensure_ascii=False, indent=2))
 
 
+def cmd_verification_run(args):
+    """Execute one policy-frozen criterion and persist the runner receipt."""
+    try:
+        output = run_verification_receipt_cli(
+            VerificationReceiptCliRequest(args.criterion, args.repro_input),
+            _VERIFICATION_RECEIPT_CLI_SERVICES,
+        )
+    except EvidenceFailure as exc:
+        print(exc.code, file=sys.stderr)
+        sys.exit(exc.code)
+    print(output)
+
+
 _CLAIMS_LEDGER_CLI_SERVICES = ClaimsLedgerCliServices(
     resolve_state_file, _resolve_evidence_output_path, _legacy_evidence_repository,
 )
@@ -16405,6 +16435,10 @@ def _add_review_parsers(subparsers) -> None:
     verify_source.add_argument("--stdin", action="store_true", help="stdin から JSON を読む")
     verify_source.add_argument("--input", default=None, help="JSON ファイルパス")
     p_verify_record.set_defaults(func=cmd_verification_record)
+    p_verify_run = verify_sub.add_parser("run", help="凍結済み verifier を実行し receipt を記録")
+    p_verify_run.add_argument("--criterion", required=True)
+    p_verify_run.add_argument("--repro-input", default=None, help="policy 登録済み replay 用の JSON input")
+    p_verify_run.set_defaults(func=cmd_verification_run, command_outcome_tracking=True)
     p_verify_claims = verify_sub.add_parser("claims", help="implementation claim ledger を生成")
     p_verify_claims.add_argument("--iteration", type=int, required=True)
     p_verify_claims.add_argument("--doc-digest", required=True)

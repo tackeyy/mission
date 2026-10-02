@@ -251,6 +251,14 @@ class RecordVerification:
 
 
 @dataclass(frozen=True)
+class RecordVerificationReceipt:
+    """Persist a runner-produced receipt; callers cannot declare success."""
+
+    at: str
+    receipt: FrozenJsonObject
+
+
+@dataclass(frozen=True)
 class ImportAcceptanceContract:
     """Install one immutable acceptance contract for a mission."""
 
@@ -419,6 +427,7 @@ GENERIC_SET_DEDICATED_FIELDS = frozenset(
         "context_manifests",
         "claims_ledgers",
         "verification_history",
+        "verification_receipts",
         "acceptance_contract",
     }
 )
@@ -441,6 +450,7 @@ Command = Union[
     Reactivate,
     RecordArtifactPublication,
     RecordVerification,
+    RecordVerificationReceipt,
     ImportAcceptanceContract,
     RecordExecutorStep,
     RecordSpecialistRecommendation,
@@ -470,6 +480,7 @@ _COMMAND_TYPES = {
     Reactivate: "reactivate",
     RecordArtifactPublication: "record-artifact-publication",
     RecordVerification: "record-verification",
+    RecordVerificationReceipt: "record-verification-receipt",
     ImportAcceptanceContract: "acceptance-contract-import",
     RecordExecutorStep: "executor-handoff-record-step",
     RecordSpecialistRecommendation: "specialists-record-recommendation",

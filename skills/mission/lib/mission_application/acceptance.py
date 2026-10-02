@@ -7,18 +7,20 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from acceptance_contract import AcceptanceContractError, digest, load, status
+from acceptance_contract import AcceptanceContractError, canonical_contract_digest, digest, load, status
 from mission_application.evidence import PreparedEvidenceOperation, execute_evidence_operation
 from mission_application.cli_operation import CliOperationRejected, prepare_cli_operation
 from mission_application.artifact import EvidenceFailure
 from mission_kernel.commands import ImportAcceptanceContract
 from mission_kernel.json_codec import freeze_json_value
+from mission_application.verifier_policy import VerifierPolicyError, freeze as freeze_verifier_policy
 
 
 @dataclass(frozen=True)
 class AcceptanceContractImportRequest:
     now: object
     raw: object
+    verifier_policy: object = None
 
 
 @dataclass(frozen=True)
@@ -29,9 +31,10 @@ class AcceptanceContractCliServices:
     fail: object
     compatibility_arguments: object
     canonical_operation: object
+    load_verifier_policy: object
 
 
-def prepare_acceptance_contract_import(state: object, *, now: object, raw: object) -> PreparedEvidenceOperation:
+def prepare_acceptance_contract_import(state: object, *, now: object, raw: object, verifier_policy=None) -> PreparedEvidenceOperation:
     if not isinstance(state, dict):
         raise EvidenceFailure("state-invalid")
     if not isinstance(raw, bytes):
@@ -42,14 +45,22 @@ def prepare_acceptance_contract_import(state: object, *, now: object, raw: objec
         raise EvidenceFailure(str(exc)) from exc
     if contract["mission_id"] != (state.get("mission_id") or state.get("session_id")):
         raise EvidenceFailure("acceptance-contract-mission-mismatch")
+    if contract["schema"] == "mission-acceptance-contract/2":
+        try:
+            contract["verifier_policy"] = freeze_verifier_policy(
+                verifier_policy, command_ids=[item["command_id"] for item in contract["criteria"]],
+                expected_digest=contract["verifier_policy_digest"],
+            )
+        except VerifierPolicyError as exc:
+            raise EvidenceFailure(str(exc)) from exc
     frozen = freeze_json_value(contract)
     command = ImportAcceptanceContract(now, frozen)
-    result = {"acceptance_contract": {**copy.deepcopy(contract), "digest": digest(contract)}}
+    result = {"acceptance_contract": {**copy.deepcopy(contract), "digest": canonical_contract_digest(contract)}}
     return PreparedEvidenceOperation(command, (), result, volatile_fields=("imported_at",))
 
 
 def run_acceptance_contract_import(request: AcceptanceContractImportRequest, repository: object) -> dict:
-    return execute_evidence_operation(repository, lambda state: prepare_acceptance_contract_import(state, now=request.now, raw=request.raw))
+    return execute_evidence_operation(repository, lambda state: prepare_acceptance_contract_import(state, now=request.now, raw=request.raw, verifier_policy=request.verifier_policy))
 
 
 def prepare_acceptance_contract_import_operation(raw, *, session_id, compatibility_arguments, canonical_operation):
@@ -71,10 +82,12 @@ def acceptance_contract_status(state: object) -> dict:
     if not isinstance(contract, dict):
         return status(None)
     stored = dict(contract)
-    stored.pop("imported_at", None)
+    binding = stored.pop("verifier_policy", None)
     result = status(stored)
     if result["present"]:
+        result["digest"] = canonical_contract_digest(contract)
         result["imported_at"] = contract.get("imported_at")
+        result["verifier_policy"] = binding
     return result
 
 
@@ -102,14 +115,15 @@ def run_acceptance_contract_import_cli(args, services) -> str:
             compatibility_arguments=services.compatibility_arguments,
             canonical_operation=services.canonical_operation,
         )
+        policy = services.load_verifier_policy(cwd) if load(raw)["schema"] == "mission-acceptance-contract/2" else None
         result = run_acceptance_contract_import(
-            AcceptanceContractImportRequest(services.now(), raw),
+            AcceptanceContractImportRequest(services.now(), raw, policy),
             services.repository(cwd, state_file, stamp=True, pre_admit_lease=True,
                                 session_id=state_file.stem, operation_id=identity.operation_id,
                                 operation_command=identity.operation_command,
                                 operation_command_type=identity.command_type),
         )
-    except (EvidenceFailure, CliOperationRejected) as exc:
+    except (EvidenceFailure, CliOperationRejected, VerifierPolicyError) as exc:
         services.fail(getattr(exc, "code", str(exc)), 2)
     return _render(result)
 

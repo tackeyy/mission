@@ -13,6 +13,7 @@ from .commands import (
     GenerateContextManifest,
     GenerateClaimsLedger,
     RecordVerification,
+    RecordVerificationReceipt,
     ImportAcceptanceContract,
     UpdateProgress,
     VerificationCheck,
@@ -343,6 +344,70 @@ def apply_verification_record(
     history = copy.deepcopy(history) if isinstance(history, list) else []
     history.append(entry)
     document["verification_history"] = history
+    document["updated_at"] = entry["recorded_at"]
+    return document, entry
+
+
+_RECEIPT_FIELDS = {
+    "schema", "contract_digest", "criterion_id", "candidate_digest",
+    "verifier_policy_digest", "verifier_definition_digest", "argv",
+    "relative_cwd", "started_at", "finished_at", "exit_code", "timed_out",
+    "executed_count", "output_digest", "status", "runner_provenance",
+    "repro_input_digest", "observed_output_bytes", "output_truncated", "block_reason",
+}
+
+
+def project_verification_receipt(command: RecordVerificationReceipt) -> dict:
+    at = _text(command.at, "verification-receipt-timestamp-invalid")
+    try:
+        receipt = command.receipt.thaw()
+    except AttributeError as exc:
+        raise EvidenceRuleError("verification-receipt-invalid") from exc
+    if not isinstance(receipt, dict) or set(receipt) != _RECEIPT_FIELDS:
+        raise EvidenceRuleError("verification-receipt-invalid")
+    if receipt.get("schema") != "mission-verification-receipt/1" or receipt.get("status") not in {"passed", "failed", "blocked"}:
+        raise EvidenceRuleError("verification-receipt-invalid")
+    for key in ("contract_digest", "candidate_digest", "verifier_policy_digest", "verifier_definition_digest", "output_digest"):
+        if not isinstance(receipt.get(key), str) or __import__("re").fullmatch(r"sha256:[0-9a-f]{64}", receipt[key]) is None:
+            raise EvidenceRuleError("verification-receipt-invalid")
+    if not isinstance(receipt.get("criterion_id"), str) or not receipt["criterion_id"]:
+        raise EvidenceRuleError("verification-receipt-invalid")
+    if not isinstance(receipt.get("argv"), list) or not receipt["argv"] or not all(isinstance(item, str) and item for item in receipt["argv"]):
+        raise EvidenceRuleError("verification-receipt-invalid")
+    if not isinstance(receipt.get("relative_cwd"), str) or not receipt["relative_cwd"]:
+        raise EvidenceRuleError("verification-receipt-invalid")
+    if type(receipt.get("timed_out")) is not bool or receipt.get("exit_code") is not None and type(receipt["exit_code"]) is not int:
+        raise EvidenceRuleError("verification-receipt-invalid")
+    if receipt.get("executed_count") is not None and (type(receipt["executed_count"]) is not int or receipt["executed_count"] < 0):
+        raise EvidenceRuleError("verification-receipt-invalid")
+    if type(receipt.get("observed_output_bytes")) is not int or receipt["observed_output_bytes"] < 0 or type(receipt.get("output_truncated")) is not bool:
+        raise EvidenceRuleError("verification-receipt-invalid")
+    if receipt.get("repro_input_digest") is not None and (not isinstance(receipt["repro_input_digest"], str) or __import__("re").fullmatch(r"sha256:[0-9a-f]{64}", receipt["repro_input_digest"]) is None):
+        raise EvidenceRuleError("verification-receipt-invalid")
+    if receipt["status"] == "blocked":
+        if not isinstance(receipt.get("block_reason"), str) or not receipt["block_reason"]:
+            raise EvidenceRuleError("verification-receipt-invalid")
+    elif receipt.get("block_reason") is not None:
+        raise EvidenceRuleError("verification-receipt-invalid")
+    if not isinstance(receipt.get("runner_provenance"), str) or not receipt["runner_provenance"]:
+        raise EvidenceRuleError("verification-receipt-invalid")
+    if receipt["status"] == "passed" and (receipt["timed_out"] or receipt["exit_code"] != 0):
+        raise EvidenceRuleError("verification-receipt-invalid")
+    return {**copy.deepcopy(receipt), "recorded_at": at}
+
+
+def apply_verification_receipt(state: Mapping[str, object], command: RecordVerificationReceipt) -> tuple[dict, dict]:
+    document = copy.deepcopy(dict(state))
+    entry = project_verification_receipt(command)
+    history = document.get("verification_receipts")
+    if history is None:
+        history = []
+    elif not isinstance(history, list) or not all(isinstance(item, dict) for item in history):
+        raise EvidenceRuleError("verification-receipt-history-invalid")
+    else:
+        history = copy.deepcopy(history)
+    history.append(entry)
+    document["verification_receipts"] = history
     document["updated_at"] = entry["recorded_at"]
     return document, entry
 

@@ -7,6 +7,7 @@ from pathlib import PurePosixPath
 
 
 SCHEMA = "mission-acceptance-contract/1"
+POLICY_BOUND_SCHEMA = "mission-acceptance-contract/2"
 REVIEW_POLICY = "fresh-required"
 
 
@@ -63,13 +64,23 @@ def _path(value: object) -> str:
 
 
 def validate(value: object) -> dict:
-    if not isinstance(value, dict) or set(value) != {
+    base_fields = {
         "schema", "mission_id", "requirement_text", "requirement_digest", "revision",
         "review_policy", "requirements", "criteria", "coverage",
-    }:
+    }
+    if not isinstance(value, dict) or set(value) not in (base_fields, base_fields | {"verifier_policy_digest"}, base_fields | {"verifier_policy_digest", "verifier_policy"}):
         raise AcceptanceContractError("contract-fields-invalid")
-    if value["schema"] != SCHEMA or value["review_policy"] != REVIEW_POLICY:
+    if value["schema"] not in {SCHEMA, POLICY_BOUND_SCHEMA} or value["review_policy"] != REVIEW_POLICY:
         raise AcceptanceContractError("contract-schema-invalid")
+    if value["schema"] == SCHEMA and set(value) != base_fields:
+        raise AcceptanceContractError("contract-fields-invalid")
+    if value["schema"] == POLICY_BOUND_SCHEMA:
+        policy_digest = value.get("verifier_policy_digest")
+        if not isinstance(policy_digest, str) or not __import__("re").fullmatch(r"sha256:[0-9a-f]{64}", policy_digest):
+            raise AcceptanceContractError("verifier-policy-digest-invalid")
+        binding = value.get("verifier_policy")
+        if binding is not None and (not isinstance(binding, dict) or binding.get("digest") != policy_digest or not isinstance(binding.get("commands"), dict)):
+            raise AcceptanceContractError("verifier-policy-binding-invalid")
     _text(value["mission_id"], "mission-id-invalid")
     text = _text(value["requirement_text"], "requirement-text-invalid")
     expected = "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -127,6 +138,16 @@ def validate(value: object) -> dict:
 
 def digest(contract: dict) -> str:
     return "sha256:" + hashlib.sha256(canonical_bytes(contract)).hexdigest()
+
+
+def canonical_contract_digest(contract: dict) -> str:
+    """Identify the imported contract independently of frozen runtime binding."""
+    if not isinstance(contract, dict):
+        raise AcceptanceContractError("contract-digest-invalid")
+    identity = dict(contract)
+    identity.pop("imported_at", None)
+    identity.pop("verifier_policy", None)
+    return digest(identity)
 
 
 def status(contract: object) -> dict:
