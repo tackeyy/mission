@@ -78,9 +78,63 @@ def test_runner_bounds_output_times_out_and_rejects_zero_test_count(tmp_path):
     descendant = execute_candidate(candidate, {"argv": ["python3", "-c", "import subprocess, sys; subprocess.Popen([sys.executable, '-c', 'import os, time; os.setsid(); time.sleep(2)'])"], "timeout_sec": 1, "output_limit": 8, "kind": "command", "env": {}}, relative_cwd=".")
     assert descendant["status"] == "blocked" and descendant["timed_out"] is True
     assert time.monotonic() - started < 1.8
-    zero = execute_candidate(candidate, {"argv": ["python3", "-c", "print('0 tests')"], "timeout_sec": 5, "output_limit": 4, "kind": "test", "executed_count_pattern": r"(\\d+) tests", "env": {}}, relative_cwd=".")
+    zero = execute_candidate(candidate, {"argv": ["python3", "-c", "from pathlib import Path; Path('result.xml').write_text('<testsuite/>')"], "timeout_sec": 5, "output_limit": 4, "kind": "test", "test_report": {"format": "junit-xml", "path": "result.xml"}, "env": {}}, relative_cwd=".")
     assert zero["status"] == "failed" and zero["executed_count"] == 0
     mutation = execute_candidate(candidate, {"argv": ["python3", "-c", "from pathlib import Path; Path('app.py').write_text('mutated')"], "timeout_sec": 5, "output_limit": 8, "kind": "command", "env": {}}, relative_cwd=".")
     assert mutation["status"] == "blocked"
     assert mutation["exit_code"] == 0 and mutation["timed_out"] is False
     assert mutation["block_reason"] == "candidate-stale"
+
+
+def test_test_runner_uses_declared_junit_report_not_console_text(tmp_path):
+    """A passing process cannot borrow a count from arbitrary stdout."""
+    from mission_application.verification_runner import capture_candidate, execute_candidate
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "app.py").write_text("x = 1", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-qm", "base"], cwd=tmp_path, check=True)
+    candidate = capture_candidate(tmp_path, declared_untracked=())
+    command = {
+        "argv": ["python3", "-c", "from pathlib import Path; print('1 tests'); print('0 tests'); Path('result.xml').write_text('<testsuite><testcase/><testcase><skipped/></testcase></testsuite>')"],
+        "timeout_sec": 5, "output_limit": 4, "kind": "test", "env": {},
+        "test_report": {"format": "junit-xml", "path": "result.xml"},
+    }
+    outcome = execute_candidate(candidate, command, relative_cwd=".")
+    assert outcome["status"] == "passed"
+    assert outcome["executed_count"] == 1
+    assert outcome["output_truncated"] is True
+    assert outcome["observed_output_bytes"] > 4
+
+
+def test_runner_rejects_undeclared_path_arguments_and_binds_repro_kind(tmp_path):
+    import pytest
+    from mission_application.verification_runner import VerificationRunnerError, capture_candidate, execute_candidate
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "app.py").write_text("x = 1", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-qm", "base"], cwd=tmp_path, check=True)
+    candidate = capture_candidate(tmp_path, declared_untracked=())
+    with pytest.raises(VerificationRunnerError, match="verifier-explicit-path-unsupported"):
+        execute_candidate(candidate, {"argv": ["python3", "/tmp/helper.py"], "timeout_sec": 5, "output_limit": 8, "kind": "command", "env": {}}, relative_cwd=".")
+    counterexample = execute_candidate(candidate, {"argv": ["python3", "-c", "pass"], "timeout_sec": 5, "output_limit": 8, "kind": "command", "env": {}}, relative_cwd=".", repro_input=("counterexample", "repro.json", b"same"))
+    finding = execute_candidate(candidate, {"argv": ["python3", "-c", "pass"], "timeout_sec": 5, "output_limit": 8, "kind": "command", "env": {}}, relative_cwd=".", repro_input=("finding", "repro.json", b"same"))
+    assert counterexample["repro_input_digest"] != finding["repro_input_digest"]
+
+
+def test_runner_persists_facts_when_materialized_input_becomes_special_file(tmp_path):
+    from mission_application.verification_runner import capture_candidate, execute_candidate
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "app.py").write_text("x = 1", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-qm", "base"], cwd=tmp_path, check=True)
+    outcome = execute_candidate(
+        capture_candidate(tmp_path, declared_untracked=()),
+        {"argv": ["python3", "-c", "from pathlib import Path; Path('app.py').unlink(); Path('app.py').mkdir()"], "timeout_sec": 5, "output_limit": 8, "kind": "command", "env": {}},
+        relative_cwd=".",
+    )
+    assert outcome["status"] == "blocked"
+    assert outcome["exit_code"] == 0
+    assert outcome["block_reason"] == "candidate-observation-invalid"

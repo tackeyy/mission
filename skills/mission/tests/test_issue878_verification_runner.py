@@ -77,7 +77,7 @@ def test_legacy_verifier_policy_schema_is_explicitly_unsupported():
         validate({"schema": "mission-verifier-policy/1", "commands": []})
 
 
-def test_policy_rejects_unbounded_test_count_pattern_before_process_execution():
+def test_policy_rejects_console_test_count_pattern_before_process_execution():
     import pytest
     from mission_application.verifier_policy import VerifierPolicyError, validate
 
@@ -85,8 +85,20 @@ def test_policy_rejects_unbounded_test_count_pattern_before_process_execution():
     policy["commands"][0]["kind"] = "test"
     policy["commands"][0]["executed_count_pattern"] = "("
 
-    with pytest.raises(VerifierPolicyError, match="verifier-policy-test-adapter-invalid"):
+    with pytest.raises(VerifierPolicyError, match="verifier-policy-command-invalid"):
         validate(policy)
+
+
+def test_policy_rejects_absolute_and_escape_path_shapes_outside_toolchain():
+    import pytest
+    from mission_application.verifier_policy import VerifierPolicyError, validate
+
+    for argv, env in ((["python", "--helper=/tmp/helper.py"], {}), (["python", "../helper.py"], {}), (["python", "-c", "pass"], {"CONFIG": "/tmp/config"})):
+        policy = _policy()
+        policy["commands"][0]["argv"] = [policy["commands"][0]["toolchain"]["path"], *argv[1:]]
+        policy["commands"][0]["env"] = env
+        with pytest.raises(VerifierPolicyError, match="verifier-policy-explicit-path-unsupported"):
+            validate(policy)
 
 
 def test_public_runner_records_process_bound_receipt(tmp_path, run_cli):
@@ -143,7 +155,7 @@ def test_public_runner_binds_replay_input_to_frozen_replay_command_and_receipt(t
     receipt = json.loads(result.stdout)["receipt"]
     assert receipt["status"] == "passed"
     assert receipt["argv"] == policy["commands"][1]["argv"]
-    assert receipt["repro_input_digest"] == "sha256:" + hashlib.sha256(b"repro.json\0proof").hexdigest()
+    assert receipt["repro_input_digest"] == "sha256:" + hashlib.sha256(b"counterexample\0repro.json\0proof").hexdigest()
     assert receipt["block_reason"] is None
 
     repro.write_text(json.dumps({"artifact_kind": "counterexample", "content": "x" * 65}), encoding="utf-8")
@@ -193,7 +205,8 @@ def test_receipt_record_refuses_to_overwrite_a_non_history_value():
         "verifier_policy_digest": digest, "verifier_definition_digest": digest,
         "argv": ["true"], "relative_cwd": ".", "started_at": "2026-01-01T00:00:00Z",
         "finished_at": "2026-01-01T00:00:00Z", "exit_code": 0, "timed_out": False,
-        "executed_count": None, "output_digest": digest, "status": "passed",
+        "executed_count": None, "output_digest": digest, "observed_output_bytes": 0,
+        "output_truncated": False, "status": "passed",
         "runner_provenance": "mission-public-cli/1", "repro_input_digest": None,
         "block_reason": None,
     }

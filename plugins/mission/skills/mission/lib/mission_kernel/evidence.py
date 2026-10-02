@@ -353,7 +353,7 @@ _RECEIPT_FIELDS = {
     "verifier_policy_digest", "verifier_definition_digest", "argv",
     "relative_cwd", "started_at", "finished_at", "exit_code", "timed_out",
     "executed_count", "output_digest", "status", "runner_provenance",
-    "repro_input_digest", "block_reason",
+    "repro_input_digest", "observed_output_bytes", "output_truncated", "block_reason",
 }
 
 
@@ -379,6 +379,8 @@ def project_verification_receipt(command: RecordVerificationReceipt) -> dict:
     if type(receipt.get("timed_out")) is not bool or receipt.get("exit_code") is not None and type(receipt["exit_code"]) is not int:
         raise EvidenceRuleError("verification-receipt-invalid")
     if receipt.get("executed_count") is not None and (type(receipt["executed_count"]) is not int or receipt["executed_count"] < 0):
+        raise EvidenceRuleError("verification-receipt-invalid")
+    if type(receipt.get("observed_output_bytes")) is not int or receipt["observed_output_bytes"] < 0 or type(receipt.get("output_truncated")) is not bool:
         raise EvidenceRuleError("verification-receipt-invalid")
     if receipt.get("repro_input_digest") is not None and (not isinstance(receipt["repro_input_digest"], str) or __import__("re").fullmatch(r"sha256:[0-9a-f]{64}", receipt["repro_input_digest"]) is None):
         raise EvidenceRuleError("verification-receipt-invalid")

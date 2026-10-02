@@ -44,7 +44,7 @@ def validate(value):
     result = {}
     for command in commands:
         required = {"id", "argv", "relative_cwd", "timeout_sec", "output_limit", "kind", "env", "declared_untracked", "toolchain", "external_inputs"}
-        optional = {"executed_count_pattern", "replay"}
+        optional = {"test_report", "replay"}
         if not isinstance(command, dict) or not required <= set(command) or not set(command) <= required | optional:
             raise VerifierPolicyError("verifier-policy-command-invalid")
         identifier = _text(command["id"], "verifier-policy-command-id-invalid")
@@ -56,12 +56,14 @@ def validate(value):
             raise VerifierPolicyError("verifier-policy-toolchain-invalid")
         if command["kind"] not in {"command", "test"} or type(command["timeout_sec"]) is not int or not 0 < command["timeout_sec"] <= 3600 or type(command["output_limit"]) is not int or not 0 < command["output_limit"] <= 1048576:
             raise VerifierPolicyError("verifier-policy-command-invalid")
-        pattern = command.get("executed_count_pattern")
-        if command["kind"] == "test" and (not isinstance(pattern, str) or not pattern or len(pattern) > 512):
+        report = command.get("test_report")
+        if command["kind"] == "test" and (not isinstance(report, dict) or set(report) != {"format", "path"}):
             raise VerifierPolicyError("verifier-policy-test-adapter-invalid")
-        if command["kind"] == "test" and pattern != r"(\d+) tests":
+        if command["kind"] == "test" and report["format"] != "junit-xml":
             raise VerifierPolicyError("verifier-policy-test-adapter-invalid")
-        if command["kind"] == "command" and pattern is not None:
+        if command["kind"] == "test":
+            _relative(report["path"], "verifier-policy-test-adapter-invalid")
+        if command["kind"] == "command" and report is not None:
             raise VerifierPolicyError("verifier-policy-command-invalid")
         inputs = command["external_inputs"]
         if not isinstance(inputs, list):
@@ -84,6 +86,7 @@ def validate(value):
         _relative(command["relative_cwd"], "verifier-policy-cwd-invalid")
         if not isinstance(command["env"], dict) or not all(isinstance(key, str) and key and isinstance(item, str) for key, item in command["env"].items()):
             raise VerifierPolicyError("verifier-policy-env-invalid")
+        _validate_explicit_paths(argv, command["env"])
         outputs = command["declared_untracked"]
         if not isinstance(outputs, list) or len(set(outputs)) != len(outputs):
             raise VerifierPolicyError("verifier-policy-output-invalid")
@@ -91,6 +94,16 @@ def validate(value):
             _relative(output, "verifier-policy-output-invalid")
         result[identifier] = {key: command[key] for key in sorted(command)}
     return result
+
+
+def _validate_explicit_paths(argv, env):
+    """Reject path-shaped command inputs that the snapshot cannot bind."""
+    def unsupported(value):
+        candidate = value.split("=", 1)[-1]
+        return candidate.startswith("/") or any(part == ".." for part in candidate.split("/"))
+
+    if any(unsupported(value) for value in argv[1:]) or any(unsupported(value) for value in env.values()):
+        raise VerifierPolicyError("verifier-policy-explicit-path-unsupported")
 
 
 def load(project_root, *, user_path=None):

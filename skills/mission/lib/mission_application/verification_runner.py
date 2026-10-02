@@ -11,6 +11,7 @@ import tempfile
 import time
 import selectors
 import signal
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
@@ -205,21 +206,32 @@ def _toolchain_matches(command) -> bool:
         return False
 
 
-def _executed_count(command, output: bytes) -> int | None:
-    """Count only a policy-declared, machine-readable test adapter result."""
-    pattern = command.get("executed_count_pattern")
-    if pattern is None:
-        return None
-    import re
+def _explicit_paths_are_bound(command) -> bool:
+    """Only argv[0] is a frozen toolchain path; other path inputs are refused."""
+    def unsafe(value):
+        candidate = value.split("=", 1)[-1]
+        return candidate.startswith("/") or any(part == ".." for part in candidate.split("/"))
+    return not any(unsafe(value) for value in command["argv"][1:]) and not any(unsafe(value) for value in command.get("env", {}).values())
 
-    match = re.search(pattern.encode("utf-8"), output)
-    if match is None:
-        return 0
+
+def _executed_count(command, root: Path) -> int | None:
+    """Read the policy-registered JUnit report, never presentational output."""
+    if command.get("kind") != "test":
+        return None
+    report = command.get("test_report")
+    if not isinstance(report, dict) or report.get("format") != "junit-xml":
+        return None
     try:
-        value = int(match.group(1))
-    except (IndexError, ValueError):
-        return 0
-    return value if value >= 0 else 0
+        source = _read(root, _relative(report.get("path")), 0, required=False)
+        if source.content is None:
+            return None
+        root_element = ET.fromstring(source.content)
+    except (ET.ParseError, VerificationRunnerError, TypeError):
+        return None
+    suites = [root_element] if root_element.tag == "testsuite" else root_element.findall("testsuite")
+    if not suites:
+        return None
+    return sum(1 for suite in suites for case in suite.findall("testcase") if case.find("skipped") is None)
 
 
 def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
@@ -236,15 +248,19 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
     limit = command.get("output_limit")
     if not isinstance(argv, list) or not argv or type(timeout) is not int or type(limit) is not int:
         raise VerificationRunnerError("verifier-definition-invalid")
+    if not _explicit_paths_are_bound(command):
+        raise VerificationRunnerError("verifier-explicit-path-unsupported")
     before = candidate.digest
     started = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     if not _toolchain_matches(command):
-        return {"started_at": started, "finished_at": started, "exit_code": None, "timed_out": False, "executed_count": None, "output_digest": "sha256:" + hashlib.sha256(b"").hexdigest(), "status": "blocked", "block_reason": "toolchain-stale", "repro_input_digest": None}
+        return {"started_at": started, "finished_at": started, "exit_code": None, "timed_out": False, "executed_count": None, "output_digest": "sha256:" + hashlib.sha256(b"").hexdigest(), "observed_output_bytes": 0, "output_truncated": False, "status": "blocked", "block_reason": "toolchain-stale", "repro_input_digest": None}
     timed_out = False
     with materialize_candidate(candidate) as root:
         repro_digest = None
         if repro_input is not None:
-            path, content = repro_input
+            artifact_kind, path, content = repro_input
+            if not isinstance(artifact_kind, str) or not artifact_kind:
+                raise VerificationRunnerError("repro-input-invalid")
             path = _relative(path)
             if not isinstance(content, bytes):
                 raise VerificationRunnerError("repro-input-invalid")
@@ -253,7 +269,7 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
             target = _target(root, path)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
-            repro_digest = "sha256:" + hashlib.sha256(path.encode() + b"\0" + content).hexdigest()
+            repro_digest = "sha256:" + hashlib.sha256(artifact_kind.encode() + b"\0" + path.encode() + b"\0" + content).hexdigest()
         cwd = root if relative_cwd == "." else root / _relative(relative_cwd)
         if not cwd.is_dir():
             raise VerificationRunnerError("verifier-cwd-missing")
@@ -271,11 +287,16 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
                 "timed_out": False,
                 "executed_count": None,
                 "output_digest": "sha256:" + hashlib.sha256(b"").hexdigest(),
+                "observed_output_bytes": 0,
+                "output_truncated": False,
                 "status": "blocked",
                 "block_reason": "process-unavailable",
                 "repro_input_digest": repro_digest,
             }
         output = bytearray()
+        output_hash = hashlib.sha256()
+        observed_output_bytes = 0
+        output_truncated = False
         selector = selectors.DefaultSelector()
         assert child.stdout is not None
         stdout = child.stdout
@@ -298,8 +319,13 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
                 chunk = os.read(key.fd, 65536)
                 if not chunk:
                     selector.unregister(key.fileobj)
-                elif len(output) < limit:
-                    output.extend(chunk[:limit - len(output)])
+                else:
+                    output_hash.update(chunk)
+                    observed_output_bytes += len(chunk)
+                    if len(output) < limit:
+                        output.extend(chunk[:limit - len(output)])
+                    if len(output) < observed_output_bytes:
+                        output_truncated = True
         try:
             child.wait(timeout=0.2)
         except subprocess.TimeoutExpired:
@@ -313,13 +339,18 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
             exit_code = child.returncode
         selector.close()
         stdout.close()
-        observed = tuple(_read(root, item.path, item.mode, required=True) for item in candidate.files)
-        candidate_stale = _digest(observed) != candidate.digest
-    output = bytes(output)
+        count = _executed_count(command, root)
+        try:
+            observed = tuple(_read(root, item.path, item.mode, required=True) for item in candidate.files)
+            candidate_stale = _digest(observed) != candidate.digest
+            observation_reason = "candidate-stale" if candidate_stale else None
+        except VerificationRunnerError:
+            candidate_stale = True
+            observation_reason = "candidate-observation-invalid"
+    output_truncated = output_truncated or timed_out
     after = candidate.digest
     if before != after:
         raise VerificationRunnerError("candidate-mutated")
-    count = _executed_count(command, output)
     toolchain_stale = not _toolchain_matches(command)
     passed = not timed_out and not candidate_stale and not toolchain_stale and exit_code == 0 and (command.get("kind") != "test" or (count is not None and count > 0))
     return {
@@ -328,8 +359,10 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
         "exit_code": exit_code,
         "timed_out": timed_out,
         "executed_count": count,
-        "output_digest": "sha256:" + hashlib.sha256(output).hexdigest(),
+        "output_digest": "sha256:" + output_hash.hexdigest(),
+        "observed_output_bytes": observed_output_bytes,
+        "output_truncated": output_truncated,
         "status": "passed" if passed else "blocked" if timed_out or candidate_stale or toolchain_stale else "failed",
-        "block_reason": "timeout" if timed_out else "candidate-stale" if candidate_stale else "toolchain-stale" if toolchain_stale else None,
+        "block_reason": "timeout" if timed_out else observation_reason if candidate_stale else "toolchain-stale" if toolchain_stale else None,
         "repro_input_digest": repro_digest,
     }

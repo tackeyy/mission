@@ -43,6 +43,7 @@ from mission_kernel.evidence import (
     project_verification_entry,
 )
 from mission_kernel.json_codec import encode_json_value, freeze_json_value
+from acceptance_contract import canonical_contract_digest
 from .artifact import EvidenceEffect, EvidenceFailure, make_evidence_effect
 from .ports import LegacyCommandExecutionResult
 
@@ -245,9 +246,7 @@ def execute_evidence_operation(repository: object, prepare) -> dict:
             raise EvidenceFailure("acceptance-contract-projection-mismatch")
         if replayed:
             payload["acceptance_contract"] = {
-                **copy.deepcopy(observed), "digest": "sha256:" + hashlib.sha256(
-                    encode_json_value(freeze_json_value(observed))
-                ).hexdigest(),
+                **copy.deepcopy(observed), "digest": canonical_contract_digest(observed),
             }
     elif isinstance(command, GenerateContextManifest):
         record = (source.get("context_manifests") or {}).get(

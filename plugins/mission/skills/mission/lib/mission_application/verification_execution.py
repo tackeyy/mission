@@ -107,9 +107,9 @@ def run_contract_verifier(state, *, project_root, criterion_id, repro_input=None
         command = replay_command
     try:
         candidate = capture_candidate(project_root, declared_untracked=command["declared_untracked"], external_inputs=command["external_inputs"])
-        replay_file = None if repro_input is None else (replay["relative_path"], repro_input["content"].encode())
+        replay_file = None if repro_input is None else (repro_input["artifact_kind"], replay["relative_path"], repro_input["content"].encode())
         if replay_file is not None and any(
-            replay_file[0] == item.path or replay_file[0].startswith(item.path + "/") or item.path.startswith(replay_file[0] + "/")
+            replay_file[1] == item.path or replay_file[1].startswith(item.path + "/") or item.path.startswith(replay_file[1] + "/")
             for item in candidate.files
         ):
             return _blocked_receipt(contract, policy, criterion_id, command, "replay-input-path-conflict")
@@ -118,7 +118,11 @@ def run_contract_verifier(state, *, project_root, criterion_id, repro_input=None
         # mutable worktree never receives a successful receipt.
         current = capture_candidate(project_root, declared_untracked=command["declared_untracked"], external_inputs=command["external_inputs"])
     except (KeyError, VerificationRunnerError) as exc:
-        raise EvidenceFailure(str(exc)) from exc
+        if "outcome" not in locals() or "candidate" not in locals():
+            raise EvidenceFailure(str(exc)) from exc
+        outcome["status"] = "blocked"
+        outcome["block_reason"] = "candidate-observation-invalid"
+        current = candidate
     if current.digest != candidate.digest:
         outcome["status"] = "blocked"
         outcome["block_reason"] = "candidate-stale"
@@ -137,6 +141,8 @@ def run_contract_verifier(state, *, project_root, criterion_id, repro_input=None
         "timed_out": outcome["timed_out"],
         "executed_count": outcome["executed_count"],
         "output_digest": outcome["output_digest"],
+        "observed_output_bytes": outcome["observed_output_bytes"],
+        "output_truncated": outcome["output_truncated"],
         "status": outcome["status"],
         "runner_provenance": "mission-public-cli/1",
         "repro_input_digest": outcome["repro_input_digest"],
@@ -146,4 +152,4 @@ def run_contract_verifier(state, *, project_root, criterion_id, repro_input=None
 
 def _blocked_receipt(contract, policy, criterion_id, command, reason):
     import hashlib
-    return {"schema": "mission-verification-receipt/1", "contract_digest": canonical_contract_digest(contract), "criterion_id": criterion_id, "candidate_digest": "sha256:" + "0" * 64, "verifier_policy_digest": policy["digest"], "verifier_definition_digest": verifier_definition_digest(command), "argv": list(command["argv"]), "relative_cwd": command["relative_cwd"], "started_at": "1970-01-01T00:00:00Z", "finished_at": "1970-01-01T00:00:00Z", "exit_code": None, "timed_out": False, "executed_count": None, "output_digest": "sha256:" + hashlib.sha256(reason.encode()).hexdigest(), "status": "blocked", "runner_provenance": "mission-public-cli/1", "repro_input_digest": None, "block_reason": reason}
+    return {"schema": "mission-verification-receipt/1", "contract_digest": canonical_contract_digest(contract), "criterion_id": criterion_id, "candidate_digest": "sha256:" + "0" * 64, "verifier_policy_digest": policy["digest"], "verifier_definition_digest": verifier_definition_digest(command), "argv": list(command["argv"]), "relative_cwd": command["relative_cwd"], "started_at": "1970-01-01T00:00:00Z", "finished_at": "1970-01-01T00:00:00Z", "exit_code": None, "timed_out": False, "executed_count": None, "output_digest": "sha256:" + hashlib.sha256(reason.encode()).hexdigest(), "observed_output_bytes": 0, "output_truncated": False, "status": "blocked", "runner_provenance": "mission-public-cli/1", "repro_input_digest": None, "block_reason": reason}
