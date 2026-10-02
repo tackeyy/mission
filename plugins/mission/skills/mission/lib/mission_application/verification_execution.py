@@ -117,7 +117,7 @@ def run_contract_verifier(state, *, project_root, criterion_id, repro_input=None
         # The source must still be the candidate after process execution.  A
         # mutable worktree never receives a successful receipt.
         current = capture_candidate(project_root, declared_untracked=command["declared_untracked"], external_inputs=command["external_inputs"])
-    except (KeyError, VerificationRunnerError) as exc:
+    except (KeyError, OSError, VerificationRunnerError) as exc:
         if "outcome" not in locals() or "candidate" not in locals():
             raise EvidenceFailure(str(exc)) from exc
         outcome["status"] = "blocked"

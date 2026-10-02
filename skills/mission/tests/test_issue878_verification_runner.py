@@ -177,6 +177,35 @@ def test_public_runner_records_process_bound_receipt(tmp_path, run_cli):
     assert stored["verification_receipts"][-1] == receipt
 
 
+def test_contract_verifier_preserves_child_facts_when_post_execution_source_capture_is_denied(tmp_path, run_cli, monkeypatch):
+    """A source read denied after execution must still leave an auditable receipt."""
+    from mission_application import verification_execution
+
+    prepared = _prepare_public_runner(tmp_path, run_cli)
+    assert prepared["imported"].returncode == 0
+    state = json.loads(run_cli("get", cwd=tmp_path).stdout)
+    real_capture = verification_execution.capture_candidate
+    calls = 0
+
+    def deny_second_capture(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise PermissionError("source-observation-denied")
+        return real_capture(*args, **kwargs)
+
+    monkeypatch.setattr(verification_execution, "capture_candidate", deny_second_capture)
+
+    receipt = verification_execution.run_contract_verifier(state, project_root=tmp_path, criterion_id="AC1")
+
+    assert calls == 2
+    assert receipt["status"] == "blocked"
+    assert receipt["block_reason"] == "candidate-observation-invalid"
+    assert receipt["exit_code"] == 0
+    assert receipt["timed_out"] is False
+    assert receipt["observed_output_bytes"] == len(b"ok\n")
+
+
 def test_public_runner_records_failed_junit_report_as_failed_receipt(tmp_path, run_cli):
     prepared = _prepare_public_runner(tmp_path, run_cli, policy=_junit_policy("<testsuite><testcase><failure/></testcase></testsuite>"))
     assert prepared["imported"].returncode == 0
