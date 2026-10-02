@@ -199,6 +199,28 @@ def test_assignment_requires_fixed_manifest_worker_and_candidate_envelope(tmp_pa
     assert record["reason"] == "assignment_manifest_mismatch"
 
 
+def test_assignment_derives_worker_digest_from_the_fixed_template(tmp_path):
+    module = _load()
+    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, capture_output=True, check=True).stdout.strip()
+    assignment, worker = _materialize_record(module, tmp_path, "concurrency-lost-update", "worker")
+    _, repair = _materialize_record(module, tmp_path, "concurrency-lost-update", "reference")
+    envelope = module.freeze_candidate(assignment, repair)
+    unrelated = tmp_path / assignment["task_id"]
+    unrelated.mkdir()
+    unrelated_digest = module._digest_tree(unrelated)
+    forged = {
+        **assignment,
+        "generated_digest": unrelated_digest,
+        "worker_digest": unrelated_digest,
+        "candidate_digest": unrelated_digest,
+    }
+
+    record = module.evaluate_assignment(ROOT, commit, forged, unrelated, repair, envelope)
+
+    assert record["status"] == "failed"
+    assert record["reason"] == "assignment_manifest_mismatch"
+
+
 def test_materializer_binds_current_source_commit_and_creates_one_task_repo(tmp_path):
     module = _load()
     commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, capture_output=True, check=True).stdout.strip()
@@ -239,6 +261,31 @@ def test_evaluator_rejects_a_snapshot_change_without_discarding_its_record(monke
     assert record["cases"] == []
 
 
+def test_assignment_rechecks_the_envelope_digest_when_evaluation_starts(monkeypatch, tmp_path):
+    module = _load()
+    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, capture_output=True, check=True).stdout.strip()
+    assignment, worker = _materialize_record(module, tmp_path, "concurrency-lost-update", "worker")
+    _, repair = _materialize_record(module, tmp_path, "concurrency-lost-update", "reference")
+    envelope = module.freeze_candidate(assignment, repair)
+    original_digest = module._digest_tree
+    calls = 0
+
+    def digest_with_change(path):
+        nonlocal calls
+        if path == repair:
+            calls += 1
+            if calls == 2:
+                (repair / "service.py").write_text("def execute(value): return {}\n", encoding="utf-8")
+        return original_digest(path)
+
+    monkeypatch.setattr(module, "_digest_tree", digest_with_change)
+    record = module.evaluate_assignment(ROOT, commit, assignment, worker, repair, envelope)
+
+    assert record["status"] == "failed"
+    assert record["reason"] == "candidate_digest_mismatch"
+    assert record["candidate_digest"] != envelope["candidate_digest"]
+
+
 def test_evaluator_distinguishes_json_boolean_from_number_and_rejects_invalid_cases(tmp_path):
     module = _load()
     root = ROOT / "benchmarks" / "mission-vs-goal" / "complex-fixtures"
@@ -258,6 +305,31 @@ def test_evaluator_distinguishes_json_boolean_from_number_and_rejects_invalid_ca
     record = module.evaluate_candidate(root, entry, candidate)
     assert record["status"] == "failed"
     assert record["reason"] == "evaluator_output_invalid"
+
+
+def test_evaluator_records_invalid_entries_and_bounded_non_json_values(tmp_path):
+    module = _load()
+    root = ROOT / "benchmarks" / "mission-vs-goal" / "complex-fixtures"
+    entry = next(entry for entry in module.load_catalog(root) if entry["id"] == "compatibility-legacy-default")
+    candidate = _materialize(module, tmp_path, entry["id"], "reference")
+
+    record = module.evaluate_candidate(root, None, candidate)
+    assert record["status"] == "failed"
+    assert record["reason"] == "evaluation_entry_invalid"
+    assert record["cases"] == []
+
+    cyclic = []
+    cyclic.append(cyclic)
+    record = module.evaluate_candidate(root, {**entry, "checks": [{"name": "cycle", "scenario": cyclic, "expected": None}]}, candidate)
+    assert record["status"] == "failed"
+    assert record["reason"] == "evaluation_case_non_json"
+
+    deep = None
+    for _ in range(80):
+        deep = [deep]
+    record = module.evaluate_candidate(root, {**entry, "checks": [{"name": "deep", "scenario": deep, "expected": None}]}, candidate)
+    assert record["status"] == "failed"
+    assert record["reason"] == "evaluation_case_non_json"
 
 
 def test_public_smoke_returns_a_failure_record_for_timeout_and_reaps_group_child(tmp_path):

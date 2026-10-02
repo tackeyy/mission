@@ -27,6 +27,7 @@ from typing import Any
 
 
 MAX_EVALUATOR_OUTPUT_BYTES = 65536
+MAX_JSON_DEPTH = 64
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -150,15 +151,36 @@ print(json.dumps(module.execute(json.loads(sys.argv[2])), sort_keys=True))
 
 
 def _json_value(value: Any) -> bool:
-    if value is None or isinstance(value, (str, bool, int)):
-        return True
-    if isinstance(value, float):
-        return value == value and value not in (float("inf"), float("-inf"))
-    if isinstance(value, list):
-        return all(_json_value(item) for item in value)
-    if isinstance(value, dict):
-        return all(isinstance(key, str) and _json_value(item) for key, item in value.items())
-    return False
+    """Accept only bounded, serializable JSON values without recursion leaks."""
+    seen: set[int] = set()
+
+    def valid(item: Any, depth: int) -> bool:
+        if depth > MAX_JSON_DEPTH:
+            return False
+        if item is None or type(item) in (str, bool, int):
+            return True
+        if type(item) is float:
+            return item == item and item not in (float("inf"), float("-inf"))
+        if type(item) not in (list, dict):
+            return False
+        identity = id(item)
+        if identity in seen:
+            return False
+        seen.add(identity)
+        try:
+            if type(item) is list:
+                return all(valid(child, depth + 1) for child in item)
+            return all(type(key) is str and valid(child, depth + 1) for key, child in item.items())
+        finally:
+            seen.remove(identity)
+
+    try:
+        if not valid(value, 0):
+            return False
+        json.dumps(value, allow_nan=False)
+    except (OverflowError, RecursionError, TypeError, ValueError):
+        return False
+    return True
 
 
 def _json_equal(actual: Any, expected: Any) -> bool:
@@ -187,6 +209,24 @@ def _entry_error(entry: Any) -> str | None:
         if not _json_value(check["scenario"]) or not _json_value(check["expected"]):
             return "evaluation_case_non_json"
     return None
+
+
+def _entry_metadata(entry: Any) -> dict[str, Any]:
+    if not isinstance(entry, dict):
+        return {"task_id": None, "family": None, "version": None}
+    return {"task_id": entry.get("id"), "family": entry.get("family"), "version": entry.get("version")}
+
+
+def _template_digest(generator: Any, task_id: str, group: str) -> str:
+    """Digest the fixed template bytes without trusting an assignment's tree."""
+    with tempfile.TemporaryDirectory(prefix="mission-complex-template-") as temporary:
+        root = Path(temporary) / task_id
+        root.mkdir()
+        for name, content in generator.task_template(task_id, group).items():
+            target = root / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        return _digest_tree(root)
 
 
 def _materialize_candidate(source: Path, destination: Path) -> tuple[Path, str]:
@@ -275,9 +315,9 @@ def _run_bounded(command: list[str], *, timeout_seconds: float) -> tuple[int | N
     return process.poll(), bytes(captured["stdout"]), timed_out, exceeded, incomplete
 
 
-def evaluate_candidate(root: Path, entry: dict[str, Any], candidate: Path, timeout_seconds: float = 3.0) -> dict[str, Any]:
+def evaluate_candidate(root: Path, entry: Any, candidate: Path, timeout_seconds: float = 3.0, expected_candidate_digest: str | None = None) -> dict[str, Any]:
     """Observe one candidate in a fresh process and preserve non-pass states."""
-    base = {"task_id": entry.get("id"), "family": entry.get("family"), "version": entry.get("version"), "candidate_digest": None}
+    base = {**_entry_metadata(entry), "candidate_digest": None}
     error = _entry_error(entry)
     checks = entry.get("checks") if isinstance(entry, dict) else []
     if error is not None:
@@ -289,14 +329,16 @@ def evaluate_candidate(root: Path, entry: dict[str, Any], candidate: Path, timeo
     except ValueError:
         return {**base, "status": "failed", "reason": "candidate_invalid", "case_count": len(checks), "cases": []}
     base["candidate_digest"] = initial_digest
+    if expected_candidate_digest is not None and initial_digest != expected_candidate_digest:
+        return {**base, "status": "failed", "reason": "candidate_digest_mismatch", "case_count": len(checks), "cases": []}
     with tempfile.TemporaryDirectory(prefix="mission-complex-evaluator-") as temporary:
         runner = Path(temporary) / "runner.py"; runner.write_text(_runner_source(), encoding="utf-8")
+        cases = []
         try:
-            cases = []
             for check in checks:
                 scenario = check["scenario"]
                 materialized, snapshot_digest = _materialize_candidate(candidate, Path(temporary) / f"candidate-{len(cases)}")
-                if snapshot_digest != initial_digest:
+                if snapshot_digest != initial_digest or (expected_candidate_digest is not None and snapshot_digest != expected_candidate_digest):
                     return {**base, "status": "failed", "reason": "candidate_changed", "case_count": len(checks), "cases": cases}
                 returncode, stdout, timed_out, output_exceeded, incomplete = _run_bounded(
                     [sys.executable, "-I", str(runner), str(materialized), json.dumps(scenario)],
@@ -323,7 +365,7 @@ def evaluate_candidate(root: Path, entry: dict[str, Any], candidate: Path, timeo
         final_digest = _digest_tree(candidate)
     except ValueError:
         return {**base, "status": "failed", "reason": "candidate_invalid", "case_count": len(checks), "cases": cases}
-    if final_digest != initial_digest:
+    if final_digest != initial_digest or (expected_candidate_digest is not None and final_digest != expected_candidate_digest):
         return {**base, "status": "failed", "reason": "candidate_changed", "case_count": len(checks), "cases": cases}
     if len(cases) != len(checks) or not cases:
         return {**base, "status": "failed", "reason": "evaluator_cases_invalid", "case_count": len(cases), "cases": cases}
@@ -347,7 +389,8 @@ def evaluate_assignment(repo_root: Path, source_commit: str, assignment: dict[st
         entries = {entry["id"]: entry for entry in generator.render_catalog()["tasks"]}
         task_id = assignment["task_id"]
         entry = entries[task_id]
-        expected = {"source_commit": source_commit, "generator_digest": _digest_bytes(generator_bytes), "catalog_digest": _digest_bytes(catalog_bytes), "task_id": task_id, "family": entry["family"], "version": entry["version"], "fixture_group": "worker", "task_root": task_id, "input_digest": generator.template_digest(task_id, "worker")}
+        template_digest = _template_digest(generator, task_id, "worker")
+        expected = {"source_commit": source_commit, "generator_digest": _digest_bytes(generator_bytes), "catalog_digest": _digest_bytes(catalog_bytes), "task_id": task_id, "family": entry["family"], "version": entry["version"], "fixture_group": "worker", "task_root": task_id, "input_digest": generator.template_digest(task_id, "worker"), "generated_digest": template_digest, "worker_digest": template_digest, "candidate_digest": template_digest}
         expected["input_manifest_identity"] = _digest_bytes(json.dumps({
             "source_commit": source_commit, "generator_digest": expected["generator_digest"],
             "catalog_digest": expected["catalog_digest"], "task_id": task_id,
@@ -355,7 +398,7 @@ def evaluate_assignment(repo_root: Path, source_commit: str, assignment: dict[st
         }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
         if any(assignment.get(key) != value for key, value in expected.items()):
             return {**base, "reason": "assignment_manifest_mismatch"}
-        if not worker_root.is_dir() or worker_root.name != task_id or _digest_tree(worker_root) != assignment.get("worker_digest"):
+        if not worker_root.is_dir() or worker_root.name != task_id or _digest_tree(worker_root) != template_digest:
             return {**base, "reason": "assignment_worker_mismatch"}
         envelope_keys = ("task_id", "family", "version", "source_commit", "generator_digest", "catalog_digest", "input_manifest_identity")
         if not isinstance(candidate_envelope, dict) or any(candidate_envelope.get(key) != assignment.get(key) for key in envelope_keys):
@@ -364,7 +407,13 @@ def evaluate_assignment(repo_root: Path, source_commit: str, assignment: dict[st
             return {**base, "reason": "candidate_digest_mismatch"}
     except (KeyError, TypeError, ValueError):
         return base
-    return evaluate_candidate(repo_root / "benchmarks" / "mission-vs-goal" / "complex-fixtures", entry, candidate_root, timeout_seconds)
+    return evaluate_candidate(
+        repo_root / "benchmarks" / "mission-vs-goal" / "complex-fixtures",
+        entry,
+        candidate_root,
+        timeout_seconds,
+        expected_candidate_digest=candidate_envelope["candidate_digest"],
+    )
 
 
 def run_public_smoke(candidate: Path) -> dict[str, Any]:
