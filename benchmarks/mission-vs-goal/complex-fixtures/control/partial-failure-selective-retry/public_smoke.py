@@ -1,2 +1,2 @@
-from service import scenario
-assert isinstance(scenario(), dict)
+from service import execute
+assert isinstance(execute([]), dict)

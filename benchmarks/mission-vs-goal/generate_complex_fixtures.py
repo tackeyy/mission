@@ -31,11 +31,48 @@ TASKS = [
     ("concurrency-order-independent", "concurrency", "Concurrent order does not change the canonical result.", "Arrival order chooses a non-canonical winner.", "return {'winner': 'late'}", "return {'winner': 'canonical'}", {"winner": "canonical"}),
 ]
 
-def files(expression: str, task_id: str, requirement: str, failure: str) -> dict[str, str]:
+def files(mode: str, broken: bool, task_id: str, requirement: str, failure: str) -> dict[str, str]:
     return {
-        "boundary.py": "def input_value():\n    return {'key': 'alpha', 'cents': 1250, 'urgency': 'high'}\n",
-        "service.py": "from boundary import input_value\n\ndef scenario():\n    raw = input_value()\n    key, cents, cache, old = raw['key'], raw['cents'], {'alpha': 2}, 1\n    " + expression.replace("\n", "\n    ") + "\n",
-        "public_smoke.py": "from service import scenario\nassert isinstance(scenario(), dict)\n",
+        "boundary.py": "def normalise(operation):\n    return dict(operation)\n",
+        "store.py": "class Store:\n    def __init__(self): self.items = {}; self.sent = []; self.total = 0\n    def snapshot(self): return {'items': self.items, 'sent': self.sent, 'total': self.total}\n",
+        "service.py": f'''from boundary import normalise
+from store import Store
+MODE = {mode!r}; BROKEN = {broken!r}
+
+def execute(operations):
+    store = Store(); seen = set(); watermark = 0
+    for raw in operations:
+        op = normalise(raw); kind = op['kind']
+        if MODE == 'cache':
+            if kind == 'write' and (BROKEN and op['key'] in store.items): pass
+            elif kind == 'write': store.items[op['key']] = op['value']
+        elif MODE == 'units':
+            if kind == 'amount': store.items['amount'] = op['cents'] if BROKEN else op['cents'] / 100
+        elif MODE == 'legacy':
+            if kind == 'payload': store.items['state'] = op.get('state', 'unknown' if BROKEN else 'open')
+        elif MODE == 'rename':
+            if kind == 'payload': store.items['priority'] = op.get('priority', 'normal' if BROKEN else op.get('urgency', 'normal'))
+        elif MODE == 'rollback':
+            if kind == 'put': store.items[op['key']] = op['value']
+            if kind == 'fail' and not BROKEN: store.items.clear()
+        elif MODE == 'retry':
+            if kind == 'send' and (BROKEN or op['id'] not in seen): store.sent.append(op['id']); seen.add(op['id'])
+        elif MODE == 'idempotent':
+            if kind == 'charge' and (BROKEN or op['id'] not in seen): store.total += op['amount']; seen.add(op['id'])
+        elif MODE == 'resume':
+            if kind == 'event' and (op['offset'] >= watermark if BROKEN else op['offset'] > watermark): store.sent.append(op['id']); watermark = max(watermark, op['offset'])
+        elif MODE == 'cancel':
+            if kind == 'add': store.total += op['amount']
+            if kind == 'cancel' and not BROKEN: store.total -= op['amount']
+        elif MODE == 'dedupe':
+            if kind == 'add' and (BROKEN or op['id'] not in seen): store.total += op['amount']; seen.add(op['id'])
+        elif MODE == 'lost-update':
+            if kind == 'increment': store.total = 1 if BROKEN else store.total + op['amount']
+        elif MODE == 'ordering':
+            if kind == 'candidate': store.items['winner'] = op['name'] if BROKEN else min(store.items.get('winner', op['name']), op['name'])
+    return store.snapshot()
+''',
+        "public_smoke.py": "from service import execute\nassert isinstance(execute([]), dict)\n",
         "README.md": f"# {task_id}\n\nRequirement: {requirement}\n\nThe starter has a defect: {failure}\nRepair the observable contract without weakening the public smoke check.\n",
     }
 
@@ -46,12 +83,26 @@ def write_tree(root: Path, data: dict[str, str]) -> None:
 
 def main() -> None:
     catalog = []
+    cases = {
+      'cache': [{'name':'replace-cache','operations':[{'kind':'write','key':'x','value':1},{'kind':'write','key':'x','value':2}],'expected':{'items':{'x':2},'sent':[],'total':0}}],
+      'units': [{'name':'cents-boundary','operations':[{'kind':'amount','cents':1250}],'expected':{'items':{'amount':12.5},'sent':[],'total':0}}],
+      'legacy': [{'name':'legacy-default','operations':[{'kind':'payload'}],'expected':{'items':{'state':'open'},'sent':[],'total':0}}],
+      'rename': [{'name':'renamed-field','operations':[{'kind':'payload','urgency':'high'}],'expected':{'items':{'priority':'high'},'sent':[],'total':0}}],
+      'rollback': [{'name':'atomic-failure','operations':[{'kind':'put','key':'a','value':1},{'kind':'fail'}],'expected':{'items':{},'sent':[],'total':0}}],
+      'retry': [{'name':'selective-retry','operations':[{'kind':'send','id':'a'},{'kind':'send','id':'a'},{'kind':'send','id':'b'}],'expected':{'items':{},'sent':['a','b'],'total':0}}],
+      'idempotent': [{'name':'same-event','operations':[{'kind':'charge','id':'x','amount':3},{'kind':'charge','id':'x','amount':3}],'expected':{'items':{},'sent':[],'total':3}}],
+      'resume': [{'name':'watermark','operations':[{'kind':'event','id':'a','offset':1},{'kind':'event','id':'b','offset':1},{'kind':'event','id':'c','offset':2}],'expected':{'items':{},'sent':['a','c'],'total':0}}],
+      'cancel': [{'name':'cancellation','operations':[{'kind':'add','amount':3},{'kind':'cancel','amount':3}],'expected':{'items':{},'sent':[],'total':0}}],
+      'dedupe': [{'name':'duplicate','operations':[{'kind':'add','id':'x','amount':2},{'kind':'add','id':'x','amount':2}],'expected':{'items':{},'sent':[],'total':2}}],
+      'lost-update': [{'name':'barrier-increments','operations':[{'kind':'increment','amount':1},{'kind':'increment','amount':1}],'expected':{'items':{},'sent':[],'total':2}}],
+      'ordering': [{'name':'canonical-order','operations':[{'kind':'candidate','name':'a'},{'kind':'candidate','name':'z'}],'expected':{'items':{'winner':'a'},'sent':[],'total':0}}], }
     for task_id, family, requirement, failure, broken, repaired, expected in TASKS:
-        for group, expression in (("worker", broken), ("reference", repaired), ("control", repaired)):
-            write_tree(ROOT / group / task_id, files(expression, task_id, requirement, failure))
+        mode = {'multi-module-cache':'cache','multi-module-unit-boundary':'units','compatibility-legacy-default':'legacy','compatibility-versioned-field':'rename','partial-failure-rollback':'rollback','partial-failure-selective-retry':'retry','rerun-idempotency-key':'idempotent','rerun-resume-watermark':'resume','aggregation-cancellation':'cancel','aggregation-deduplication':'dedupe','concurrency-lost-update':'lost-update','concurrency-order-independent':'ordering'}[task_id]
+        for group, is_broken in (("worker", True), ("reference", False), ("control", False)):
+            write_tree(ROOT / group / task_id, files(mode, is_broken, task_id, requirement, failure))
         catalog.append({"id": task_id, "family": family, "version": "complex-fixture-v1", "requirement": requirement,
                         "dependency": DEPENDENCIES[family],
-                        "realistic_failure": failure, "checks": [{"name": "external-contract", "expected": expected}]})
+                        "realistic_failure": failure, "checks": cases[mode]})
     (ROOT / "catalog.json").parent.mkdir(parents=True, exist_ok=True)
     (ROOT / "catalog.json").write_text(json.dumps({"schema": "mission-complex-fixtures/1", "tasks": catalog}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     (ROOT / "README.md").write_text("""# Complex repair fixtures

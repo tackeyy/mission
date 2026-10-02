@@ -10,9 +10,25 @@
       "realistic_failure": "A write returns a stale cached value after an update.",
       "checks": [
         {
-          "name": "external-contract",
+          "name": "replace-cache",
+          "operations": [
+            {
+              "kind": "write",
+              "key": "x",
+              "value": 1
+            },
+            {
+              "kind": "write",
+              "key": "x",
+              "value": 2
+            }
+          ],
           "expected": {
-            "value": 2
+            "items": {
+              "x": 2
+            },
+            "sent": [],
+            "total": 0
           }
         }
       ]
@@ -26,9 +42,19 @@
       "realistic_failure": "A cents value is exposed as whole currency.",
       "checks": [
         {
-          "name": "external-contract",
+          "name": "cents-boundary",
+          "operations": [
+            {
+              "kind": "amount",
+              "cents": 1250
+            }
+          ],
           "expected": {
-            "amount": 12.5
+            "items": {
+              "amount": 12.5
+            },
+            "sent": [],
+            "total": 0
           }
         }
       ]
@@ -42,9 +68,18 @@
       "realistic_failure": "A legacy payload loses its compatibility default.",
       "checks": [
         {
-          "name": "external-contract",
+          "name": "legacy-default",
+          "operations": [
+            {
+              "kind": "payload"
+            }
+          ],
           "expected": {
-            "state": "open"
+            "items": {
+              "state": "open"
+            },
+            "sent": [],
+            "total": 0
           }
         }
       ]
@@ -58,9 +93,19 @@
       "realistic_failure": "A renamed field is silently ignored by the current consumer.",
       "checks": [
         {
-          "name": "external-contract",
+          "name": "renamed-field",
+          "operations": [
+            {
+              "kind": "payload",
+              "urgency": "high"
+            }
+          ],
           "expected": {
-            "priority": "high"
+            "items": {
+              "priority": "high"
+            },
+            "sent": [],
+            "total": 0
           }
         }
       ]
@@ -74,9 +119,21 @@
       "realistic_failure": "A partial write remains visible after a later operation fails.",
       "checks": [
         {
-          "name": "external-contract",
+          "name": "atomic-failure",
+          "operations": [
+            {
+              "kind": "put",
+              "key": "a",
+              "value": 1
+            },
+            {
+              "kind": "fail"
+            }
+          ],
           "expected": {
-            "stored": []
+            "items": {},
+            "sent": [],
+            "total": 0
           }
         }
       ]
@@ -90,12 +147,28 @@
       "realistic_failure": "A retry repeats an already accepted external operation.",
       "checks": [
         {
-          "name": "external-contract",
+          "name": "selective-retry",
+          "operations": [
+            {
+              "kind": "send",
+              "id": "a"
+            },
+            {
+              "kind": "send",
+              "id": "a"
+            },
+            {
+              "kind": "send",
+              "id": "b"
+            }
+          ],
           "expected": {
+            "items": {},
             "sent": [
-              "first",
-              "second"
-            ]
+              "a",
+              "b"
+            ],
+            "total": 0
           }
         }
       ]
@@ -109,9 +182,23 @@
       "realistic_failure": "A repeated event is charged twice.",
       "checks": [
         {
-          "name": "external-contract",
+          "name": "same-event",
+          "operations": [
+            {
+              "kind": "charge",
+              "id": "x",
+              "amount": 3
+            },
+            {
+              "kind": "charge",
+              "id": "x",
+              "amount": 3
+            }
+          ],
           "expected": {
-            "charges": 1
+            "items": {},
+            "sent": [],
+            "total": 3
           }
         }
       ]
@@ -125,12 +212,31 @@
       "realistic_failure": "Resume processes the previously committed item again.",
       "checks": [
         {
-          "name": "external-contract",
+          "name": "watermark",
+          "operations": [
+            {
+              "kind": "event",
+              "id": "a",
+              "offset": 1
+            },
+            {
+              "kind": "event",
+              "id": "b",
+              "offset": 1
+            },
+            {
+              "kind": "event",
+              "id": "c",
+              "offset": 2
+            }
+          ],
           "expected": {
-            "processed": [
-              "b",
+            "items": {},
+            "sent": [
+              "a",
               "c"
-            ]
+            ],
+            "total": 0
           }
         }
       ]
@@ -144,8 +250,20 @@
       "realistic_failure": "A cancellation leaves an obsolete positive total.",
       "checks": [
         {
-          "name": "external-contract",
+          "name": "cancellation",
+          "operations": [
+            {
+              "kind": "add",
+              "amount": 3
+            },
+            {
+              "kind": "cancel",
+              "amount": 3
+            }
+          ],
           "expected": {
+            "items": {},
+            "sent": [],
             "total": 0
           }
         }
@@ -160,8 +278,22 @@
       "realistic_failure": "A duplicate event is counted twice.",
       "checks": [
         {
-          "name": "external-contract",
+          "name": "duplicate",
+          "operations": [
+            {
+              "kind": "add",
+              "id": "x",
+              "amount": 2
+            },
+            {
+              "kind": "add",
+              "id": "x",
+              "amount": 2
+            }
+          ],
           "expected": {
+            "items": {},
+            "sent": [],
             "total": 2
           }
         }
@@ -176,9 +308,21 @@
       "realistic_failure": "Two writers read the same value and one increment is lost.",
       "checks": [
         {
-          "name": "external-contract",
+          "name": "barrier-increments",
+          "operations": [
+            {
+              "kind": "increment",
+              "amount": 1
+            },
+            {
+              "kind": "increment",
+              "amount": 1
+            }
+          ],
           "expected": {
-            "count": 2
+            "items": {},
+            "sent": [],
+            "total": 2
           }
         }
       ]
@@ -192,9 +336,23 @@
       "realistic_failure": "Arrival order chooses a non-canonical winner.",
       "checks": [
         {
-          "name": "external-contract",
+          "name": "canonical-order",
+          "operations": [
+            {
+              "kind": "candidate",
+              "name": "a"
+            },
+            {
+              "kind": "candidate",
+              "name": "z"
+            }
+          ],
           "expected": {
-            "winner": "canonical"
+            "items": {
+              "winner": "a"
+            },
+            "sent": [],
+            "total": 0
           }
         }
       ]

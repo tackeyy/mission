@@ -10,7 +10,6 @@ not trusted.
 
 from __future__ import annotations
 
-import hashlib
 import importlib.util
 import json
 import subprocess
@@ -21,13 +20,13 @@ from typing import Any
 
 
 def _digest_tree(root: Path) -> str:
-    digest = hashlib.sha256()
-    for path in sorted(item for item in root.rglob("*") if item.is_file()):
-        relative = path.relative_to(root).as_posix().encode("utf-8")
-        content = path.read_bytes()
-        digest.update(len(relative).to_bytes(8, "big")); digest.update(relative)
-        digest.update(len(content).to_bytes(8, "big")); digest.update(content)
-    return "sha256:" + digest.hexdigest()
+    """Use #882's regular-file, no-link snapshot boundary verbatim."""
+    source = Path(__file__).with_name("native_goal_benchmark.py")
+    spec = importlib.util.spec_from_file_location("native_goal_snapshot", source)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("worker snapshot implementation unavailable")
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    return module._digest_tree(root, exclude_git=True)
 
 
 def load_catalog(root: Path) -> list[dict[str, Any]]:
@@ -53,7 +52,7 @@ spec = importlib.util.spec_from_file_location("candidate_service", candidate + "
 module = importlib.util.module_from_spec(spec)
 sys.path.insert(0, candidate)
 spec.loader.exec_module(module)
-print(json.dumps(module.scenario(), sort_keys=True))
+print(json.dumps(module.execute(json.loads(sys.argv[2])), sort_keys=True))
 '''
 
 
@@ -69,16 +68,20 @@ def evaluate_candidate(root: Path, entry: dict[str, Any], candidate: Path, timeo
     with tempfile.TemporaryDirectory(prefix="mission-complex-evaluator-") as temporary:
         runner = Path(temporary) / "runner.py"; runner.write_text(_runner_source(), encoding="utf-8")
         try:
-            observed = subprocess.run([sys.executable, "-I", str(runner), str(candidate)], text=True, capture_output=True, timeout=timeout_seconds, check=False)
+            cases = []
+            for check in checks:
+                observed = subprocess.run([sys.executable, "-I", str(runner), str(candidate), json.dumps(check.get("operations"))], text=True, capture_output=True, timeout=timeout_seconds, check=False)
+                if observed.returncode != 0:
+                    return {**base, "status": "failed", "reason": "evaluator_execution_failed", "case_count": len(checks), "cases": cases}
+                if len(observed.stdout) > 65536:
+                    return {**base, "status": "failed", "reason": "evaluator_output_too_large", "case_count": len(checks), "cases": cases}
+                try:
+                    actual = json.loads(observed.stdout)
+                except json.JSONDecodeError:
+                    return {**base, "status": "failed", "reason": "evaluator_output_invalid", "case_count": len(checks), "cases": cases}
+                cases.append({"name": check.get("name"), "passed": actual == check.get("expected")})
         except subprocess.TimeoutExpired:
             return {**base, "status": "blocked", "reason": "evaluator_timeout", "case_count": len(checks), "cases": []}
-    if observed.returncode != 0:
-        return {**base, "status": "failed", "reason": "evaluator_execution_failed", "case_count": len(checks), "cases": []}
-    try:
-        actual = json.loads(observed.stdout)
-    except json.JSONDecodeError:
-        return {**base, "status": "failed", "reason": "evaluator_output_invalid", "case_count": len(checks), "cases": []}
-    cases = [{"name": check.get("name"), "passed": actual == check.get("expected")} for check in checks if isinstance(check, dict)]
     if len(cases) != len(checks) or not cases:
         return {**base, "status": "failed", "reason": "evaluator_cases_invalid", "case_count": len(cases), "cases": cases}
     return {**base, "status": "passed" if all(case["passed"] for case in cases) else "failed",
