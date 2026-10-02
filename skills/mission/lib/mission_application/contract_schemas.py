@@ -116,7 +116,7 @@ def acceptance_contract_schema() -> dict:
             "revision": "integer at least 1",
             "requirements[]": "contiguous ledger entries covering requirement_text exactly",
             "requirements[].id": "unique non-empty identifier",
-            "requirements[].start / end": "integer UTF-8 text indexes; start begins at the previous end and end is greater than start",
+            "requirements[].start / end": "integer Unicode codepoint indexes; start begins at the previous end and end is greater than start",
             "requirements[].text": "exact substring of requirement_text from start through end",
             "requirements[].classification": "obligation or context",
             "criteria[]": "non-empty list of unique acceptance criteria; unmapped obligations remain retained with coverage pending",

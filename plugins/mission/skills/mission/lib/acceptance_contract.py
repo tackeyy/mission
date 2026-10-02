@@ -37,7 +37,7 @@ def canonical_bytes(value: object) -> bytes:
 def load(raw: bytes) -> dict:
     try:
         value = json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs, parse_constant=_constant)
-    except (UnicodeDecodeError, json.JSONDecodeError, AcceptanceContractError) as exc:
+    except (UnicodeDecodeError, ValueError, AcceptanceContractError) as exc:
         raise AcceptanceContractError("contract-json-invalid") from exc
     return validate(value)
 
@@ -55,8 +55,9 @@ def _text(value: object, code: str) -> str:
 
 def _path(value: object) -> str:
     path = _text(value, "target-path-invalid")
-    parsed = PurePosixPath(path)
-    if parsed.is_absolute() or any(part in {"", ".", ".."} for part in parsed.parts):
+    if ("\\" in path or path.startswith("/") or path.startswith("//")
+            or len(path) >= 2 and path[1] == ":"
+            or any(part in {"", ".", ".."} for part in path.split("/"))):
         raise AcceptanceContractError("target-path-invalid")
     return path
 
