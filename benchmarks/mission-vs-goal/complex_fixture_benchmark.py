@@ -233,11 +233,21 @@ def run_public_smoke(candidate: Path) -> dict[str, Any]:
 
 
 def export_worker_fixtures(repo_root: Path, starting_commit: str, destination: Path, catalog_root: Path) -> Path:
-    """Use #882's positive allowlist export for the exact worker material."""
+    """Generate one-task repos, then use #882's unchanged positive export."""
     module_path = repo_root / "benchmarks" / "mission-vs-goal" / "native_goal_benchmark.py"
     spec = importlib.util.spec_from_file_location("native_goal_worker_export", module_path)
     if spec is None or spec.loader is None:
         raise RuntimeError("worker export implementation unavailable")
     module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
-    allowed = [f"benchmarks/mission-vs-goal/complex-fixtures/worker/{entry['id']}" for entry in load_catalog(catalog_root)]
-    return module.create_worker_export(repo_root, starting_commit, destination, allowed)
+    entries = load_catalog(catalog_root)
+    destination.mkdir(parents=True, exist_ok=False)
+    manifest = []
+    for entry in entries:
+        with tempfile.TemporaryDirectory(prefix="mission-complex-worker-") as temporary:
+            generated = Path(temporary) / "repo"
+            record = materialize_task(repo_root, starting_commit, entry["id"], "worker", generated)
+            exported = module.create_worker_export(generated, record["generated_commit"], destination / entry["id"], [entry["id"]])
+            record["export_digest"] = _digest_tree(exported / entry["id"])
+            manifest.append(record)
+    (destination / "manifest.json").write_text(json.dumps({"source_commit": starting_commit, "assignments": manifest}, indent=2) + "\n", encoding="utf-8")
+    return destination

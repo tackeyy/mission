@@ -95,8 +95,11 @@ def test_worker_export_uses_the_positive_allowlist_from_native_goal_benchmark(tm
     exported = module.export_worker_fixtures(ROOT, commit, tmp_path / "worker", root)
     paths = {path.relative_to(exported).as_posix() for path in exported.rglob("*") if path.is_file()}
     assert paths
-    assert all("/reference/" not in f"/{path}" and "/control/" not in f"/{path}" for path in paths)
+    assert all("reference" not in path and "control" not in path for path in paths)
     assert not any("catalog.json" in path or "evaluator" in path for path in paths)
+    manifest = __import__("json").loads((exported / "manifest.json").read_text())
+    assert manifest["source_commit"] == commit
+    assert len(manifest["assignments"]) == 12
 
 
 def test_concurrency_tasks_use_real_shared_state_and_evaluator_owned_scenarios(tmp_path):
