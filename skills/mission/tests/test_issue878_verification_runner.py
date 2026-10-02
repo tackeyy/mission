@@ -1,6 +1,7 @@
 """#878: registered verification policies bind acceptance imports to execution."""
 import hashlib
 import json
+import subprocess
 
 
 def _policy():
@@ -45,3 +46,29 @@ def test_import_freezes_registered_project_verifier_policy(tmp_path, run_cli):
     stored = json.loads(run_cli("get", cwd=tmp_path).stdout)["acceptance_contract"]
     assert stored["verifier_policy"]["digest"] == contract["verifier_policy_digest"]
     assert stored["verifier_policy"]["commands"]["project-test"]["argv"] == policy["commands"][0]["argv"]
+
+
+def test_public_runner_records_process_bound_receipt(tmp_path, run_cli):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "tracked.txt").write_text("candidate", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-qm", "base"], cwd=tmp_path, check=True)
+    run_cli("init", "verification runner", "--force-mission", cwd=tmp_path, check=True)
+    policy_dir = tmp_path / ".mission"; policy_dir.mkdir()
+    encoded = json.dumps(_policy(), sort_keys=True, separators=(",", ":")).encode()
+    (policy_dir / "verifiers.json").write_bytes(encoded)
+    state = json.loads(run_cli("get", cwd=tmp_path).stdout)
+    contract = _contract(state["mission_id"])
+    contract["verifier_policy_digest"] = "sha256:" + hashlib.sha256(encoded).hexdigest()
+    source = tmp_path / "contract.json"; source.write_text(json.dumps(contract), encoding="utf-8")
+    assert run_cli("acceptance-contract", "import", "--input", str(source), cwd=tmp_path).returncode == 0
+
+    result = run_cli("verification", "run", "--criterion", "AC1", cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads(result.stdout)["receipt"]
+    assert receipt["schema"] == "mission-verification-receipt/1"
+    assert receipt["status"] == "passed"
+    assert receipt["argv"] == _policy()["commands"][0]["argv"]
+    stored = json.loads(run_cli("get", cwd=tmp_path).stdout)
+    assert stored["verification_receipts"][-1] == receipt

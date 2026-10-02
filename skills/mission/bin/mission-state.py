@@ -219,6 +219,7 @@ from mission_application.evidence import (  # noqa: E402
     ProgressClearRequest,
     ProgressUpdateRequest,
     VerificationRecordRequest,
+    VerificationReceiptRequest,
     evidence_publication_paths,
     prepare_verification_record_operation,
     run_context_manifest,
@@ -226,6 +227,7 @@ from mission_application.evidence import (  # noqa: E402
     run_progress_clear,
     run_progress_update,
     run_verification_record,
+    run_verification_receipt,
     validate_context_iteration_override,
     verify_published_evidence_effects,
 )
@@ -235,6 +237,7 @@ from mission_application.acceptance import (  # noqa: E402
     run_acceptance_contract_status_cli,
 )
 from mission_application.verifier_policy import load as load_verifier_policy  # noqa: E402
+from mission_application.verification_execution import run_contract_verifier  # noqa: E402
 from mission_application.planning import (  # noqa: E402
     EXECUTOR_HANDOFF_ABORT_REASONS,
     EXECUTOR_HANDOFF_COMMAND_NAMES,
@@ -13908,6 +13911,39 @@ def cmd_verification_record(args):
     print(json.dumps({"ok": True, **result}, ensure_ascii=False, indent=2))
 
 
+def cmd_verification_run(args):
+    """Execute one policy-frozen criterion and persist the runner receipt."""
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        raise SystemExit("verification-state-missing")
+    try:
+        reader = _legacy_lifecycle_repository(cwd, sf, stamp=False, strict_read=True)
+        with reader.transaction():
+            state = reader.load()
+        receipt = run_contract_verifier(state, project_root=cwd, criterion_id=args.criterion)
+        caller_id, arguments = _compatibility_operation_arguments(
+            {"criterion_id": args.criterion, "candidate_digest": receipt["candidate_digest"], "receipt_status": receipt["status"]},
+            target_digest="", require_caller=False,
+        )
+        operation_id = command = None
+        if caller_id is not None:
+            operation_id, command = _canonical_compatibility_operation(
+                sf.stem, "verification-receipt-record", arguments, caller_operation_id=caller_id,
+            )
+        result = run_verification_receipt(
+            VerificationReceiptRequest(iso_now(), receipt),
+            _legacy_lifecycle_repository(
+                cwd, sf, stamp=True, pre_admit_lease=True, session_id=sf.stem,
+                operation_id=operation_id, operation_command=command,
+                operation_command_type="verification-receipt-record",
+            ),
+        )
+    except EvidenceFailure as exc:
+        raise SystemExit(exc.code) from exc
+    print(json.dumps({"ok": True, **result}, ensure_ascii=False, indent=2))
+
+
 _CLAIMS_LEDGER_CLI_SERVICES = ClaimsLedgerCliServices(
     resolve_state_file, _resolve_evidence_output_path, _legacy_evidence_repository,
 )
@@ -16407,6 +16443,9 @@ def _add_review_parsers(subparsers) -> None:
     verify_source.add_argument("--stdin", action="store_true", help="stdin から JSON を読む")
     verify_source.add_argument("--input", default=None, help="JSON ファイルパス")
     p_verify_record.set_defaults(func=cmd_verification_record)
+    p_verify_run = verify_sub.add_parser("run", help="凍結済み verifier を実行し receipt を記録")
+    p_verify_run.add_argument("--criterion", required=True)
+    p_verify_run.set_defaults(func=cmd_verification_run, command_outcome_tracking=True)
     p_verify_claims = verify_sub.add_parser("claims", help="implementation claim ledger を生成")
     p_verify_claims.add_argument("--iteration", type=int, required=True)
     p_verify_claims.add_argument("--doc-digest", required=True)

@@ -40,6 +40,7 @@ from .commands import (
     RecordExecutorStep,
     RecordSpecialistRecommendation,
     RecordVerification,
+    RecordVerificationReceipt,
     ImportAcceptanceContract,
     RejectExecutorHandoff,
     AbortExecutorHandoff,
@@ -58,6 +59,7 @@ from .evidence import (
     apply_progress_clear,
     apply_progress_update,
     apply_verification_record,
+    apply_verification_receipt,
 )
 
 from .a4 import (
@@ -1376,6 +1378,16 @@ def _record_verification(state: MissionState, raw_command: object) -> Transition
     )
 
 
+def _record_verification_receipt(state: MissionState, raw_command: object) -> Transition:
+    command = raw_command
+    assert isinstance(command, RecordVerificationReceipt)
+    try:
+        document, _entry = apply_verification_receipt(_evidence_document(state), command)
+    except EvidenceRuleError as rejected:
+        raise _Rejected(rejected.code)
+    return Transition(_with_evidence_document(state, document), (KernelEvent("verification-receipt-recorded"),))
+
+
 def _import_acceptance_contract(state: MissionState, raw_command: object) -> Transition:
     command = raw_command
     assert isinstance(command, ImportAcceptanceContract)
@@ -1987,6 +1999,12 @@ TRANSITION_TABLE = build_transition_table(
             _record_verification,
         ),
         TransitionRule(
+            "verification-receipt-record",
+            RecordVerificationReceipt,
+            _command_type_guard(RecordVerificationReceipt),
+            _record_verification_receipt,
+        ),
+        TransitionRule(
             "acceptance-contract-import",
             ImportAcceptanceContract,
             _command_type_guard(ImportAcceptanceContract),
@@ -2176,7 +2194,7 @@ def bind_transition_effects(
         claims = (command.artifact_effect, command.export_effect)
     elif isinstance(command, (UpdateProgress, GenerateContextManifest, GenerateClaimsLedger)):
         claims = (command.effect,)
-    elif isinstance(command, (ClearProgress, RecordVerification, ImportAcceptanceContract)):
+    elif isinstance(command, (ClearProgress, RecordVerification, RecordVerificationReceipt, ImportAcceptanceContract)):
         claims = ()
     if claims is not None and (
         len(effects) != len(claims)

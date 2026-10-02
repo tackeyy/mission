@@ -304,6 +304,7 @@ def test_decide_and_guidance_share_one_named_transition_table():
         "progress-clear",
         "progress-update",
         "verification-record",
+        "verification-receipt-record",
         "mark-halt",
         "mark-pass",
         "reactivate",

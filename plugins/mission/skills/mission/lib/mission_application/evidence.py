@@ -30,6 +30,7 @@ from mission_kernel.commands import (
     GenerateContextManifest,
     ProgressEffectClaim,
     RecordVerification,
+    RecordVerificationReceipt,
     UpdateProgress,
     VerificationCheck,
 )
@@ -89,6 +90,12 @@ class VerificationRecordRequest:
     iteration: object
     checks: object
     kind: object = "execution"
+
+
+@dataclass(frozen=True)
+class VerificationReceiptRequest:
+    now: object
+    receipt: object
 
 
 @dataclass(frozen=True)
@@ -284,6 +291,15 @@ def execute_evidence_operation(repository: object, prepare) -> dict:
             raise EvidenceFailure("verification-projection-mismatch")
         if replayed:
             payload["verification"] = copy.deepcopy(record)
+    elif isinstance(command, RecordVerificationReceipt):
+        receipts = source.get("verification_receipts")
+        if not isinstance(receipts, list) or not receipts or not isinstance(receipts[-1], dict):
+            raise EvidenceFailure("verification-receipt-projection-mismatch")
+        observed = dict(receipts[-1]); observed.pop("recorded_at", None)
+        if observed != command.receipt.thaw():
+            raise EvidenceFailure("verification-receipt-projection-mismatch")
+        if replayed:
+            payload["receipt"] = copy.deepcopy(receipts[-1])
     elif isinstance(command, GenerateClaimsLedger):
         record = (source.get("claims_ledgers") or {}).get(str(command.iteration))
         if not isinstance(record, dict):
@@ -561,6 +577,22 @@ def run_verification_record(
             checks=request.checks,
             kind=request.kind,
         ),
+    )
+
+
+def prepare_verification_receipt(state: object, *, now: object, receipt: object) -> PreparedEvidenceOperation:
+    if not isinstance(state, dict) or not isinstance(receipt, dict):
+        raise EvidenceFailure("verification-receipt-invalid")
+    command = RecordVerificationReceipt(now, freeze_json_value(receipt))
+    from mission_kernel.evidence import project_verification_receipt
+    entry = _translate(lambda: project_verification_receipt(command))
+    return PreparedEvidenceOperation(command, (), {"receipt": copy.deepcopy(entry)}, volatile_fields=("recorded_at",))
+
+
+def run_verification_receipt(request: VerificationReceiptRequest, repository: object) -> dict:
+    return execute_evidence_operation(
+        repository,
+        lambda state: prepare_verification_receipt(state, now=request.now, receipt=request.receipt),
     )
 
 

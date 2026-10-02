@@ -15,3 +15,18 @@ def test_snapshot_uses_dirty_tracked_bytes_and_fresh_materialization(tmp_path):
     with materialize_candidate(candidate) as directory:
         assert (directory / "app.txt").read_text(encoding="utf-8") == "dirty"
     assert candidate.digest.startswith("sha256:")
+
+
+def test_rejects_forged_escape_and_distinguishes_deleted_file_from_dash():
+    import pytest
+    from mission_application.verification_runner import CandidateFile, CandidateSnapshot, VerificationRunnerError, _digest, materialize_candidate
+
+    escape = (CandidateFile("../outside", 0o644, b"x"),)
+    with pytest.raises(VerificationRunnerError, match="candidate-path-invalid"):
+        _digest(escape)
+    deleted = (CandidateFile("result", 0o644, None),)
+    dash = (CandidateFile("result", 0o644, b"-"),)
+    assert _digest(deleted) != _digest(dash)
+    with pytest.raises(VerificationRunnerError, match="candidate-digest-invalid"):
+        with materialize_candidate(CandidateSnapshot(dash, _digest(deleted))):
+            pass

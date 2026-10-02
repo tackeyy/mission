@@ -39,13 +39,19 @@ def validate(value):
         raise VerifierPolicyError("verifier-policy-commands-invalid")
     result = {}
     for command in commands:
-        if not isinstance(command, dict) or set(command) != {"id", "argv", "relative_cwd", "timeout_sec", "output_limit", "kind", "env", "declared_untracked"}:
+        allowed = {"id", "argv", "relative_cwd", "timeout_sec", "output_limit", "kind", "env", "declared_untracked", "executed_count_pattern"}
+        if not isinstance(command, dict) or set(command) not in ({"id", "argv", "relative_cwd", "timeout_sec", "output_limit", "kind", "env", "declared_untracked"}, allowed):
             raise VerifierPolicyError("verifier-policy-command-invalid")
         identifier = _text(command["id"], "verifier-policy-command-id-invalid")
         argv = command["argv"]
         if identifier in result or not isinstance(argv, list) or not argv or not all(isinstance(item, str) and item and "\x00" not in item for item in argv):
             raise VerifierPolicyError("verifier-policy-command-invalid")
         if command["kind"] not in {"command", "test"} or type(command["timeout_sec"]) is not int or not 0 < command["timeout_sec"] <= 3600 or type(command["output_limit"]) is not int or not 0 < command["output_limit"] <= 1048576:
+            raise VerifierPolicyError("verifier-policy-command-invalid")
+        pattern = command.get("executed_count_pattern")
+        if command["kind"] == "test" and (not isinstance(pattern, str) or not pattern or len(pattern) > 512):
+            raise VerifierPolicyError("verifier-policy-test-adapter-invalid")
+        if command["kind"] == "command" and pattern is not None:
             raise VerifierPolicyError("verifier-policy-command-invalid")
         _relative(command["relative_cwd"], "verifier-policy-cwd-invalid")
         if not isinstance(command["env"], dict) or not all(isinstance(key, str) and key and isinstance(item, str) for key, item in command["env"].items()):
@@ -63,6 +69,8 @@ def load(project_root, *, user_path=None):
     project = Path(project_root) / ".mission" / "verifiers.json"
     selected = project if project.is_file() else Path(user_path) if user_path is not None else Path.home() / ".config" / "mission" / "verifiers.json"
     try:
+        if selected.is_symlink():
+            raise OSError("policy symlink")
         raw = selected.read_bytes()
         value = json.loads(raw.decode("utf-8"))
     except (OSError, UnicodeDecodeError, ValueError) as exc:

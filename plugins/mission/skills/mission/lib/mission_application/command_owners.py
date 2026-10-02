@@ -48,6 +48,7 @@ COMMAND_OWNER_REGISTRY = {
         "progress update",
         "verification claims",
         "verification record",
+        "verification run",
     ),
     **_owned(
         "A4.specialist-planning",
