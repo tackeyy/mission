@@ -69,12 +69,14 @@ def observe_codex_goal(
 ) -> dict[str, Any]:
     """Verify set/get identity and terminal state independently from events."""
     created, observed = _goal(set_response), _goal(get_response)
-    methods = {event.get("method") for event in events if isinstance(event, dict)}
+    target_events = [event.get("method") for event in events if isinstance(event, dict) and isinstance(event.get("params"), dict) and event["params"].get("threadId") == thread_id]
+    started_index = next((index for index, method in enumerate(target_events) if method == "turn/started"), None)
+    completed_index = next((index for index, method in enumerate(target_events) if method == "turn/completed"), None)
     base = {
         "native_goal_observed": False,
         "goal_thread_id": observed.get("threadId") if observed else None,
-        "turn_started": "turn/started" in methods,
-        "turn_completed": "turn/completed" in methods,
+        "turn_started": started_index is not None,
+        "turn_completed": completed_index is not None,
         "goal_status": observed.get("status") if observed else None,
         "tokens_used": observed.get("tokensUsed") if observed else None,
         "token_budget": observed.get("tokenBudget") if observed else None,
@@ -84,7 +86,7 @@ def observe_codex_goal(
     if any(goal.get("threadId") != thread_id or goal.get("objective") != objective for goal in (created, observed)):
         return {**base, "fidelity": "unverified", "outcome": "failed", "reason": "goal_identity_mismatch"}
     base["native_goal_observed"] = True
-    if "turn/completed" not in methods:
+    if started_index is None or completed_index is None or completed_index < started_index:
         return {**base, "fidelity": "unverified", "outcome": "failed", "reason": "turn_not_completed"}
     if observed.get("status") in {"budgetLimited", "usageLimited"}:
         reason = "goal_budget_limited" if observed["status"] == "budgetLimited" else "goal_usage_limited"
@@ -110,8 +112,11 @@ def run_codex_adapter(
     rpc("turn/start", {"threadId": thread_id, "input": [{"type": "text", "text": objective}]})
     get_response = rpc("thread/goal/get", {"threadId": thread_id})
     observation = observe_codex_goal(thread_id, objective, set_response, get_response, events)
-    clear_response = rpc("thread/goal/clear", {"threadId": thread_id})
-    return {**observation, "goal_cleared": bool(clear_response.get("cleared"))}
+    try:
+        clear_response = rpc("thread/goal/clear", {"threadId": thread_id})
+    except Exception as exc:
+        return {**observation, "goal_cleared": False, "cleanup_error": type(exc).__name__}
+    return {**observation, "goal_cleared": bool(clear_response.get("cleared")), "cleanup_error": None}
 
 
 def observe_claude_goal(invocation: str, returncode: int, result: dict[str, Any] | None) -> dict[str, Any]:
@@ -119,8 +124,10 @@ def observe_claude_goal(invocation: str, returncode: int, result: dict[str, Any]
     result = result if isinstance(result, dict) else {}
     invoked = invocation.lstrip().startswith("/goal ")
     terminal = isinstance(result.get("session_id"), str) and bool(result.get("result")) and result.get("is_error") is False
+    # Claude print JSON has no native Goal id or lifecycle read-back.  It may
+    # establish that `/goal` was sent, but must never establish completion.
     if invoked and returncode == 0 and terminal:
-        return {"native_goal_observed": True, "fidelity": "verified", "outcome": "completed", "reason": None}
+        return {"native_goal_observed": True, "fidelity": "unverified", "outcome": "failed", "reason": "goal_lifecycle_unobserved"}
     reason = "official_goal_not_invoked" if not invoked else "terminal_goal_observation_missing"
     return {"native_goal_observed": invoked, "fidelity": "unverified", "outcome": "failed", "reason": reason}
 
@@ -193,9 +200,10 @@ def create_immutable_package(repo_root: Path, starting_commit: str, output_path:
 
 
 def write_record(path: Path, record: dict[str, Any]) -> None:
-    """Persist a sanitised record only; raw protocol transcripts belong outside Git."""
+    """Persist one sanitised assignment record without replacing earlier evidence."""
     serialised = json.dumps(record, ensure_ascii=False, sort_keys=True)
     if any(marker in serialised for marker in _UNSAFE_TRACE):
         raise ValueError("unsafe trace data in benchmark record")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(serialised + "\n", encoding="utf-8")
+    with path.open("x", encoding="utf-8") as stream:
+        stream.write(serialised + "\n")

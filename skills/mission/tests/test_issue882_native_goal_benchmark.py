@@ -62,7 +62,7 @@ def test_event_without_completed_goal_is_not_native_completion():
     assert result["native_goal_observed"] is True
     assert result["fidelity"] == "unverified"
     assert result["outcome"] == "failed"
-    assert result["reason"] == "goal_not_complete"
+    assert result["reason"] == "turn_not_completed"
 
 
 def test_completed_goal_requires_matching_set_and_get_identity():
@@ -83,7 +83,7 @@ def test_completed_goal_and_completed_turn_produce_verified_fidelity():
 
     result = module.observe_codex_goal(
         "t-1", "inspect", {"goal": {**goal, "status": "active"}}, {"goal": goal},
-        [{"method": "turn/started"}, {"method": "turn/completed", "params": {"threadId": "t-1"}}],
+        [{"method": "turn/started", "params": {"threadId": "t-1"}}, {"method": "turn/completed", "params": {"threadId": "t-1"}}],
     )
 
     assert result["fidelity"] == "verified"
@@ -98,7 +98,7 @@ def test_budget_limited_native_goal_is_a_verified_blocked_outcome():
     active = {"threadId": "t-1", "objective": "inspect", "status": "active"}
     limited = {"threadId": "t-1", "objective": "inspect", "status": "budgetLimited"}
 
-    result = module.observe_codex_goal("t-1", "inspect", {"goal": active}, {"goal": limited}, [{"method": "turn/completed"}])
+    result = module.observe_codex_goal("t-1", "inspect", {"goal": active}, {"goal": limited}, [{"method": "turn/started", "params": {"threadId": "t-1"}}, {"method": "turn/completed", "params": {"threadId": "t-1"}}])
 
     assert result["fidelity"] == "verified"
     assert result["outcome"] == "blocked"
@@ -113,8 +113,22 @@ def test_claude_requires_official_goal_invocation_and_terminal_observation():
     assert result["outcome"] == "failed"
 
     result = module.observe_claude_goal("/goal inspect", 0, {"session_id": "s-1", "is_error": False, "result": "done"})
-    assert result["fidelity"] == "verified"
-    assert result["outcome"] == "completed"
+    assert result["fidelity"] == "unverified"
+    assert result["outcome"] == "failed"
+
+
+def test_codex_events_must_start_then_complete_on_the_target_thread():
+    module = _load()
+    active = {"threadId": "t", "objective": "o", "status": "active"}
+    complete = {"threadId": "t", "objective": "o", "status": "complete"}
+    for events in (
+        [{"method": "turn/completed", "params": {"threadId": "t"}}],
+        [{"method": "turn/completed", "params": {"threadId": "t"}}, {"method": "turn/started", "params": {"threadId": "t"}}],
+        [{"method": "turn/started", "params": {"threadId": "other"}}, {"method": "turn/completed", "params": {"threadId": "other"}}],
+    ):
+        result = module.observe_codex_goal("t", "o", {"goal": active}, {"goal": complete}, events)
+        assert result["fidelity"] == "unverified"
+        assert result["outcome"] == "failed"
 
 
 def test_assignment_outcomes_keep_every_assigned_cell_and_failure():
@@ -191,18 +205,31 @@ def test_write_record_rejects_personal_paths_before_persisting(tmp_path):
     assert not path.exists()
 
 
+def test_write_record_never_replaces_an_earlier_assignment_outcome(tmp_path):
+    module = _load()
+    path = tmp_path / "record.json"
+    module.write_record(path, {"outcome": "failed"})
+    try:
+        module.write_record(path, {"outcome": "completed"})
+    except FileExistsError:
+        pass
+    else:
+        raise AssertionError("a second run must choose a distinct output path")
+    assert json.loads(path.read_text()) == {"outcome": "failed"}
+
+
 def test_codex_probe_uses_goal_protocol_and_preserves_budget_limited_outcome(tmp_path, monkeypatch):
     probe = _load_probe()
 
     class FakeRpc:
         def __init__(self, *_args):
-            self.events = [{"method": "turn/started"}, {"method": "turn/completed"}]
+            self.events = [{"method": "turn/started", "params": {"threadId": "thread-1"}}, {"method": "turn/completed", "params": {"threadId": "thread-1"}}]
             self.calls = []
         def request(self, method, params):
             self.calls.append((method, params))
             if method == "thread/start": return {"thread": {"id": "thread-1"}}
-            if method == "thread/goal/set": return {"goal": {"threadId": "thread-1", "objective": "do work", "status": "active"}}
-            if method == "thread/goal/get": return {"goal": {"threadId": "thread-1", "objective": "do work", "status": "budgetLimited", "tokenBudget": 5}}
+            if method == "thread/goal/set": return {"goal": {"threadId": "thread-1", "objective": params["objective"], "status": "active"}}
+            if method == "thread/goal/get": return {"goal": {"threadId": "thread-1", "objective": fake.calls[2][1]["objective"], "status": "budgetLimited", "tokenBudget": 5}}
             if method == "thread/goal/clear": return {"cleared": True}
             return {}
         def wait_for_event(self, method): return method == "turn/completed"
@@ -210,12 +237,13 @@ def test_codex_probe_uses_goal_protocol_and_preserves_budget_limited_outcome(tmp
 
     fake = FakeRpc()
     monkeypatch.setattr(probe, "RpcProcess", lambda *_args: fake)
-    result = probe.probe_codex(tmp_path, "do work", 1, 5)
+    result = probe.probe_codex(tmp_path, "do work", "artifact exists", 1, 5, 2)
 
     assert [name for name, _params in fake.calls] == ["initialize", "thread/start", "thread/goal/set", "turn/start", "thread/goal/get", "thread/goal/clear"]
     assert fake.calls[2][1]["tokenBudget"] == 5
     assert result["outcome"] == "blocked"
     assert result["reason"] == "goal_budget_limited"
+    assert "Acceptance criterion: artifact exists" in fake.calls[2][1]["objective"]
 
 
 def test_claude_probe_passes_official_goal_and_fixed_plugin_package(tmp_path, monkeypatch):
@@ -231,7 +259,7 @@ def test_claude_probe_passes_official_goal_and_fixed_plugin_package(tmp_path, mo
     monkeypatch.setattr(probe.subprocess, "run", fake_run)
     result = probe.probe_claude(tmp_path, tmp_path / "package", "do work", "artifact exists", 1, 0.5)
 
-    assert result["outcome"] == "completed"
+    assert result["outcome"] == "failed"
     assert seen["command"][:5] == ["claude", "--max-budget-usd", "0.5", "--plugin-dir", str(package)]
     assert seen["command"][-1].startswith("/goal do work")
     assert "Acceptance criterion: artifact exists" in seen["command"][-1]
@@ -250,9 +278,23 @@ def test_claude_mission_probe_uses_the_same_fixed_plugin_package(tmp_path, monke
     monkeypatch.setattr(probe.subprocess, "run", fake_run)
     result = probe.probe_claude(tmp_path, tmp_path / "package", "do work", "artifact exists", 1, 0.5, "mission")
 
-    assert result == {"native_goal_observed": False, "fidelity": "not_applicable", "outcome": "completed", "reason": None, "package_delivery": "claude_plugin_dir"}
+    assert result["outcome"] == "failed"
+    assert result["reason"] == "mission_state_unobserved"
     assert str(package) in seen["command"]
     assert seen["command"][-1].startswith("/mission do work")
+
+
+def test_clear_failure_is_recorded_after_terminal_observation():
+    module = _load()
+    def rpc(method, _params):
+        if method == "thread/goal/set": return {"goal": {"threadId": "t", "objective": "o", "status": "active"}}
+        if method == "thread/goal/get": return {"goal": {"threadId": "t", "objective": "o", "status": "complete"}}
+        if method == "thread/goal/clear": raise RuntimeError("clear")
+        return {}
+    result = module.run_codex_adapter(rpc, "t", "o", [{"method": "turn/started", "params": {"threadId": "t"}}, {"method": "turn/completed", "params": {"threadId": "t"}}])
+    assert result["outcome"] == "completed"
+    assert result["goal_cleared"] is False
+    assert result["cleanup_error"] == "RuntimeError"
 
 
 def test_new_schema_accepts_unsupported_and_keeps_historical_schema_separate():

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import selectors
 import shutil
 import subprocess
@@ -32,6 +31,7 @@ class RpcProcess:
         self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                         text=True, bufsize=1)
         self.timeout = timeout
+        self.deadline = time.monotonic() + timeout
         self.sequence = 0
         self.events: list[dict] = []
         self.selector = selectors.DefaultSelector()
@@ -44,9 +44,8 @@ class RpcProcess:
         assert self.process.stdin is not None
         self.process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}) + "\n")
         self.process.stdin.flush()
-        deadline = time.monotonic() + self.timeout
-        while time.monotonic() < deadline:
-            ready = self.selector.select(max(0, deadline - time.monotonic()))
+        while time.monotonic() < self.deadline:
+            ready = self.selector.select(max(0, self.deadline - time.monotonic()))
             if not ready:
                 break
             line = self.process.stdout.readline()
@@ -61,12 +60,11 @@ class RpcProcess:
                 # Store names and identity only; raw turn text is never an artifact.
                 params = message.get("params") if isinstance(message.get("params"), dict) else {}
                 self.events.append({"method": message["method"], "params": {"threadId": params.get("threadId")}})
-        raise TimeoutError(f"app-server {method} did not respond within {self.timeout} seconds")
+        raise TimeoutError(f"app-server assignment deadline expired during {method}")
 
     def wait_for_event(self, method: str) -> bool:
-        deadline = time.monotonic() + self.timeout
-        while time.monotonic() < deadline:
-            ready = self.selector.select(max(0, deadline - time.monotonic()))
+        while time.monotonic() < self.deadline:
+            ready = self.selector.select(max(0, self.deadline - time.monotonic()))
             if not ready:
                 break
             line = self.process.stdout.readline()
@@ -97,21 +95,33 @@ def _thread_id(response: dict) -> str:
     return value
 
 
-def probe_codex(worktree: Path, objective: str, timeout: float, token_budget: int | None) -> dict:
+def probe_codex(worktree: Path, objective: str, acceptance: str, timeout: float, token_budget: int | None, max_turns: int) -> dict:
     rpc = RpcProcess(["codex", "app-server", "--stdio"], timeout)
+    observation: dict | None = None
     try:
         rpc.request("initialize", {"clientInfo": {"name": "mission-native-goal-benchmark", "version": "1"}, "capabilities": {}})
         thread_id = _thread_id(rpc.request("thread/start", {"cwd": str(worktree)}))
-        goal = {"threadId": thread_id, "objective": objective, "status": "active"}
+        assignment = f"{objective}\n\nAcceptance criterion: {acceptance}"
+        goal = {"threadId": thread_id, "objective": assignment, "status": "active"}
         if token_budget is not None:
             goal["tokenBudget"] = token_budget
         set_response = rpc.request("thread/goal/set", goal)
-        rpc.request("turn/start", {"threadId": thread_id, "input": [{"type": "text", "text": objective}]})
-        rpc.wait_for_event("turn/completed")
-        get_response = rpc.request("thread/goal/get", {"threadId": thread_id})
-        observation = observe_codex_goal(thread_id, objective, set_response, get_response, rpc.events)
-        clear_response = rpc.request("thread/goal/clear", {"threadId": thread_id})
-        return {**observation, "goal_cleared": bool(clear_response.get("cleared"))}
+        get_response: dict = {}
+        for _ in range(max_turns):
+            rpc.request("turn/start", {"threadId": thread_id, "input": [{"type": "text", "text": assignment}]})
+            rpc.wait_for_event("turn/completed")
+            get_response = rpc.request("thread/goal/get", {"threadId": thread_id})
+            observation = observe_codex_goal(thread_id, assignment, set_response, get_response, rpc.events)
+            if observation["goal_status"] in {"complete", "budgetLimited", "usageLimited"}:
+                break
+        assert observation is not None
+        if observation["goal_status"] == "active":
+            observation = {**observation, "fidelity": "verified", "outcome": "blocked", "reason": "assignment_turn_limit"}
+        try:
+            clear_response = rpc.request("thread/goal/clear", {"threadId": thread_id})
+        except (OSError, RuntimeError, TimeoutError) as exc:
+            return {**observation, "goal_cleared": False, "cleanup_error": type(exc).__name__}
+        return {**observation, "goal_cleared": bool(clear_response.get("cleared")), "cleanup_error": None}
     finally:
         rpc.close()
 
@@ -132,14 +142,22 @@ def probe_claude(worktree: Path, package_root: Path, objective: str, acceptance:
         result = None
     if arm == "goal":
         return observe_claude_goal(invocation, completed.returncode, result)
-    terminal = isinstance(result, dict) and isinstance(result.get("session_id"), str) and result.get("is_error") is False
     return {
         "native_goal_observed": False,
         "fidelity": "not_applicable",
-        "outcome": "completed" if completed.returncode == 0 and terminal else "failed",
-        "reason": None if completed.returncode == 0 and terminal else "terminal_mission_observation_missing",
+        "outcome": "failed",
+        "reason": "mission_state_unobserved",
         "package_delivery": "claude_plugin_dir",
+        "package_loaded": None,
     }
+
+
+def _commit_at(worktree: Path) -> str:
+    result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=worktree, text=True, capture_output=True, check=False)
+    commit = result.stdout.strip()
+    if result.returncode != 0 or len(commit) != 40:
+        raise RuntimeError("task_snapshot_unavailable")
+    return commit
 
 
 def main() -> int:
@@ -150,11 +168,17 @@ def main() -> int:
     parser.add_argument("--task-id", required=True)
     parser.add_argument("--acceptance-criterion", required=True)
     parser.add_argument("--starting-commit", required=True)
+    parser.add_argument("--mission-source-commit", required=True)
+    parser.add_argument("--model-id", required=True)
+    parser.add_argument("--provider-version", required=True)
+    parser.add_argument("--effort", required=True)
+    parser.add_argument("--permissions", required=True)
     parser.add_argument("--worktree", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--timeout-seconds", type=float, default=30)
     parser.add_argument("--token-budget", type=int, default=None)
     parser.add_argument("--max-budget-usd", type=float, default=None)
+    parser.add_argument("--max-turns", type=int, default=2)
     args = parser.parse_args()
     if args.timeout_seconds <= 0:
         parser.error("--timeout-seconds must be positive")
@@ -162,27 +186,42 @@ def main() -> int:
         parser.error("--token-budget must be positive")
     if args.max_budget_usd is not None and args.max_budget_usd <= 0:
         parser.error("--max-budget-usd must be positive")
-    if args.host == "codex" and args.arm != "goal":
-        parser.error("Codex mission package execution is not supported by this public app-server adapter")
+    if args.max_turns <= 0:
+        parser.error("--max-turns must be positive")
     worktree = Path(args.worktree).resolve()
     output = Path(args.output).resolve()
-    with tempfile.TemporaryDirectory(prefix="mission-native-goal-package-") as temporary:
-        package = Path(temporary) / "mission.tar"
-        create_immutable_package(worktree, args.starting_commit, package)
-        package_root = Path(temporary) / "package"
-        shutil.unpack_archive(str(package), str(package_root), format="tar")
-        manifest = immutable_manifest(args.starting_commit, package_root, package, {
-            "host": args.host, "arm": args.arm, "timeout_seconds": args.timeout_seconds, "worktree_snapshot": args.starting_commit,
-            "task_id": args.task_id, "acceptance_criterion": args.acceptance_criterion,
-            "token_budget": args.token_budget, "max_budget_usd": args.max_budget_usd,
-        })
-        package_prepared = (package_root / "plugins" / "mission" / "skills" / "mission" / "SKILL.md").is_file()
-        try:
-            observation = probe_codex(worktree, args.objective, args.timeout_seconds, args.token_budget) if args.host == "codex" else probe_claude(worktree, package_root, args.objective, args.acceptance_criterion, args.timeout_seconds, args.max_budget_usd, args.arm)
-        except (OSError, RuntimeError, TimeoutError) as exc:
-            observation = {"native_goal_observed": False, "fidelity": "unverified", "outcome": "unsupported", "reason": type(exc).__name__}
-        label = f"{args.host}_native_goal" if args.arm == "goal" else "mission"
-        write_record(output, {"schema": NATIVE_SCHEMA, "run_id": output.stem, "task_id": args.task_id, "arm": label, "manifest": manifest, "package_prepared": package_prepared, **observation})
+    label = "codex_native_goal" if args.host == "codex" and args.arm == "goal" else ("claude_code_native_goal" if args.arm == "goal" else "mission")
+    try:
+        actual_snapshot = _commit_at(worktree)
+        with tempfile.TemporaryDirectory(prefix="mission-native-goal-package-") as temporary:
+            package = Path(temporary) / "mission.tar"
+            create_immutable_package(worktree, args.mission_source_commit, package)
+            package_root = Path(temporary) / "package"
+            shutil.unpack_archive(str(package), str(package_root), format="tar")
+            manifest = immutable_manifest(args.mission_source_commit, package_root, package, {
+                "host": args.host, "arm": args.arm, "model_id": args.model_id, "provider_version": args.provider_version,
+                "effort": args.effort, "permissions": args.permissions, "objective": args.objective,
+                "acceptance_criterion": args.acceptance_criterion, "timeout_seconds": args.timeout_seconds,
+                "token_budget": args.token_budget, "max_budget_usd": args.max_budget_usd, "max_turns": args.max_turns,
+            })
+            manifest["task_snapshot"] = {"expected": args.starting_commit, "observed": actual_snapshot, "matches": actual_snapshot == args.starting_commit}
+            manifest["mission_source_commit"] = args.mission_source_commit
+            package_prepared = (package_root / "plugins" / "mission" / "skills" / "mission" / "SKILL.md").is_file()
+            if not manifest["task_snapshot"]["matches"]:
+                observation = {"native_goal_observed": False, "fidelity": "not_applicable", "outcome": "failed", "reason": "task_snapshot_mismatch"}
+            elif args.host == "codex" and args.arm == "mission":
+                observation = {"native_goal_observed": False, "fidelity": "not_applicable", "outcome": "unsupported", "reason": "codex_mission_package_delivery_unavailable", "package_delivery": "unavailable"}
+            else:
+                try:
+                    observation = probe_codex(worktree, args.objective, args.acceptance_criterion, args.timeout_seconds, args.token_budget, args.max_turns) if args.host == "codex" else probe_claude(worktree, package_root, args.objective, args.acceptance_criterion, args.timeout_seconds, args.max_budget_usd, args.arm)
+                except (OSError, RuntimeError, TimeoutError) as exc:
+                    observation = {"native_goal_observed": False, "fidelity": "unverified", "outcome": "failed", "reason": "adapter_execution_failed", "error_type": type(exc).__name__}
+            write_record(output, {"schema": NATIVE_SCHEMA, "run_id": output.stem, "task_id": args.task_id, "arm": label, "manifest": manifest, "package_prepared": package_prepared, **observation})
+    except (OSError, RuntimeError, ValueError, shutil.ReadError) as exc:
+        write_record(output, {"schema": NATIVE_SCHEMA, "run_id": output.stem, "task_id": args.task_id, "arm": label,
+                              "manifest": {"schema": "native-goal-benchmark-manifest/1", "state": "unprepared"},
+                              "package_prepared": False, "outcome": "failed", "fidelity": "not_applicable",
+                              "reason": "package_prepare_failed", "error_type": type(exc).__name__})
     return 0
 
 
