@@ -437,32 +437,32 @@ def test_mission_state_requires_the_current_codex_session_binding(tmp_path):
         {"session_id": "cx-thread", "mission_id": "m", "passes": True, "loop_active": False},
         fresh_ns,
     )
-    assert probe._fresh_mission_state(tmp_path, current_mtime, "thread") is not None
-    current.unlink()
-
-    stale, stale_mtime = write_state(
-        "cx-thread.json",
-        {"session_id": "cx-thread", "mission_id": "m", "passes": True},
-        stale_ns,
-    )
-    assert stale_mtime < current_mtime
-    assert probe._fresh_mission_state(tmp_path, current_mtime, "thread") is None
-    stale.unlink()
-
     other, other_mtime = write_state(
         "cx-other.json",
         {"session_id": "cx-other", "mission_id": "other", "passes": True},
         fresh_ns,
     )
-    assert probe._fresh_mission_state(tmp_path, other_mtime, "thread") is None
+    started_ns = min(current_mtime, other_mtime)
+    assert probe._fresh_mission_state(tmp_path, started_ns, "thread")["session_id"] == "cx-thread"
+    assert probe._fresh_mission_state(tmp_path, started_ns, "other")["session_id"] == "cx-other"
+    current.unlink()
     other.unlink()
+
+    stale, stale_mtime = write_state(
+        "cx-stale.json",
+        {"session_id": "cx-stale", "mission_id": "stale", "passes": True},
+        stale_ns,
+    )
+    assert stale_mtime < current_mtime
+    assert probe._fresh_mission_state(tmp_path, current_mtime, "stale") is None
+    stale.unlink()
 
     _wrong_name, wrong_name_mtime = write_state(
         "cx-unrelated.json",
-        {"session_id": "cx-thread", "mission_id": "m", "passes": True},
+        {"session_id": "cx-filename", "mission_id": "filename", "passes": True},
         fresh_ns,
     )
-    assert probe._fresh_mission_state(tmp_path, wrong_name_mtime, "thread") is None
+    assert probe._fresh_mission_state(tmp_path, wrong_name_mtime, "filename") is None
     (sessions / "cx-unrelated.json").unlink()
 
     _wrong_payload, wrong_payload_mtime = write_state(
