@@ -13918,9 +13918,13 @@ def cmd_verification_run(args):
     if not sf.exists():
         raise SystemExit("verification-state-missing")
     try:
-        reader = _legacy_lifecycle_repository(cwd, sf, stamp=False, strict_read=True)
+        reader = _legacy_lifecycle_repository(cwd, sf, stamp=False, strict_read=True, pre_admit_lease=True, session_id=sf.stem)
         with reader.transaction():
             state = reader.load()
+        contract = state.get("acceptance_contract") if isinstance(state, dict) else None
+        live_policy = load_verifier_policy(cwd)
+        if not isinstance(contract, dict) or not isinstance(contract.get("verifier_policy"), dict) or live_policy["digest"] != contract["verifier_policy"].get("digest"):
+            raise EvidenceFailure("verifier-policy-stale")
         repro_input = None
         if args.repro_input:
             try:
