@@ -219,7 +219,6 @@ from mission_application.evidence import (  # noqa: E402
     ProgressClearRequest,
     ProgressUpdateRequest,
     VerificationRecordRequest,
-    VerificationReceiptRequest,
     evidence_publication_paths,
     prepare_verification_record_operation,
     run_context_manifest,
@@ -227,7 +226,6 @@ from mission_application.evidence import (  # noqa: E402
     run_progress_clear,
     run_progress_update,
     run_verification_record,
-    run_verification_receipt,
     validate_context_iteration_override,
     verify_published_evidence_effects,
 )
@@ -237,7 +235,11 @@ from mission_application.acceptance import (  # noqa: E402
     run_acceptance_contract_status_cli,
 )
 from mission_application.verifier_policy import load as load_verifier_policy  # noqa: E402
-from mission_application.verification_execution import run_contract_verifier  # noqa: E402
+from mission_application.verification_execution import (  # noqa: E402
+    VerificationReceiptCliRequest,
+    VerificationReceiptCliServices,
+    run_verification_receipt_cli,
+)
 from mission_application.planning import (  # noqa: E402
     EXECUTOR_HANDOFF_ABORT_REASONS,
     EXECUTOR_HANDOFF_COMMAND_NAMES,
@@ -8352,6 +8354,16 @@ _ACCEPTANCE_CONTRACT_CLI_SERVICES = AcceptanceContractCliServices(
 )
 
 
+_VERIFICATION_RECEIPT_CLI_SERVICES = VerificationReceiptCliServices(
+    resolve_state_file,
+    _legacy_lifecycle_repository,
+    load_verifier_policy,
+    _compatibility_operation_arguments,
+    _canonical_compatibility_operation,
+    iso_now,
+)
+
+
 _ARTIFACT_CLI_SERVICES = ArtifactCliServices(
     resolve_state_file,
     _artifact_path,
@@ -13913,45 +13925,15 @@ def cmd_verification_record(args):
 
 def cmd_verification_run(args):
     """Execute one policy-frozen criterion and persist the runner receipt."""
-    cwd = Path.cwd()
-    sf = resolve_state_file(cwd)
-    if not sf.exists():
-        raise SystemExit("verification-state-missing")
     try:
-        reader = _legacy_lifecycle_repository(cwd, sf, stamp=False, strict_read=True, pre_admit_lease=True, session_id=sf.stem)
-        with reader.transaction():
-            state = reader.load()
-        contract = state.get("acceptance_contract") if isinstance(state, dict) else None
-        live_policy = load_verifier_policy(cwd)
-        if not isinstance(contract, dict) or not isinstance(contract.get("verifier_policy"), dict) or live_policy["digest"] != contract["verifier_policy"].get("digest"):
-            raise EvidenceFailure("verifier-policy-stale")
-        repro_input = None
-        if args.repro_input:
-            try:
-                repro_input = json.loads(Path(args.repro_input).read_text(encoding="utf-8"))
-            except (OSError, ValueError) as exc:
-                raise EvidenceFailure("replay-input-invalid") from exc
-        receipt = run_contract_verifier(state, project_root=cwd, criterion_id=args.criterion, repro_input=repro_input)
-        caller_id, arguments = _compatibility_operation_arguments(
-            {"criterion_id": args.criterion, "candidate_digest": receipt["candidate_digest"], "receipt_status": receipt["status"]},
-            target_digest="", require_caller=False,
-        )
-        operation_id = command = None
-        if caller_id is not None:
-            operation_id, command = _canonical_compatibility_operation(
-                sf.stem, "verification-receipt-record", arguments, caller_operation_id=caller_id,
-            )
-        result = run_verification_receipt(
-            VerificationReceiptRequest(iso_now(), receipt),
-            _legacy_lifecycle_repository(
-                cwd, sf, stamp=True, pre_admit_lease=True, session_id=sf.stem,
-                operation_id=operation_id, operation_command=command,
-                operation_command_type="verification-receipt-record",
-            ),
+        output = run_verification_receipt_cli(
+            VerificationReceiptCliRequest(args.criterion, args.repro_input),
+            _VERIFICATION_RECEIPT_CLI_SERVICES,
         )
     except EvidenceFailure as exc:
-        raise SystemExit(exc.code) from exc
-    print(json.dumps({"ok": True, **result}, ensure_ascii=False, indent=2))
+        print(exc.code, file=sys.stderr)
+        sys.exit(exc.code)
+    print(output)
 
 
 _CLAIMS_LEDGER_CLI_SERVICES = ClaimsLedgerCliServices(

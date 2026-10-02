@@ -204,11 +204,24 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
         cwd = root if relative_cwd == "." else root / _relative(relative_cwd)
         if not cwd.is_dir():
             raise VerificationRunnerError("verifier-cwd-missing")
-        child = subprocess.Popen(
-            argv, cwd=cwd, shell=False, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
-            env={"PATH": command.get("toolchain_path", os.defpath), **command.get("env", {})},
-        )
+        try:
+            child = subprocess.Popen(
+                argv, cwd=cwd, shell=False, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
+                env={"PATH": command.get("toolchain_path", os.defpath), **command.get("env", {})},
+            )
+        except OSError:
+            return {
+                "started_at": started,
+                "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+                "exit_code": None,
+                "timed_out": False,
+                "executed_count": None,
+                "output_digest": "sha256:" + hashlib.sha256(b"").hexdigest(),
+                "status": "blocked",
+                "block_reason": "process-unavailable",
+                "repro_input_digest": repro_digest,
+            }
         output = bytearray()
         selector = selectors.DefaultSelector()
         assert child.stdout is not None

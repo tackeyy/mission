@@ -171,6 +171,31 @@ def test_public_runner_rejects_live_policy_drift_before_creating_a_receipt(tmp_p
     assert "verification_receipts" not in json.loads(run_cli("get", cwd=tmp_path).stdout)
 
 
+def test_public_runner_records_blocked_receipt_when_registered_binary_is_unavailable(tmp_path, run_cli):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "tracked.txt").write_text("candidate", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-qm", "base"], cwd=tmp_path, check=True)
+    run_cli("init", "verification runner", "--force-mission", cwd=tmp_path, check=True)
+    policy = _policy(); policy["commands"][0]["argv"] = ["mission-neutral-binary-does-not-exist"]
+    policy_dir = tmp_path / ".mission"; policy_dir.mkdir()
+    encoded = json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()
+    (policy_dir / "verifiers.json").write_bytes(encoded)
+    state = json.loads(run_cli("get", cwd=tmp_path).stdout)
+    contract = _contract(state["mission_id"])
+    contract["verifier_policy_digest"] = "sha256:" + hashlib.sha256(encoded).hexdigest()
+    source = tmp_path / "contract.json"; source.write_text(json.dumps(contract), encoding="utf-8")
+    assert run_cli("acceptance-contract", "import", "--input", str(source), cwd=tmp_path).returncode == 0
+
+    result = run_cli("verification", "run", "--criterion", "AC1", cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads(result.stdout)["receipt"]
+    assert receipt["status"] == "blocked"
+    assert receipt["block_reason"] == "process-unavailable"
+    assert receipt["exit_code"] is None and receipt["timed_out"] is False
+
+
 def test_same_operation_retry_runs_the_verifier_again_and_rejects_a_different_receipt(tmp_path, run_cli):
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     (tmp_path / "tracked.txt").write_text("candidate", encoding="utf-8")
@@ -179,7 +204,7 @@ def test_same_operation_retry_runs_the_verifier_again_and_rejects_a_different_re
     run_cli("init", "verification runner", "--force-mission", cwd=tmp_path, check=True)
     counter = tmp_path / "process-count.txt"
     policy = _policy()
-    policy["commands"][0]["argv"] = ["python3", "-c", f"from pathlib import Path; p=Path({str(counter)!r}); p.write_text(str(int(p.read_text() if p.exists() else '0') + 1))"]
+    policy["commands"][0]["argv"] = ["python3", "-c", f"from pathlib import Path; p=Path({str(counter)!r}); n=int(p.read_text() if p.exists() else '0') + 1; p.write_text(str(n)); print(n)"]
     policy_dir = tmp_path / ".mission"; policy_dir.mkdir()
     encoded = json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()
     (policy_dir / "verifiers.json").write_bytes(encoded)

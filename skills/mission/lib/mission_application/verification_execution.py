@@ -1,6 +1,10 @@
 """Public acceptance-verifier execution bound to frozen contract evidence."""
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
+from pathlib import Path
+
 from mission_application.artifact import EvidenceFailure
 from mission_application.verification_runner import (
     VerificationRunnerError,
@@ -9,6 +13,71 @@ from mission_application.verification_runner import (
     verifier_definition_digest,
 )
 from acceptance_contract import digest as contract_digest
+
+
+@dataclass(frozen=True)
+class VerificationReceiptCliRequest:
+    criterion_id: object
+    repro_input_path: object = None
+
+
+@dataclass(frozen=True)
+class VerificationReceiptCliServices:
+    resolve_state_file: object
+    repository: object
+    load_verifier_policy: object
+    compatibility_arguments: object
+    canonical_operation: object
+    now: object
+
+
+def run_verification_receipt_cli(request, services) -> str:
+    """Run and persist one verifier receipt through injected CLI services."""
+    cwd = Path.cwd()
+    state_file = services.resolve_state_file(cwd)
+    if not state_file.exists():
+        raise EvidenceFailure("verification-state-missing")
+    reader = services.repository(
+        cwd, state_file, stamp=False, strict_read=True, pre_admit_lease=True,
+        session_id=state_file.stem,
+    )
+    with reader.transaction():
+        state = reader.load()
+    contract = state.get("acceptance_contract") if isinstance(state, dict) else None
+    live_policy = services.load_verifier_policy(cwd)
+    if not isinstance(contract, dict) or not isinstance(contract.get("verifier_policy"), dict) or live_policy["digest"] != contract["verifier_policy"].get("digest"):
+        raise EvidenceFailure("verifier-policy-stale")
+    repro_input = None
+    if request.repro_input_path:
+        try:
+            repro_input = json.loads(Path(request.repro_input_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise EvidenceFailure("replay-input-invalid") from exc
+    receipt = run_contract_verifier(
+        state, project_root=cwd, criterion_id=request.criterion_id,
+        repro_input=repro_input,
+    )
+    caller_id, arguments = services.compatibility_arguments(
+        {"criterion_id": request.criterion_id, "candidate_digest": receipt["candidate_digest"], "receipt_status": receipt["status"]},
+        target_digest="", require_caller=False,
+    )
+    operation_id = operation_command = None
+    if caller_id is not None:
+        operation_id, operation_command = services.canonical_operation(
+            state_file.stem, "verification-receipt-record", arguments,
+            caller_operation_id=caller_id,
+        )
+    from mission_application.evidence import VerificationReceiptRequest, run_verification_receipt
+    result = run_verification_receipt(
+        VerificationReceiptRequest(services.now(), receipt),
+        services.repository(
+            cwd, state_file, stamp=True, pre_admit_lease=True,
+            session_id=state_file.stem, operation_id=operation_id,
+            operation_command=operation_command,
+            operation_command_type="verification-receipt-record",
+        ),
+    )
+    return json.dumps({"ok": True, **result}, ensure_ascii=False, indent=2)
 
 
 def run_contract_verifier(state, *, project_root, criterion_id, repro_input=None):
