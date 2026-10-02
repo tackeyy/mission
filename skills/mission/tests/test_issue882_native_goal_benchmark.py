@@ -336,7 +336,8 @@ def test_codex_mission_uses_listed_fixed_skill_as_a_native_input(tmp_path, monke
     result = probe.probe_codex(tmp_path, "work", "accepted", 1, None, 1, "m", "high", "p", "mission", package)
     assert result["outcome"] == "completed"
     assert result["package_delivery"] == "skill_input"
-    assert any(name == "skills/extraRoots/set" for name, _ in fake.calls)
+    roots = next(params for name, params in fake.calls if name == "skills/extraRoots/set")
+    assert roots == {"extraRoots": [str(package / "skills")]}
     turn = next(params for name, params in fake.calls if name == "turn/start")
     assert turn["input"][0] == {"type": "skill", "name": "mission", "path": str(skill)}
 

@@ -149,7 +149,7 @@ def probe_codex(worktree: Path, objective: str, acceptance: str, timeout: float,
             if package_root is None:
                 raise RuntimeError("package_root_required")
             skill_path = package_root / "skills" / "mission" / "SKILL.md"
-            rpc.request("skills/extraRoots/set", {"extraRoots": [str(package_root)]})
+            rpc.request("skills/extraRoots/set", {"extraRoots": [str(package_root / "skills")]})
             listed = rpc.request("skills/list", {"cwds": [str(worktree)], "forceReload": True})
             entries = listed.get("data", []) if isinstance(listed, dict) else []
             matched = any(isinstance(entry, dict) and any(isinstance(skill, dict) and skill.get("path") == str(skill_path) for skill in entry.get("skills", [])) for entry in entries)
