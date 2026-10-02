@@ -1,2 +1,3 @@
 from service import execute
-assert isinstance(execute([]), dict)
+
+assert execute({"initial": 0, "deltas": [0, 0]})["threads_completed"] == 2

@@ -15,8 +15,13 @@ import json
 import subprocess
 import sys
 import tempfile
+import threading
+import shutil
 from pathlib import Path
 from typing import Any
+
+
+MAX_EVALUATOR_OUTPUT_BYTES = 65536
 
 
 def _digest_tree(root: Path) -> str:
@@ -56,6 +61,50 @@ print(json.dumps(module.execute(json.loads(sys.argv[2])), sort_keys=True))
 '''
 
 
+def _materialize_candidate(source: Path, destination: Path) -> Path:
+    """Copy only a stable regular-file candidate tree for one evaluator run."""
+    _digest_tree(source)
+    destination.mkdir()
+    for path in source.rglob("*"):
+        if path.is_dir():
+            continue
+        relative = path.relative_to(source)
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, target)
+    _digest_tree(destination)
+    return destination
+
+
+def _run_bounded(command: list[str], *, timeout_seconds: float) -> tuple[int | None, bytes, bool, bool]:
+    """Run one evaluator child with bounded in-memory stdout/stderr collection."""
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    captured = {"stdout": bytearray(), "stderr": bytearray()}
+    exceeded = threading.Event()
+
+    def consume(name: str, stream: Any) -> None:
+        while chunk := stream.read(8192):
+            if len(captured[name]) + len(chunk) > MAX_EVALUATOR_OUTPUT_BYTES:
+                exceeded.set()
+                process.kill()
+                return
+            captured[name].extend(chunk)
+
+    readers = [threading.Thread(target=consume, args=(name, stream), daemon=True) for name, stream in (("stdout", process.stdout), ("stderr", process.stderr))]
+    for reader in readers:
+        reader.start()
+    timed_out = False
+    try:
+        process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        process.kill()
+        process.wait()
+    for reader in readers:
+        reader.join()
+    return process.returncode, bytes(captured["stdout"]), timed_out, exceeded.is_set()
+
+
 def evaluate_candidate(root: Path, entry: dict[str, Any], candidate: Path, timeout_seconds: float = 3.0) -> dict[str, Any]:
     """Observe one candidate in a fresh process and preserve non-pass states."""
     base = {"task_id": entry.get("id"), "family": entry.get("family"), "version": entry.get("version"),
@@ -70,18 +119,25 @@ def evaluate_candidate(root: Path, entry: dict[str, Any], candidate: Path, timeo
         try:
             cases = []
             for check in checks:
-                observed = subprocess.run([sys.executable, "-I", str(runner), str(candidate), json.dumps(check.get("operations"))], text=True, capture_output=True, timeout=timeout_seconds, check=False)
-                if observed.returncode != 0:
-                    return {**base, "status": "failed", "reason": "evaluator_execution_failed", "case_count": len(checks), "cases": cases}
-                if len(observed.stdout) > 65536:
+                scenario = check.get("scenario", check.get("operations"))
+                materialized = _materialize_candidate(candidate, Path(temporary) / f"candidate-{len(cases)}")
+                returncode, stdout, timed_out, output_exceeded = _run_bounded(
+                    [sys.executable, "-I", str(runner), str(materialized), json.dumps(scenario)],
+                    timeout_seconds=timeout_seconds,
+                )
+                if timed_out:
+                    return {**base, "status": "blocked", "reason": "evaluator_timeout", "case_count": len(checks), "cases": cases}
+                if output_exceeded:
                     return {**base, "status": "failed", "reason": "evaluator_output_too_large", "case_count": len(checks), "cases": cases}
+                if returncode != 0:
+                    return {**base, "status": "failed", "reason": "evaluator_execution_failed", "case_count": len(checks), "cases": cases}
                 try:
-                    actual = json.loads(observed.stdout)
+                    actual = json.loads(stdout)
                 except json.JSONDecodeError:
                     return {**base, "status": "failed", "reason": "evaluator_output_invalid", "case_count": len(checks), "cases": cases}
                 cases.append({"name": check.get("name"), "passed": actual == check.get("expected")})
-        except subprocess.TimeoutExpired:
-            return {**base, "status": "blocked", "reason": "evaluator_timeout", "case_count": len(checks), "cases": []}
+        except ValueError:
+            return {**base, "status": "failed", "reason": "candidate_invalid", "case_count": len(checks), "cases": cases}
     if len(cases) != len(checks) or not cases:
         return {**base, "status": "failed", "reason": "evaluator_cases_invalid", "case_count": len(cases), "cases": cases}
     return {**base, "status": "passed" if all(case["passed"] for case in cases) else "failed",

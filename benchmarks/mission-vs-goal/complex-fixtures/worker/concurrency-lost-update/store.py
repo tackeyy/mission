@@ -1,3 +1,11 @@
-class Store:
-    def __init__(self): self.items = {}; self.sent = []; self.total = 0
-    def snapshot(self): return {'items': self.items, 'sent': self.sent, 'total': self.total}
+class Counter:
+    def __init__(self, initial):
+        self._value = initial
+
+    def update(self, delta, ready):
+        observed = self._value
+        ready.wait()
+        self._value = observed + delta
+
+    def snapshot(self):
+        return self._value

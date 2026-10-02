@@ -1,6 +1,5 @@
 # concurrency-order-independent
 
-Requirement: Concurrent order does not change the canonical result.
+Contract: Concurrent order does not change the canonical result.
 
-The starter has a defect: Arrival order chooses a non-canonical winner.
-Repair the observable contract without weakening the public smoke check.
+The service registers two ranked candidates in the supplied arrival order. It must return the canonical winner (lowest rank, then identifier) and report that both worker threads completed.

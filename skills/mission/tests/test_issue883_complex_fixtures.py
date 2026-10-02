@@ -69,7 +69,7 @@ def test_evaluator_fails_closed_for_no_cases_and_timeout(monkeypatch, tmp_path):
     assert record["status"] == "failed"
     assert record["reason"] == "no_evaluation_cases"
 
-    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: (_ for _ in ()).throw(module.subprocess.TimeoutExpired(args[0], 1)))
+    monkeypatch.setattr(module, "_run_bounded", lambda *args, **kwargs: (None, b"", True, False))
     record = module.evaluate_candidate(root, entry, tmp_path)
     assert record["status"] == "blocked"
     assert record["reason"] == "evaluator_timeout"
@@ -84,3 +84,60 @@ def test_worker_export_uses_the_positive_allowlist_from_native_goal_benchmark(tm
     assert paths
     assert all("/reference/" not in f"/{path}" and "/control/" not in f"/{path}" for path in paths)
     assert not any("catalog.json" in path or "evaluator" in path for path in paths)
+
+
+def test_concurrency_tasks_use_real_shared_state_and_evaluator_owned_scenarios():
+    module = _load()
+    root = ROOT / "benchmarks" / "mission-vs-goal" / "complex-fixtures"
+    entries = {entry["id"]: entry for entry in module.load_catalog(root)}
+
+    lost_update = entries["concurrency-lost-update"]
+    assert [check["expected"]["final_state"] for check in lost_update["checks"]] == [2, 14, -1]
+    assert all(check["expected"]["threads_completed"] == 2 for check in lost_update["checks"])
+
+    ordering = entries["concurrency-order-independent"]
+    assert {check["expected"]["winner"]["id"] for check in ordering["checks"]} == {"a", "b", "z"}
+    assert all("scenario" in check for check in (*lost_update["checks"], *ordering["checks"]))
+
+    for task_id in ("concurrency-lost-update", "concurrency-order-independent"):
+        worker = root / "worker" / task_id
+        source = "\n".join(path.read_text(encoding="utf-8") for path in worker.glob("*.py"))
+        assert "MODE" not in source
+        assert "BROKEN" not in source
+        assert {"boundary.py", "service.py", "store.py"} <= {path.name for path in worker.iterdir()}
+
+
+def test_evaluator_materializes_candidate_and_bounds_output(tmp_path):
+    module = _load()
+    root = ROOT / "benchmarks" / "mission-vs-goal" / "complex-fixtures"
+    entry = next(entry for entry in module.load_catalog(root) if entry["id"] == "concurrency-lost-update")
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (candidate / "boundary.py").write_text("def normalise(value): return value\n", encoding="utf-8")
+    (candidate / "store.py").write_text("", encoding="utf-8")
+    (candidate / "service.py").write_text("def execute(value):\n    print('x' * 70000)\n    return {}\n", encoding="utf-8")
+    before = {path.name: path.read_bytes() for path in candidate.iterdir()}
+
+    record = module.evaluate_candidate(root, entry, candidate)
+
+    assert record["status"] == "failed"
+    assert record["reason"] == "evaluator_output_too_large"
+    assert before == {path.name: path.read_bytes() for path in candidate.iterdir() if path.is_file()}
+
+
+def test_concurrency_materializations_match_the_generator():
+    generator_path = ROOT / "benchmarks" / "mission-vs-goal" / "generate_complex_fixtures.py"
+    spec = importlib.util.spec_from_file_location("generate_complex_fixtures", generator_path)
+    generator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generator)
+    root = ROOT / "benchmarks" / "mission-vs-goal" / "complex-fixtures"
+
+    for group in ("worker", "reference", "control"):
+        for task_id, mode, requirement in (
+            ("concurrency-lost-update", "lost-update", "A deterministic barrier preserves both concurrent increments."),
+            ("concurrency-order-independent", "ordering", "Concurrent order does not change the canonical result."),
+        ):
+            expected = generator.files(mode, group == "worker", task_id, requirement, "")
+            actual = {path.name: path.read_text(encoding="utf-8") for path in (root / group / task_id).glob("*.py")}
+            actual["README.md"] = (root / group / task_id / "README.md").read_text(encoding="utf-8")
+            assert actual == expected

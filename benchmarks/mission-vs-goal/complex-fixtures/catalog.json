@@ -308,21 +308,36 @@
       "realistic_failure": "Two writers read the same value and one increment is lost.",
       "checks": [
         {
-          "name": "barrier-increments",
-          "operations": [
-            {
-              "kind": "increment",
-              "amount": 1
-            },
-            {
-              "kind": "increment",
-              "amount": 1
-            }
-          ],
+          "name": "zero-plus-one-plus-one",
+          "scenario": {
+            "initial": 0,
+            "deltas": [1, 1]
+          },
           "expected": {
-            "items": {},
-            "sent": [],
-            "total": 2
+            "final_state": 2,
+            "threads_completed": 2
+          }
+        },
+        {
+          "name": "seven-plus-two-plus-five",
+          "scenario": {
+            "initial": 7,
+            "deltas": [2, 5]
+          },
+          "expected": {
+            "final_state": 14,
+            "threads_completed": 2
+          }
+        },
+        {
+          "name": "negative-three-plus-four-minus-two",
+          "scenario": {
+            "initial": -3,
+            "deltas": [4, -2]
+          },
+          "expected": {
+            "final_state": -1,
+            "threads_completed": 2
           }
         }
       ]
@@ -336,23 +351,36 @@
       "realistic_failure": "Arrival order chooses a non-canonical winner.",
       "checks": [
         {
-          "name": "canonical-order",
-          "operations": [
-            {
-              "kind": "candidate",
-              "name": "a"
-            },
-            {
-              "kind": "candidate",
-              "name": "z"
-            }
-          ],
+          "name": "z-over-a-by-rank",
+          "scenario": {
+            "candidates": [{"id": "z", "rank": 1}, {"id": "a", "rank": 2}],
+            "arrival_order": ["a", "z"]
+          },
           "expected": {
-            "items": {
-              "winner": "a"
-            },
-            "sent": [],
-            "total": 0
+            "winner": {"id": "z", "rank": 1},
+            "threads_completed": 2
+          }
+        },
+        {
+          "name": "b-over-c-by-rank",
+          "scenario": {
+            "candidates": [{"id": "b", "rank": 1}, {"id": "c", "rank": 2}],
+            "arrival_order": ["c", "b"]
+          },
+          "expected": {
+            "winner": {"id": "b", "rank": 1},
+            "threads_completed": 2
+          }
+        },
+        {
+          "name": "same-rank-id-tie-break-in-reverse-arrival-order",
+          "scenario": {
+            "candidates": [{"id": "a", "rank": 4}, {"id": "z", "rank": 4}],
+            "arrival_order": ["a", "z"]
+          },
+          "expected": {
+            "winner": {"id": "a", "rank": 4},
+            "threads_completed": 2
           }
         }
       ]

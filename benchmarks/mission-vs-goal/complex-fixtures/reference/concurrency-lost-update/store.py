@@ -1,3 +1,16 @@
-class Store:
-    def __init__(self): self.items = {}; self.sent = []; self.total = 0
-    def snapshot(self): return {'items': self.items, 'sent': self.sent, 'total': self.total}
+from threading import Lock
+
+
+class Counter:
+    def __init__(self, initial):
+        self._value = initial
+        self._lock = Lock()
+
+    def update(self, delta, ready):
+        ready.wait()
+        with self._lock:
+            self._value += delta
+
+    def snapshot(self):
+        with self._lock:
+            return self._value

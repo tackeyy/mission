@@ -31,7 +31,152 @@ TASKS = [
     ("concurrency-order-independent", "concurrency", "Concurrent order does not change the canonical result.", "Arrival order chooses a non-canonical winner.", "return {'winner': 'late'}", "return {'winner': 'canonical'}", {"winner": "canonical"}),
 ]
 
+def concurrency_files(task_id: str, broken: bool, requirement: str) -> dict[str, str]:
+    if task_id == "concurrency-lost-update":
+        store = '''from threading import Lock
+
+
+class Counter:
+    def __init__(self, initial):
+        self._value = initial
+        self._lock = Lock()
+
+    def update(self, delta, ready):
+        ready.wait()
+        with self._lock:
+            self._value += delta
+
+    def snapshot(self):
+        with self._lock:
+            return self._value
+'''
+        if broken:
+            store = '''class Counter:
+    def __init__(self, initial):
+        self._value = initial
+
+    def update(self, delta, ready):
+        observed = self._value
+        ready.wait()
+        self._value = observed + delta
+
+    def snapshot(self):
+        return self._value
+'''
+        return {
+            "boundary.py": '''def normalise(request):
+    if not isinstance(request, dict):
+        raise ValueError("request must be an object")
+    deltas = request.get("deltas")
+    if not isinstance(deltas, list) or len(deltas) != 2:
+        raise ValueError("two deltas are required")
+    return int(request.get("initial", 0)), tuple(int(delta) for delta in deltas)
+''',
+            "store.py": store,
+            "service.py": '''from threading import Barrier, Thread
+
+from boundary import normalise
+from store import Counter
+
+
+def execute(request):
+    initial, deltas = normalise(request)
+    counter = Counter(initial)
+    ready = Barrier(2)
+    threads = [Thread(target=counter.update, args=(delta, ready)) for delta in deltas]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=1)
+    return {"final_state": counter.snapshot(), "threads_completed": sum(not thread.is_alive() for thread in threads)}
+''',
+            "public_smoke.py": '''from service import execute
+
+assert execute({"initial": 0, "deltas": [0, 0]})["threads_completed"] == 2
+''',
+            "README.md": f"# {task_id}\n\nContract: {requirement}\n\nThe service receives an initial count and two deltas. It must return the final count and report that both worker threads completed.\n",
+        }
+    store = '''from threading import Lock
+
+
+class WinnerStore:
+    def __init__(self):
+        self._winner = None
+        self._lock = Lock()
+
+    def register(self, candidate):
+        with self._lock:
+            if self._winner is None or (candidate["rank"], candidate["id"]) < (self._winner["rank"], self._winner["id"]):
+                self._winner = candidate
+
+    def snapshot(self):
+        with self._lock:
+            return dict(self._winner) if self._winner is not None else None
+'''
+    if broken:
+        store = '''class WinnerStore:
+    def __init__(self):
+        self._winner = None
+
+    def register(self, candidate):
+        self._winner = candidate
+
+    def snapshot(self):
+        return dict(self._winner) if self._winner is not None else None
+'''
+    return {
+        "boundary.py": '''def normalise(request):
+    if not isinstance(request, dict):
+        raise ValueError("request must be an object")
+    candidates = request.get("candidates")
+    arrival_order = request.get("arrival_order")
+    if not isinstance(candidates, list) or len(candidates) != 2 or not isinstance(arrival_order, list):
+        raise ValueError("two candidates and an arrival order are required")
+    parsed = [{"id": str(candidate["id"]), "rank": int(candidate["rank"])} for candidate in candidates]
+    by_id = {candidate["id"]: candidate for candidate in parsed}
+    if len(by_id) != 2 or set(arrival_order) != set(by_id):
+        raise ValueError("arrival order must name each candidate once")
+    return tuple(by_id[candidate_id] for candidate_id in arrival_order)
+''',
+        "store.py": store,
+        "service.py": '''from threading import Barrier, Event, Thread
+
+from boundary import normalise
+from store import WinnerStore
+
+
+def execute(request):
+    candidates = normalise(request)
+    winner = WinnerStore()
+    ready = Barrier(2)
+    first_arrived = Event()
+
+    def register(candidate, position):
+        ready.wait()
+        if position:
+            first_arrived.wait()
+        winner.register(candidate)
+        if not position:
+            first_arrived.set()
+
+    threads = [Thread(target=register, args=(candidate, position)) for position, candidate in enumerate(candidates)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=1)
+    return {"winner": winner.snapshot(), "threads_completed": sum(not thread.is_alive() for thread in threads)}
+''',
+        "public_smoke.py": '''from service import execute
+
+assert execute({"candidates": [{"id": "x", "rank": 1}, {"id": "y", "rank": 2}], "arrival_order": ["x", "y"]})["threads_completed"] == 2
+''',
+        "README.md": f"# {task_id}\n\nContract: {requirement}\n\nThe service registers two ranked candidates in the supplied arrival order. It must return the canonical winner (lowest rank, then identifier) and report that both worker threads completed.\n",
+    }
+
+
 def files(mode: str, broken: bool, task_id: str, requirement: str, failure: str) -> dict[str, str]:
+    if mode == "lost-update" or mode == "ordering":
+        return concurrency_files(task_id, broken, requirement)
     return {
         "boundary.py": "def normalise(operation):\n    return dict(operation)\n",
         "store.py": "class Store:\n    def __init__(self): self.items = {}; self.sent = []; self.total = 0\n    def snapshot(self): return {'items': self.items, 'sent': self.sent, 'total': self.total}\n",
@@ -94,8 +239,16 @@ def main() -> None:
       'resume': [{'name':'watermark','operations':[{'kind':'event','id':'a','offset':1},{'kind':'event','id':'b','offset':1},{'kind':'event','id':'c','offset':2}],'expected':{'items':{},'sent':['a','c'],'total':0}}],
       'cancel': [{'name':'cancellation','operations':[{'kind':'add','amount':3},{'kind':'cancel','amount':3}],'expected':{'items':{},'sent':[],'total':0}}],
       'dedupe': [{'name':'duplicate','operations':[{'kind':'add','id':'x','amount':2},{'kind':'add','id':'x','amount':2}],'expected':{'items':{},'sent':[],'total':2}}],
-      'lost-update': [{'name':'barrier-increments','operations':[{'kind':'increment','amount':1},{'kind':'increment','amount':1}],'expected':{'items':{},'sent':[],'total':2}}],
-      'ordering': [{'name':'canonical-order','operations':[{'kind':'candidate','name':'a'},{'kind':'candidate','name':'z'}],'expected':{'items':{'winner':'a'},'sent':[],'total':0}}], }
+      'lost-update': [
+          {'name': 'zero-plus-one-plus-one', 'scenario': {'initial': 0, 'deltas': [1, 1]}, 'expected': {'final_state': 2, 'threads_completed': 2}},
+          {'name': 'seven-plus-two-plus-five', 'scenario': {'initial': 7, 'deltas': [2, 5]}, 'expected': {'final_state': 14, 'threads_completed': 2}},
+          {'name': 'negative-three-plus-four-minus-two', 'scenario': {'initial': -3, 'deltas': [4, -2]}, 'expected': {'final_state': -1, 'threads_completed': 2}},
+      ],
+      'ordering': [
+          {'name': 'z-over-a-by-rank', 'scenario': {'candidates': [{'id': 'z', 'rank': 1}, {'id': 'a', 'rank': 2}], 'arrival_order': ['a', 'z']}, 'expected': {'winner': {'id': 'z', 'rank': 1}, 'threads_completed': 2}},
+          {'name': 'b-over-c-by-rank', 'scenario': {'candidates': [{'id': 'b', 'rank': 1}, {'id': 'c', 'rank': 2}], 'arrival_order': ['c', 'b']}, 'expected': {'winner': {'id': 'b', 'rank': 1}, 'threads_completed': 2}},
+          {'name': 'same-rank-id-tie-break-in-reverse-arrival-order', 'scenario': {'candidates': [{'id': 'a', 'rank': 4}, {'id': 'z', 'rank': 4}], 'arrival_order': ['a', 'z']}, 'expected': {'winner': {'id': 'a', 'rank': 4}, 'threads_completed': 2}},
+      ], }
     for task_id, family, requirement, failure, broken, repaired, expected in TASKS:
         mode = {'multi-module-cache':'cache','multi-module-unit-boundary':'units','compatibility-legacy-default':'legacy','compatibility-versioned-field':'rename','partial-failure-rollback':'rollback','partial-failure-selective-retry':'retry','rerun-idempotency-key':'idempotent','rerun-resume-watermark':'resume','aggregation-cancellation':'cancel','aggregation-deduplication':'dedupe','concurrency-lost-update':'lost-update','concurrency-order-independent':'ordering'}[task_id]
         for group, is_broken in (("worker", True), ("reference", False), ("control", False)):
