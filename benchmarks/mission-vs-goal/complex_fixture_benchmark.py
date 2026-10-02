@@ -311,7 +311,8 @@ def _run_bounded(command: list[str], *, timeout_seconds: float) -> tuple[int | N
     if process.poll() is None and not exceeded:
         timed_out = True
 
-    if timed_out or exceeded or incomplete:
+    group_pending = group_exists()
+    if timed_out or exceeded or incomplete or group_pending:
         terminate_group()
 
     shutdown_deadline = time.monotonic() + 0.1
@@ -319,7 +320,7 @@ def _run_bounded(command: list[str], *, timeout_seconds: float) -> tuple[int | N
         if process.poll() is not None and not group_exists():
             break
         time.sleep(0.002)
-    incomplete = incomplete or group_exists()
+    incomplete = incomplete or group_pending or group_exists()
     selector.close()
     for stream in (process.stdout, process.stderr):
         try:

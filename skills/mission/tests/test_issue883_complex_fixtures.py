@@ -3,6 +3,7 @@
 import importlib.util
 import errno
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -375,9 +376,11 @@ def test_public_smoke_reaps_a_parent_exited_child_that_holds_the_pipe(monkeypatc
     )
     gate_keeper = os.open(gate, os.O_RDWR | os.O_NONBLOCK)
     actual_popen = module.subprocess.Popen
+    processes = []
 
     def parent_exited_popen(*args, **kwargs):
         process = actual_popen(*args, **kwargs)
+        processes.append(process)
         process.wait(timeout=1)
         return process
 
@@ -386,6 +389,11 @@ def test_public_smoke_reaps_a_parent_exited_child_that_holds_the_pipe(monkeypatc
         record = module.run_public_smoke(candidate)
     finally:
         os.close(gate_keeper)
+        for process in processes:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
     assert record["status"] == "failed"
     assert record["reason"] == "smoke_reader_incomplete"
@@ -425,3 +433,68 @@ def test_bounded_runner_reaps_a_parent_exit_descendant_holding_a_pipe(tmp_path):
     assert int(pid_path.read_text()) > 0
     time.sleep(0.45)
     assert not survivor_path.exists()
+
+
+def test_bounded_runner_reaps_a_parent_exit_descendant_after_closing_pipes(monkeypatch, tmp_path):
+    module = _load()
+    parent_exited = tmp_path / "parent-exited"
+    survivor = tmp_path / "descendant-survived"
+    gate = tmp_path / "descendant-gate"
+    os.mkfifo(gate)
+    descendant = (
+        "import os, pathlib, sys\n"
+        + "os.close(1)\n"
+        + "os.close(2)\n"
+        + f"gate = os.open({str(gate)!r}, os.O_RDONLY)\n"
+        + "os.write(int(sys.argv[1]), b'R')\n"
+        + "while not os.read(gate, 1):\n"
+        + "    pass\n"
+        + f"pathlib.Path({str(survivor)!r}).write_text('alive')\n"
+    )
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "import os, pathlib, subprocess, sys; "
+            "ready_read, ready_write = os.pipe(); "
+            f"subprocess.Popen([sys.executable, '-c', {descendant!r}, str(ready_write)], pass_fds=(ready_write,)); "
+            "os.close(ready_write); "
+            "assert os.read(ready_read, 1) == b'R'; os.close(ready_read); "
+            f"pathlib.Path({str(parent_exited)!r}).write_text('exited')"
+        ),
+    ]
+    gate_keeper = os.open(gate, os.O_RDWR | os.O_NONBLOCK)
+    actual_popen = module.subprocess.Popen
+    processes = []
+
+    def parent_exited_popen(*args, **kwargs):
+        process = actual_popen(*args, **kwargs)
+        processes.append(process)
+        process.wait(timeout=1)
+        return process
+
+    monkeypatch.setattr(module.subprocess, "Popen", parent_exited_popen)
+    try:
+        _, _, timed_out, exceeded, incomplete = module._run_bounded(command, timeout_seconds=0.15)
+        os.close(gate_keeper)
+        gate_keeper = None
+        assert parent_exited.read_text(encoding="utf-8") == "exited"
+        assert not timed_out
+        assert not exceeded
+        assert incomplete
+        try:
+            gate_writer = os.open(gate, os.O_WRONLY | os.O_NONBLOCK)
+        except OSError as exc:
+            assert exc.errno == errno.ENXIO
+        else:
+            os.close(gate_writer)
+            raise AssertionError("ordinary closed-pipe descendant survived cleanup")
+        assert not survivor.exists()
+    finally:
+        if gate_keeper is not None:
+            os.close(gate_keeper)
+        for process in processes:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
