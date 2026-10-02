@@ -111,17 +111,26 @@ def validate(value):
 def explicit_paths_are_supported(argv, env):
     """Return whether command inputs contain only snapshot-bindable path shapes."""
     import os
+    import shlex
     from urllib.parse import unquote, urlsplit
 
     def path_unsupported(candidate):
+        path, separator, selector = candidate.partition("::")
+        if separator and selector and path.endswith(".py") and ":" not in path and not path.startswith("/") and "\\" not in path and all(part not in {"", ".."} for part in path.split("/")):
+            return False
         return bool(urlsplit(candidate).scheme) or candidate.startswith("/") or (len(candidate) >= 3 and candidate[0].isalpha() and candidate[1:3] in {":/", ":\\"}) or any(part == ".." for part in candidate.replace("\\", "/").split("/"))
 
-    def unsupported(value):
+    def unsupported(value, *, split_option_value=False):
         if not isinstance(value, str):
             return True
         candidate = unquote(value)
         parts = candidate.split("=")
         values = [candidate, *("=".join(parts[index:]) for index in range(1, len(parts)))]
+        if split_option_value and "=" in candidate:
+            try:
+                values.extend(shlex.split(candidate.split("=", 1)[1]))
+            except ValueError:
+                return True
         for raw_item in values:
             item = raw_item.strip().strip("'\"").strip()
             if item.startswith("@") and path_unsupported(item[1:].strip().strip("'\"").strip()):
@@ -136,7 +145,22 @@ def explicit_paths_are_supported(argv, env):
 
     if not isinstance(argv, list) or not isinstance(env, dict) or not all(isinstance(value, str) for value in env.values()):
         return False
-    return not (any(unsupported(value) for value in argv[1:]) or any(unsupported(part) for value in env.values() for part in value.split(os.pathsep)))
+    for index, value in enumerate(argv[1:], start=1):
+        if index > 1 and argv[index - 1] == "-c":
+            continue
+        if unsupported(value, split_option_value=isinstance(value, str) and value.startswith("--")):
+            return False
+    for key, value in env.items():
+        if key == "PYTEST_ADDOPTS":
+            try:
+                values = shlex.split(value)
+            except ValueError:
+                return False
+            if any(unsupported(item, split_option_value=item.startswith("--")) for item in values):
+                return False
+        elif any(unsupported(part) for part in value.split(os.pathsep)):
+            return False
+    return True
 
 
 def _validate_explicit_paths(argv, env):

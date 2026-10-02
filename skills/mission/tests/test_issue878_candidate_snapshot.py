@@ -158,7 +158,7 @@ def test_runner_rejects_external_pytest_module_nested_in_override_assignment(tmp
     (package / "__init__.py").write_text("", encoding="utf-8")
     (package / "test_receipt.py").write_text("def test_external_receipt():\n    assert True\n", encoding="utf-8")
     command = {
-        "argv": [sys.executable, "-m", "pytest", f"--override-ini=pythonpath={external}", "--pyargs", "test_external", "--junitxml=result.xml", "-q"],
+        "argv": [sys.executable, "-m", "pytest", f"--override-ini=pythonpath=src {external}", "--pyargs", "test_external", "--junitxml=result.xml", "-q"],
         "timeout_sec": 5, "output_limit": 4096, "kind": "test", "env": {},
         "test_report": {"format": "junit-xml", "path": "result.xml"},
     }
@@ -180,7 +180,7 @@ def test_runner_rejects_external_pytest_module_nested_in_environment_assignment(
     command = {
         "argv": [sys.executable, "-m", "pytest", "--junitxml=result.xml", "-q"],
         "timeout_sec": 5, "output_limit": 4096, "kind": "test",
-        "env": {"PYTEST_ADDOPTS": f"--override-ini='pythonpath={external}' --pyargs test_external_env"},
+        "env": {"PYTEST_ADDOPTS": f"'--override-ini=pythonpath=src {external}' --pyargs test_external_env"},
         "test_report": {"format": "junit-xml", "path": "result.xml"},
     }
 
