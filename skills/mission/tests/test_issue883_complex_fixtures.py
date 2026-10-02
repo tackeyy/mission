@@ -1,6 +1,8 @@
 """#883: complex fixture cohorts distinguish repairs from plausible regressions."""
 
 import importlib.util
+import errno
+import os
 import subprocess
 import sys
 import time
@@ -346,24 +348,42 @@ def test_evaluator_records_os_startup_failure_for_a_large_json_scenario(tmp_path
     assert record["cases"] == []
 
 
-def test_public_smoke_returns_a_failure_record_for_timeout_and_reaps_group_child(tmp_path):
+def test_public_smoke_reaps_a_parent_exited_child_that_holds_the_pipe(tmp_path):
     module = _load()
     candidate = tmp_path / "candidate"; candidate.mkdir()
+    parent_exited = tmp_path / "parent-exited"
     survivor = tmp_path / "survivor"
-    descendant = f"import pathlib, time; time.sleep(.35); pathlib.Path({str(survivor)!r}).write_text('alive')"
+    gate = tmp_path / "descendant-gate"
+    os.mkfifo(gate)
+    descendant = (
+        "import os, pathlib, sys\n"
+        + "os.write(int(sys.argv[1]), b'R')\n"
+        + f"gate = os.open({str(gate)!r}, os.O_RDONLY)\n"
+        + "os.read(gate, 1)\n"
+        + f"pathlib.Path({str(survivor)!r}).write_text('alive')\n"
+    )
     (candidate / "public_smoke.py").write_text(
-        "import subprocess, sys\n" + f"subprocess.Popen([sys.executable, '-c', {descendant!r}])\n" + "raise SystemExit(0)\n",
+        "import os, pathlib, subprocess, sys\n"
+        + "ready_read, ready_write = os.pipe()\n"
+        + f"child = subprocess.Popen([sys.executable, '-c', {descendant!r}, str(ready_write)], pass_fds=(ready_write,))\n"
+        + "os.close(ready_write)\n"
+        + "assert os.read(ready_read, 1) == b'R'\n"
+        + "os.close(ready_read)\n"
+        + f"pathlib.Path({str(parent_exited)!r}).write_text('exited')\n",
         encoding="utf-8",
     )
-    original = module._run_bounded
-    module._run_bounded = lambda command, timeout_seconds: original(command, timeout_seconds=0.05)
-    try:
-        record = module.run_public_smoke(candidate)
-    finally:
-        module._run_bounded = original
+    record = module.run_public_smoke(candidate)
+
     assert record["status"] == "failed"
     assert record["reason"] == "smoke_reader_incomplete"
-    time.sleep(0.45)
+    assert parent_exited.read_text(encoding="utf-8") == "exited"
+    try:
+        gate_writer = os.open(gate, os.O_WRONLY | os.O_NONBLOCK)
+    except OSError as exc:
+        assert exc.errno == errno.ENXIO
+    else:
+        os.close(gate_writer)
+        raise AssertionError("ordinary process-group descendant survived cleanup")
     assert not survivor.exists()
 
 
