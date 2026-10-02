@@ -93,7 +93,10 @@ def validate(value: object) -> dict:
             raise AcceptanceContractError("requirement-span-invalid")
         if item["text"] != text[item["start"]:item["end"]]:
             raise AcceptanceContractError("requirement-span-text-invalid")
-        if item["classification"] not in {"obligation", "context"}:
+        if (
+            not isinstance(item["classification"], str)
+            or item["classification"] not in {"obligation", "context"}
+        ):
             raise AcceptanceContractError("requirement-classification-invalid")
         cursor = item["end"]
     if cursor != len(text):

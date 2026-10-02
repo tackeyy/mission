@@ -72,6 +72,19 @@ def test_rejects_lone_surrogate_requirement_text_without_writing(tmp_path, run_c
     assert "acceptance_contract" not in json.loads(run_cli("get", cwd=tmp_path).stdout)
 
 
+@pytest.mark.parametrize("invalid", [[], {}, True, 1])
+def test_rejects_non_string_requirement_classification_without_writing(tmp_path, run_cli, invalid):
+    run_cli("init", "acceptance contract", "--force-mission", cwd=tmp_path, check=True)
+    contract = _contract()
+    contract["requirements"][0]["classification"] = invalid
+    source = tmp_path / "contract.json"
+    source.write_text(json.dumps(contract), encoding="utf-8")
+    result = run_cli("acceptance-contract", "import", "--input", str(source), cwd=tmp_path)
+    assert result.returncode != 0
+    assert "internal-error" not in result.stdout
+    assert "acceptance_contract" not in json.loads(run_cli("get", cwd=tmp_path).stdout)
+
+
 def test_kernel_refuses_a_contract_for_another_mission():
     from acceptance_contract import validate
     from mission_kernel.commands import ImportAcceptanceContract
