@@ -348,6 +348,11 @@ def evaluate_assignment(repo_root: Path, source_commit: str, assignment: dict[st
         task_id = assignment["task_id"]
         entry = entries[task_id]
         expected = {"source_commit": source_commit, "generator_digest": _digest_bytes(generator_bytes), "catalog_digest": _digest_bytes(catalog_bytes), "task_id": task_id, "family": entry["family"], "version": entry["version"], "fixture_group": "worker", "task_root": task_id, "input_digest": generator.template_digest(task_id, "worker")}
+        expected["input_manifest_identity"] = _digest_bytes(json.dumps({
+            "source_commit": source_commit, "generator_digest": expected["generator_digest"],
+            "catalog_digest": expected["catalog_digest"], "task_id": task_id,
+            "family": entry["family"], "version": entry["version"], "fixture_group": "worker",
+        }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
         if any(assignment.get(key) != value for key, value in expected.items()):
             return {**base, "reason": "assignment_manifest_mismatch"}
         if not worker_root.is_dir() or worker_root.name != task_id or _digest_tree(worker_root) != assignment.get("worker_digest"):

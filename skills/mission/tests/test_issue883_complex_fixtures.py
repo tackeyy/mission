@@ -193,6 +193,11 @@ def test_assignment_requires_fixed_manifest_worker_and_candidate_envelope(tmp_pa
     assert record["status"] == "failed"
     assert record["reason"] == "candidate_digest_mismatch"
 
+    altered_assignment = {**assignment, "input_manifest_identity": "sha256:" + "0" * 64}
+    record = module.evaluate_assignment(ROOT, commit, altered_assignment, worker, repair, envelope)
+    assert record["status"] == "failed"
+    assert record["reason"] == "assignment_manifest_mismatch"
+
 
 def test_materializer_binds_current_source_commit_and_creates_one_task_repo(tmp_path):
     module = _load()
@@ -248,6 +253,11 @@ def test_evaluator_distinguishes_json_boolean_from_number_and_rejects_invalid_ca
         record = module.evaluate_candidate(root, {**entry, "checks": checks}, candidate)
         assert record["status"] == "failed"
         assert record["reason"] == reason
+
+    (candidate / "service.py").write_text("def execute(value): return float('nan')\n", encoding="utf-8")
+    record = module.evaluate_candidate(root, entry, candidate)
+    assert record["status"] == "failed"
+    assert record["reason"] == "evaluator_output_invalid"
 
 
 def test_public_smoke_returns_a_failure_record_for_timeout_and_reaps_group_child(tmp_path):
