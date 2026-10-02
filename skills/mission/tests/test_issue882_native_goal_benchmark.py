@@ -379,3 +379,17 @@ def test_protocol_error_classification_requires_goal_method_and_jsonrpc_code():
     assert probe._unsupported_goal_protocol(probe.RpcProtocolError("thread/goal/set", -32601, "Method not found")) is True
     assert probe._unsupported_goal_protocol(probe.RpcProtocolError("thread/start", -32601, "Method not found")) is False
     assert probe._unsupported_goal_protocol(OSError("-32601")) is False
+
+
+def test_cli_main_rejects_nonfinite_values_and_accepts_finite_control(tmp_path, monkeypatch):
+    probe = _load_probe()
+    base = ["probe", "--host", "codex", "--objective", "o", "--task-id", "t", "--acceptance-criterion", "a", "--starting-commit", "a" * 40, "--mission-source-repo", str(tmp_path), "--mission-source-commit", "a" * 40, "--model-id", "m", "--effort", "low", "--permissions", "p", "--worktree", str(tmp_path), "--output", str(tmp_path / "record.json")]
+    for flag, value in (("--timeout-seconds", "nan"), ("--timeout-seconds", "inf"), ("--max-budget-usd", "nan"), ("--max-budget-usd", "inf")):
+        monkeypatch.setattr(sys, "argv", [*base, flag, value])
+        try: probe.main()
+        except SystemExit as exc: assert exc.code == 2
+        else: raise AssertionError("nonfinite CLI value must be rejected")
+    monkeypatch.setattr(probe, "_task_snapshot", lambda _path: {"observed": "a" * 40, "clean": True})
+    monkeypatch.setattr(sys, "argv", [*base, "--timeout-seconds", "1", "--max-budget-usd", "0.1"])
+    assert probe.main() == 0
+    assert json.loads((tmp_path / "record.json").read_text())["outcome"] == "failed"
