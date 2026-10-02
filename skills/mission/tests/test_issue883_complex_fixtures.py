@@ -99,7 +99,16 @@ def test_worker_export_uses_the_positive_allowlist_from_native_goal_benchmark(tm
     assert not any("catalog.json" in path or "evaluator" in path for path in paths)
     manifest = __import__("json").loads((exported / "manifest.json").read_text())
     assert manifest["source_commit"] == commit
+    assert manifest["schema"] == "mission-complex-fixture-export/1"
+    assert manifest["assignment_count"] == 12
+    assert manifest["catalog_digest"].startswith("sha256:")
     assert len(manifest["assignments"]) == 12
+    for assignment in manifest["assignments"]:
+        assert assignment["fixture_group"] == "worker"
+        assert assignment["task_root"] == assignment["task_id"]
+        assert assignment["family"] and assignment["version"]
+        assert assignment["candidate_digest"] == assignment["worker_digest"]
+        assert assignment["input_manifest_identity"].startswith("sha256:")
 
 
 def test_concurrency_tasks_use_real_shared_state_and_evaluator_owned_scenarios(tmp_path):
@@ -208,15 +217,23 @@ def test_evaluator_rejects_a_snapshot_change_without_discarding_its_record(monke
     assert record["cases"] == []
 
 
-def test_bounded_runner_does_not_wait_for_a_descendant_holding_a_pipe_open():
+def test_bounded_runner_reaps_a_parent_exit_descendant_holding_a_pipe(tmp_path):
     module = _load()
+    pid_path = tmp_path / "descendant.pid"
     command = [
         sys.executable,
         "-c",
-        "import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(5)']); time.sleep(.02)",
+        (
+            "import pathlib, subprocess, sys; "
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(5)']); "
+            f"pathlib.Path({str(pid_path)!r}).write_text(str(child.pid))"
+        ),
     ]
     started = time.monotonic()
     _, _, _, _, incomplete = module._run_bounded(command, timeout_seconds=0.15)
 
     assert incomplete
-    assert time.monotonic() - started < 1
+    assert time.monotonic() - started < 0.5
+    child_pid = int(pid_path.read_text())
+    with __import__("pytest").raises(ProcessLookupError):
+        __import__("os").kill(child_pid, 0)

@@ -61,7 +61,10 @@ def materialize_task(repo_root: Path, source_commit: str, task_id: str, group: s
         raise ValueError("fixture generator does not match the declared commit")
     generator = _load_generator(generator_path)
     catalog_bytes = generator.render_catalog_bytes()
-    if task_id not in {entry["id"] for entry in generator.render_catalog()["tasks"]}:
+    catalog = generator.render_catalog()
+    entries = {entry["id"]: entry for entry in catalog["tasks"]}
+    entry = entries.get(task_id)
+    if not isinstance(entry, dict):
         raise ValueError("unknown fixture task")
     files = generator.task_template(task_id, group)
     task_root = destination / task_id; task_root.mkdir(parents=True)
@@ -74,16 +77,30 @@ def materialize_task(repo_root: Path, source_commit: str, task_id: str, group: s
     subprocess.run(["git", "commit", "-qm", "generated fixture"], cwd=destination, check=True)
     generated_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=destination, text=True, capture_output=True, check=True).stdout.strip()
     generated_digest = _digest_tree(task_root)
+    input_identity = _digest_bytes(json.dumps({
+        "source_commit": source_commit,
+        "generator_digest": _digest_bytes(shown.stdout),
+        "catalog_digest": _digest_bytes(catalog_bytes),
+        "task_id": task_id,
+        "family": entry["family"],
+        "version": entry["version"],
+        "fixture_group": group,
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
     return {
         "source_commit": source_commit,
         "generator_digest": _digest_bytes(shown.stdout),
         "catalog_digest": _digest_bytes(catalog_bytes),
         "input_digest": generator.template_digest(task_id, group),
+        "input_manifest_identity": input_identity,
         "task_id": task_id,
+        "family": entry["family"],
+        "version": entry["version"],
+        "fixture_group": group,
         "generated_commit": generated_commit,
         "task_root": task_id,
         "generated_digest": generated_digest,
         "worker_digest": generated_digest,
+        "candidate_digest": generated_digest,
     }
 
 
@@ -133,7 +150,13 @@ def _materialize_candidate(source: Path, destination: Path) -> tuple[Path, str]:
 
 
 def _run_bounded(command: list[str], *, timeout_seconds: float) -> tuple[int | None, bytes, bool, bool, bool]:
-    """Bound child, pipes, and reader lifetime without blocking on stream close."""
+    """Bound the direct child and ordinary process-group descendants.
+
+    A descendant can retain inherited pipe descriptors after its direct parent
+    exits.  This terminates that original process group and closes this
+    supervisor's descriptors without claiming to contain a descendant that
+    deliberately creates a new session.
+    """
     process = subprocess.Popen(
         command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         start_new_session=os.name == "posix",
@@ -176,14 +199,22 @@ def _run_bounded(command: list[str], *, timeout_seconds: float) -> tuple[int | N
             break
         if process.poll() is not None and not selector.get_map():
             break
+    incomplete = bool(selector.get_map())
     if process.poll() is None and not exceeded:
         timed_out = True
+
+    if timed_out or exceeded or incomplete:
         terminate_group()
+
     shutdown_deadline = time.monotonic() + 0.1
     while process.poll() is None and time.monotonic() < shutdown_deadline:
         time.sleep(0.002)
-    incomplete = bool(selector.get_map())
     selector.close()
+    for stream in (process.stdout, process.stderr):
+        try:
+            stream.detach().close()
+        except (OSError, ValueError):
+            pass
     return process.poll(), bytes(captured["stdout"]), timed_out, exceeded, incomplete
 
 
@@ -278,5 +309,14 @@ def export_worker_fixtures(repo_root: Path, starting_commit: str, destination: P
             exported = module.create_worker_export(generated, record["generated_commit"], destination / entry["id"], [entry["id"]])
             record["export_digest"] = _digest_tree(exported / entry["id"])
             manifest.append(record)
-    (destination / "manifest.json").write_text(json.dumps({"source_commit": starting_commit, "assignments": manifest}, indent=2) + "\n", encoding="utf-8")
+    if not manifest:
+        raise ValueError("complex fixture export requires assignments")
+    (destination / "manifest.json").write_text(json.dumps({
+        "schema": "mission-complex-fixture-export/1",
+        "source_commit": starting_commit,
+        "generator_digest": manifest[0]["generator_digest"],
+        "catalog_digest": manifest[0]["catalog_digest"],
+        "assignment_count": len(manifest),
+        "assignments": manifest,
+    }, indent=2) + "\n", encoding="utf-8")
     return destination
