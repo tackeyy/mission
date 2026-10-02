@@ -116,7 +116,7 @@ def _digest(files) -> str:
     return "sha256:" + digest.hexdigest()
 
 
-def capture_candidate(root, *, declared_untracked) -> CandidateSnapshot:
+def capture_candidate(root, *, declared_untracked, external_inputs=()) -> CandidateSnapshot:
     root = Path(root).resolve()
     tracked = _tracked(root)
     names = {path for path, _mode in tracked}
@@ -129,6 +129,18 @@ def capture_candidate(root, *, declared_untracked) -> CandidateSnapshot:
         if path in names:
             raise VerificationRunnerError("declared-output-tracked")
         files.append(_read(root, path, 0, required=False))
+    for item in external_inputs:
+        if not isinstance(item, dict):
+            raise VerificationRunnerError("external-input-invalid")
+        source = _relative(item.get("source_path"))
+        target = _relative(item.get("target_path"))
+        if target in names or any(file.path == target for file in files):
+            raise VerificationRunnerError("external-input-target-conflict")
+        try:
+            source_file = _read(root, source, 0, required=False)
+        except VerificationRunnerError as exc:
+            raise VerificationRunnerError("external-input-invalid") from exc
+        files.append(CandidateFile(target, source_file.mode, source_file.content))
     files.sort(key=lambda item: item.path)
     return CandidateSnapshot(tuple(files), _digest(files))
 
@@ -157,6 +169,22 @@ def verifier_definition_digest(command) -> str:
 
     raw = json.dumps(command, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def _toolchain_matches(command) -> bool:
+    toolchain = command.get("toolchain")
+    if toolchain is None:
+        return True
+    if not isinstance(toolchain, dict):
+        return False
+    path = Path(toolchain.get("path", ""))
+    try:
+        info = path.lstat()
+        if path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            return False
+        return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest() == toolchain.get("digest")
+    except OSError:
+        return False
 
 
 def _executed_count(command, output: bytes) -> int | None:
@@ -192,6 +220,8 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
         raise VerificationRunnerError("verifier-definition-invalid")
     before = candidate.digest
     started = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    if not _toolchain_matches(command):
+        return {"started_at": started, "finished_at": started, "exit_code": None, "timed_out": False, "executed_count": None, "output_digest": "sha256:" + hashlib.sha256(b"").hexdigest(), "status": "blocked", "block_reason": "toolchain-stale", "repro_input_digest": None}
     timed_out = False
     with materialize_candidate(candidate) as root:
         repro_digest = None
@@ -208,7 +238,7 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
             child = subprocess.Popen(
                 argv, cwd=cwd, shell=False, stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
-                env={"PATH": command.get("toolchain_path", os.defpath), **command.get("env", {})},
+            env={"PATH": str(Path(command["toolchain"]["path"]).parent) if command.get("toolchain") else os.defpath, **command.get("env", {})},
             )
         except OSError:
             return {
@@ -230,9 +260,12 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
         while selector.get_map() or child.poll() is None:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                if child.poll() is None:
+                if not timed_out:
                     timed_out = True
-                    os.killpg(child.pid, signal.SIGKILL)
+                    try:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
                 remaining = 0.1
             for key, _event in selector.select(min(remaining, 0.1)):
                 chunk = os.read(key.fd, 65536)
@@ -241,7 +274,7 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
                 elif len(output) < limit:
                     output.extend(chunk[:limit - len(output)])
         child.wait()
-        exit_code = None if timed_out else child.returncode
+        exit_code = child.returncode
         selector.close()
         observed = tuple(_read(root, item.path, item.mode, required=True) for item in candidate.files)
         candidate_stale = _digest(observed) != candidate.digest
@@ -250,7 +283,8 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
     if before != after:
         raise VerificationRunnerError("candidate-mutated")
     count = _executed_count(command, output)
-    passed = not timed_out and not candidate_stale and exit_code == 0 and (command.get("kind") != "test" or (count is not None and count > 0))
+    toolchain_stale = not _toolchain_matches(command)
+    passed = not timed_out and not candidate_stale and not toolchain_stale and exit_code == 0 and (command.get("kind") != "test" or (count is not None and count > 0))
     return {
         "started_at": started,
         "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
@@ -258,7 +292,7 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
         "timed_out": timed_out,
         "executed_count": count,
         "output_digest": "sha256:" + hashlib.sha256(output).hexdigest(),
-        "status": "passed" if passed else "blocked" if timed_out or candidate_stale else "failed",
-        "block_reason": "timeout" if timed_out else "candidate-stale" if candidate_stale else None,
+        "status": "passed" if passed else "blocked" if timed_out or candidate_stale or toolchain_stale else "failed",
+        "block_reason": "timeout" if timed_out else "candidate-stale" if candidate_stale else "toolchain-stale" if toolchain_stale else None,
         "repro_input_digest": repro_digest,
     }

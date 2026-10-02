@@ -2,15 +2,20 @@
 import hashlib
 import json
 import subprocess
+import sys
+from pathlib import Path
 
 
 def _policy():
+    executable = Path(sys.executable).resolve()
     return {
-        "schema": "mission-verifier-policy/1",
+        "schema": "mission-verifier-policy/2",
         "commands": [{
-            "id": "project-test", "argv": ["python3", "-c", "print('ok')"],
+            "id": "project-test", "argv": [str(executable), "-c", "print('ok')"],
             "relative_cwd": ".", "timeout_sec": 5, "output_limit": 4096,
             "kind": "command", "env": {}, "declared_untracked": [],
+            "toolchain": {"path": str(executable), "digest": "sha256:" + hashlib.sha256(executable.read_bytes()).hexdigest()},
+            "external_inputs": [],
         }],
     }
 
@@ -23,9 +28,10 @@ def _replay_policy():
     }
     policy["commands"].append({
         "id": "replay-test",
-        "argv": ["python3", "-c", "from pathlib import Path; assert Path('repro.json').read_text() == 'proof'"],
+        "argv": _policy()["commands"][0]["argv"][:1] + ["-c", "from pathlib import Path; assert Path('repro.json').read_text() == 'proof'"],
         "relative_cwd": ".", "timeout_sec": 5, "output_limit": 4096,
         "kind": "command", "env": {}, "declared_untracked": [],
+        "toolchain": _policy()["commands"][0]["toolchain"], "external_inputs": [],
     })
     return policy
 
@@ -61,6 +67,14 @@ def test_import_freezes_registered_project_verifier_policy(tmp_path, run_cli):
     stored = json.loads(run_cli("get", cwd=tmp_path).stdout)["acceptance_contract"]
     assert stored["verifier_policy"]["digest"] == contract["verifier_policy_digest"]
     assert stored["verifier_policy"]["commands"]["project-test"]["argv"] == policy["commands"][0]["argv"]
+
+
+def test_legacy_verifier_policy_schema_is_explicitly_unsupported():
+    import pytest
+    from mission_application.verifier_policy import VerifierPolicyError, validate
+
+    with pytest.raises(VerifierPolicyError, match="verifier-policy-unsupported"):
+        validate({"schema": "mission-verifier-policy/1", "commands": []})
 
 
 def test_public_runner_records_process_bound_receipt(tmp_path, run_cli):
@@ -177,7 +191,8 @@ def test_public_runner_records_blocked_receipt_when_registered_binary_is_unavail
     subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
     subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-qm", "base"], cwd=tmp_path, check=True)
     run_cli("init", "verification runner", "--force-mission", cwd=tmp_path, check=True)
-    policy = _policy(); policy["commands"][0]["argv"] = ["mission-neutral-binary-does-not-exist"]
+    policy = _policy(); policy["commands"][0]["argv"] = ["/missing/mission-neutral-binary"]
+    policy["commands"][0]["toolchain"] = {"path": "/missing/mission-neutral-binary", "digest": "sha256:" + "0" * 64}
     policy_dir = tmp_path / ".mission"; policy_dir.mkdir()
     encoded = json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()
     (policy_dir / "verifiers.json").write_bytes(encoded)
@@ -192,7 +207,7 @@ def test_public_runner_records_blocked_receipt_when_registered_binary_is_unavail
     assert result.returncode == 0, result.stderr
     receipt = json.loads(result.stdout)["receipt"]
     assert receipt["status"] == "blocked"
-    assert receipt["block_reason"] == "process-unavailable"
+    assert receipt["block_reason"] == "toolchain-stale"
     assert receipt["exit_code"] is None and receipt["timed_out"] is False
 
 
@@ -204,7 +219,7 @@ def test_same_operation_retry_runs_the_verifier_again_and_rejects_a_different_re
     run_cli("init", "verification runner", "--force-mission", cwd=tmp_path, check=True)
     counter = tmp_path / "process-count.txt"
     policy = _policy()
-    policy["commands"][0]["argv"] = ["python3", "-c", f"from pathlib import Path; p=Path({str(counter)!r}); n=int(p.read_text() if p.exists() else '0') + 1; p.write_text(str(n)); print(n)"]
+    policy["commands"][0]["argv"] = [policy["commands"][0]["toolchain"]["path"], "-c", f"from pathlib import Path; p=Path({str(counter)!r}); n=int(p.read_text() if p.exists() else '0') + 1; p.write_text(str(n)); print(n)"]
     policy_dir = tmp_path / ".mission"; policy_dir.mkdir()
     encoded = json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()
     (policy_dir / "verifiers.json").write_bytes(encoded)

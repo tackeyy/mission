@@ -10,7 +10,7 @@ class VerifierPolicyError(ValueError):
     pass
 
 
-SCHEMA = "mission-verifier-policy/1"
+SCHEMA = "mission-verifier-policy/2"
 
 
 def _digest(raw: bytes) -> str:
@@ -32,21 +32,26 @@ def _relative(value, code):
 
 
 def validate(value):
-    if not isinstance(value, dict) or set(value) != {"schema", "commands"} or value["schema"] != SCHEMA:
+    if not isinstance(value, dict) or set(value) != {"schema", "commands"}:
         raise VerifierPolicyError("verifier-policy-schema-invalid")
+    if value["schema"] != SCHEMA:
+        raise VerifierPolicyError("verifier-policy-unsupported")
     commands = value["commands"]
     if not isinstance(commands, list) or not commands:
         raise VerifierPolicyError("verifier-policy-commands-invalid")
     result = {}
     for command in commands:
-        required = {"id", "argv", "relative_cwd", "timeout_sec", "output_limit", "kind", "env", "declared_untracked"}
-        optional = {"executed_count_pattern", "toolchain_path", "replay"}
+        required = {"id", "argv", "relative_cwd", "timeout_sec", "output_limit", "kind", "env", "declared_untracked", "toolchain", "external_inputs"}
+        optional = {"executed_count_pattern", "replay"}
         if not isinstance(command, dict) or not required <= set(command) or not set(command) <= required | optional:
             raise VerifierPolicyError("verifier-policy-command-invalid")
         identifier = _text(command["id"], "verifier-policy-command-id-invalid")
         argv = command["argv"]
         if identifier in result or not isinstance(argv, list) or not argv or not all(isinstance(item, str) and item and "\x00" not in item for item in argv):
             raise VerifierPolicyError("verifier-policy-command-invalid")
+        toolchain = command["toolchain"]
+        if not isinstance(toolchain, dict) or set(toolchain) != {"path", "digest"} or not isinstance(toolchain["path"], str) or not toolchain["path"].startswith("/") or "\x00" in toolchain["path"] or not isinstance(toolchain["digest"], str) or __import__("re").fullmatch(r"sha256:[0-9a-f]{64}", toolchain["digest"]) is None or argv[0] != toolchain["path"]:
+            raise VerifierPolicyError("verifier-policy-toolchain-invalid")
         if command["kind"] not in {"command", "test"} or type(command["timeout_sec"]) is not int or not 0 < command["timeout_sec"] <= 3600 or type(command["output_limit"]) is not int or not 0 < command["output_limit"] <= 1048576:
             raise VerifierPolicyError("verifier-policy-command-invalid")
         pattern = command.get("executed_count_pattern")
@@ -54,9 +59,19 @@ def validate(value):
             raise VerifierPolicyError("verifier-policy-test-adapter-invalid")
         if command["kind"] == "command" and pattern is not None:
             raise VerifierPolicyError("verifier-policy-command-invalid")
-        toolchain = command.get("toolchain_path")
-        if toolchain is not None and (not isinstance(toolchain, str) or not toolchain.startswith("/") or "\x00" in toolchain):
-            raise VerifierPolicyError("verifier-policy-toolchain-invalid")
+        inputs = command["external_inputs"]
+        if not isinstance(inputs, list):
+            raise VerifierPolicyError("verifier-policy-external-input-invalid")
+        source_paths = set()
+        target_paths = set()
+        for item in inputs:
+            if not isinstance(item, dict) or set(item) != {"kind", "source_path", "target_path"} or item["kind"] != "local-file":
+                raise VerifierPolicyError("verifier-policy-external-input-unsupported")
+            source = _relative(item["source_path"], "verifier-policy-external-input-invalid")
+            target = _relative(item["target_path"], "verifier-policy-external-input-invalid")
+            if source in source_paths or target in target_paths:
+                raise VerifierPolicyError("verifier-policy-external-input-invalid")
+            source_paths.add(source); target_paths.add(target)
         replay = command.get("replay")
         if replay is not None:
             if not isinstance(replay, dict) or set(replay) != {"command_id", "max_bytes", "allowed_artifact_kinds", "relative_path"} or not isinstance(replay["command_id"], str) or not replay["command_id"] or type(replay["max_bytes"]) is not int or not 0 < replay["max_bytes"] <= 1048576 or not isinstance(replay["allowed_artifact_kinds"], list) or not replay["allowed_artifact_kinds"] or not all(isinstance(item, str) and item for item in replay["allowed_artifact_kinds"]):

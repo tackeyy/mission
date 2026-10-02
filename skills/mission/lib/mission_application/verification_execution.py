@@ -106,14 +106,14 @@ def run_contract_verifier(state, *, project_root, criterion_id, repro_input=None
             return _blocked_receipt(contract, policy, criterion_id, command, "replay-unsupported")
         command = replay_command
     try:
-        candidate = capture_candidate(project_root, declared_untracked=command["declared_untracked"])
+        candidate = capture_candidate(project_root, declared_untracked=command["declared_untracked"], external_inputs=command["external_inputs"])
         replay_file = None if repro_input is None else (replay["relative_path"], repro_input["content"].encode())
         if replay_file is not None and replay_file[0] in {item.path for item in candidate.files}:
             return _blocked_receipt(contract, policy, criterion_id, command, "replay-input-path-conflict")
         outcome = execute_candidate(candidate, command, relative_cwd=command["relative_cwd"], repro_input=replay_file)
         # The source must still be the candidate after process execution.  A
         # mutable worktree never receives a successful receipt.
-        current = capture_candidate(project_root, declared_untracked=command["declared_untracked"])
+        current = capture_candidate(project_root, declared_untracked=command["declared_untracked"], external_inputs=command["external_inputs"])
     except (KeyError, VerificationRunnerError) as exc:
         raise EvidenceFailure(str(exc)) from exc
     if current.digest != candidate.digest:
