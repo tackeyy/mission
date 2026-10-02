@@ -427,6 +427,7 @@ GENERIC_SET_DEDICATED_FIELDS = frozenset(
         "context_manifests",
         "claims_ledgers",
         "verification_history",
+        "verification_receipts",
         "acceptance_contract",
     }
 )

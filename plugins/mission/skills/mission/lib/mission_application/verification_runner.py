@@ -176,7 +176,7 @@ def _executed_count(command, output: bytes) -> int | None:
     return value if value >= 0 else 0
 
 
-def execute_candidate(candidate, command, *, relative_cwd):
+def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
     """Run one frozen argv in a materialized candidate and return facts only.
 
     No caller supplied shell text or ambient environment reaches the child.
@@ -194,6 +194,13 @@ def execute_candidate(candidate, command, *, relative_cwd):
     started = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     timed_out = False
     with materialize_candidate(candidate) as root:
+        repro_digest = None
+        if repro_input is not None:
+            path, content = repro_input
+            target = _target(root, path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+            repro_digest = "sha256:" + hashlib.sha256(path.encode() + b"\0" + content).hexdigest()
         cwd = root if relative_cwd == "." else root / _relative(relative_cwd)
         if not cwd.is_dir():
             raise VerificationRunnerError("verifier-cwd-missing")
@@ -222,6 +229,10 @@ def execute_candidate(candidate, command, *, relative_cwd):
         child.wait()
         exit_code = None if timed_out else child.returncode
         selector.close()
+        observed = tuple(_read(root, item.path, item.mode, required=True) for item in candidate.files)
+        if _digest(observed) != candidate.digest:
+            timed_out = True
+            exit_code = None
     output = bytes(output)
     after = candidate.digest
     if before != after:
@@ -236,4 +247,5 @@ def execute_candidate(candidate, command, *, relative_cwd):
         "executed_count": count,
         "output_digest": "sha256:" + hashlib.sha256(output).hexdigest(),
         "status": "passed" if passed else "failed" if not timed_out else "blocked",
+        "repro_input_digest": repro_digest,
     }

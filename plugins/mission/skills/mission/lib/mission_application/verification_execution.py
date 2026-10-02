@@ -38,7 +38,8 @@ def run_contract_verifier(state, *, project_root, criterion_id, repro_input=None
         command = replay_command
     try:
         candidate = capture_candidate(project_root, declared_untracked=command["declared_untracked"])
-        outcome = execute_candidate(candidate, command, relative_cwd=command["relative_cwd"])
+        replay_file = None if repro_input is None else (repro_input["relative_path"], repro_input["content"].encode())
+        outcome = execute_candidate(candidate, command, relative_cwd=command["relative_cwd"], repro_input=replay_file)
         # The source must still be the candidate after process execution.  A
         # mutable worktree never receives a successful receipt.
         current = capture_candidate(project_root, declared_untracked=command["declared_untracked"])
@@ -63,9 +64,10 @@ def run_contract_verifier(state, *, project_root, criterion_id, repro_input=None
         "output_digest": outcome["output_digest"],
         "status": outcome["status"],
         "runner_provenance": "mission-public-cli/1",
+        "repro_input_digest": outcome["repro_input_digest"],
     }
 
 
 def _blocked_receipt(contract, policy, criterion_id, command, reason):
     import hashlib
-    return {"schema": "mission-verification-receipt/1", "contract_digest": contract_digest({key: value for key, value in contract.items() if key not in {"imported_at", "verifier_policy"}}), "criterion_id": criterion_id, "candidate_digest": "sha256:" + "0" * 64, "verifier_policy_digest": policy["digest"], "verifier_definition_digest": verifier_definition_digest(command), "argv": list(command["argv"]), "relative_cwd": command["relative_cwd"], "started_at": "1970-01-01T00:00:00Z", "finished_at": "1970-01-01T00:00:00Z", "exit_code": None, "timed_out": False, "executed_count": None, "output_digest": "sha256:" + hashlib.sha256(reason.encode()).hexdigest(), "status": "blocked", "runner_provenance": "mission-public-cli/1"}
+    return {"schema": "mission-verification-receipt/1", "contract_digest": contract_digest({key: value for key, value in contract.items() if key not in {"imported_at", "verifier_policy"}}), "criterion_id": criterion_id, "candidate_digest": "sha256:" + "0" * 64, "verifier_policy_digest": policy["digest"], "verifier_definition_digest": verifier_definition_digest(command), "argv": list(command["argv"]), "relative_cwd": command["relative_cwd"], "started_at": "1970-01-01T00:00:00Z", "finished_at": "1970-01-01T00:00:00Z", "exit_code": None, "timed_out": False, "executed_count": None, "output_digest": "sha256:" + hashlib.sha256(reason.encode()).hexdigest(), "status": "blocked", "runner_provenance": "mission-public-cli/1", "repro_input_digest": None}
