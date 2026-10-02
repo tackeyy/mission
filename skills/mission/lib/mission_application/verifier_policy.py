@@ -108,8 +108,8 @@ def validate(value):
     return result
 
 
-def _validate_explicit_paths(argv, env):
-    """Reject path-shaped command inputs that the snapshot cannot bind."""
+def explicit_paths_are_supported(argv, env):
+    """Return whether command inputs contain only snapshot-bindable path shapes."""
     import os
     from urllib.parse import unquote, urlsplit
 
@@ -117,15 +117,32 @@ def _validate_explicit_paths(argv, env):
         return bool(urlsplit(candidate).scheme) or candidate.startswith("/") or (len(candidate) >= 3 and candidate[0].isalpha() and candidate[1:3] in {":/", ":\\"}) or any(part == ".." for part in candidate.replace("\\", "/").split("/"))
 
     def unsupported(value):
-        candidate = unquote(value.split("=", 1)[-1])
-        if candidate.startswith("@"):
-            return path_unsupported(candidate[1:])
-        if candidate.startswith("-") and not candidate.startswith("--"):
-            compact = candidate[1:]
-            return "/" in compact or ".." in compact
-        return path_unsupported(candidate)
+        if not isinstance(value, str):
+            return True
+        candidate = unquote(value)
+        values = [candidate]
+        if "=" in candidate:
+            prefix, assigned = candidate.split("=", 1)
+            values.extend((prefix, assigned))
+        for item in values:
+            if item.startswith("@") and path_unsupported(item[1:]):
+                return True
+            if item.startswith("-") and not item.startswith("--"):
+                compact = item[1:]
+                if "/" in compact or ".." in compact:
+                    return True
+            if path_unsupported(item):
+                return True
+        return False
 
-    if any(unsupported(value) for value in argv[1:]) or any(unsupported(part) for value in env.values() for part in value.split(os.pathsep)):
+    if not isinstance(argv, list) or not isinstance(env, dict) or not all(isinstance(value, str) for value in env.values()):
+        return False
+    return not (any(unsupported(value) for value in argv[1:]) or any(unsupported(part) for value in env.values() for part in value.split(os.pathsep)))
+
+
+def _validate_explicit_paths(argv, env):
+    """Reject path-shaped command inputs that the snapshot cannot bind."""
+    if not explicit_paths_are_supported(argv, env):
         raise VerifierPolicyError("verifier-policy-explicit-path-unsupported")
 
 

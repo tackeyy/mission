@@ -1,5 +1,6 @@
 """#878 candidate snapshot regression tests."""
 import subprocess
+import sys
 import time
 
 
@@ -136,6 +137,11 @@ def test_runner_rejects_undeclared_path_arguments_and_binds_repro_kind(tmp_path)
     candidate = capture_candidate(tmp_path, declared_untracked=())
     with pytest.raises(VerificationRunnerError, match="verifier-explicit-path-unsupported"):
         execute_candidate(candidate, {"argv": ["python3", "/tmp/helper.py"], "timeout_sec": 5, "output_limit": 8, "kind": "command", "env": {}}, relative_cwd=".")
+    helper = tmp_path.parent / "helper.py=active"
+    helper.write_text("print('external-helper-ran')", encoding="utf-8")
+    for argument in (str(helper), f"key={helper}", f"-c{helper}", f"@{helper}"):
+        with pytest.raises(VerificationRunnerError, match="verifier-explicit-path-unsupported"):
+            execute_candidate(candidate, {"argv": [sys.executable, argument], "timeout_sec": 5, "output_limit": 8, "kind": "command", "env": {}}, relative_cwd=".")
     counterexample = execute_candidate(candidate, {"argv": ["python3", "-c", "pass"], "timeout_sec": 5, "output_limit": 8, "kind": "command", "env": {}}, relative_cwd=".", repro_input=("counterexample", "repro.json", b"same"))
     finding = execute_candidate(candidate, {"argv": ["python3", "-c", "pass"], "timeout_sec": 5, "output_limit": 8, "kind": "command", "env": {}}, relative_cwd=".", repro_input=("finding", "repro.json", b"same"))
     assert counterexample["repro_input_digest"] != finding["repro_input_digest"]

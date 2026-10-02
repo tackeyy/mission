@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 
+from mission_application.verifier_policy import explicit_paths_are_supported
+
 
 class VerificationRunnerError(ValueError):
     pass
@@ -213,24 +215,6 @@ def _toolchain_matches(command) -> bool:
         return False
 
 
-def _explicit_paths_are_bound(command) -> bool:
-    """Only argv[0] is a frozen toolchain path; other path inputs are refused."""
-    import os
-    from urllib.parse import unquote, urlsplit
-    def path_unsafe(candidate):
-        return bool(urlsplit(candidate).scheme) or candidate.startswith("/") or (len(candidate) >= 3 and candidate[0].isalpha() and candidate[1:3] in {":/", ":\\"}) or any(part == ".." for part in candidate.replace("\\", "/").split("/"))
-
-    def unsafe(value):
-        candidate = unquote(value.split("=", 1)[-1])
-        if candidate.startswith("@"):
-            return path_unsafe(candidate[1:])
-        if candidate.startswith("-") and not candidate.startswith("--"):
-            compact = candidate[1:]
-            return "/" in compact or ".." in compact
-        return path_unsafe(candidate)
-    return not any(unsafe(value) for value in command["argv"][1:]) and not any(unsafe(part) for value in command.get("env", {}).values() for part in value.split(os.pathsep))
-
-
 def _executed_count(command, root: Path) -> tuple[int | None, bool]:
     """Read a fresh, bounded JUnit report and verify its reported outcome."""
     if command.get("kind") != "test":
@@ -312,7 +296,7 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
     limit = command.get("output_limit")
     if not isinstance(argv, list) or not argv or type(timeout) is not int or type(limit) is not int:
         raise VerificationRunnerError("verifier-definition-invalid")
-    if not _explicit_paths_are_bound(command):
+    if not explicit_paths_are_supported(command["argv"], command.get("env", {})):
         raise VerificationRunnerError("verifier-explicit-path-unsupported")
     report_path = None
     if command.get("kind") == "test":
