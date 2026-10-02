@@ -14041,6 +14041,9 @@ def cmd_closeout(args):
     if sf.exists():
         _snapshot, current = _load_authoritative_state(sf)
         if current.get("passes") is True:
+            if current.get("acceptance_contract") is not None:
+                print("ERROR: acceptance contract requires completion revalidation", file=sys.stderr)
+                sys.exit(2)
             next_stdout = io.StringIO()
             with contextlib.redirect_stdout(next_stdout):
                 cmd_next(argparse.Namespace())

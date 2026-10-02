@@ -1039,6 +1039,7 @@ def _acceptance_completion_ready(state: MissionState, command: MarkPass) -> None
             raise _Rejected("acceptance-receipt-stale")
         if latest.get("candidate_digest") != candidates[criterion_id]:
             raise _Rejected("acceptance-receipt-stale")
+    raise _Rejected("acceptance-fresh-review-pending")
 
 
 def _mark_pass(state: MissionState, raw_command: object) -> Transition:
