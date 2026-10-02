@@ -227,13 +227,17 @@ def probe_claude(worktree: Path, package_root: Path, objective: str, acceptance:
         result = None
     if arm == "goal":
         return observe_claude_goal(invocation, completed.returncode, result)
+    # Print JSON exposes model usage but not an authoritative effort or permission
+    # read-back.  A Mission completion is therefore not comparable until all three
+    # configured values can be observed from a public response.
+    model_usage = result.get("modelUsage") if isinstance(result, dict) else None
+    observed_model = next(iter(model_usage), None) if isinstance(model_usage, dict) else None
+    config_matches = False
     session_id = result.get("session_id") if isinstance(result, dict) else None
     state = _current_mission_state(worktree, session_id, started_ns)
     if state is not None:
-        if state.get("passes") is True:
-            return {"native_goal_observed": False, "fidelity": "verified", "outcome": "completed", "reason": None, "package_delivery": "claude_plugin_dir", "package_loaded": True, "mission_state": state}
-        if isinstance(state.get("halt_reason"), str) and state["halt_reason"]:
-            return {"native_goal_observed": False, "fidelity": "verified", "outcome": "blocked", "reason": "mission_halted", "package_delivery": "claude_plugin_dir", "package_loaded": True, "mission_state": state}
+        if state.get("passes") is True or (isinstance(state.get("halt_reason"), str) and state["halt_reason"]):
+            return {"native_goal_observed": False, "fidelity": "unverified", "outcome": "failed", "reason": "execution_config_unobserved", "package_delivery": "claude_plugin_dir", "package_loaded": True, "mission_state": state, "observed_model": observed_model, "config_matches": config_matches}
     return {
         "native_goal_observed": False,
         "fidelity": "not_applicable",
