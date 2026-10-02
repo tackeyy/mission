@@ -9,6 +9,8 @@ import stat
 import subprocess
 import tempfile
 import time
+import selectors
+import signal
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,7 +59,7 @@ def _tracked(root: Path) -> list[tuple[str, int]]:
         if path in seen:
             raise VerificationRunnerError("candidate-git-conflict")
         seen.add(path)
-        files.append((path, mode))
+        files.append((path, stat.S_IMODE(mode)))
     return files
 
 
@@ -90,6 +92,9 @@ def _read(root: Path, path: str, mode: int, *, required: bool) -> CandidateFile:
             if (opened.st_dev, opened.st_ino, opened.st_mode, opened.st_nlink) != (info.st_dev, info.st_ino, info.st_mode, info.st_nlink):
                 raise VerificationRunnerError("candidate-changed-during-read")
             content = handle.read()
+            final = os.fstat(handle.fileno())
+            if (final.st_dev, final.st_ino, final.st_size, final.st_mtime_ns, final.st_ctime_ns) != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns):
+                raise VerificationRunnerError("candidate-changed-during-read")
     except OSError as exc:
         raise VerificationRunnerError("candidate-read-invalid") from exc
     return CandidateFile(path, stat.S_IMODE(info.st_mode), content)
@@ -192,19 +197,32 @@ def execute_candidate(candidate, command, *, relative_cwd):
         cwd = root if relative_cwd == "." else root / _relative(relative_cwd)
         if not cwd.is_dir():
             raise VerificationRunnerError("verifier-cwd-missing")
-        try:
-            completed = subprocess.run(
-                argv, cwd=cwd, shell=False, stdin=subprocess.DEVNULL,
-                capture_output=True, timeout=timeout,
-                env={"PATH": os.environ.get("PATH", "") , **command.get("env", {})},
-            )
-            exit_code = completed.returncode
-            output = completed.stdout + completed.stderr
-        except subprocess.TimeoutExpired as exc:
-            timed_out = True
-            exit_code = None
-            output = (exc.stdout or b"") + (exc.stderr or b"")
-    output = output[:limit]
+        child = subprocess.Popen(
+            argv, cwd=cwd, shell=False, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
+            env={"PATH": command.get("toolchain_path", os.defpath), **command.get("env", {})},
+        )
+        output = bytearray()
+        selector = selectors.DefaultSelector()
+        assert child.stdout is not None
+        selector.register(child.stdout, selectors.EVENT_READ)
+        deadline = time.monotonic() + timeout
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                os.killpg(child.pid, signal.SIGKILL)
+                remaining = 0.1
+            for key, _event in selector.select(remaining):
+                chunk = os.read(key.fd, 65536)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                elif len(output) < limit:
+                    output.extend(chunk[:limit - len(output)])
+        child.wait()
+        exit_code = None if timed_out else child.returncode
+        selector.close()
+    output = bytes(output)
     after = candidate.digest
     if before != after:
         raise VerificationRunnerError("candidate-mutated")
