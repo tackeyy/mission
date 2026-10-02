@@ -94,6 +94,18 @@ def review_contract_schema() -> dict:
     return copy.deepcopy(_review_contract_schema(REVIEW_SCORE_KEYS, REVIEW_SEVERITIES))
 
 
+def acceptance_contract_schema() -> dict:
+    """Return the public schema for immutable acceptance contract import."""
+    from acceptance_contract import REVIEW_POLICY, SCHEMA
+
+    return {
+        "schema": "mission-contract-schema/1",
+        "contract": "acceptance-contract-import",
+        "required": ["schema", "mission_id", "requirement_text", "requirement_digest", "revision", "review_policy", "requirements", "criteria", "coverage"],
+        "enums": {"schema": [SCHEMA], "review_policy": [REVIEW_POLICY], "coverage.status": ["pending"]},
+    }
+
+
 def contract_schema_for(contract: str) -> dict:
     """Return one published contract by name."""
     from plan_contract import contract_schema as plan_contract_schema
@@ -102,6 +114,8 @@ def contract_schema_for(contract: str) -> dict:
         return plan_contract_schema()
     if contract == "review-import":
         return review_contract_schema()
+    if contract == "acceptance-contract-import":
+        return acceptance_contract_schema()
     raise ValueError("unknown contract: {}".format(contract))
 
 

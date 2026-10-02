@@ -229,6 +229,11 @@ from mission_application.evidence import (  # noqa: E402
     validate_context_iteration_override,
     verify_published_evidence_effects,
 )
+from mission_application.acceptance import (  # noqa: E402
+    AcceptanceContractImportRequest,
+    acceptance_contract_status,
+    run_acceptance_contract_import,
+)
 from mission_application.planning import (  # noqa: E402
     EXECUTOR_HANDOFF_ABORT_REASONS,
     EXECUTOR_HANDOFF_COMMAND_NAMES,
@@ -13905,6 +13910,36 @@ def cmd_verification_claims(args):
     print(rendered)
 
 
+def cmd_acceptance_contract_import(args):
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        raise SystemExit("acceptance-contract-state-missing")
+    try:
+        raw = Path(args.input).read_bytes()
+        result = run_acceptance_contract_import(
+            AcceptanceContractImportRequest(iso_now(), raw),
+            _legacy_lifecycle_repository(cwd, sf, stamp=True, pre_admit_lease=True),
+        )
+    except (EvidenceFailure, OSError) as exc:
+        raise SystemExit(getattr(exc, "code", str(exc))) from exc
+    print(json.dumps({"ok": True, **result}, ensure_ascii=False, indent=2))
+
+
+def cmd_acceptance_contract_status(args):
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        raise SystemExit("acceptance-contract-state-missing")
+    repository = _legacy_lifecycle_repository(cwd, sf, stamp=False, strict_read=True)
+    with repository.transaction():
+        data = repository.load()
+    try:
+        print(json.dumps(acceptance_contract_status(data), ensure_ascii=False, indent=2))
+    except EvidenceFailure as exc:
+        raise SystemExit(exc.code) from exc
+
+
 def cmd_review_finalize(args):
     """#283: aggregate-reviews → push-score を 1 コマンドで実行する (Phase 5 transactional).
 
@@ -16271,7 +16306,7 @@ def _add_review_parsers(subparsers) -> None:
 
     p_schema = sub.add_parser("schema", help="入力契約のスキーマを出力する (#683)")
     p_schema.add_argument("--contract", required=True,
-                          choices=("planning-adopt-core", "review-import"),
+                          choices=("planning-adopt-core", "review-import", "acceptance-contract-import"),
                           help="出力する契約")
     p_schema.set_defaults(func=cmd_schema)
     p_score = sub.add_parser("push-score", help="score_history に採点結果を append (orchestrator が Phase 5 直後に呼ぶ)")
@@ -16387,6 +16422,13 @@ def _add_review_parsers(subparsers) -> None:
     p_verify_claims.add_argument("--doc-digest", required=True)
     p_verify_claims.add_argument("--out", required=True)
     p_verify_claims.set_defaults(func=cmd_verification_claims)
+    p_acceptance = sub.add_parser("acceptance-contract", help="immutable acceptance contract を管理")
+    p_acceptance_sub = p_acceptance.add_subparsers(dest="acceptance_contract_command", required=True)
+    p_acceptance_import = p_acceptance_sub.add_parser("import", help="versioned acceptance contract を一度だけ保存")
+    p_acceptance_import.add_argument("--input", required=True)
+    p_acceptance_import.set_defaults(func=cmd_acceptance_contract_import, command_outcome_tracking=True)
+    p_acceptance_status = p_acceptance_sub.add_parser("status", help="保存済み acceptance contract の状態を表示")
+    p_acceptance_status.set_defaults(func=cmd_acceptance_contract_status)
 
 
 def _add_lifecycle_parsers(subparsers) -> None:
