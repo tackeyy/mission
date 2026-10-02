@@ -992,6 +992,21 @@ def _acceptance_completion_ready(state: MissionState) -> None:
         raise _Rejected("acceptance-contract-invalid")
     if contract.get("coverage") != {"status": "valid"}:
         raise _Rejected("acceptance-coverage-pending")
+    criteria = contract.get("criteria")
+    if not isinstance(criteria, list):
+        raise _Rejected("acceptance-contract-invalid")
+    required = [item.get("id") for item in criteria if isinstance(item, dict) and item.get("required") is True]
+    if not required or not all(isinstance(identifier, str) and identifier for identifier in required):
+        raise _Rejected("acceptance-contract-invalid")
+    history = document.get("verification_receipts")
+    if not isinstance(history, list):
+        raise _Rejected("acceptance-receipt-missing")
+    for criterion_id in required:
+        latest = next((item for item in reversed(history) if isinstance(item, dict) and item.get("criterion_id") == criterion_id), None)
+        if latest is None:
+            raise _Rejected("acceptance-receipt-missing")
+        if latest.get("status") != "passed":
+            raise _Rejected("acceptance-receipt-not-passed")
 
 
 def _mark_pass(state: MissionState, raw_command: object) -> Transition:

@@ -144,6 +144,28 @@ def test_mark_pass_rejects_contract_with_pending_coverage(tmp_path):
     assert repository.saved is None
 
 
+def test_mark_pass_rejects_valid_coverage_without_required_receipt(tmp_path):
+    from mission_application.review import MarkPassRequest, ReviewFailure, mark_pass
+
+    state = _review_state(tmp_path)
+    state["acceptance_contract"] = {
+        "schema": "mission-acceptance-contract/2",
+        "coverage": {"status": "valid"},
+        "criteria": [{"id": "AC1", "required": True}],
+    }
+    repository = _RecordingRepository(state)
+
+    with pytest.raises(ReviewFailure) as raised:
+        mark_pass(
+            repository,
+            MarkPassRequest(False, None, False, "", "2030-08-23T00:00:00Z"),
+            _pass_services(_load_cli_module("issue879_missing_receipt")),
+        )
+
+    assert raised.value.reason == "acceptance-receipt-missing"
+    assert repository.saved is None
+
+
 def test_mark_pass_force_path_preserves_approval_binding(tmp_path):
     from mission_application.review import MarkPassRequest, mark_pass
 
