@@ -387,25 +387,27 @@ def test_public_smoke_reaps_a_parent_exited_child_that_holds_the_pipe(monkeypatc
     monkeypatch.setattr(module.subprocess, "Popen", parent_exited_popen)
     try:
         record = module.run_public_smoke(candidate)
-    finally:
         os.close(gate_keeper)
+        gate_keeper = None
+        assert record["status"] == "failed"
+        assert record["reason"] == "smoke_reader_incomplete"
+        assert parent_exited.read_text(encoding="utf-8") == "exited"
+        try:
+            gate_writer = os.open(gate, os.O_WRONLY | os.O_NONBLOCK)
+        except OSError as exc:
+            assert exc.errno == errno.ENXIO
+        else:
+            os.close(gate_writer)
+            raise AssertionError("ordinary process-group descendant survived cleanup")
+        assert not survivor.exists()
+    finally:
+        if gate_keeper is not None:
+            os.close(gate_keeper)
         for process in processes:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-
-    assert record["status"] == "failed"
-    assert record["reason"] == "smoke_reader_incomplete"
-    assert parent_exited.read_text(encoding="utf-8") == "exited"
-    try:
-        gate_writer = os.open(gate, os.O_WRONLY | os.O_NONBLOCK)
-    except OSError as exc:
-        assert exc.errno == errno.ENXIO
-    else:
-        os.close(gate_writer)
-        raise AssertionError("ordinary process-group descendant survived cleanup")
-    assert not survivor.exists()
 
 
 def test_bounded_runner_reaps_a_parent_exit_descendant_holding_a_pipe(tmp_path):
