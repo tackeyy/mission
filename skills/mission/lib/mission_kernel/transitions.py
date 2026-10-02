@@ -982,7 +982,7 @@ def _maximum_agreement_delta(payload: dict[str, object]) -> float | None:
     return maximum
 
 
-def _acceptance_completion_ready(state: MissionState) -> None:
+def _acceptance_completion_ready(state: MissionState, command: MarkPass) -> None:
     """Keep contract-enabled sessions pending until typed coverage exists."""
     document = _evidence_document(state)
     contract = document.get("acceptance_contract")
@@ -1018,6 +1018,12 @@ def _acceptance_completion_ready(state: MissionState) -> None:
         contract_digest = canonical_contract_digest(contract)
     except (TypeError, ValueError):
         raise _Rejected("acceptance-contract-invalid")
+    try:
+        candidates = command.acceptance_candidate_digests.thaw()
+    except AttributeError:
+        raise _Rejected("acceptance-candidate-invalid")
+    if not isinstance(candidates, dict) or set(candidates) != {item["id"] for item in required} or not all(isinstance(value, str) for value in candidates.values()):
+        raise _Rejected("acceptance-candidate-missing")
     for criterion in required:
         criterion_id = criterion["id"]
         command_id = criterion.get("command_id")
@@ -1031,13 +1037,15 @@ def _acceptance_completion_ready(state: MissionState) -> None:
             raise _Rejected("acceptance-receipt-not-passed")
         if (latest.get("contract_digest") != contract_digest or latest.get("verifier_policy_digest") != policy_digest or latest.get("verifier_definition_digest") != verifier_definition_digest(command)):
             raise _Rejected("acceptance-receipt-stale")
+        if latest.get("candidate_digest") != candidates[criterion_id]:
+            raise _Rejected("acceptance-receipt-stale")
 
 
 def _mark_pass(state: MissionState, raw_command: object) -> Transition:
     command = raw_command
     assert isinstance(command, MarkPass)
     control = _active_control(state)
-    _acceptance_completion_ready(state)
+    _acceptance_completion_ready(state, command)
     if type(command.force) is not bool:
         raise _Rejected("invalid-force-flag")
     if command.force:

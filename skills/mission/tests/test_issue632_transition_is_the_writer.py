@@ -221,6 +221,37 @@ def test_mark_pass_rejects_latest_failed_receipt_without_old_pass_fallback(tmp_p
     assert repository.saved is None
 
 
+def test_mark_pass_rejects_receipt_without_fresh_candidate_observation(tmp_path):
+    from acceptance_contract import canonical_contract_digest, verifier_definition_digest
+    from mission_application.review import MarkPassRequest, ReviewFailure, mark_pass
+
+    command = {"id": "project-test", "argv": ["true"]}
+    contract = {
+        "schema": "mission-acceptance-contract/2",
+        "coverage": {"status": "valid"},
+        "criteria": [{"id": "AC1", "required": True, "command_id": "project-test"}],
+        "verifier_policy": {"digest": "sha256:" + "a" * 64, "commands": {"project-test": command}},
+    }
+    state = _review_state(tmp_path)
+    state["acceptance_contract"] = contract
+    state["verification_receipts"] = [{
+        "criterion_id": "AC1", "status": "passed", "contract_digest": canonical_contract_digest(contract),
+        "verifier_policy_digest": contract["verifier_policy"]["digest"],
+        "verifier_definition_digest": verifier_definition_digest(command), "candidate_digest": "sha256:" + "b" * 64,
+    }]
+    repository = _RecordingRepository(state)
+
+    with pytest.raises(ReviewFailure) as raised:
+        mark_pass(
+            repository,
+            MarkPassRequest(False, None, False, "", "2030-08-23T00:00:00Z"),
+            _pass_services(_load_cli_module("issue879_missing_candidate")),
+        )
+
+    assert raised.value.reason == "acceptance-candidate-missing"
+    assert repository.saved is None
+
+
 def test_mark_pass_force_path_preserves_approval_binding(tmp_path):
     from mission_application.review import MarkPassRequest, mark_pass
 

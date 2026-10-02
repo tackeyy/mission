@@ -11,6 +11,7 @@ from typing import Callable
 
 from mission_kernel.codec_v4 import decode_mission_state
 from mission_kernel.commands import MarkPass
+from mission_kernel.json_codec import freeze_json_value
 from mission_kernel.model import (
     BoundScore,
     GitRevisionScope,
@@ -312,6 +313,7 @@ class MarkPassServices:
     # #568: early-stop の継続条件の評価結果を返す観測子。gate 判定には使わない
     # (記録のみ)。未配線の adapter では None を許し、記録を省略する。
     early_stop_evaluation: Callable[[dict, dict | None, str], dict | None] | None = None
+    capture_acceptance_candidates: Callable[[dict], dict] | None = None
 
 
 @dataclass(frozen=True)
@@ -444,6 +446,14 @@ def mark_pass(
 
     with repository.transaction():
         data = repository.load()
+        try:
+            acceptance_candidates = (
+                services.capture_acceptance_candidates(data)
+                if services.capture_acceptance_candidates is not None
+                else {}
+            )
+        except (OSError, ValueError) as exc:
+            raise ReviewFailure("acceptance candidate capture failed", reason="acceptance-candidate-unavailable") from exc
         verification = services.verify_force_approval(data) if request.force else None
         try:
             services.validate_artifact_gate(data)
@@ -512,6 +522,7 @@ def mark_pass(
             artifact_gate_satisfied=True,
             specialist_gate_satisfied=not request.force,
             verified_score_index=None if request.force else latest_index,
+            acceptance_candidate_digests=freeze_json_value(acceptance_candidates),
             at=request.at,
             compatibility=compatibility_delta(
                 data,
