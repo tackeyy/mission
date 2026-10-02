@@ -995,18 +995,43 @@ def _acceptance_completion_ready(state: MissionState) -> None:
     criteria = contract.get("criteria")
     if not isinstance(criteria, list):
         raise _Rejected("acceptance-contract-invalid")
-    required = [item.get("id") for item in criteria if isinstance(item, dict) and item.get("required") is True]
-    if not required or not all(isinstance(identifier, str) and identifier for identifier in required):
+    required = []
+    for item in criteria:
+        if not isinstance(item, dict) or type(item.get("required")) is not bool or not isinstance(item.get("id"), str) or not item["id"]:
+            raise _Rejected("acceptance-contract-invalid")
+        if item["required"]:
+            required.append(item)
+    if not required:
         raise _Rejected("acceptance-contract-invalid")
     history = document.get("verification_receipts")
     if not isinstance(history, list):
         raise _Rejected("acceptance-receipt-missing")
-    for criterion_id in required:
-        latest = next((item for item in reversed(history) if isinstance(item, dict) and item.get("criterion_id") == criterion_id), None)
+    if any(not isinstance(item, dict) or not isinstance(item.get("criterion_id"), str) or not isinstance(item.get("status"), str) for item in history):
+        raise _Rejected("acceptance-receipt-invalid")
+    policy = contract.get("verifier_policy")
+    commands = policy.get("commands") if isinstance(policy, dict) else None
+    policy_digest = policy.get("digest") if isinstance(policy, dict) else None
+    if not isinstance(commands, dict) or not isinstance(policy_digest, str):
+        raise _Rejected("acceptance-contract-invalid")
+    try:
+        from acceptance_contract import canonical_contract_digest
+        from mission_application.verification_runner import verifier_definition_digest
+        contract_digest = canonical_contract_digest(contract)
+    except (TypeError, ValueError):
+        raise _Rejected("acceptance-contract-invalid")
+    for criterion in required:
+        criterion_id = criterion["id"]
+        command_id = criterion.get("command_id")
+        command = commands.get(command_id) if isinstance(command_id, str) else None
+        if not isinstance(command, dict):
+            raise _Rejected("acceptance-contract-invalid")
+        latest = next((item for item in reversed(history) if item["criterion_id"] == criterion_id), None)
         if latest is None:
             raise _Rejected("acceptance-receipt-missing")
         if latest.get("status") != "passed":
             raise _Rejected("acceptance-receipt-not-passed")
+        if (latest.get("contract_digest") != contract_digest or latest.get("verifier_policy_digest") != policy_digest or latest.get("verifier_definition_digest") != verifier_definition_digest(command)):
+            raise _Rejected("acceptance-receipt-stale")
 
 
 def _mark_pass(state: MissionState, raw_command: object) -> Transition:

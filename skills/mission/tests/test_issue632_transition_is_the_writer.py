@@ -166,6 +166,34 @@ def test_mark_pass_rejects_valid_coverage_without_required_receipt(tmp_path):
     assert repository.saved is None
 
 
+def test_mark_pass_rejects_receipt_with_stale_contract_binding(tmp_path):
+    from mission_application.review import MarkPassRequest, ReviewFailure, mark_pass
+
+    command = {"id": "project-test", "argv": ["true"]}
+    state = _review_state(tmp_path)
+    state["acceptance_contract"] = {
+        "schema": "mission-acceptance-contract/2",
+        "coverage": {"status": "valid"},
+        "criteria": [{"id": "AC1", "required": True, "command_id": "project-test"}],
+        "verifier_policy": {"digest": "sha256:" + "a" * 64, "commands": {"project-test": command}},
+    }
+    state["verification_receipts"] = [{
+        "criterion_id": "AC1", "status": "passed", "contract_digest": "sha256:" + "b" * 64,
+        "verifier_policy_digest": "sha256:" + "a" * 64, "verifier_definition_digest": "sha256:" + "c" * 64,
+    }]
+    repository = _RecordingRepository(state)
+
+    with pytest.raises(ReviewFailure) as raised:
+        mark_pass(
+            repository,
+            MarkPassRequest(False, None, False, "", "2030-08-23T00:00:00Z"),
+            _pass_services(_load_cli_module("issue879_stale_receipt")),
+        )
+
+    assert raised.value.reason == "acceptance-receipt-stale"
+    assert repository.saved is None
+
+
 def test_mark_pass_force_path_preserves_approval_binding(tmp_path):
     from mission_application.review import MarkPassRequest, mark_pass
 
