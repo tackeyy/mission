@@ -67,6 +67,9 @@ v4 flat と v5 fenced container の両方を実行する。
 | closed schema 5 decode/encode | 同関数: extensions の契約/receipt を保持し、pure kernel が pending coverage を拒否。契約なしの pure MarkPass は従来どおり成功 |
 | D0: 不正な criterion command_id / 凍結 command の欠落field・出力要素・external inputs | `test_malformed_frozen_verifier_rejects_public_completion_atomically`: lookup / hash / capture 前に `acceptance-contract-invalid` または `verifier-policy-command-invalid` で拒否 |
 | D0: live / frozen command の閉じた形 | `test_shared_validator_closes_live_and_frozen_command_fields_before_sets`: 必須fieldと各要素の表を共有し、live の set 化前検査も検証 |
+| D0 追補: `acceptance-contract status` の不正binding・criterion・command・Unicode | `test_status_rejects_malformed_persisted_contract_atomically` と上記共有表: 同じ閉じたvalidatorを表示・digest前に通し、exit 2で拒否。正常契約とキー欠落は `test_status_keeps_valid_and_contractless_sessions_readable` で維持 |
+| D0 追補: runner の通常 / blocked receipt のcanonical失敗 | `test_runner_rejects_uncanonical_contract_before_receipt_generation`: 契約全体のcanonical検査を共有境界へ置き、実行・receipt生成前に拒否 |
+| D0 追補: 既pass closeout の不正frozen command | `test_already_passed_closeout_validates_frozen_commands`: 共有validatorの理由コードで拒否し、公開bytesと制御値を保持 |
 | D0: runner / replay の不正command・replay command_id | `test_runner_and_replay_reject_malformed_frozen_commands_atomically`: 同じ共有validatorで exit 2、receipt追加なし |
 | D0: present null の mark-passes / closeout / 既pass / status / runner / 通常init | `test_null_contract_is_present_and_rejects_atomically`: null を契約なしに変換しない。v5 init は既存の `session-already-initialized` 拒否を維持 |
 | D0: v4 / closed-v5 kernel の null・不正command | `test_codecs_keep_contract_and_receipt_evidence[null / malformed-command]`: pure gate が理由コード付き拒否、transition なし |
@@ -271,7 +274,7 @@ python3 -m pytest -q \
 
 399 passed / 0 failed、exit 0、427.78秒。full suiteは実行していない。
 mirror一致、thin-adapter baseline一致、inventory / import、衛生・語彙を含む。
-新規validatorのsource / mirrorはuntrackedなので、同じ衛生・語彙scannerでも個別に検査した。
+初回作業では新規validatorのsource / mirrorがまだtrackedではなかったため、同じ衛生・語彙scannerでも個別に検査した。
 文書の結果追記後は全変更ファイルを同じscannerで確認し、`git diff --check`もexit 0。
 テスト実行中はファイルを編集していない。
 
@@ -287,11 +290,96 @@ python3 -m pytest -q skills/mission/tests/test_issue879_completion_cli.py -k 'sh
 
 D0の正式review / 独立Checker / required CI / GitHubへの公開は実施していない。
 独立したread-only探索の結果を正式なacceptedへ読み替えない。
-HEADは基点`93c0833efc55a90f535d7c525ac533c7897b3cbf`のまま。
-最終確認時のローカル`origin/main`は`93a631c68d23b8b9e9b5fac1a981347702580a08`
+初回作業時のHEADは基点`93c0833efc55a90f535d7c525ac533c7897b3cbf`だった。
+その時点のローカル`origin/main`は`93a631c68d23b8b9e9b5fac1a981347702580a08`
 （[設計文書PR 898](https://github.com/tackeyy/mission/pull/898)）へ1commit進んでいた。
 差分は`docs/design/689-fresh-review-receipt.md`のみ。Git操作禁止に従い統合はしていない。
 次工程では最新baseを確認してからcandidateをfreezeし、review / Checker / CIを同じheadで取得する。
 commit分割案: `fix: 永続completion gateの不正形とnull契約を拒否する`
 （実装・回帰・mirror）、`docs: completion gateの確定記録とD0の検証経路を更新する`（本書）。
 本作業はcommit / push / PR / mergeを行わない。
+
+## D0 status 追補: 同種検索とRed / Green
+
+追補の開始HEADは `4c3e535ca24eb7e4e88ffb1c015811b2b1408c3e`。cleanな専用worktreeで確認した。
+依頼元から共有された独立探索は、このheadの122入力中34件がstatus経路で期待と異なり、
+原因は共有validatorを通さない表示・digest処理だった。この件数は今回のローカル測定ではない。
+
+以下の検索をrepository全体のPython sourceで実施し、mirrorは同じsourceの複製として照合した。
+
+```sh
+rg -n 'acceptance_contract|frozen_verifier_commands|canonical_contract_digest|canonical_bytes|verifier_definition_digest' skills scripts --glob '*.py' --glob '!**/tests/**'
+rg -n 'from acceptance_contract|import acceptance_contract' --glob '*.py' --glob '!**/tests/**' --glob '!plugins/**' .
+rg -n 'acceptance_contract|verifier_policy|canonical_contract_digest|canonical_bytes\(' --glob '*.py' --glob '!**/tests/**' --glob '!plugins/**' .
+```
+
+下表のlocatorは `skills/mission/lib/` に対するpath:line。契約を解釈する経路と、
+既に検査済みの値だけをhashする経路をsourceで確認した。
+
+| hit | 判定 / 対応 |
+|---|---|
+| `acceptance_contract.py:203`, `mission_application/acceptance.py:78`, `:132` | statusを共有frozen validatorへ接続。契約例外をEvidenceFailureへ変換し、CLIでexit 2。schema 1のimport済み契約も検査して表示を維持 |
+| `mission_application/verification_execution.py:138`, `:169` | 通常 / blocked receiptのdigest前に、`:162`の共有validatorで契約全体のcanonical encodingを検査。Unicodeを含む契約を実行前に拒否 |
+| `mission_application/review.py:88` | 既passのshortcutでも共有validatorを通し、不正commandの理由コードを保持 |
+| `mission_application/review.py:35`, `:516`; `mission_kernel/transitions.py:999`, `:1026`, `:1046` | candidate capture / preflight / kernelは既存の共有validatorと理由変換を使用。共有canonical検査の追加も同じ境界で効く。kernelのdigestはValueError（AcceptanceContractErrorの親）も拒否へ変換 |
+| `mission_application/acceptance.py:43`, `:58`, `:68`, `:72` | importのdigestはloadの閉じた検査・canonical encodingとlive policy freezeの後。永続契約を直接hashする経路ではなく、入力例外は既存の境界で変換 |
+| `mission_application/evidence.py:239`, `:249` | import operationの再送結果はimportで検査済みのexpectedとの完全一致を要求し、不正な保存値はprojection-mismatchで拒否。digestは一致した値のみ。追加の受理経路はない |
+| `mission_application/legacy_initialization.py:340` | キー存在時は通常initを無条件に拒否。契約を解釈・hash・captureしない安全な拒否境界を維持 |
+| `mission_kernel/evidence.py:415`, `:429`; `mission_application/contract_schemas.py:97`; `mission_kernel/commands.py:432` | import commandの検査・キー保護・静的schema。検査なしで永続契約を受理するstatus経路ではない |
+| `acceptance_contract.py:31`, `:135`, `:140`, `:155`, `:199`, `:215`, `:220`; `mission_application/verification_runner.py:4` | canonical helperとre-export。純粋helperはAcceptanceContractErrorを返し、公開契約経路の境界で変換。新しいstatus・共有validatorもその境界を使用 |
+| `pregate_cache.py:105`; `mission_persistence/reinitialization.py:40`; `mission_persistence/fenced_commit.py:535` | `_canonical_bytes`は別の関数であり、acceptance contract helperの呼び出しではない |
+
+v5のretained-v4 payloadにsurrogateがある場合、互換projectionが契約validatorの前に
+UnicodeErrorを返す。status / runnerの読み取り境界をexit 2・`canonical-json-invalid`へ変換した。
+v4のcommand / criterion shapeは共有validatorの`verifier-policy-command-invalid` /
+`acceptance-contract-invalid`を保持する。全回帰で公開bytesとpasses / loop_active / phase /
+terminal_outcomeを比較した。surrogate入りv5の制御値は、表示失敗と独立したfenced readerの保存bytesから確認する。
+
+範囲外の発見: 汎用`get`は同じv5 surrogate fixtureでexit 1・internal-errorとなる。
+`mission_persistence/legacy_v4.py:1057` / `:1095`の互換projectionと
+`mission_kernel/json_codec.py:74`のUTF-8 encodingを通るためで、独立した公開CLI probeで確認した。
+汎用state出力のUnicode処理は今回変更していない。status / runnerは上記境界で拒否する。
+
+テストの検出価値: 既存command形状表をlive / frozen / statusで共有した。
+公開CLIではcommand欠落、criteria空、Unicodeの別境界を代表入力に絞った。
+runnerの通常 / blocked receiptと既pass shortcutは異なるhash / 拒否経路を通すため保持する。
+正常契約・キー欠落のstatusは誤拒否を検出する。subprocess費用は下表の実測で示す。
+
+すべて `python3 -m pytest -q skills/mission/tests/test_issue879_completion_cli.py` に次のselectorを付けた。
+xdistは未導入なので `-n` は使っていない。
+
+| selector / 段階 | passed | failed | deselected | exit | 秒 |
+|---|---:|---:|---:|---:|---:|
+| `-k 'null_contract or shared_validator'` baseline | 13 | 0 | 90 | 0 | 38.03 |
+| `-k status_rejects_malformed` 初回fixture調整 | 0 | 10 | 103 | 1 | 16.81 |
+| 同selector Red（fixture調整後） | 0 | 10 | 103 | 1 | 54.16 |
+| `-k 'shared_validator or status_uses_shared or runner_rejects_uncanonical or already_passed_closeout_validates or status_keeps'` Red | 4 | 8 | 112 | 1 | 86.59 |
+| `-k 'status_rejects_malformed or shared_validator or status_uses_shared or runner_rejects_uncanonical or already_passed_closeout_validates or status_keeps'` Green | 22 | 0 | 102 | 0 | 115.88 |
+
+初回10 failuresのうち3件はfixtureのUTF-8 encodingで止まったもので、product Redとは扱わない。
+escaped JSONを実際のfenced genesisへ投入するfixtureに直した後の10 failuresでは、
+statusのexit 0 / present trueと、canonical / projectionのinternal-error / exit 1を再現した。
+追加Redではrunnerのinternal-error、既pass closeoutの不適切な理由コード、statusの表検査不実行を再現した。
+
+追補の最終指定10ファイル検証:
+
+```sh
+python3 -m pytest -q \
+  skills/mission/tests/test_issue879_completion_cli.py \
+  skills/mission/tests/test_issue877_acceptance_contract.py \
+  skills/mission/tests/test_issue878_verification_runner.py \
+  skills/mission/tests/test_issue632_transition_is_the_writer.py \
+  skills/mission/tests/test_codex_wrapper_sync.py \
+  skills/mission/tests/test_issue626_thin_adapter_guard.py \
+  skills/mission/tests/test_python_module_inventory.py \
+  skills/mission/tests/test_plugins_in_sync.py \
+  skills/mission/tests/test_artifact_hygiene.py \
+  skills/mission/tests/test_vendor_fingerprint.py
+```
+
+295 passed / 0 failed、exit 0、735.31秒。full suiteは実行していない。
+実行中の編集はなし。source / mirrorはbyte一致、thin adapterは変更なし。
+結果追記後の文書も既存の衛生・語彙scannerで確認し、`git diff --check`はexit 0。
+追補ではcommit / pushおよびレビューCLIを実行していない。正式review / Checker / CIは次工程で取得する。
+commit案は `fix: 契約参照経路の不正形とcanonicalエラーを拒否する`（実装・回帰・mirror）と
+`docs: status検証と同種検索結果を記録する`（本書）。
