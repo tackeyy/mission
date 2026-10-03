@@ -35,6 +35,16 @@ def _public_bytes(root):
     }
 
 
+def _persisted_fixture_document(root):
+    """Inspect published fixture bytes even when authoritative loads reject them."""
+    state_root = root / '.mission-state'
+    document = json.loads((state_root / 'sessions' / 'test.json').read_bytes())
+    if document.get('schema') != 'mission-head/1':
+        return document
+    manifest = json.loads((state_root / document['state_generation']['path']).read_bytes())
+    return json.loads((state_root / manifest['state']['object']).read_bytes())
+
+
 def _persist_fixture(root, state, schema, *, closed_v5=False, escaped_contract=False):
     """Arrange flat v4 or a fenced v5 container, without generic set.
 
@@ -45,6 +55,33 @@ def _persist_fixture(root, state, schema, *, closed_v5=False, escaped_contract=F
     raw = json.dumps(state).encode()
     if schema == 4:
         path.write_bytes(raw)
+        return
+    if escaped_contract:
+        # Publish valid state, then forge coherent lineage. A hostile JSON
+        # escape must reach the reader without using the writer to admit it.
+        safe = dict(state)
+        safe.pop('acceptance_contract')
+        _persist_fixture(root, safe, schema, closed_v5=closed_v5)
+        state_root = root / '.mission-state'
+        head = json.loads(path.read_bytes())
+        manifest = json.loads((state_root / head['state_generation']['path']).read_bytes())
+        document = _persisted_fixture_document(root)
+        document.get('extensions', document)['acceptance_contract'] = state['acceptance_contract']
+
+        def publish(value, directory, suffix):
+            payload = json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
+            digest = hashlib.sha256(payload).hexdigest()
+            relative = f'{directory}/{digest}{suffix}'
+            (state_root / relative).write_bytes(payload)
+            return {'digest': 'sha256:' + digest, 'path': relative, 'size': len(payload)}
+
+        state_ref = publish(document, 'objects', '.blob')
+        manifest['state'] = {'digest': state_ref['digest'], 'object': state_ref['path'], 'size': state_ref['size']}
+        generation_ref = publish(manifest, 'generations', '.json')
+        commit = json.loads((state_root / head['commit']['path']).read_bytes())
+        commit.update(state=state_ref, generation=generation_ref)
+        head.update(commit=publish(commit, 'commits', '.json'), state_generation=generation_ref)
+        path.write_text(json.dumps(head, sort_keys=True, separators=(',', ':')))
         return
     from mission_kernel import decode_snapshot, decode_mission_state, project_legacy_document
     from mission_kernel.codec_v5 import encode_v5_state, _state_payload, _review_json
@@ -61,19 +98,7 @@ def _persist_fixture(root, state, schema, *, closed_v5=False, escaped_contract=F
     admitted = repository.begin(request)
     if not closed_v5:
         target = replace(snapshot.state, lease=admitted.pending_lease.target, snapshot_provenance=None)
-        if escaped_contract:
-            # A directly persisted JSON escape need not be UTF-8 encodable
-            # after decoding. Project the control/lease, then inject the
-            # hostile contract before the real fenced genesis publication.
-            safe = dict(state)
-            safe.pop("acceptance_contract")
-            target = replace(target, legacy_passthrough=freeze_json_value(safe))
-            document = json.loads(project_legacy_document(target))
-            document["acceptance_contract"] = state["acceptance_contract"]
-            payload = json.dumps(document).encode()
-        else:
-            payload = project_legacy_document(target)
-        repository.initialize(request, state_bytes=payload)
+        repository.initialize(request, state_bytes=project_legacy_document(target))
         assert json.loads(path.read_bytes())["schema"] == "mission-head/1"
         return
     def sized(reference):
@@ -103,9 +128,8 @@ def _persist_fixture(root, state, schema, *, closed_v5=False, escaped_contract=F
         "revision_scope": entry["revision_scope"],
     } for score, entry in zip(snapshot.state.scores, state["score_history"])]
     typed = decode_mission_state(json.dumps(payload).encode())
-    payload_bytes = json.dumps(payload).encode() if escaped_contract else encode_v5_state(typed, snapshot.guidance)
-    repository.initialize(request, state_bytes=payload_bytes)
-    assert json.loads(repository.read("test").state_bytes)["schema_version"] == 5
+    repository.initialize(request, state_bytes=encode_v5_state(typed, snapshot.guidance))
+    assert _persisted_fixture_document(root)["schema_version"] == 5
 
 
 @pytest.fixture(params=[4, 5], ids=["v4-flat", "v5-container"])
@@ -145,11 +169,7 @@ def _reject_unchanged(run_cli, root, args, reason, *, env=None, raw_control=Fals
     def document():
         if not raw_control:
             return json.loads(run_cli("get", cwd=root).stdout)
-        retained = json.loads((root / ".mission-state" / "sessions" / "test.json").read_bytes())
-        if retained.get("schema") != "mission-head/1":
-            return retained
-        from mission_persistence.fenced_commit import LocalFencedRepository
-        return json.loads(LocalFencedRepository(root / ".mission-state").read("test").state_bytes)
+        return _persisted_fixture_document(root)
     before = _public_bytes(root)
     document_before = document()
     public_before = document_before.get("control", document_before)
@@ -186,7 +206,7 @@ def _append_contract_surrogate(contract, mutation):
     ("external-inputs-null", "verifier-policy-command-invalid", "mark-passes"),
     ("argv-missing", "verifier-policy-command-invalid", "mark-passes"),
     *[(mutation, reason, route)
-      for mutation, reason in [("argv-surrogate", "verifier-policy-command-invalid"),
+      for mutation, reason in [("argv-surrogate", "canonical-json-invalid"),
                                ("expected-surrogate", "canonical-json-invalid")]
       for route in ["mark-passes", "closeout", "force"]],
 ])
@@ -206,8 +226,6 @@ def test_malformed_frozen_verifier_rejects_public_completion_atomically(completi
         _append_contract_surrogate(contract, mutation)
     surrogate = mutation.endswith("surrogate")
     _persist_fixture(root, state, schema, escaped_contract=surrogate)
-    if surrogate and (schema == 5 or route == "closeout"):
-        reason = "canonical-json-invalid"
     args = [route] if route != "force" else ["mark-passes", "--force", "--reason", "fixture", "--approved-by-user"]
     _reject_unchanged(run_cli, root, args, reason, raw_control=surrogate)
 
@@ -232,8 +250,8 @@ def test_null_contract_is_present_and_rejects_atomically(completion_session, run
 @pytest.mark.parametrize("mutation,reason", [
     ("command-fields", "verifier-policy-command-invalid"),
     ("contract-fields", "acceptance-contract-invalid"),
-    ("command-surrogate", "verifier-policy-command-invalid"),
-    ("criterion-surrogate", "acceptance-contract-invalid"),
+    ("command-surrogate", "canonical-json-invalid"),
+    ("criterion-surrogate", "canonical-json-invalid"),
     ("digest-surrogate", "canonical-json-invalid"),
 ])
 def test_status_rejects_malformed_persisted_contract_atomically(completion_session, run_cli, mutation, reason):
@@ -252,10 +270,6 @@ def test_status_rejects_malformed_persisted_contract_atomically(completion_sessi
         contract["criteria"][0]["expected"] = "\ud800"
     surrogate = mutation.endswith("surrogate")
     _persist_fixture(root, state, schema, escaped_contract=surrogate)
-    # v5 projects before reaching contract semantics. Invalid Unicode there
-    # must also be a controlled canonical rejection, without publication.
-    if surrogate and schema == 5:
-        reason = "canonical-json-invalid"
     _reject_unchanged(run_cli, root, ["acceptance-contract", "status"], reason,
                       raw_control=surrogate)
 
@@ -410,7 +424,7 @@ def test_runner_and_replay_reject_malformed_frozen_commands_atomically(completio
             commands["replay-test"]["argv"].append("\ud800")
     surrogate = mutation == "replay-surrogate"
     _persist_fixture(root, state, schema, escaped_contract=surrogate)
-    reason = "canonical-json-invalid" if surrogate and schema == 5 else "verifier-policy-command-invalid"
+    reason = "canonical-json-invalid" if surrogate else "verifier-policy-command-invalid"
     if mutation == "repro-surrogate":
         reason = "replay-input-invalid"
     _reject_unchanged(run_cli, root, args, reason, raw_control=surrogate)
@@ -723,3 +737,76 @@ def test_codecs_keep_contract_and_receipt_evidence(completion_session, run_cli, 
         assert legacy_decision.transition.new_state.control.passes is True
     reason = "legacy passthrough is unavailable" if schema == 5 else expected
     _reject_unchanged(run_cli, root, ["mark-passes"], reason)
+
+
+@pytest.mark.parametrize('args', [
+    ('set', 'complexity=Simple'),
+    ('advance', '--phase', 'planning'),
+    ('activity', 'start', '--kind', 'active', '--reason', 'implementation'),
+    ('activity', 'end'),
+    ('progress', 'get', '--json'),
+    ('progress', 'update', '--total', '10', '--completed', '1', '--json'),
+    ('progress', 'clear', '--json'),
+    ('mark-halt', '--reason', 'fixture', '--category', 'other'),
+    ('refresh-pid', '--no-reactivate'),
+], ids=['set', 'advance', 'activity-start', 'activity-end', 'progress-get',
+        'progress-update', 'progress-clear', 'mark-halt', 'refresh-pid'])
+@pytest.mark.parametrize('completion_session,closed_v5', [(4, False), (5, False), (5, True)],
+                         indirect=['completion_session'], ids=['flat-v4', 'container-v4', 'container-v5'])
+def test_repository_routes_reject_unencodable_state_without_publication(completion_session, run_cli, args, closed_v5):
+    root, state, schema = completion_session
+    state['acceptance_contract']['criteria'][0]['expected'] = '\ud800'
+    _persist_fixture(root, state, schema, escaped_contract=True, closed_v5=closed_v5)
+    result = _reject_unchanged(run_cli, root, args, 'canonical-json-invalid', raw_control=True)
+    output = result.stdout + result.stderr
+    assert 'state projection cannot be canonically encoded' in output
+    assert 'UnicodeEncodeError' not in output
+    assert 'surrogates not allowed' not in output
+
+
+@pytest.mark.parametrize('completion_session,closed_v5', [(4, False), (5, False), (5, True)],
+                         indirect=['completion_session'], ids=['flat-v4', 'container-v4', 'container-v5'])
+def test_repository_read_port_rejects_unencodable_state(completion_session, closed_v5):
+    import contextlib
+    from mission_persistence.fenced_commit import FencedCommitError, LocalFencedRepository
+    from mission_persistence.legacy_v4 import LegacyV4Repository
+
+    root, state, schema = completion_session
+    state['acceptance_contract']['criteria'][0]['expected'] = '\ud800'
+    _persist_fixture(root, state, schema, escaped_contract=True, closed_v5=closed_v5)
+    path = root / '.mission-state' / 'sessions' / 'test.json'
+    repository = (LocalFencedRepository(path.parent.parent) if schema == 5 else
+                  LegacyV4Repository(lock=contextlib.nullcontext,
+                      read_state=lambda: json.loads(path.read_bytes()),
+                      write_state=lambda *_args, **_kwargs: pytest.fail('unexpected publication'),
+                      backup_state=lambda: pytest.fail('unexpected backup'),
+                      add_to_aggregate=lambda: None, remove_from_aggregate=lambda: None))
+    before = _public_bytes(root)
+    with pytest.raises(FencedCommitError) as caught:
+        repository.read('test')
+    assert caught.value.code == 'canonical-json-invalid'
+    assert str(caught.value) == 'canonical-json-invalid: state projection cannot be canonically encoded'
+    assert _public_bytes(root) == before
+
+
+def test_repository_reads_keep_unicode_and_historical_nonfinite_scores(completion_session, run_cli):
+    root, state, schema = completion_session
+    state['acceptance_contract']['criteria'][0]['expected'] = '日本語 café'
+    _persist_fixture(root, state, schema)
+    before = _public_bytes(root)
+    result = run_cli('progress', 'get', '--json', cwd=root)
+    assert result.returncode == 0, result.stdout + result.stderr
+    result = run_cli('get', cwd=root)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout)['acceptance_contract']['criteria'][0]['expected'] == '日本語 café'
+    assert _public_bytes(root) == before
+    if schema == 4:
+        state['score_history'][0]['composite'] = float('nan')
+        path = root / '.mission-state' / 'sessions' / 'test.json'
+        path.write_text(json.dumps(state, ensure_ascii=False))
+        before = _public_bytes(root)
+        for args in [('get',), ('progress', 'get', '--json')]:
+            result = run_cli(*args, cwd=root)
+            assert result.returncode == 0, result.stdout + result.stderr
+        assert json.loads(run_cli('get', cwd=root).stdout)['acceptance_contract']['criteria'][0]['expected'] == '日本語 café'
+        assert _public_bytes(root) == before

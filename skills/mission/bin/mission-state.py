@@ -6739,7 +6739,7 @@ def cmd_progress_get(args):
     if not sf.exists():
         print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
         sys.exit(1)
-    data = json.loads(sf.read_text())
+    _snapshot, data = _load_authoritative_state(sf, legacy_compatibility=True)
     progress = data.get("progress") or {}
     if args.json:
         print(json.dumps({"ok": True, "progress": progress}, indent=2, ensure_ascii=False))

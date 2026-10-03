@@ -66,6 +66,7 @@ from .fenced_commit import (
     RepositoryExecutionResult,
     admit_lease,
     project_legacy_document,
+    encode_legacy_document,
     compute_intent_digest,
     validate_execution_request,
 )
@@ -383,6 +384,7 @@ class LegacyV4Repository:
         document = self._guarded_call(self._read_state)
         if not isinstance(document, dict):
             return document
+        encode_legacy_document(document)
         self._loaded_document = copy.deepcopy(document)
         return copy.deepcopy(document)
 
