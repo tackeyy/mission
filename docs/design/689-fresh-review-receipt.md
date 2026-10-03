@@ -126,7 +126,7 @@ child 側が実際に読み込んだ packet bytes の digest を取得し、送�
 | 別 child・別 context・入力受領一致・能力強制を host が観測 | kernel が `independent=true` を導出 |
 | inline または parent と同じ context | `independent=false`。診断用 output は保存可能、valid receipt にはならない |
 | fresh child を開始できない、identity/input 受領/能力が観測不能 | terminal blocked、理由コード。inline fallback で成功しない |
-| receipt field 不正、登録 pin/binding 不一致 | terminal rejected または import 拒否。成功証拠を作らない |
+| launch 報告の field 不正、登録 pin/binding 不一致 | 終端 `blocked`（§4 の variant 表。起動後なら `launch_attempted=true`）。running 後の output 不合格は `failed`。成功証拠を作らない |
 
 同梱は tests 配下の neutral fixture adapter だけとする。fixture は実子 process で packet を読み、
 receipt と決定的な output を返す。テストが作る一時 distribution metadata/user registry を通して
