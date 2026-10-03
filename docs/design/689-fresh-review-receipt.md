@@ -185,7 +185,7 @@ ledger の omission を valid と呼ぶ自己申告だけでは足りず、kerne
 従って C の「contract.coverage が valid」という直接比較を receipt による実効 coverage 判定へ置き換える。
 契約の immutable identity/revision を書き換えず、coverage は pending から valid または理由付き open へ進む。
 決定（全体 coverage receipt）: 全体 coverage receipt とは、`completed` かつ `independent=true` で、criterion_ids が全 required criterion を含む request の coverage receipt を指す。実効 coverage を valid にできるのはこれだけで、部分 request（required criterion の一部だけを選んだ request）の coverage receipt は記録するが実効 coverage を valid にしない。実効 coverage は、現 contract・現 candidate に束縛された最新の全体 coverage receipt から導出する。criterion ごとの探索完了は複数 request を合成してよいが（§5）、完了には現候補に対する全体 coverage receipt が別途必須である。
-新しい coverage receipt が open/blocked なら古い valid へ fallback しない。
+新しい全体 coverage receipt が open/blocked なら古い valid へ fallback しない（部分 request の coverage receipt はこの判定に使わないが、それが持つ open obligation は §5 の条件 4 で完了を止める）。
 
 `CommitFreshReviewResult` の一つの public state commit で、terminal receipt、output content-addressed ref、
 output digest、coverage receipt、open obligations/findings、request 消費を束縛する。
@@ -214,7 +214,7 @@ variant ごとの field は次のとおりで、表にない field の存在・`
 `launch_attempted=true` の `blocked` の後に同じ child から届いた報告・output は、request が consumed のため import を拒否する。
 output import は二段で判定する。第一段は送り手の照合で、operation_id・fencing_epoch・request_id/nonce・running 記録の launch receipt にある child identity が一致するかを見る。一致しなければ別の書き手または古い書き手として command 単位で拒否し、state を変えず request はその時点の状態に残す（consumed request への報告もここで拒否する）。これは保存される終端ではない。
 第二段は照合済み child の output の中身の検査で、schema、output 内の request_digest、候補 binding、予算を見る。不合格なら次の行のとおり `failed` 終端とする。
-（この二段の境界は設計レビュー 3 巡目の後に追加した決定であり、D2 の実装着手前に改めて設計レビューにかける。）
+（この二段の境界は設計レビュー 3 巡目の後に追加した決定であり、D2（#896）の実装着手前に改めて設計レビューにかける。）
 running の request に対する output import が検査で不合格になった場合は拒否で終わらせず、`failed` 終端として保存する。
 
 pending→dispatch-unknown→running→terminal を採用する。spawn 前 durable intent、receipt 後 running、
