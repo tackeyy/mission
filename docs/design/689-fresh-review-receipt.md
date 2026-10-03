@@ -48,7 +48,7 @@ request_id と nonce は application が暗号学的乱数で生成する。call
 prepare の再応答は operation の保存結果から同じ request を返し、乱数を再生成しない。
 iteration は現 state と一致、criterion_ids は重複なし・登録済み・非空とする。
 一回で全 required criterion を選ぶことを既定にするが、部分探索も記録可能。
-部分探索だけでは全体完了できない。criterion ごとの independent opt-out は設けない。
+部分探索だけでは全体完了できない（全体 coverage receipt の定義は §4）。criterion ごとの independent opt-out は設けない。
 
 `input_digest` は、request の制御 envelope を除いた immutable input packet の digest。
 packet は元要求全文、ledger 全体、criteria 全体、凍結 policy の対象定義、候補 snapshot の
@@ -154,7 +154,7 @@ finding の閉じた型は `finding_id`, `criterion_id`, `requirement_ids`,
 actual は runner の status/exit/count/output digest 等の観測事実、expected は criterion の expected と
 禁止副作用への参照、および比較内容。モデルが書いた実行結果は未確認の仮説として扱う。
 
-command_id は criterion の凍結 `replay.command_id` と厳密一致しなければならない。
+command_id は、criterion が参照する verifier command の凍結 `replay.command_id` と厳密一致しなければならない。
 repro_input はその replay policy の allowed_artifact_kinds/max_bytes/relative_path を使用する。
 現状の B はこの形の input を登録 replay command に materialize し、結果に repro digest と
 実行事実を束縛する。runner は output digest 等の事実を返し、全文出力を返していない。[S2][S6]
@@ -184,7 +184,7 @@ ledger の omission を valid と呼ぶ自己申告だけでは足りず、kerne
 契約の coverage を書き換えると B の既存 receipt 全てが stale になる。[S1]
 従って C の「contract.coverage が valid」という直接比較を receipt による実効 coverage 判定へ置き換える。
 契約の immutable identity/revision を書き換えず、coverage は pending から valid または理由付き open へ進む。
-複数部分探索で criterion は覆えても、全 ledger の valid coverage は単一の全体 coverage receipt を必須とする。
+決定（全体 coverage receipt）: 全体 coverage receipt とは、`completed` かつ `independent=true` で、criterion_ids が全 required criterion を含む request の coverage receipt を指す。実効 coverage を valid にできるのはこれだけで、部分 request（required criterion の一部だけを選んだ request）の coverage receipt は記録するが実効 coverage を valid にしない。実効 coverage は、現 contract・現 candidate に束縛された最新の全体 coverage receipt から導出する。criterion ごとの探索完了は複数 request を合成してよいが（§5）、完了には現候補に対する全体 coverage receipt が別途必須である。
 新しい coverage receipt が open/blocked なら古い valid へ fallback しない。
 
 `CommitFreshReviewResult` の一つの public state commit で、terminal receipt、output content-addressed ref、
@@ -231,7 +231,7 @@ terminal commit 後・応答前の停止は同一 operation の再応答で回�
 
 1. contract・凍結 verifier policy の shape と identity が有効。
 2. required criteria 全てに、最新の通常 verification receipt が passed、現 candidate と定義・policy が一致。
-3. 全 required criterion に、現 request/contract/input/candidate の completed fresh review receipt がある。
+3. 各 required criterion について、その criterion を含む最新の attempt（request）が、現 contract/input/candidate に束縛された completed fresh review receipt である。加えて §4 の全体 coverage receipt が現候補に対して存在する。
 4. 全て `independent=true`、criterion search 完了、全 ledger の実効 coverage valid、open obligation がない。
 5. required obligation または禁止副作用へ束縛された未解決 finding がゼロ。Medium も含む。
 
@@ -333,19 +333,18 @@ CI は Python shards→make test-shard で tracked tests を選ぶ。test-e2e �
 全体の予測 reviewed lines は **3,100〜3,900 行**（追加+削除、未実測）。
 canonical の実装・codec/schema・CLI 配線・テスト・文書・inventory は含め、配布 mirror は除く。
 repo の 600 行説明責任・1,400 行分割閾値を越えるため、一括 PR は提案しない。[S19]
-本ステップは下表の子を起票せず、orchestrator の範囲確定を待つ。
+§9 の決定により下表のとおり分割し、各子を起票済み（D0 #894、D1 #895、D2 #896、D4 #897。D3 は #689 本体）。
 
 | 順序・割当 | 予測行数 | 一つの PR で閉じる受入条件と中間状態 |
 |---|---:|---|
 | 子 D1: typed request と projection | 850〜1,050 | request/nonce/input publication、codec、汎用 writer 遮断、operation 再応答。prepare/status のみ公開。completion は従来どおり拒否 |
 | 子 D2: runtime adapter と fenced launch/result | 1,100〜1,350 | host registry/protocol、fixture child、dispatch/recovery、output/replay/coverage receipt と一回消費の原子的公開。D1 依存。receipt を生成できるが completion はまだ拒否 |
-| #689 に残す D3: completion 統合と C carry-over | 1,150〜1,500 | D1/D2 依存。全 required receipt/coverage/finding gate、C Low 3件、CLI end-to-end、reviewer 指示/利用文書、bypass inventory 更新 |
+| 子 D0: C から引き継ぐ Low 3件 | 200〜300 | §6 の (a)(b)(c)。既存 C gate を維持し D1 と独立、D3 より先に merge |
+| #689 に残す D3: completion 統合 | 950〜1,200 | D0/D1/D2 依存。全 required receipt/coverage/finding gate、CLI end-to-end、reviewer 指示/利用文書、bypass inventory の統合後更新 |
+| 子 D4: 実 host adapter と最小 probe | 未見積 | D2 依存。既定で無効、利用者の registry 登録を要する。未観測項目は blocked として記録。D3（#689）の完了条件に含めない |
 
 各子は #689 を Refs で指し自身を Closes、#689 の最後の PR は D3 の受入条件だけで Closes できるよう
 本文を変更する。子の受入条件・依存・除外範囲は親と双方向に明記する。
-D3 上限は 1,400 行を越えうるため、実装前見積りで超過したら C Low の validator/status 修正と
-inventory 現状訂正を先行子 D0（200〜300 行）へ分け、D3 を 950〜1,200 行にする。
-D0 は既存 C gate を維持し D1 と独立、ただし D3 より先に merge する。
 docs/plan だけの本設計を実装 PR の完了条件に混ぜない。
 各 600 行以上の PR では command family の型・producer・consumer・対応回帰を同時に成立させる必要を
 「さらに分けない理由」として記す。行数自体は実 diff を `scripts/pr_size.py` で再計測する。[S19]
@@ -397,5 +396,5 @@ docs/plan だけの本設計を実装 PR の完了条件に混ぜない。
 - [T3: test_issue878_verification_runner.py:85–342](https://github.com/tackeyy/mission/blob/93c0833efc55a90f535d7c525ac533c7897b3cbf/skills/mission/tests/test_issue878_verification_runner.py#L85-L342)、[test_issue878_candidate_snapshot.py:18–110](https://github.com/tackeyy/mission/blob/93c0833efc55a90f535d7c525ac533c7897b3cbf/skills/mission/tests/test_issue878_candidate_snapshot.py#L18-L110)。
 - [T4: test_issue877_acceptance_contract.py:42–62](https://github.com/tackeyy/mission/blob/93c0833efc55a90f535d7c525ac533c7897b3cbf/skills/mission/tests/test_issue877_acceptance_contract.py#L42-L62)、[同:128–137](https://github.com/tackeyy/mission/blob/93c0833efc55a90f535d7c525ac533c7897b3cbf/skills/mission/tests/test_issue877_acceptance_contract.py#L128-L137)。
 - [T5: test_issue509_a4_application.py:176–244](https://github.com/tackeyy/mission/blob/93c0833efc55a90f535d7c525ac533c7897b3cbf/skills/mission/tests/test_issue509_a4_application.py#L176-L244)、[test_provider_preflight.py:482–575](https://github.com/tackeyy/mission/blob/93c0833efc55a90f535d7c525ac533c7897b3cbf/skills/mission/tests/test_provider_preflight.py#L482-L575)。
-- [T6: test_review_import.py:527–566](https://github.com/tackeyy/mission/blob/93c0833efc55a90f535d7c525ac533c7897b3cbf/skills/mission/tests/test_review_import.py#L527-L566)、[同:807–849](https://github.com/tackeyy/mission/blob/93c0833efc55a90f535d7c525ac533c7897b3cbf/skills/mission/tests/test_review_import.py#L807-L849)、[test_issue747_p2b_cli_operation_id.py:383–498](https://github.com/tackeyy/mission/blob/93c0833efc55a90f535d7c525ac533c7897b3cbf/skills/mission/tests/test_issue747_p2b_cli_operation_id.py#L383-L498)。
+- [T6: test_review_import.py:527–566](https://github.com/tackeyy/mission/blob/93c0833efc55a90f535d7c525ac533c7897b3cbf/skills/mission/tests/test_review_import.py#L527-L566)、[同:807–](https://github.com/tackeyy/mission/blob/93c0833efc55a90f535d7c525ac533c7897b3cbf/skills/mission/tests/test_review_import.py#L807-L)、[test_issue747_p2b_cli_operation_id.py:383–498](https://github.com/tackeyy/mission/blob/93c0833efc55a90f535d7c525ac533c7897b3cbf/skills/mission/tests/test_issue747_p2b_cli_operation_id.py#L383-L498)。
 - [T7: test_issue626_thin_adapter_guard.py:373–444](https://github.com/tackeyy/mission/blob/93c0833efc55a90f535d7c525ac533c7897b3cbf/skills/mission/tests/test_issue626_thin_adapter_guard.py#L373-L444)、[test_command_inventory.py:1732–1804](https://github.com/tackeyy/mission/blob/93c0833efc55a90f535d7c525ac533c7897b3cbf/skills/mission/tests/test_command_inventory.py#L1732-L1804)、[test_python_module_inventory.py:29–113](https://github.com/tackeyy/mission/blob/93c0833efc55a90f535d7c525ac533c7897b3cbf/skills/mission/tests/test_python_module_inventory.py#L29-L113)、[test_codex_wrapper_sync.py:40–61](https://github.com/tackeyy/mission/blob/93c0833efc55a90f535d7c525ac533c7897b3cbf/skills/mission/tests/test_codex_wrapper_sync.py#L40-L61)。
