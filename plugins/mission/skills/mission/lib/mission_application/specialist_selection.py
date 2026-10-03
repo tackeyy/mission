@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mission_persistence.fenced_commit import CanonicalStateEncodingError
+from mission_kernel.errors import CanonicalStateEncodingError
 
 from dataclasses import dataclass
 from typing import Callable, Mapping, Optional, Set

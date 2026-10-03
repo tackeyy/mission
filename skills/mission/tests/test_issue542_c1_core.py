@@ -629,10 +629,12 @@ def test_cleanup_stale_reports_a_v5_lease_refresh_race_as_skipped(
     assert _state(tmp_path, session_id)["loop_active"] is True
 
 
-def test_halt_all_silently_skips_a_v5_session(tmp_path, run_cli):
+@pytest.mark.parametrize("expired", [False, True], ids=["unexpired", "expired"])
+def test_halt_all_resolves_v5_and_respects_lease_expiry(tmp_path, run_cli, expired):
     session_id = "halt-all-v5"
     _init_v5(run_cli, tmp_path, session_id=session_id)
     before = _state(tmp_path, session_id)
+    head_before = _head(tmp_path, session_id)
 
     halted = run_cli(
         "halt",
@@ -644,13 +646,29 @@ def test_halt_all_silently_skips_a_v5_session(tmp_path, run_cli):
         "--category",
         "other",
         cwd=tmp_path,
-        env_extra={"MISSION_SESSION_ID": "janitor"},
+        env_extra={"MISSION_SESSION_ID": "janitor",
+                   "MISSION_STATE_NOW": "2026-08-18T00:16:00Z" if expired
+                   else "2026-08-18T00:00:01Z"},
     )
 
     assert halted.returncode == 0, halted.stderr
-    assert json.loads(halted.stdout)["halted"] == []
-    assert halted.stderr == ""
-    assert _state(tmp_path, session_id) == before
+    current = _state(tmp_path, session_id)
+    if expired:
+        assert json.loads(halted.stdout)["halted"] == [str(tmp_path)]
+        assert halted.stderr == ""
+        assert current["mission_id"] == before["mission_id"]
+        assert current["loop_active"] is False
+        assert current["passes"] is False
+        assert current["phase"] == "halted"
+        assert current["halt_reason"] == "Issue 542 halt-all v5 compatibility probe"
+        assert current["fencing_epoch"] == before["fencing_epoch"] + 1
+        assert _head(tmp_path, session_id)["generation"] == head_before["generation"] + 1
+    else:
+        assert json.loads(halted.stdout)["halted"] == []
+        assert "WARN: skip" in halted.stderr
+        assert "lease" in halted.stderr
+        assert current == before
+        assert _head(tmp_path, session_id) == head_before
 
 
 def test_t4_reinit_of_v5_session_is_rejected(tmp_path, run_cli):

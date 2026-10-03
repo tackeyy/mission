@@ -19,8 +19,14 @@ from typing import Callable, Optional, Union
 from mission_kernel import decode_mission_state, decode_snapshot, project_legacy_document as _kernel_project_legacy_document
 from mission_kernel.codec_v5 import encode_v5_state
 from mission_kernel.identifiers import TOKEN128_RE
+from mission_kernel.errors import (
+    CanonicalStateEncodingError,
+    StateBoundaryError as FencedCommitError,  # Retain the public persistence error identity.
+)
 from mission_kernel.json_codec import (
     STATE_LIMIT,
+    canonical_state_encoding,
+    encode_legacy_document,
     decode_json_object,
     encode_json_object,
     thaw_json_object,
@@ -107,49 +113,10 @@ _TRANSACTION_RE = re.compile(r"[0-9a-f]{32}")
 _TIMESTAMP_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 
 
-class FencedCommitError(ValueError):
-    def __init__(self, code: str, detail: str):
-        super().__init__(detail)
-        self.code = code
-        self.detail = detail
-
-
-class CanonicalStateEncodingError(FencedCommitError):
-    """Renderability rejection that compatibility fallbacks must not absorb."""
-
-
-@contextmanager
-def canonical_state_encoding():
-    """Translate projection/encoding failures at the shared persistence boundary.
-
-    Compatibility readers and writers use the same kernel encoder. Its
-    parser exceptions must remain a coded input rejection for every caller.
-    """
-    try:
-        yield
-    except FencedCommitError as exc:
-        if exc.code == "canonical-json-invalid" and not isinstance(exc, CanonicalStateEncodingError):
-            raise CanonicalStateEncodingError(exc.code, exc.detail) from exc
-        raise
-    except (TypeError, ValueError) as exc:
-        code = getattr(exc, "code", "canonical-json-invalid")
-        detail = str(exc) if hasattr(exc, "code") else f"{code}: state projection cannot be canonically encoded"
-        error_type = CanonicalStateEncodingError if code == "canonical-json-invalid" else FencedCommitError
-        raise error_type(code, detail) from exc
-
-
 def project_legacy_document(state):
     """Project retained state without exposing raw encoder exceptions."""
     with canonical_state_encoding():
         return _kernel_project_legacy_document(state)
-
-
-def encode_legacy_document(document: dict) -> bytes:
-    """Check UTF-8 renderability while retaining historical non-finite scores."""
-    with canonical_state_encoding():
-        return json.dumps(
-            document, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-        ).encode("utf-8")
 
 
 @dataclass(frozen=True)

@@ -5742,6 +5742,7 @@ def cmd_invoke_command_provider(args):
         path_exists=Path.exists,
         read_bytes=Path.read_bytes,
         read_text=Path.read_text,
+        read_session_json=read_session_json,
         inspect_repository_bytes=inspect_repository_bytes,
         v5_format=RepositoryFormat.V5,
     )
@@ -14975,6 +14976,7 @@ def cmd_cleanup_stale(args):
         path_from_string=Path,
         path_exists=Path.exists,
         iter_state_files=_iter_state_files,
+        preflight_session_paths=preflight_session_paths,
         load_authoritative_state=_load_authoritative_state,
         lease_fields_present=_lease_fields_present,
         expired_lease_without_heartbeat=_expired_lease_without_heartbeat,

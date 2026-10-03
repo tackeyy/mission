@@ -20,3 +20,16 @@ class StrictReadError(ValueError):
         super().__init__(f"{code}: {detail}")
         self.code = code
         self.detail = detail
+
+
+class StateBoundaryError(ValueError):
+    """Coded rejection shared by state codecs, ports, and persistence adapters."""
+
+    def __init__(self, code: str, detail: str):
+        super().__init__(detail)
+        self.code = code
+        self.detail = detail
+
+
+class CanonicalStateEncodingError(StateBoundaryError):
+    """Renderability rejection that compatibility fallbacks must not absorb."""

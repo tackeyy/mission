@@ -1,8 +1,6 @@
 """Application use case for a legacy command provider invocation."""
 from __future__ import annotations
 
-from mission_persistence.authoritative_reader import read_session_json
-
 from dataclasses import dataclass
 import hashlib
 import json
@@ -62,6 +60,7 @@ class WorkspaceServices:
     path_exists: object
     read_bytes: object
     read_text: object
+    read_session_json: object
     inspect_repository_bytes: object
     v5_format: object
 
@@ -240,7 +239,7 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
         with _preread_repo.transaction():
             data = _preread_repo.load()
     else:
-        data = read_session_json(sf, source=workspace.read_text(sf))
+        data = workspace.read_session_json(sf, source=workspace.read_text(sf))
     provider_policy.validate_specialist_public_state(data)
     provider = provider_policy.find_provider(data, request.provider_id)
     if not provider:
@@ -426,7 +425,7 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
     # If dispatch was already committed (idempotent replay), skip external call
     if already_dispatched:
         # Return result from state
-        _final_state = read_session_json(sf, source=workspace.read_text(sf))
+        _final_state = workspace.read_session_json(sf, source=workspace.read_text(sf))
         _cached_inv = next(
             (inv for inv in (_final_state.get("specialist_invocations") or [])
              if isinstance(inv, dict) and inv.get("invocation_id") == entry["invocation_id"]),

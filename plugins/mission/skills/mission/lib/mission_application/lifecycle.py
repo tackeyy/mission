@@ -51,7 +51,8 @@ from mission_kernel.transitions import (
     handoff_discard_refusal,
 )
 from provider_public_contract import SpecialistPublicContractError
-from mission_persistence.fenced_commit import FencedCommitError, encode_legacy_document
+from mission_kernel.errors import StateBoundaryError
+from mission_kernel.json_codec import encode_legacy_document
 from .compatibility import compatibility_delta
 from .ports import (
     AggregateIndexError,
@@ -740,7 +741,7 @@ def diagnose_terminalizable_state(document: dict) -> str:
     """Classify why a document can or cannot supply halt claims."""
     try:
         candidate = _typed_state(document)
-    except FencedCommitError:
+    except StateBoundaryError:
         raise
     except (TypeError, ValueError, UnicodeError):
         return TERMINALIZABLE_UNDECODABLE
@@ -1573,7 +1574,7 @@ def set_fields(
             # legacy provider records.  Typed A4 decode now reaches this gate
             # before the adapter-level validator, but must not erase its path.
             raise
-        except FencedCommitError:
+        except StateBoundaryError:
             raise
         except (TypeError, ValueError, UnicodeError) as error:
             raise LifecycleFailure(

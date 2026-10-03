@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from mission_persistence.fenced_commit import CanonicalStateEncodingError
+from mission_kernel.errors import CanonicalStateEncodingError
 
 
 @dataclass(frozen=True)
@@ -412,7 +412,11 @@ def initialize_legacy_v4(request, services):
                         f".mission-state/sessions/{sid}-{new_mission_id[:8]}-"
                         f"{services.time.time_ns()}-assumptions.md"
                     )
-                elif existing_mission_id and existing_mission_id == new_mission_id:
+                elif (
+                    not request.new_mission
+                    and existing_mission_id
+                    and existing_mission_id == new_mission_id
+                ):
                     if "planning_policy_version" not in existing_data:
                         initial.pop("planning_policy_version", None)
                     else:

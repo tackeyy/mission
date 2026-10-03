@@ -911,3 +911,53 @@ def test_archive_resolution_rejects_unencodable_state_before_publication(complet
                       ['resolve-archive', '--path', str(target), '--status', 'resolved',
                        '--frozen-snapshot', '--json'],
                       'canonical-json-invalid', raw_control=True)
+
+
+@pytest.mark.parametrize("completion_session", [5], indirect=True, ids=["v5-container"])
+def test_queue_from_state_resolves_healthy_v5_scores(completion_session, run_cli):
+    root, state, schema = completion_session
+    state["custom_note"] = "日本語 café"
+    _persist_fixture(root, state, schema)
+    before = _public_bytes(root)
+    scope = state["score_history"][-1]["revision_scope"]
+
+    result = run_cli("queue", "enqueue", "--from-state", "--issue-ref", "902",
+                     "--pr-ref", "903", cwd=root)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    queued = json.loads(result.stdout)["entry"]
+    assert queued["status"] == "queued"
+    assert queued["accepted_base_sha"] == scope["base_sha"]
+    assert queued["head_sha"] == scope["head_sha"]
+    published = json.loads((root / ".mission-state" / "merge-queue.json").read_bytes())
+    assert published["entries"][0] == queued
+    after = _public_bytes(root)
+    assert {key: after[key] for key in before} == before
+    assert set(after) - set(before) == {"merge-queue.json"}
+
+
+@pytest.mark.parametrize("completion_session", [5], indirect=True, ids=["v5-container"])
+def test_parallel_closeout_resolves_healthy_v5_pass_child(completion_session, run_cli):
+    root, state, schema = completion_session
+    state.update(logical_group_id="group-902", issue_ref="902", passes=True,
+                 loop_active=False, phase="done", terminal_outcome="completed_pass",
+                 custom_note="日本語 café")
+    run_cli("parallel-init", "--group-id", "group-902", "--issue-ref", "902",
+            cwd=root, check=True)
+    _persist_fixture(root, state, schema)
+    _rewrite_fixture_document(root, lambda doc: doc.update(lease_expires_at="2000-01-01T00:00:00Z"))
+    before = _public_bytes(root)
+
+    result = run_cli("parallel-closeout", "--group-id", "group-902", cwd=root)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout)["outcome"] == "pass"
+    manifest_key = "sessions/group-902.group.json"
+    manifest = json.loads((root / ".mission-state" / manifest_key).read_bytes())
+    assert manifest["status"] == "terminal"
+    assert manifest["outcome"] == "pass"
+    after = _public_bytes(root)
+    assert after[manifest_key] != before[manifest_key]
+    assert {key: value for key, value in after.items() if key != manifest_key} == {
+        key: value for key, value in before.items() if key != manifest_key
+    }
