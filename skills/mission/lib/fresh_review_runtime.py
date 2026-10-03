@@ -10,10 +10,13 @@ from dataclasses import asdict, dataclass
 import hashlib
 import importlib.machinery
 import importlib.metadata
+import importlib.util
 import json
 import os
 from pathlib import Path
 import re
+import sys
+from types import BuiltinFunctionType, FunctionType, MethodDescriptorType, MethodType, WrapperDescriptorType
 from typing import Protocol
 
 from mission_kernel.fresh_review import FreshReviewError, canonical_digest
@@ -109,10 +112,12 @@ def read_registry():
         configured = os.environ.get('XDG_CONFIG_HOME')
         root = Path(configured) if configured else Path.home() / '.config'
         if not root.is_absolute():
-            raise FreshReviewError('fresh-review-adapter-registry-invalid')
+            raise FreshReviewError('fresh-review-adapter-config-relative')
         raw = read_stable_bytes_beneath(root, 'mission/fresh-review-adapters.json', limit=REGISTRY_LIMIT).payload
         value = json.loads(raw.decode('utf-8'), object_pairs_hook=_unique_pairs)
         return validate_registry(value)
+    except FreshReviewError:
+        raise
     except (OSError, StrictReadError, UnicodeError, ValueError) as exc:
         raise FreshReviewError('fresh-review-adapter-registry-invalid') from exc
 
@@ -124,7 +129,7 @@ class AdapterPin:
     module: str
 
 
-def _source_digest(module):
+def _source_spec(module):
     # util.find_spec on a dotted name imports its parent package. Walk using
     # PathFinder instead so even package initializers remain outside the parent.
     search = None
@@ -140,11 +145,64 @@ def _source_digest(module):
             raise FreshReviewError('fresh-review-adapter-source-invalid')
     if spec is None or not isinstance(spec.origin, str) or spec.origin in {'built-in', 'frozen'}:
         raise FreshReviewError('fresh-review-adapter-source-invalid')
+    return spec
+
+
+def _source_digest(module):
     try:
-        source = read_stable_bytes(spec.origin)
+        source = read_stable_bytes(_source_spec(module).origin)
     except (OSError, StrictReadError) as exc:
         raise FreshReviewError('fresh-review-adapter-source-invalid') from exc
     return 'sha256:' + hashlib.sha256(source).hexdigest()
+
+
+def _load_pinned_factory(pin, entry):
+    """Compile the exact pinned bytes, without import caches or loader code."""
+    invalid = 'fresh-review-adapter-source-invalid'
+    if pin.module in sys.modules:
+        raise FreshReviewError(invalid)
+    origin = _source_spec(pin.module).origin
+    source = read_stable_bytes(origin)
+    if 'sha256:' + hashlib.sha256(source).hexdigest() != pin.registration.source_digest:
+        raise FreshReviewError(invalid)
+    code = compile(source, origin, 'exec', dont_inherit=True)
+    # Always use a source spec: module_from_spec must not invoke an extension
+    # loader, and cached bytecode must not replace the bytes checked above.
+    spec = importlib.util.spec_from_file_location(
+        pin.module, origin, loader=importlib.machinery.SourceFileLoader(pin.module, origin))
+    module = importlib.util.module_from_spec(spec)
+    if _source_digest(pin.module) != pin.registration.source_digest:
+        raise FreshReviewError(invalid)
+    sys.modules[pin.module] = module
+    try:
+        exec(code, module.__dict__)
+        factory = module
+        for part in entry.attr.split('.'):
+            factory = getattr(factory, part)
+        if (sys.modules.get(pin.module) is not module or module.__file__ != origin
+                or module.__spec__ is not spec or spec.origin != origin
+                or getattr(factory, '__module__', None) != pin.module):
+            raise FreshReviewError(invalid)
+        if isinstance(factory, type):
+            callbacks = (factory.__new__, factory.__init__, type(factory).__call__)
+        elif callable(factory):
+            callbacks = (factory,)
+        else:
+            raise FreshReviewError(invalid)
+        callback_types = (FunctionType, MethodType, BuiltinFunctionType, MethodDescriptorType, WrapperDescriptorType)
+        callbacks = tuple(callback if isinstance(callback, callback_types)
+                          else getattr(type(callback), '__call__', None) for callback in callbacks)
+        callbacks = tuple(callback.__func__ if isinstance(callback, MethodType) else callback
+                          for callback in callbacks)
+        if any(not isinstance(callback, callback_types) for callback in callbacks):
+            raise FreshReviewError(invalid)
+        if any(callback.__globals__ is not module.__dict__ or callback.__code__.co_filename != origin
+               for callback in callbacks if isinstance(callback, FunctionType)):
+            raise FreshReviewError(invalid)
+        return factory
+    except BaseException:
+        sys.modules.pop(pin.module, None)
+        raise
 
 
 def _resolve_adapter(identifier):
@@ -170,14 +228,14 @@ def _resolve_adapter(identifier):
             owned_entry_points=owned, configured_distribution=registration.distribution,
             configured_version=registration.version, group=ENTRY_POINT_GROUP,
         )
-        if owned.count((ENTRY_POINT_GROUP, entry.name, entry.value)) != 1:
-            raise FreshReviewError('fresh-review-adapter-distribution-invalid')
     except FreshReviewError:
         raise
     except (AttributeError, KeyError, OSError, TypeError, ValueError, importlib.metadata.PackageNotFoundError) as exc:
         raise FreshReviewError('fresh-review-adapter-distribution-invalid') from exc
     try:
         module = entry.module
+        if entry.extras:
+            raise FreshReviewError('fresh-review-adapter-entry-point-invalid')
     except (AttributeError, AssertionError, TypeError, ValueError) as exc:
         raise FreshReviewError('fresh-review-adapter-entry-point-invalid') from exc
     if not isinstance(module, str) or not _MODULE.fullmatch(module):
@@ -204,7 +262,7 @@ def load_adapter(pin: AdapterPin) -> FreshReviewRuntimeAdapter:
     if current != pin:
         raise FreshReviewError('fresh-review-adapter-pin-changed')
     try:
-        factory = entry.load()
+        factory = _load_pinned_factory(pin, entry)
         adapter = factory()
         if any(not callable(getattr(adapter, method, None))
                for method in ('observe_parent', 'launch', 'collect', 'cancel', 'recover')):
