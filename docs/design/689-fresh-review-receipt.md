@@ -66,7 +66,7 @@ prepare・dispatch 直前・output import 直前・completion 直前に同じ ma
 adapter へ渡す候補は capture 済みの読取専用 materialization に限定する。
 
 budget の repository 上限は wall time 300 秒、tool calls 64、replays 16、output 256 KiB とする。
-host policy はこれより小さい上限に制限できる。入力 packet は 1 MiB 上限とし、超過は blocked。
+host policy はこれより小さい上限に制限できる。入力 packet は 1 MiB 上限とする。prepare の時点で超過が分かれば request を保存しない command 拒否、dispatch 直前の再取得で超過した場合は `blocked` 終端とする。
 clock/出力量/replay 数は application が計測し、tool calls と filesystem/network 能力は host adapter が
 強制する。能力を強制できない host は起動しない。金額予算・repair 予約は後続 budget 作業へ残す。
 
@@ -114,7 +114,7 @@ source pin は entry-point module の pin であり、host 全体・依存コー
 host adapter を trust root とする限界を公開仕様に書く。
 
 launch receipt は閉じた `mission-fresh-review-launch/1` とする。
-`request_id/request_digest/nonce/operation_id/fencing_epoch/adapter_registration_digest`、
+`request_id/request_digest/nonce/operation_id/fencing_epoch/adapter_registration_digest`（`operation_id`/`fencing_epoch` は dispatch 側の値。§4 の `dispatch_*` に対応する）、
 adapter 観測による `parent_identity/child_identity/context_identity/context_mode/received_input_digest/started_at`、
 enforced tools/budget を持つ。identity は opaque で再利用判定に使え、PID 単独は採用しない。
 parent_identity は `observe_parent` 由来、child/session/context identity と received_input_digest は
@@ -184,8 +184,19 @@ ledger の omission を valid と呼ぶ自己申告だけでは足りず、kerne
 契約の coverage を書き換えると B の既存 receipt 全てが stale になる。[S1]
 従って C の「contract.coverage が valid」という直接比較を receipt による実効 coverage 判定へ置き換える。
 契約の immutable identity/revision を書き換えず、coverage は pending から valid または理由付き open へ進む。
-決定（全体 coverage receipt）: 全体 coverage receipt とは、`completed` かつ `independent=true` で、criterion_ids が全 required criterion を含む request の coverage receipt を指す。実効 coverage を valid にできるのはこれだけで、部分 request（required criterion の一部だけを選んだ request）の coverage receipt は記録するが実効 coverage を valid にしない。実効 coverage は、現 contract・現 candidate に束縛された最新の全体 coverage receipt から導出する。criterion ごとの探索完了は複数 request を合成してよいが（§5）、完了には現候補に対する全体 coverage receipt が別途必須である。
-新しい coverage receipt が open/blocked なら古い valid へ fallback しない。
+決定（全体 coverage receipt）: 全体 coverage receipt とは、`completed` かつ `independent=true` で、criterion_ids が全 required criterion を含む request の coverage receipt を指す。実効 coverage を valid にできるのはこれだけで、部分 request（required criterion の一部だけを選んだ request）の coverage receipt は記録するが実効 coverage を valid にしない。実効 coverage の導出は直後の「実効 coverage の選び方」に従い、最新の全体 attempt だけで判定する。criterion ごとの探索完了は複数 request を合成してよいが（§5）、完了には、最新の全体 attempt が現候補に対する有効な全体 coverage receipt であることが別途必須である。
+決定（実効 coverage の選び方）: 実効 coverage は、criterion_ids が全 required criterion を含む request のうち**最新の attempt**だけで判定する。attempt は状態を問わず、`pending`（準備済みで未 dispatch）・`dispatch-unknown`・`running` の request も含む。「最新」は時刻ではなく、projection へ request が追加された順（`PrepareFreshReview` の commit 順）で決める。それより前の全体 attempt の receipt へは戻らない。部分 request の coverage receipt はこの判定に使わないが、それが持つ open obligation は §5 の条件 4 で完了を止める。最新の全体 attempt から `effective_coverage` と §5 の理由コードを次のとおり決める。
+
+| 判定順 | 最新の全体 attempt | `effective_coverage` | 完了 gate の理由コード |
+|---|---|---|---|
+| 1 | 全体 attempt が存在しない | `pending` | `acceptance-fresh-review-missing` |
+| 2 | 状態を問わず、request が束縛した contract・input・candidate が現在と一致しない | `open` | `acceptance-fresh-review-stale` |
+| 3 | `pending`・`dispatch-unknown`・`running` | `pending` | `acceptance-fresh-review-pending` |
+| 4 | `completed` だが `independent=false` | `open` | `acceptance-fresh-review-non-independent` |
+| 5 | `failed`・`blocked`・`abandoned-unknown`、または `completed` で coverage が open | `open` | `acceptance-coverage-open` |
+| 6 | `completed` かつ `independent=true` で coverage receipt が valid | `valid` | （§5 の他の条件へ進む） |
+
+行は上から順に評価し、最初に当てはまった行を採る（実行途中でも古い候補に束縛された attempt は stale を返す）。
 
 `CommitFreshReviewResult` の一つの public state commit で、terminal receipt、output content-addressed ref、
 output digest、coverage receipt、open obligations/findings、request 消費を束縛する。
@@ -197,7 +208,7 @@ public head が参照しない staged bytes は成功ではない。receipt だ�
 v5 は現 fenced repository を使い、別の transaction system を増設しない。
 
 決定（終端 receipt の variant）: `mission-fresh-review-terminal/1` は `outcome` で分岐する閉じた variant とする。
-全 variant 共通の必須 field は `request_id/request_digest/nonce/operation_id/fencing_epoch/outcome/reason/candidate_digest/budget_used/ended_at`。
+全 variant 共通の必須 field は `request_id/request_digest/nonce/dispatch_operation_id/dispatch_fencing_epoch/commit_operation_id/commit_fencing_epoch/outcome/reason/candidate_digest/budget_used/ended_at`（`dispatch_*` は dispatch intent 記録の値。入力超過・候補不一致など prepare の時点で分かる不備は request を保存しない command 拒否とし、`blocked` 終端は必ず dispatch の予約を持つ）。
 variant ごとの field は次のとおりで、表にない field の存在・`null` による欠落表現は decoder が拒否する。
 
 | outcome | 到達条件 | launch receipt | output ref/digest | coverage receipt・findings | 完了 gate |
@@ -213,8 +224,9 @@ variant ごとの field は次のとおりで、表にない field の存在・`
 `independent=false` の inline 実行は `completed` として保存できるが、完了 gate では無効のままとする。
 `launch_attempted=true` の `blocked` の後に同じ child から届いた報告・output は、request が consumed のため import を拒否する。
 output import は二段で判定する。第一段は送り手の照合で、operation_id・fencing_epoch・request_id/nonce・running 記録の launch receipt にある child identity が一致するかを見る。一致しなければ別の書き手または古い書き手として command 単位で拒否し、state を変えず request はその時点の状態に残す（consumed request への報告もここで拒否する）。これは保存される終端ではない。
+決定（takeover 後の照合値と記録）: 第一段で child の報告と突き合わせる operation_id・fencing_epoch は、**保存済みの dispatch 側の値**（running 記録の launch receipt に保存した値）とする。child は起動した dispatch に属するためである。報告を取り込む書き手（通常の import、または lease takeover 後の `fresh-review reconcile`）は、自身の operation_id と**現行の lease/fencing_epoch** で repository の fence を通る。旧 writer は現行 epoch と一致しないため fence で拒否される。終端 receipt には `dispatch_operation_id`/`dispatch_fencing_epoch`（照合した dispatch 側）と `commit_operation_id`/`commit_fencing_epoch`（公開した書き手側）を分けて記録する（§4 の終端 variant の共通 field を参照）。`dispatch_*` の取得元は、launch receipt の有無にかかわらず `BeginFreshReviewDispatch` が保存した dispatch intent 記録とする（`dispatch-unknown` からの `abandoned-unknown` も同じ）。
 第二段は照合済み child の output の中身の検査で、schema、output 内の request_digest、候補 binding、予算を見る。不合格なら次の行のとおり `failed` 終端とする。
-（この二段の境界は設計レビュー 3 巡目の後に追加した決定であり、D2 の実装着手前に改めて設計レビューにかける。）
+（この二段の境界は設計レビュー 3 巡目の後に追加した決定であり、D2（#896）の実装着手前に改めて設計レビューにかける。）
 running の request に対する output import が検査で不合格になった場合は拒否で終わらせず、`failed` 終端として保存する。
 
 pending→dispatch-unknown→running→terminal を採用する。spawn 前 durable intent、receipt 後 running、
@@ -231,12 +243,12 @@ terminal commit 後・応答前の停止は同一 operation の再応答で回�
 
 1. contract・凍結 verifier policy の shape と identity が有効。
 2. required criteria 全てに、最新の通常 verification receipt が passed、現 candidate と定義・policy が一致。
-3. 各 required criterion について、その criterion を含む最新の attempt（request）が、現 contract/input/candidate に束縛された completed fresh review receipt である。加えて §4 の全体 coverage receipt が現候補に対して存在する。
+3. 各 required criterion について、その criterion を含む最新の attempt（request）が、現 contract/input/candidate に束縛された completed fresh review receipt である。加えて §4「実効 coverage の選び方」により、最新の全体 attempt が現候補に対する有効な全体 coverage receipt である（それより前の全体 attempt の receipt は数えない）。
 4. 全て `independent=true`、criterion search 完了、全 ledger の実効 coverage valid、open obligation がない。
 5. required obligation または禁止副作用へ束縛された未解決 finding がゼロ。Medium も含む。
 
-無条件 `acceptance-fresh-review-pending` を以上へ置換し、missing/stale/non-independent/
-coverage-open/unresolved-finding を区別する理由コードを返す。
+無条件 `acceptance-fresh-review-pending` を以上へ置換し、fresh review に関する判定は §4「実効 coverage の選び方」の表の順と理由コード（`acceptance-fresh-review-missing`・`acceptance-fresh-review-stale`・`acceptance-fresh-review-pending`・`acceptance-fresh-review-non-independent`・`acceptance-coverage-open`）に従う。
+条件 5 の未解決 finding は `acceptance-unresolved-finding` で拒否する。
 一つの review が全条件を覆ってよい。部分 receipt を合成する場合も、各 criterion の最新 attempt が
 failed/blocked/non-independent なら古い成功へ fallback しない。running request もその対象 criterion を未達にする。
 MarkPass に application が観測した fresh candidate map を typed carrier として渡し、kernel は保存 request と比較する。
