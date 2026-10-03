@@ -196,6 +196,22 @@ public head が参照しない staged bytes は成功ではない。receipt だ�
 既存 evidence use case は repository の transition+effects を利用し、v4 の effect publication も保存とまとめる。[S7]
 v5 は現 fenced repository を使い、別の transaction system を増設しない。
 
+決定（終端 receipt の variant）: `mission-fresh-review-terminal/1` は `outcome` で分岐する閉じた variant とする。
+全 variant 共通の必須 field は `request_id/request_digest/nonce/operation_id/fencing_epoch/outcome/reason/candidate_digest/budget_used/ended_at`。
+variant ごとの field は次のとおりで、表にない field の存在・`null` による欠落表現は decoder が拒否する。
+
+| outcome | 到達条件 | launch receipt | output ref/digest | coverage receipt・findings | 完了 gate |
+|---|---|---|---|---|---|
+| `completed` | adapter が child の終了と output を観測し、output が schema・予算・binding 検査を通過 | 必須 | 必須 | 必須 | `independent=true` の時だけ有効 |
+| `failed` | launch 後に child の異常終了、output 不正・予算超過・binding 不一致を観測 | 必須 | output bytes が存在すれば診断用として保持可、無ければ欠落 | 持たない | 無効 |
+| `blocked` | launch 前に起動不能・能力/identity/入力受領が観測不能・入力超過・登録 pin 不一致 | 持たない | 持たない | 持たない | 無効 |
+| `abandoned-unknown` | dispatch-unknown または running の中断後、exact child と output を観測できない | running に達していれば必須、dispatch-unknown からなら持たない | 持たない | 持たない | 無効 |
+
+`reason` は variant ごとの閉じた理由コード集合から選ぶ。`completed` 以外は理由コード必須で、`completed` は `none`。
+どの variant でも terminal commit が request を consumed にし、同じ nonce の再利用・二重 terminal を拒否する。
+同一 operation の再応答は保存済み terminal をそのまま返す。再試行は `fresh-review prepare` で新しい request（新しい nonce）を作る。
+`independent=false` の inline 実行は `completed` として保存できるが、完了 gate では無効のままとする。
+
 pending→dispatch-unknown→running→terminal を採用する。spawn 前 durable intent、receipt 後 running、
 terminal 前 candidate recapture を守る。dispatch-unknown は既存 saga と同じく自動 redispatch しない。[S9]
 interrupt 後に output がなければ failed/abandoned-unknown。旧 writer の遅着は fence で拒否する。
