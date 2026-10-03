@@ -42,6 +42,7 @@ from .commands import (
     RecordVerification,
     RecordVerificationReceipt,
     ImportAcceptanceContract,
+    PrepareFreshReview,
     RejectExecutorHandoff,
     AbortExecutorHandoff,
     HandoffAbortReason,
@@ -258,6 +259,7 @@ def _active_control(state: MissionState) -> MissionControl:
 
 _COMPATIBILITY_FORBIDDEN_FIELDS = frozenset(
     {
+        "fresh_review",
         "phase",
         "passes",
         "loop_active",
@@ -1477,6 +1479,15 @@ def _import_acceptance_contract(state: MissionState, raw_command: object) -> Tra
     return Transition(_with_evidence_document(state, document), (KernelEvent("acceptance-contract-imported"),))
 
 
+def _prepare_fresh_review(state: MissionState, command: object) -> Transition:
+    from .fresh_review import prepare_request_state, FreshReviewError
+    try:
+        next_state = prepare_request_state(state, command)
+    except FreshReviewError as rejected:
+        raise _Rejected(rejected.code)
+    return Transition(next_state, (KernelEvent("fresh-review-prepared"),))
+
+
 def _generate_claims_ledger(state: MissionState, raw_command: object) -> Transition:
     command = raw_command
     assert isinstance(command, GenerateClaimsLedger)
@@ -2083,6 +2094,12 @@ TRANSITION_TABLE = build_transition_table(
             _record_verification_receipt,
         ),
         TransitionRule(
+            "fresh-review-prepare",
+            PrepareFreshReview,
+            _command_type_guard(PrepareFreshReview),
+            _prepare_fresh_review,
+        ),
+        TransitionRule(
             "acceptance-contract-import",
             ImportAcceptanceContract,
             _command_type_guard(ImportAcceptanceContract),
@@ -2264,7 +2281,9 @@ def bind_transition_effects(
     registered = _ISSUED_TRANSITIONS[id(transition)]
     command = registered[2]
     claims: tuple[object, ...] | None = None
-    if isinstance(command, (InitializeArtifact, RenderArtifact, RecordArtifactPublication)):
+    if isinstance(command, PrepareFreshReview):
+        claims = () if command.effect is None else (command.effect,)
+    elif isinstance(command, (InitializeArtifact, RenderArtifact, RecordArtifactPublication)):
         claims = (command.effect,)
     elif isinstance(command, AppendArtifactBlock):
         claims = ()

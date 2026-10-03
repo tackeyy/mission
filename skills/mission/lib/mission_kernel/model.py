@@ -8,6 +8,7 @@ import re
 from typing import TYPE_CHECKING, Optional, Union
 
 if TYPE_CHECKING:
+    from .fresh_review import FreshReviewProjection
     from .a4 import A4Projection
 
 
@@ -484,6 +485,7 @@ class MissionState:
     extensions: FrozenJsonObject
     legacy_passthrough: Optional[FrozenJsonObject]
     a4: "A4Projection" = field(default_factory=lambda: _empty_a4_projection())
+    fresh_review: "FreshReviewProjection" = field(default_factory=lambda: _empty_fresh_review_projection())
     snapshot_provenance: Optional[SnapshotProvenance] = None
     _snapshot_binding: Optional[object] = field(
         default=None, init=False, repr=False, compare=False
@@ -492,6 +494,11 @@ class MissionState:
     @property
     def terminal_outcome(self) -> Optional[TerminalOutcome]:
         return self.control.terminal_outcome
+
+
+def _empty_fresh_review_projection():
+    from .fresh_review import FreshReviewProjection
+    return FreshReviewProjection()
 
 
 def _empty_a4_projection() -> "A4Projection":

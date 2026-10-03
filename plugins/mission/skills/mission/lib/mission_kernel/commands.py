@@ -12,6 +12,7 @@ from .model import FrozenJsonObject
 from .model import HaltCategory, Phase, PreparedHandoff
 from .artifact import ArtifactEffectClaim
 from .a4 import SpecialistRecommendationProjection
+from .fresh_review import FreshReviewRequest
 
 
 @dataclass(frozen=True)
@@ -268,6 +269,24 @@ class ImportAcceptanceContract:
 
 
 @dataclass(frozen=True)
+class FreshReviewInputEffectClaim:
+    kind: str
+    target: str
+    digest: str
+    size: int
+
+
+@dataclass(frozen=True)
+class PrepareFreshReview:
+    request: FreshReviewRequest
+    operation_id: str
+    intent_digest: str
+    payload_digest: str
+    packet: Optional[FrozenJsonObject]
+    effect: Optional[FreshReviewInputEffectClaim]
+
+
+@dataclass(frozen=True)
 class CanonicalPlanObservation:
     path: str
     digest: str
@@ -430,6 +449,7 @@ GENERIC_SET_DEDICATED_FIELDS = frozenset(
         "verification_history",
         "verification_receipts",
         "acceptance_contract",
+        "fresh_review",
     }
 )
 
@@ -453,6 +473,7 @@ Command = Union[
     RecordVerification,
     RecordVerificationReceipt,
     ImportAcceptanceContract,
+    PrepareFreshReview,
     RecordExecutorStep,
     RecordSpecialistRecommendation,
     RejectExecutorHandoff,
@@ -483,6 +504,7 @@ _COMMAND_TYPES = {
     RecordVerification: "record-verification",
     RecordVerificationReceipt: "record-verification-receipt",
     ImportAcceptanceContract: "acceptance-contract-import",
+    PrepareFreshReview: "fresh-review-prepare",
     RecordExecutorStep: "executor-handoff-record-step",
     RecordSpecialistRecommendation: "specialists-record-recommendation",
     RejectExecutorHandoff: "executor-handoff-reject-canonical-drift",
