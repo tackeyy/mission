@@ -12,7 +12,7 @@ from mission_application.verification_runner import (
     execute_candidate,
     verifier_definition_digest,
 )
-from acceptance_contract import canonical_contract_digest
+from acceptance_contract import AcceptanceContractError, canonical_contract_digest, frozen_verifier_commands
 
 
 @dataclass(frozen=True)
@@ -44,6 +44,8 @@ def run_verification_receipt_cli(request, services) -> str:
     with reader.transaction():
         state = reader.load()
     contract = state.get("acceptance_contract") if isinstance(state, dict) else None
+    if isinstance(state, dict) and "acceptance_contract" in state:
+        _frozen_commands(contract)
     live_policy = services.load_verifier_policy(cwd)
     if not isinstance(contract, dict) or not isinstance(contract.get("verifier_policy"), dict) or live_policy["digest"] != contract["verifier_policy"].get("digest"):
         raise EvidenceFailure("verifier-policy-stale")
@@ -84,14 +86,16 @@ def run_contract_verifier(state, *, project_root, criterion_id, repro_input=None
     """Execute one contract criterion without accepting caller-declared results."""
     if not isinstance(state, dict):
         raise EvidenceFailure("verification-state-invalid")
-    contract = state.get("acceptance_contract")
-    if not isinstance(contract, dict) or contract.get("schema") != "mission-acceptance-contract/2":
+    if "acceptance_contract" not in state:
+        raise EvidenceFailure("verification-contract-unavailable")
+    contract = state["acceptance_contract"]
+    commands = _frozen_commands(contract)
+    if contract.get("schema") != "mission-acceptance-contract/2":
         raise EvidenceFailure("verification-contract-unavailable")
     criteria = [item for item in contract.get("criteria", []) if isinstance(item, dict) and item.get("id") == criterion_id]
     if len(criteria) != 1:
         raise EvidenceFailure("verification-criterion-unavailable")
     policy = contract.get("verifier_policy")
-    commands = policy.get("commands") if isinstance(policy, dict) else None
     command = commands.get(criteria[0].get("command_id")) if isinstance(commands, dict) else None
     if not isinstance(command, dict):
         raise EvidenceFailure("verification-command-unregistered")
@@ -99,7 +103,13 @@ def run_contract_verifier(state, *, project_root, criterion_id, repro_input=None
     if repro_input is not None:
         if not isinstance(replay, dict):
             return _blocked_receipt(contract, policy, criterion_id, command, "replay-unsupported")
-        if not isinstance(repro_input, dict) or set(repro_input) != {"artifact_kind", "content"} or repro_input["artifact_kind"] not in replay["allowed_artifact_kinds"] or not isinstance(repro_input["content"], str) or len(repro_input["content"].encode()) > replay["max_bytes"]:
+        if not isinstance(repro_input, dict) or set(repro_input) != {"artifact_kind", "content"} or repro_input["artifact_kind"] not in replay["allowed_artifact_kinds"] or not isinstance(repro_input["content"], str):
+            return _blocked_receipt(contract, policy, criterion_id, command, "replay-input-invalid")
+        try:
+            replay_content = repro_input["content"].encode("utf-8")
+        except UnicodeError as exc:
+            raise EvidenceFailure("replay-input-invalid") from exc
+        if len(replay_content) > replay["max_bytes"]:
             return _blocked_receipt(contract, policy, criterion_id, command, "replay-input-invalid")
         replay_command = commands.get(replay["command_id"])
         if not isinstance(replay_command, dict):
@@ -107,7 +117,7 @@ def run_contract_verifier(state, *, project_root, criterion_id, repro_input=None
         command = replay_command
     try:
         candidate = capture_candidate(project_root, declared_untracked=command["declared_untracked"], external_inputs=command["external_inputs"])
-        replay_file = None if repro_input is None else (repro_input["artifact_kind"], replay["relative_path"], repro_input["content"].encode())
+        replay_file = None if repro_input is None else (repro_input["artifact_kind"], replay["relative_path"], replay_content)
         if replay_file is not None and any(
             replay_file[1] == item.path or replay_file[1].startswith(item.path + "/") or item.path.startswith(replay_file[1] + "/")
             for item in candidate.files
@@ -148,6 +158,13 @@ def run_contract_verifier(state, *, project_root, criterion_id, repro_input=None
         "repro_input_digest": outcome["repro_input_digest"],
         "block_reason": outcome["block_reason"],
     }
+
+
+def _frozen_commands(contract):
+    try:
+        return frozen_verifier_commands(contract)
+    except AcceptanceContractError as exc:
+        raise EvidenceFailure(str(exc)) from exc
 
 
 def _blocked_receipt(contract, policy, criterion_id, command, reason):

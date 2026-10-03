@@ -78,16 +78,17 @@ def prepare_acceptance_contract_import_operation(raw, *, session_id, compatibili
 def acceptance_contract_status(state: object) -> dict:
     if not isinstance(state, dict):
         raise EvidenceFailure("state-invalid")
-    contract = state.get("acceptance_contract")
-    if not isinstance(contract, dict):
+    if "acceptance_contract" not in state:
         return status(None)
-    stored = dict(contract)
-    binding = stored.pop("verifier_policy", None)
-    result = status(stored)
-    if result["present"]:
-        result["digest"] = canonical_contract_digest(contract)
-        result["imported_at"] = contract.get("imported_at")
-        result["verifier_policy"] = binding
+    contract = state["acceptance_contract"]
+    if not isinstance(contract, dict):
+        raise EvidenceFailure("acceptance-contract-invalid")
+    try:
+        result = status(contract)
+    except AcceptanceContractError as exc:
+        raise EvidenceFailure(str(exc)) from exc
+    result["imported_at"] = contract.get("imported_at")
+    result["verifier_policy"] = contract.get("verifier_policy")
     return result
 
 
@@ -132,9 +133,11 @@ def run_acceptance_contract_status_cli(args, services) -> str:
     cwd = Path.cwd()
     state_file = _state_file(cwd, services)
     repository = services.repository(cwd, state_file, stamp=False, strict_read=True)
-    with repository.transaction():
-        data = repository.load()
     try:
+        with repository.transaction():
+            data = repository.load()
         return json.dumps(acceptance_contract_status(data), ensure_ascii=False, indent=2)
     except EvidenceFailure as exc:
         services.fail(exc.code, 2)
+    except AcceptanceContractError as exc:
+        services.fail(str(exc), 2)

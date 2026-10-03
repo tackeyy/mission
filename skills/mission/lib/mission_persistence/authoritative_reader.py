@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Tuple, Union
 
-from mission_kernel import MissionState, decode_mission_state, project_legacy_document
+from mission_kernel import MissionState, decode_mission_state
 from mission_kernel.fresh_review import FreshReviewError, decode_projection
 from mission_kernel.codec_v4 import MissionStateDecodeError
 from mission_kernel.json_codec import (
@@ -34,7 +34,9 @@ from mission_common import (
     session_role,
 )
 
-from .fenced_commit import FencedCommitError, LocalFencedRepository
+from .fenced_commit import (
+    FencedCommitError, LocalFencedRepository, canonical_state_encoding, project_legacy_document,
+)
 from .repository_binding import (
     RepositoryFormat,
     RepositorySelectionError,
@@ -274,6 +276,15 @@ def _decode_legacy_compatibility_bytes(source: bytes) -> dict[str, Any]:
     return document
 
 
+def _legacy_compatibility_bytes(document: dict[str, Any]) -> bytes:
+    # Retain the historical non-finite-score compatibility while checking
+    # that the complete document can be safely rendered as UTF-8.
+    with canonical_state_encoding():
+        return json.dumps(
+            document, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")
+
+
 def _legacy_compatibility_snapshot(
     document: dict[str, Any],
     *,
@@ -288,6 +299,7 @@ def _legacy_compatibility_snapshot(
     normalizing only the typed convenience fields carried by the snapshot.
     """
 
+    _legacy_compatibility_bytes(document)
     if "schema" in document or {"commit", "state_generation"} & set(document):
         raise ValueError("legacy compatibility input uses an unsupported format")
     decode_projection(document)
@@ -464,12 +476,7 @@ def legacy_compatibility_snapshot_from_document(
 ) -> AuthoritativeSnapshot:
     """Rehydrate an already verified legacy aggregate snapshot document."""
 
-    source = json.dumps(
-        document,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    source = _legacy_compatibility_bytes(document)
     return _legacy_compatibility_snapshot(
         copy.deepcopy(document),
         state_bytes=source,
@@ -488,6 +495,10 @@ def _snapshot_from_document(
     project_root: Optional[str] = None,
     raw_document: Optional[FrozenJsonObject] = None,
 ) -> AuthoritativeSnapshot:
+    # Flat documents must be renderable too. Validate encoding without
+    # replacing their retained bytes or changing any persisted value.
+    with canonical_state_encoding():
+        encode_json_value(document)
     values = thaw_json_object(document)
     decode_projection(values)
     loop_active = values.get("loop_active", False)
@@ -683,6 +694,10 @@ def _snapshot_from_k1_state(
             raw_document=raw_document,
         )
 
+    # Raw extensions also reach audit snapshots, even when the compatibility
+    # consumer projection does not expose them.
+    with canonical_state_encoding():
+        encode_json_value(raw_document)
     consumer_document = _canonical_v5_consumer_document(state, raw_document)
     values = thaw_json_object(consumer_document)
     control = state.control
@@ -767,7 +782,8 @@ def authoritative_snapshot_from_document(
     frozen = freeze_json_value(document)
     if not isinstance(frozen, FrozenJsonObject):
         raise ValueError("authoritative session state must be an object")
-    state_bytes = encode_json_value(frozen)
+    with canonical_state_encoding():
+        state_bytes = encode_json_value(frozen)
     values = thaw_json_object(frozen)
     if "schema" in values or {"commit", "state_generation"} & set(values):
         raise ValueError("sealed state document uses an unsupported format")
