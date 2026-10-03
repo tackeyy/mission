@@ -24,6 +24,7 @@ from mission_kernel.commands import (
     ClaimsLedgerEffectClaim,
     GenerateClaimsLedger,
     ImportAcceptanceContract,
+    PrepareFreshReview,
     ClearProgress,
     Command,
     ContextManifestEffectClaim,
@@ -224,7 +225,14 @@ def execute_evidence_operation(repository: object, prepare) -> dict:
     source = execution.replayed_document if replayed else projection
     if not isinstance(source, dict):
         raise EvidenceFailure("evidence-replay-document-invalid")
-    if isinstance(command, UpdateProgress):
+    if isinstance(command, PrepareFreshReview):
+        from mission_kernel.fresh_review import decode_projection, request_document
+        matches = [item for item in decode_projection(source).requests
+                   if item.prepare_operation_id == command.operation_id]
+        if len(matches) != 1 or matches[0].request != command.request:
+            raise EvidenceFailure("fresh-review-projection-mismatch")
+        payload = {"request": request_document(matches[0].request)}
+    elif isinstance(command, UpdateProgress):
         if not _record_matches(
             source.get("progress"), payload.get("progress"), replayed, prepared,
             source,

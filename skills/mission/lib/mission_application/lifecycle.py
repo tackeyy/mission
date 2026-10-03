@@ -423,6 +423,11 @@ def initialize(
             reason="new-mission-session-undecodable",
         ) from error
     document = current.document_copy()
+    if "fresh_review" in document:
+        raise LifecycleFailure(
+            "fresh-review-reinitialization-forbidden",
+            reason="fresh-review-reinitialization-forbidden",
+        )
     diagnosis = diagnose_terminalizable_state(document)
     if diagnosis == TERMINALIZABLE_UNDECODABLE:
         raise LifecycleFailure(

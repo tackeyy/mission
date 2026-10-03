@@ -32,6 +32,7 @@ COMMAND_OWNER_REGISTRY = {
         "push-score",
         "review-finalize",
         "review-import",
+        "fresh-review prepare",
         "supersede-reviews",
     ),
     **_owned(
@@ -80,6 +81,7 @@ COMMAND_OWNER_REGISTRY = {
         "R1.query",
         "codex-preflight",
         "freshness",
+        "fresh-review status",
         "get",
         "lane-report",
         "learning brief",
