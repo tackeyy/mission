@@ -127,11 +127,11 @@ def prepare_fresh_review(state, *, root, options, operation_id, intent_digest, p
 
 
 def run_fresh_review_prepare_cli(args, services):
-    root = Path.cwd()
-    state_file = services.resolve_state_file(root)
-    if not state_file.exists():
-        services.fail('fresh-review-state-missing', 2)
     try:
+        root = Path.cwd()
+        state_file = services.resolve_state_file(root)
+        if not state_file.exists():
+            services.fail('fresh-review-state-missing', 2)
         options = _options(args)
         intent = canonical_digest({'type': 'fresh-review-prepare', 'options': options})
         payload = canonical_digest(options)
@@ -155,7 +155,9 @@ def run_fresh_review_prepare_cli(args, services):
                                                load_policy=services.load_verifier_policy),
         )
         return json.dumps({'ok': True, **result}, ensure_ascii=False, indent=2)
-    except (FreshReviewError, EvidenceFailure, CliOperationRejected, VerifierPolicyError, VerificationRunnerError, OSError) as exc:
+    except OSError:
+        services.fail('fresh-review-io-unavailable', 2)
+    except (FreshReviewError, EvidenceFailure, CliOperationRejected, VerifierPolicyError, VerificationRunnerError) as exc:
         services.fail(getattr(exc, 'code', str(exc)), 2)
 
 
