@@ -76,7 +76,8 @@ def _rewrite_fixture_document(root, mutate):
     path.write_text(json.dumps(head, sort_keys=True, separators=(',', ':')))
 
 
-def _persist_fixture(root, state, schema, *, closed_v5=False, escaped_contract=False):
+def _persist_fixture(root, state, schema, *, closed_v5=False, escaped_contract=False,
+                     operation_id="fixture-genesis"):
     """Arrange flat v4 or a fenced v5 container, without generic set.
 
     Normal v5 genesis retains v4 payloads. Closed schema-5 payloads are an
@@ -92,7 +93,7 @@ def _persist_fixture(root, state, schema, *, closed_v5=False, escaped_contract=F
         # escape must reach the reader without using the writer to admit it.
         safe = dict(state)
         safe.pop('acceptance_contract')
-        _persist_fixture(root, safe, schema, closed_v5=closed_v5)
+        _persist_fixture(root, safe, schema, closed_v5=closed_v5, operation_id=operation_id)
         def inject(document):
             document.get('extensions', document)['acceptance_contract'] = state['acceptance_contract']
         _rewrite_fixture_document(root, inject)
@@ -107,7 +108,7 @@ def _persist_fixture(root, state, schema, *, closed_v5=False, escaped_contract=F
     path.unlink()
     fixture_time = datetime.now(timezone.utc)
     repository = LocalFencedRepository(root / ".mission-state", clock=lambda: fixture_time)
-    request = _request(operation_id="fixture-genesis", lease_id="test-lease",
+    request = _request(operation_id=operation_id, lease_id="test-lease",
                        command_type="init", argv=("init", "completion fixture"))
     admitted = repository.begin(request)
     if not closed_v5:

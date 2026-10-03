@@ -2104,7 +2104,9 @@ class LocalFencedRepository:
         try:
             state = decode_mission_state(state_bytes)
         except Exception as exc:
-            raise FencedCommitError(getattr(exc, "code", "record-invalid"), "state generation is invalid") from exc
+            code = getattr(exc, "code", "record-invalid")
+            detail = code if code.startswith("fresh-review-") else "state generation is invalid"
+            raise FencedCommitError(code, detail) from exc
         with canonical_state_encoding():
             encode_json_object(decode_json_object(state_bytes))
         if state.identity.session_id is not None and state.identity.session_id != session_id:

@@ -685,12 +685,21 @@ def _decode_v4_object(document: Mapping[str, Any], frozen: FrozenJsonObject) -> 
         extensions=FrozenJsonObject(()),
         legacy_passthrough=frozen,
         a4=_decode_a4_projection(document, handoff, "$.a4"),
+        fresh_review=_decode_fresh_review_projection(document, "$.fresh_review"),
     )
 
 
 def _decode_v4_state(source: bytes) -> MissionState:
     frozen = decode_json_object(source)
     return _decode_v4_object(thaw_json_object(frozen), frozen)
+
+
+def _decode_fresh_review_projection(document, path):
+    from .fresh_review import decode_projection, FreshReviewError
+    try:
+        return decode_projection(document)
+    except FreshReviewError as exc:
+        raise _fail(exc.code, path, exc.code) from exc
 
 
 def _decode_a4_projection(document: Mapping[str, object], handoff: object, path: str):
@@ -922,6 +931,8 @@ def project_legacy_document(state: MissionState) -> bytes:
         document.pop("executor_handoff", None)
     else:
         document["executor_handoff"] = _handoff_json(state.handoff)
+    from .fresh_review import validate_projection_backing
+    validate_projection_backing(document, state.fresh_review)
     project_v4_a4(document, state.a4, state.handoff)
     input_refs = [reference for reference in state.reviews if isinstance(reference, ReviewInputRef)]
     if (

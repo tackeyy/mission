@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+from mission_kernel.fresh_review import FreshReviewError
 from mission_kernel.json_codec import decode_json_object, thaw_json_object
 
 from .authoritative_reader import read_authoritative_snapshot
@@ -326,7 +327,7 @@ class RecoverableAggregateIndex:
                     + b"\0"
                     + str(snapshot.commit_digest).encode("ascii")
                 )
-        except AggregateIndexProtocolError:
+        except (AggregateIndexProtocolError, FreshReviewError):
             raise
         except Exception as exc:
             raise AggregateIndexProtocolError("authority-unreadable", str(exc)) from exc
@@ -672,6 +673,8 @@ class RecoverableAggregateIndex:
                         None if path.name == "state.json" else session_id
                     ),
                 )
+            except FreshReviewError:
+                raise
             except Exception as exc:
                 raise AggregateIndexProtocolError(
                     "authority-unreadable", "authoritative session cannot be inspected"

@@ -419,6 +419,9 @@ def initialize(
     try:
         current = repository.current_mission()
     except (OSError, TypeError, UnicodeError, ValueError) as error:
+        code = getattr(error, "code", "")
+        if code.startswith("fresh-review-"):
+            raise LifecycleFailure(code, reason=code) from error
         reason = (
             "canonical-json-invalid"
             if getattr(error, "code", None) == "canonical-json-invalid"
@@ -430,6 +433,11 @@ def initialize(
             reason=reason,
         ) from error
     document = current.document_copy()
+    if "fresh_review" in document:
+        raise LifecycleFailure(
+            "fresh-review-reinitialization-forbidden",
+            reason="fresh-review-reinitialization-forbidden",
+        )
     diagnosis = diagnose_terminalizable_state(document)
     if diagnosis == TERMINALIZABLE_UNDECODABLE:
         raise LifecycleFailure(

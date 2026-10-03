@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+from mission_kernel.fresh_review import FreshReviewError
 from mission_kernel.errors import CanonicalStateEncodingError
 
 from dataclasses import dataclass
@@ -114,7 +115,7 @@ def _review_group_members(request, services):
             ):
                 raise ValueError("review group has an invalid generation")
             members.append((generation, state_path, state, payload, identity))
-    except CanonicalStateEncodingError:
+    except (CanonicalStateEncodingError, FreshReviewError):
         raise
     except (OSError, json.JSONDecodeError, ValueError) as error:
         raise SupersedeReviewsFailure(str(error)) from error

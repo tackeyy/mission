@@ -168,6 +168,7 @@ def _publication_claims(command, command_type):
     return tuple(
         (field, getattr(command, field))
         for field in EFFECT_FIELDS_BY_COMMAND_TYPE.get(command_type, ())
+        if getattr(command, field) is not None
     )
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 
+from mission_kernel.fresh_review import FreshReviewError
 from mission_kernel.errors import CanonicalStateEncodingError
 
 
@@ -282,14 +283,14 @@ def run_cleanup_stale(request, services):
                                     "pid": pid,
                                     "mission": (data.get("mission") or "")[:80],
                                 })
-                except CanonicalStateEncodingError:
+                except (CanonicalStateEncodingError, FreshReviewError):
                     raise
                 except Exception as error:
                     results["errors"].append({
                         "path": services.path_to_string(state_file),
                         "error": str(error),
                     })
-            except CanonicalStateEncodingError:
+            except (CanonicalStateEncodingError, FreshReviewError):
                 raise
             except Exception as error:
                 results["errors"].append({

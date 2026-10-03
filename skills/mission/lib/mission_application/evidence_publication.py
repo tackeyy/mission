@@ -452,6 +452,7 @@ def publication_blob_shapes_by_command_type():
 # claim does not and must not gain -- adding it would change the kernel
 # command schema, and with it every operation identity already recorded.
 PUBLICATION_PATH_FIELD_BY_COMMAND_TYPE = {
+    "fresh-review-prepare": "target",
     "generate-claims-ledger": "publication_path",
     "generate-context-manifest": "publication_path",
     "update-progress": "target",
@@ -461,6 +462,7 @@ PUBLICATION_PATH_FIELD_BY_COMMAND_TYPE = {
     "export-artifact": "target",
 }
 EFFECT_FIELDS_BY_COMMAND_TYPE = {
+    "fresh-review-prepare": ("effect",),
     "export-artifact": ("artifact_effect", "export_effect"),
     "generate-claims-ledger": ("effect",),
     "generate-context-manifest": ("effect",),

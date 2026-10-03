@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from mission_kernel.fresh_review import FreshReviewError
 from mission_kernel.errors import CanonicalStateEncodingError
 
 
@@ -221,7 +222,7 @@ def initialize_legacy_v4(request, services):
         for other_state_file in services.iter_state_files(cwd):
             try:
                 other = services.read_init_peer_state(other_state_file)
-            except CanonicalStateEncodingError:
+            except (CanonicalStateEncodingError, FreshReviewError):
                 raise
             except Exception:
                 continue
@@ -341,6 +342,9 @@ def initialize_legacy_v4(request, services):
             try:
                 existing_data = services.read_legacy_json_file(state_target)
                 services.validate_specialist_public_state(existing_data)
+                if "fresh_review" in existing_data:
+                    services.printer("ERROR: fresh-review-reinitialization-forbidden", file=services.stderr)
+                    services.system_exit(2)
                 if not request.new_mission and "acceptance_contract" in existing_data:
                     reason = (
                         "acceptance-contract-reinitialization-forbidden"
@@ -480,7 +484,7 @@ def initialize_legacy_v4(request, services):
                         f"上書きで復旧します: {move_error}",
                         file=services.stderr,
                     )
-            except CanonicalStateEncodingError:
+            except (CanonicalStateEncodingError, FreshReviewError):
                 raise
             except Exception as error:
                 services.printer(
@@ -505,7 +509,7 @@ def initialize_legacy_v4(request, services):
             for state_path in services.iter_state_files(cwd):
                 try:
                     prior = services.read_init_peer_state(state_path)
-                except CanonicalStateEncodingError:
+                except (CanonicalStateEncodingError, FreshReviewError):
                     raise
                 except (OSError, ValueError, services.fenced_commit_error):
                     continue

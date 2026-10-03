@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from mission_kernel.fresh_review import FreshReviewError
 from mission_kernel.errors import CanonicalStateEncodingError
 
 from dataclasses import dataclass
@@ -138,7 +139,7 @@ def decline_specialist_selection(
         with repository.transaction():
             repository.load()
             execution = repository.execute(command)
-    except CanonicalStateEncodingError:
+    except (CanonicalStateEncodingError, FreshReviewError):
         raise
     except (OSError, TypeError, ValueError) as error:
         raise SpecialistSelectionFailure(str(error)) from error

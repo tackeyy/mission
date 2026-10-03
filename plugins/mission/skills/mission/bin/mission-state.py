@@ -231,6 +231,7 @@ from mission_application.evidence import (  # noqa: E402
     validate_context_iteration_override,
     verify_published_evidence_effects,
 )
+from mission_application.fresh_review import run_fresh_review_prepare_cli, run_fresh_review_status_cli
 from mission_application.acceptance import (  # noqa: E402
     AcceptanceContractCliServices,
     run_acceptance_contract_import_cli,
@@ -383,13 +384,14 @@ from mission_persistence.fenced_commit import (  # noqa: E402
 )
 from mission_persistence.reinitialization import V5MissionReinitializer  # noqa: E402
 from mission_persistence.local_uow import VerifiedBlobSet  # noqa: E402
+from mission_kernel.fresh_review import FreshReviewError
 from mission_persistence.authoritative_reader import (  # noqa: E402
     AuthoritativeSnapshot,
     authoritative_snapshot_from_document,
     expected_session_id_for_live_path,
     is_live_session_path,
     read_authoritative_snapshot,
-    read_session_json, preflight_session_paths,
+    read_session_json, preflight_session_paths, load_authoritative_snapshot,
     read_legacy_compatibility_snapshot,
     summarize_authoritative_pass_rate_population,
 )
@@ -600,50 +602,13 @@ def _load_authoritative_state(
     legacy_compatibility: bool = False,
     allow_missing_schema_session_mismatch: bool = False,
 ) -> tuple[AuthoritativeSnapshot, dict]:
-    expected_session_id = expected_session_id_for_live_path(sf)
-    try:
-        if archive_validation is None:
-            archive_validation = _validated_archive_for_state_path(sf)
-        if archive_validation is not None:
-            snapshot = read_validated_archive_authoritative_snapshot(
-                archive_validation
-            )
-        else:
-            snapshot = read_authoritative_snapshot(
-                sf, expected_session_id=expected_session_id
-            )
-    except CanonicalStateEncodingError:
-        raise
-    except Exception as original_error:
-        if legacy_compatibility and archive_validation is None:
-            try:
-                snapshot = read_legacy_compatibility_snapshot(
-                    sf,
-                    expected_session_id=expected_session_id,
-                    allow_missing_schema_session_mismatch=(
-                        allow_missing_schema_session_mismatch
-                    ),
-                )
-            except CanonicalStateEncodingError:
-                raise
-            except MissionStateDecodeError as exc:
-                if exc.code in {
-                    "schema-version-type", "unsupported-schema-version"
-                }:
-                    raise UnsupportedSchemaVersionError(str(exc)) from exc
-                raise original_error
-            except Exception:
-                raise original_error
-        elif isinstance(original_error, MissionStateDecodeError):
-            if original_error.code in {
-                "schema-version-type", "unsupported-schema-version"
-            }:
-                raise UnsupportedSchemaVersionError(
-                    str(original_error)
-                ) from original_error
-            raise
-        else:
-            raise
+    snapshot = load_authoritative_snapshot(
+        sf, archive_validation, legacy_compatibility=legacy_compatibility,
+        allow_missing_schema_session_mismatch=allow_missing_schema_session_mismatch,
+        archive_resolver=_validated_archive_for_state_path,
+        archive_reader=read_validated_archive_authoritative_snapshot,
+        schema_error_type=UnsupportedSchemaVersionError,
+    )
     return snapshot, snapshot.document_copy()
 
 
@@ -1771,7 +1736,7 @@ def _reject_fenced_lease_for_cli(
     try:
         target_path = state_path or resolve_state_file(Path.cwd())
         _snapshot, state = _load_authoritative_state(target_path)
-    except CanonicalStateEncodingError:
+    except (CanonicalStateEncodingError, FreshReviewError):
         raise
     except (OSError, ValueError, FencedCommitError):
         pass
@@ -3221,7 +3186,7 @@ def _warn_s3_file_overlap(cwd: Path, planned_files: list[str], cur_sid: str) -> 
     for sf_other in _iter_state_files(cwd):
         try:
             other = read_session_json(sf_other)
-        except CanonicalStateEncodingError:
+        except (CanonicalStateEncodingError, FreshReviewError):
             raise
         except Exception:
             continue
@@ -6600,7 +6565,7 @@ def _artifact_profile_coverage(cwd: Path, data: dict) -> dict:
     for path in _iter_state_files(cwd, include_archive=True):
         try:
             candidate = read_session_json(path)
-        except CanonicalStateEncodingError:
+        except (CanonicalStateEncodingError, FreshReviewError):
             raise
         except (OSError, UnicodeError, ValueError, TypeError):
             continue
@@ -6965,7 +6930,7 @@ def _read_init_peer_state(path: Path) -> dict:
     try:
         _snapshot, document = _load_authoritative_state(path)
         return document
-    except CanonicalStateEncodingError:
+    except (CanonicalStateEncodingError, FreshReviewError):
         raise
     except (OSError, ValueError, FencedCommitError):
         return _read_legacy_json_file(path)
@@ -7815,7 +7780,7 @@ def _parallel_status(store: _ParallelGroupStore, group_id: str) -> tuple[Path, d
                 store.sessions_fd, name, limit=4 * 1024 * 1024
             )
             state = read_session_json(session_dir(store.cwd), name=name, source=state_content)
-        except CanonicalStateEncodingError:
+        except (CanonicalStateEncodingError, FreshReviewError):
             raise
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             raise ValueError("parallel group session state is malformed or unsafe") from exc
@@ -8713,7 +8678,7 @@ def cmd_next(args):
         snapshot, data = _load_authoritative_state(
             sf, legacy_compatibility=True
         )
-    except CanonicalStateEncodingError:
+    except (CanonicalStateEncodingError, FreshReviewError):
         raise
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -8841,7 +8806,7 @@ def _guard_resolved_root(value: Optional[str]) -> Optional[str]:
 def _guard_session_fact(sf: Path) -> GuardSessionFact:
     try:
         snapshot, _document = _load_authoritative_state(sf)
-    except CanonicalStateEncodingError:
+    except (CanonicalStateEncodingError, FreshReviewError):
         raise
     except Exception as exc:
         return GuardSessionFact(
@@ -9269,7 +9234,7 @@ def cmd_freshness(args):
         raise SystemExit(2) from exc
     try:
         snapshot, _data = _load_authoritative_state(sf)
-    except CanonicalStateEncodingError:
+    except (CanonicalStateEncodingError, FreshReviewError):
         raise
     except Exception as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
@@ -9424,7 +9389,7 @@ def cmd_codex_preflight(args):
     if state_present:
         try:
             snapshot, data = _load_authoritative_state(sf, legacy_compatibility=True)
-        except CanonicalStateEncodingError:
+        except (CanonicalStateEncodingError, FreshReviewError):
             raise
         except Exception:
             snapshot = None
@@ -9550,7 +9515,7 @@ def _permission_preflight(cwd: Path) -> dict:
         }
     try:
         _snapshot, data = _load_authoritative_state(sf)
-    except CanonicalStateEncodingError:
+    except (CanonicalStateEncodingError, FreshReviewError):
         raise
     except (OSError, ValueError, FencedCommitError):
         # Preserve the established v1-v4 schema diagnostic instead of
@@ -9558,7 +9523,7 @@ def _permission_preflight(cwd: Path) -> dict:
         try:
             legacy_candidate = _read_legacy_json_file(sf)
             _validate_schema_version(legacy_candidate)
-        except CanonicalStateEncodingError:
+        except (CanonicalStateEncodingError, FreshReviewError):
             raise
         except UnsupportedSchemaVersionError:
             raise
@@ -9716,7 +9681,7 @@ def _record_permission_probe_observation(
                 file=sys.stderr,
             )
         return result.halt_recorded, result.terminal_outcome
-    except CanonicalStateEncodingError:
+    except (CanonicalStateEncodingError, FreshReviewError):
         raise
     except UnsupportedSchemaVersionError:
         raise
@@ -10502,7 +10467,7 @@ def _force_envelope_replayed(cwd: Path, envelope: dict) -> bool:
             if not isinstance(recorded, dict):
                 continue
             validated = validate_recorded_envelope(recorded)
-        except CanonicalStateEncodingError:
+        except (CanonicalStateEncodingError, FreshReviewError):
             raise
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
             # A malformed record must never become a bypass; it is not a
@@ -13985,6 +13950,14 @@ def cmd_verification_claims(args):
     print(rendered)
 
 
+def cmd_fresh_review_prepare(args):
+    print(run_fresh_review_prepare_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES))
+
+
+def cmd_fresh_review_status(args):
+    print(run_fresh_review_status_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES))
+
+
 def cmd_acceptance_contract_import(args):
     print(run_acceptance_contract_import_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES))
 
@@ -15021,7 +14994,7 @@ def cmd_list(args):
                     "mission": snapshot.mission[:80],
                     "updated_at": snapshot.updated_at,
                 })
-            except CanonicalStateEncodingError:
+            except (CanonicalStateEncodingError, FreshReviewError):
                 raise
             except Exception as e:
                 results.append({"path": str(sf), "error": str(e)})
@@ -15136,7 +15109,7 @@ def cmd_lane_report(args):
                     legacy_compatibility=True,
                     allow_missing_schema_session_mismatch=True,
                 )
-            except CanonicalStateEncodingError:
+            except (CanonicalStateEncodingError, FreshReviewError):
                 raise
             except Exception as exc:
                 if is_live_session_path(sf):
@@ -15214,7 +15187,7 @@ def cmd_halt(args):
                     )
                     if changed:
                         halted.append(str(proj))
-            except CanonicalStateEncodingError:
+            except (CanonicalStateEncodingError, FreshReviewError):
                 raise
             except Exception as e:
                 print(f"WARN: skip {sf}: {e}", file=sys.stderr)
@@ -15281,7 +15254,7 @@ def _collect_states(
                 legacy_compatibility=True,
                 allow_missing_schema_session_mismatch=True,
             )
-        except CanonicalStateEncodingError:
+        except (CanonicalStateEncodingError, FreshReviewError):
             raise
         except UnsupportedSchemaVersionError:
             raise
@@ -15358,7 +15331,7 @@ def _collect_learning_brief_states(
             try:
                 canonical_bytes = read_state_archive_file_bytes(project_root, canonical_path)
                 canonical_state = read_session_json(canonical_path, source=canonical_bytes)
-            except CanonicalStateEncodingError:
+            except (CanonicalStateEncodingError, FreshReviewError):
                 raise
             except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
                 continue
@@ -15833,7 +15806,7 @@ def _publish_state_archive_compaction(
         canonical_bytes = read_state_archive_file_bytes(cwd, canonical_ref)
         canonical_data = read_session_json(canonical, source=canonical_bytes)
         target_bytes = read_state_archive_file_bytes(cwd, target_ref)
-    except CanonicalStateEncodingError:
+    except (CanonicalStateEncodingError, FreshReviewError):
         raise
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise WorktreeArchiveError("canonical state is unreadable") from exc
@@ -16375,7 +16348,7 @@ def _add_review_parsers(subparsers) -> None:
 
     p_schema = sub.add_parser("schema", help="入力契約のスキーマを出力する (#683)")
     p_schema.add_argument("--contract", required=True,
-                          choices=("planning-adopt-core", "review-import", "acceptance-contract-import"),
+                          choices=("planning-adopt-core", "review-import", "acceptance-contract-import", "fresh-review-prepare"),
                           help="出力する契約")
     p_schema.set_defaults(func=cmd_schema)
     p_score = sub.add_parser("push-score", help="score_history に採点結果を append (orchestrator が Phase 5 直後に呼ぶ)")
@@ -16495,6 +16468,21 @@ def _add_review_parsers(subparsers) -> None:
     p_verify_claims.add_argument("--doc-digest", required=True)
     p_verify_claims.add_argument("--out", required=True)
     p_verify_claims.set_defaults(func=cmd_verification_claims)
+    p_fresh = sub.add_parser("fresh-review", help="typed fresh-review request を管理（起動は未対応）")
+    p_fresh_sub = p_fresh.add_subparsers(dest="fresh_review_command", required=True)
+    p_prepare = p_fresh_sub.add_parser("prepare", help="候補と入力を凍結し、一回使用の request を保存")
+    p_prepare.add_argument("--perspective", required=True)
+    p_prepare.add_argument("--adapter-registration-digest", required=True, help="起動前に登録と照合する binding（起動許可ではない）")
+    p_prepare.add_argument("--criterion", action="append", help="探索する criterion（既定: required 全件）")
+    p_prepare.add_argument("--allowed-tool", action="append", default=[], choices=("read-candidate", "replay-verifier"))
+    p_prepare.add_argument("--wall-time-sec", type=int, default=300)
+    p_prepare.add_argument("--max-tool-calls", type=int, default=64)
+    p_prepare.add_argument("--max-replays", type=int, default=16)
+    p_prepare.add_argument("--max-output-bytes", type=int, default=262144)
+    p_prepare.add_argument("--max-packet-bytes", type=int, default=1048576)
+    p_prepare.set_defaults(func=cmd_fresh_review_prepare, command_outcome_tracking=True)
+    p_fresh_sub.add_parser("status", help="保存済み request と消費状態を表示").set_defaults(func=cmd_fresh_review_status)
+
     p_acceptance = sub.add_parser("acceptance-contract", help="immutable acceptance contract を管理")
     p_acceptance_sub = p_acceptance.add_subparsers(dest="acceptance_contract_command", required=True)
     p_acceptance_import = p_acceptance_sub.add_parser("import", help="versioned acceptance contract を一度だけ保存")
@@ -17081,8 +17069,11 @@ def main():
             print(json.dumps(envelope, ensure_ascii=False))
         raise SystemExit(2)
     except CommandOutcomeInputError:
-        print(json.dumps({"ok": False, "outcome_kind": "invalid-input"}, ensure_ascii=False))
+        print('{"ok": false, "outcome_kind": "invalid-input"}')
         raise SystemExit(2)
+    except FreshReviewError as error:
+        print(f"ERROR: {error.code}", file=sys.stderr)
+        sys.exit(2)
     except SpecialistPublicContractError as error:
         print(json.dumps({
             "ok": False,
