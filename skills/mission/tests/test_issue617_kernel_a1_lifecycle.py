@@ -247,6 +247,42 @@ def test_set_fields_use_case_gates_through_kernel_decision():
     assert repository.saved["estimate_minutes"] == 25
 
 
+@pytest.mark.parametrize('damage,reason', [
+    ('surrogate', 'canonical-json-invalid'),
+    ('score-shape', 'state-undecodable'),
+])
+def test_set_decode_distinguishes_encoding_from_other_invalid_state(damage, reason):
+    from mission_application.lifecycle import LifecycleFailure, SetFieldsRequest, set_fields
+    from mission_persistence.fenced_commit import FencedCommitError
+
+    cli = _load_cli_module('issue617_set_decode_cli')
+    state = _active_legacy_state()
+    if damage == 'surrogate':
+        state['custom_note'] = '\ud800'
+    else:
+        state['score_history'] = ['invalid score']
+    repository = _RecordingRepository(state)
+    # Exercise the application decoder with an alternate repository port;
+    # production repository load validation is covered by public CLI tests.
+    repository.load = lambda: copy.deepcopy(state)
+    error_type = FencedCommitError if damage == 'surrogate' else LifecycleFailure
+    with pytest.raises(error_type) as caught:
+        set_fields(repository, SetFieldsRequest(kvs=('custom_note=hello',),
+                   at='2026-08-22T01:00:00Z'), _set_services(cli))
+    error = caught.value
+    assert getattr(error, 'code', getattr(error, 'reason', None)) == reason
+    if damage == 'surrogate':
+        assert str(error) == 'canonical-json-invalid: state projection cannot be canonically encoded'
+    from mission_application.lifecycle import diagnose_terminalizable_state
+    if damage == 'surrogate':
+        with pytest.raises(FencedCommitError):
+            diagnose_terminalizable_state(state)
+    else:
+        assert diagnose_terminalizable_state(state) == 'undecodable'
+    assert repository.saved is None
+    assert repository.executed_transition == 'unset'
+
+
 @pytest.mark.parametrize("field", COMPLETION_ADJACENT_FIELDS)
 def test_set_fields_use_case_rejects_completion_adjacent_fields(field):
     from mission_application.lifecycle import (

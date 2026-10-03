@@ -18,6 +18,7 @@ from mission_application.cli_operation import prepare_cli_operation, CliOperatio
 from mission_application.evidence import PreparedEvidenceOperation, execute_evidence_operation
 from mission_application.verification_runner import capture_candidate, verifier_definition_digest, VerificationRunnerError
 from mission_application.verifier_policy import validate, VerifierPolicyError, SCHEMA as POLICY_SCHEMA
+from mission_persistence.fenced_commit import FencedCommitError, encode_legacy_document
 
 
 def _options(args):
@@ -176,11 +177,26 @@ def run_fresh_review_status_cli(args, services):
         services.fail(exc.code, 2)
 
 
+class StateReadError(ValueError):
+    """Application read rejection retaining the shared persistence reason."""
+
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+
 def run_read_fresh_review_checked_json(path):
+    try:
+        return _read_reserved_json(path)
+    except (FreshReviewError, FencedCommitError) as error:
+        raise StateReadError(error.code, str(error)) from error
+
+
+def _read_reserved_json(path):
     """Read legacy state without relaxing its reserved fresh-review key.
 
-    Other fields retain the existing JSON tolerance; typed authoritative
-    reads and repository loads enforce the same request decoder separately.
+    Check UTF-8 renderability while retaining historical JSON tolerance.
+    Repository loads enforce the same request decoder separately.
     """
     document = json.loads(Path(path).read_text(encoding="utf-8"))
     if isinstance(document, dict):
@@ -190,11 +206,13 @@ def run_read_fresh_review_checked_json(path):
                 read_authoritative_snapshot(path)
             except FreshReviewError:
                 raise
-            except (OSError, ValueError):
+            except (OSError, ValueError) as error:
+                if getattr(error, 'code', None) == 'canonical-json-invalid':
+                    raise
                 # Historical raw consumers tolerated other invalid evidence.
-                # This change tightens only the reserved fresh-review field.
                 pass
         else:
+            encode_legacy_document(document)
             values = document.get("extensions", {}) if document.get("schema_version") == 5 else document
             decode_projection(values)
     return document

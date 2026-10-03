@@ -137,6 +137,14 @@ def project_legacy_document(state):
         return _kernel_project_legacy_document(state)
 
 
+def encode_legacy_document(document: dict) -> bytes:
+    """Check UTF-8 renderability while retaining historical non-finite scores."""
+    with canonical_state_encoding():
+        return json.dumps(
+            document, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")
+
+
 @dataclass(frozen=True)
 class AuditRecord:
     command_type_digest: str
@@ -2125,6 +2133,8 @@ class LocalFencedRepository:
             code = getattr(exc, "code", "record-invalid")
             detail = code if code.startswith("fresh-review-") else "state generation is invalid"
             raise FencedCommitError(code, detail) from exc
+        with canonical_state_encoding():
+            encode_json_object(decode_json_object(state_bytes))
         if state.identity.session_id is not None and state.identity.session_id != session_id:
             raise FencedCommitError("lineage-mismatch", "state session identity differs")
         if not isinstance(state.lease, FencedLease) or state.lease.fencing_epoch != commit.fencing_epoch:

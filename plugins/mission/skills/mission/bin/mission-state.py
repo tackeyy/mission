@@ -383,7 +383,7 @@ from mission_persistence.fenced_commit import (  # noqa: E402
 )
 from mission_persistence.reinitialization import V5MissionReinitializer  # noqa: E402
 from mission_persistence.local_uow import VerifiedBlobSet  # noqa: E402
-from mission_application.fresh_review import FreshReviewError, run_read_fresh_review_checked_json
+from mission_application.fresh_review import FreshReviewError, StateReadError, run_read_fresh_review_checked_json
 from mission_persistence.authoritative_reader import (  # noqa: E402
     AuthoritativeSnapshot,
     authoritative_snapshot_from_document,
@@ -8070,8 +8070,8 @@ def _activity_state_file(cwd: Path) -> Path:
 def _read_legacy_json_file(path: Path) -> dict:
     try:
         return run_read_fresh_review_checked_json(path)
-    except FreshReviewError as error:
-        print(f"ERROR: {error.code}", file=sys.stderr)
+    except StateReadError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
         raise SystemExit(2)
 
 

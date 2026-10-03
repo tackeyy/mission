@@ -368,3 +368,67 @@ def test_legacy_tolerance_and_absent_fresh_review_are_preserved(completion_sessi
         assert result.returncode == 0, result.stderr
         assert json.loads(result.stdout)['acceptance_contract'] is None
         assert _public_bytes(root) == before
+
+
+@pytest.mark.parametrize('args', [
+    ('fresh-review', 'status'),
+    ('set', 'complexity=Simple'),
+    ('advance', '--phase', 'planning'),
+    ('activity', 'start', '--kind', 'active', '--reason', 'implementation'),
+    ('progress', 'get', '--json'),
+], ids=['status', 'set', 'advance', 'activity', 'progress'])
+def test_repository_routes_reject_unencodable_state_without_publication(completion_session, run_cli, args):
+    root, state, schema = completion_session
+    state['acceptance_contract']['criteria'][0]['expected'] = '\ud800'
+    _persist_fixture(root, state, schema, escaped_contract=True)
+    result = _reject_unchanged(run_cli, root, args,
+                               'canonical-json-invalid', raw_control=True)
+    output = result.stdout + result.stderr
+    assert 'state projection cannot be canonically encoded' in output
+    assert 'UnicodeEncodeError' not in output
+    assert 'surrogates not allowed' not in output
+
+
+def test_repository_status_keeps_unicode_and_historical_nonfinite_scores(completion_session, run_cli):
+    root, state, schema = completion_session
+    state['acceptance_contract']['criteria'][0]['expected'] = '日本語 café'
+    _persist_fixture(root, state, schema)
+    before = _public_bytes(root)
+    result = run_cli('fresh-review', 'status', cwd=root)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout) == {'requests': []}
+    assert _public_bytes(root) == before
+    if schema == 4:
+        # Historical get uses its compatibility reader. Repository selection
+        # already rejects non-finite scores for status; retain that distinction.
+        state['score_history'][0]['composite'] = float('nan')
+        path = root / '.mission-state' / 'sessions' / 'test.json'
+        path.write_text(json.dumps(state, ensure_ascii=False))
+        before = _public_bytes(root)
+        result = run_cli('get', cwd=root)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert json.loads(result.stdout)['acceptance_contract']['criteria'][0]['expected'] == '日本語 café'
+        assert _public_bytes(root) == before
+
+
+def test_repository_read_port_rejects_unencodable_state(completion_session):
+    import contextlib
+    from mission_persistence.fenced_commit import FencedCommitError, LocalFencedRepository
+    from mission_persistence.legacy_v4 import LegacyV4Repository
+
+    root, state, schema = completion_session
+    state['acceptance_contract']['criteria'][0]['expected'] = '\ud800'
+    _persist_fixture(root, state, schema, escaped_contract=True)
+    path = root / '.mission-state' / 'sessions' / 'test.json'
+    repository = (LocalFencedRepository(path.parent.parent) if schema == 5 else
+                  LegacyV4Repository(lock=contextlib.nullcontext,
+                      read_state=lambda: json.loads(path.read_bytes()),
+                      write_state=lambda *_args, **_kwargs: pytest.fail('unexpected publication'),
+                      backup_state=lambda: pytest.fail('unexpected backup'),
+                      add_to_aggregate=lambda: None, remove_from_aggregate=lambda: None))
+    before = _public_bytes(root)
+    with pytest.raises(FencedCommitError) as caught:
+        repository.read('test')
+    assert caught.value.code == 'canonical-json-invalid'
+    assert str(caught.value) == 'canonical-json-invalid: state projection cannot be canonically encoded'
+    assert _public_bytes(root) == before
