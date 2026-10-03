@@ -66,7 +66,7 @@ prepare・dispatch 直前・output import 直前・completion 直前に同じ ma
 adapter へ渡す候補は capture 済みの読取専用 materialization に限定する。
 
 budget の repository 上限は wall time 300 秒、tool calls 64、replays 16、output 256 KiB とする。
-host policy はこれより小さい上限に制限できる。入力 packet は 1 MiB 上限とし、超過は blocked。
+host policy はこれより小さい上限に制限できる。入力 packet は 1 MiB 上限とする。prepare の時点で超過が分かれば request を保存しない command 拒否、dispatch 直前の再取得で超過した場合は `blocked` 終端とする。
 clock/出力量/replay 数は application が計測し、tool calls と filesystem/network 能力は host adapter が
 強制する。能力を強制できない host は起動しない。金額予算・repair 予約は後続 budget 作業へ残す。
 
