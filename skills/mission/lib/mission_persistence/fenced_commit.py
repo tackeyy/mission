@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Callable, Optional, Union
 
-from mission_kernel import decode_mission_state, decode_snapshot, project_legacy_document
+from mission_kernel import decode_mission_state, decode_snapshot, project_legacy_document as _kernel_project_legacy_document
 from mission_kernel.codec_v5 import encode_v5_state
 from mission_kernel.identifiers import TOKEN128_RE
 from mission_kernel.json_codec import (
@@ -112,6 +112,29 @@ class FencedCommitError(ValueError):
         super().__init__(detail)
         self.code = code
         self.detail = detail
+
+
+@contextmanager
+def canonical_state_encoding():
+    """Translate projection/encoding failures at the shared persistence boundary.
+
+    Compatibility readers and writers use the same kernel encoder. Its
+    parser exceptions must remain a coded input rejection for every caller.
+    """
+    try:
+        yield
+    except FencedCommitError:
+        raise
+    except (TypeError, ValueError) as exc:
+        code = getattr(exc, "code", "canonical-json-invalid")
+        detail = str(exc) if hasattr(exc, "code") else f"{code}: state projection cannot be canonically encoded"
+        raise FencedCommitError(code, detail) from exc
+
+
+def project_legacy_document(state):
+    """Project retained state without exposing raw encoder exceptions."""
+    with canonical_state_encoding():
+        return _kernel_project_legacy_document(state)
 
 
 @dataclass(frozen=True)

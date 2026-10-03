@@ -47,7 +47,13 @@ def explicit_paths_are_supported(argv, env):
         path, separator, selector = candidate.partition("::")
         if separator and selector and path.endswith(".py") and ":" not in path and not path.startswith("/") and "\\" not in path and all(part not in {"", ".."} for part in path.split("/")):
             return False
-        return bool(urlsplit(candidate).scheme) or candidate.startswith("/") or (len(candidate) >= 3 and candidate[0].isalpha() and candidate[1:3] in {":/", ":\\"}) or any(part == ".." for part in candidate.replace("\\", "/").split("/"))
+        try:
+            scheme = urlsplit(candidate).scheme
+        except ValueError:
+            # Malformed URL syntax is an unsupported command input too.
+            # Keep this predicate total for both policy import and execution.
+            return True
+        return bool(scheme) or candidate.startswith("/") or (len(candidate) >= 3 and candidate[0].isalpha() and candidate[1:3] in {":/", ":\\"}) or any(part == ".." for part in candidate.replace("\\", "/").split("/"))
 
     def unsupported(value, *, split_option_value=False):
         if not isinstance(value, str):

@@ -139,8 +139,5 @@ def run_acceptance_contract_status_cli(args, services) -> str:
         return json.dumps(acceptance_contract_status(data), ensure_ascii=False, indent=2)
     except EvidenceFailure as exc:
         services.fail(exc.code, 2)
-    except (AcceptanceContractError, UnicodeError) as exc:
-        # A retained v4 payload inside a v5 container is projected by the
-        # reader before contract validation. Invalid Unicode must not escape
-        # that read-only boundary as an internal error.
-        services.fail(str(exc) if isinstance(exc, AcceptanceContractError) else "canonical-json-invalid", 2)
+    except AcceptanceContractError as exc:
+        services.fail(str(exc), 2)

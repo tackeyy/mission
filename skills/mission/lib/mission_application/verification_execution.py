@@ -41,11 +41,8 @@ def run_verification_receipt_cli(request, services) -> str:
         cwd, state_file, stamp=False, strict_read=True, pre_admit_lease=True,
         session_id=state_file.stem,
     )
-    try:
-        with reader.transaction():
-            state = reader.load()
-    except UnicodeError as exc:
-        raise EvidenceFailure("canonical-json-invalid") from exc
+    with reader.transaction():
+        state = reader.load()
     contract = state.get("acceptance_contract") if isinstance(state, dict) else None
     if isinstance(state, dict) and "acceptance_contract" in state:
         _frozen_commands(contract)
@@ -106,7 +103,13 @@ def run_contract_verifier(state, *, project_root, criterion_id, repro_input=None
     if repro_input is not None:
         if not isinstance(replay, dict):
             return _blocked_receipt(contract, policy, criterion_id, command, "replay-unsupported")
-        if not isinstance(repro_input, dict) or set(repro_input) != {"artifact_kind", "content"} or repro_input["artifact_kind"] not in replay["allowed_artifact_kinds"] or not isinstance(repro_input["content"], str) or len(repro_input["content"].encode()) > replay["max_bytes"]:
+        if not isinstance(repro_input, dict) or set(repro_input) != {"artifact_kind", "content"} or repro_input["artifact_kind"] not in replay["allowed_artifact_kinds"] or not isinstance(repro_input["content"], str):
+            return _blocked_receipt(contract, policy, criterion_id, command, "replay-input-invalid")
+        try:
+            replay_content = repro_input["content"].encode("utf-8")
+        except UnicodeError as exc:
+            raise EvidenceFailure("replay-input-invalid") from exc
+        if len(replay_content) > replay["max_bytes"]:
             return _blocked_receipt(contract, policy, criterion_id, command, "replay-input-invalid")
         replay_command = commands.get(replay["command_id"])
         if not isinstance(replay_command, dict):
@@ -114,7 +117,7 @@ def run_contract_verifier(state, *, project_root, criterion_id, repro_input=None
         command = replay_command
     try:
         candidate = capture_candidate(project_root, declared_untracked=command["declared_untracked"], external_inputs=command["external_inputs"])
-        replay_file = None if repro_input is None else (repro_input["artifact_kind"], replay["relative_path"], repro_input["content"].encode())
+        replay_file = None if repro_input is None else (repro_input["artifact_kind"], replay["relative_path"], replay_content)
         if replay_file is not None and any(
             replay_file[1] == item.path or replay_file[1].startswith(item.path + "/") or item.path.startswith(replay_file[1] + "/")
             for item in candidate.files

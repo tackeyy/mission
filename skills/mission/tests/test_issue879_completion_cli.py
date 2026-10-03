@@ -103,7 +103,8 @@ def _persist_fixture(root, state, schema, *, closed_v5=False, escaped_contract=F
         "revision_scope": entry["revision_scope"],
     } for score, entry in zip(snapshot.state.scores, state["score_history"])]
     typed = decode_mission_state(json.dumps(payload).encode())
-    repository.initialize(request, state_bytes=encode_v5_state(typed, snapshot.guidance))
+    payload_bytes = json.dumps(payload).encode() if escaped_contract else encode_v5_state(typed, snapshot.guidance)
+    repository.initialize(request, state_bytes=payload_bytes)
     assert json.loads(repository.read("test").state_bytes)["schema_version"] == 5
 
 
@@ -144,6 +145,9 @@ def _reject_unchanged(run_cli, root, args, reason, *, env=None, raw_control=Fals
     def document():
         if not raw_control:
             return json.loads(run_cli("get", cwd=root).stdout)
+        retained = json.loads((root / ".mission-state" / "sessions" / "test.json").read_bytes())
+        if retained.get("schema") != "mission-head/1":
+            return retained
         from mission_persistence.fenced_commit import LocalFencedRepository
         return json.loads(LocalFencedRepository(root / ".mission-state").read("test").state_bytes)
     before = _public_bytes(root)
@@ -169,13 +173,24 @@ def test_pending_contract_rejects_public_completion_atomically(completion_sessio
         assert json.loads(result.stdout)["ok"] is False
 
 
-@pytest.mark.parametrize("mutation,reason", [
-    ("command-id-list", "acceptance-contract-invalid"),
-    ("output-list-element", "verifier-policy-command-invalid"),
-    ("external-inputs-null", "verifier-policy-command-invalid"),
-    ("argv-missing", "verifier-policy-command-invalid"),
+def _append_contract_surrogate(contract, mutation):
+    if mutation == "argv-surrogate":
+        contract["verifier_policy"]["commands"]["project-test"]["argv"].append("\ud800")
+    else:
+        contract["criteria"][0]["expected"] += "\ud800"
+
+
+@pytest.mark.parametrize("mutation,reason,route", [
+    ("command-id-list", "acceptance-contract-invalid", "mark-passes"),
+    ("output-list-element", "verifier-policy-command-invalid", "mark-passes"),
+    ("external-inputs-null", "verifier-policy-command-invalid", "mark-passes"),
+    ("argv-missing", "verifier-policy-command-invalid", "mark-passes"),
+    *[(mutation, reason, route)
+      for mutation, reason in [("argv-surrogate", "verifier-policy-command-invalid"),
+                               ("expected-surrogate", "canonical-json-invalid")]
+      for route in ["mark-passes", "closeout", "force"]],
 ])
-def test_malformed_frozen_verifier_rejects_public_completion_atomically(completion_session, run_cli, mutation, reason):
+def test_malformed_frozen_verifier_rejects_public_completion_atomically(completion_session, run_cli, mutation, reason, route):
     root, state, schema = completion_session
     contract = state["acceptance_contract"]
     command = contract["verifier_policy"]["commands"]["project-test"]
@@ -185,10 +200,16 @@ def test_malformed_frozen_verifier_rejects_public_completion_atomically(completi
         command["declared_untracked"] = [[]]
     elif mutation == "external-inputs-null":
         command["external_inputs"] = None
-    else:
+    elif mutation == "argv-missing":
         command.pop("argv")
-    _persist_fixture(root, state, schema)
-    _reject_unchanged(run_cli, root, ["mark-passes"], reason)
+    else:
+        _append_contract_surrogate(contract, mutation)
+    surrogate = mutation.endswith("surrogate")
+    _persist_fixture(root, state, schema, escaped_contract=surrogate)
+    if surrogate and (schema == 5 or route == "closeout"):
+        reason = "canonical-json-invalid"
+    args = [route] if route != "force" else ["mark-passes", "--force", "--reason", "fixture", "--approved-by-user"]
+    _reject_unchanged(run_cli, root, args, reason, raw_control=surrogate)
 
 
 @pytest.mark.parametrize("route", ["mark-passes", "closeout", "already-passed", "status", "run", "resume"])
@@ -236,7 +257,7 @@ def test_status_rejects_malformed_persisted_contract_atomically(completion_sessi
     if surrogate and schema == 5:
         reason = "canonical-json-invalid"
     _reject_unchanged(run_cli, root, ["acceptance-contract", "status"], reason,
-                      raw_control=surrogate and schema == 5)
+                      raw_control=surrogate)
 
 
 @pytest.mark.parametrize("present", [True, False])
@@ -262,15 +283,21 @@ def test_runner_rejects_uncanonical_contract_before_receipt_generation(completio
         repro = root / "repro.json"
         repro.write_text(json.dumps({"artifact_kind": "counterexample", "content": "proof"}))
         args += ["--repro-input", str(repro)]
-    _reject_unchanged(run_cli, root, args, "canonical-json-invalid", raw_control=schema == 5)
+    _reject_unchanged(run_cli, root, args, "canonical-json-invalid", raw_control=True)
 
 
-def test_already_passed_closeout_validates_frozen_commands(completion_session, run_cli):
+@pytest.mark.parametrize("mutation", ["argv-missing", "argv-surrogate", "expected-surrogate"])
+def test_already_passed_closeout_validates_frozen_commands(completion_session, run_cli, mutation):
     root, state, schema = completion_session
     state.update(passes=True, loop_active=False, phase="done", terminal_outcome="completed_pass")
-    state["acceptance_contract"]["verifier_policy"]["commands"]["project-test"].pop("argv")
-    _persist_fixture(root, state, schema)
-    _reject_unchanged(run_cli, root, ["closeout"], "verifier-policy-command-invalid")
+    if mutation == "argv-missing":
+        state["acceptance_contract"]["verifier_policy"]["commands"]["project-test"].pop("argv")
+    else:
+        _append_contract_surrogate(state["acceptance_contract"], mutation)
+    surrogate = mutation.endswith("surrogate")
+    _persist_fixture(root, state, schema, escaped_contract=surrogate)
+    reason = "canonical-json-invalid" if surrogate else "verifier-policy-command-invalid"
+    _reject_unchanged(run_cli, root, ["closeout"], reason, raw_control=surrogate)
 
 
 def _malformed_verifier_commands(base):
@@ -356,7 +383,7 @@ def test_status_uses_shared_closed_contract_binding_validation():
         acceptance_contract_status({"acceptance_contract": contract})
 
 
-@pytest.mark.parametrize("mutation", ["direct-command", "replay-id", "replay-command"])
+@pytest.mark.parametrize("mutation", ["direct-command", "replay-id", "replay-command", "replay-surrogate", "repro-surrogate"])
 def test_runner_and_replay_reject_malformed_frozen_commands_atomically(completion_session, run_cli, mutation):
     root, state, schema = completion_session
     policy = _replay_policy()
@@ -372,14 +399,88 @@ def test_runner_and_replay_reject_malformed_frozen_commands_atomically(completio
         commands["project-test"]["external_inputs"] = [{}]
     else:
         source = root / "repro.json"
-        source.write_text(json.dumps({"artifact_kind": "counterexample", "content": "proof"}))
+        content = "proof\ud800" if mutation == "repro-surrogate" else "proof"
+        source.write_text(json.dumps({"artifact_kind": "counterexample", "content": content}))
         args.extend(["--repro-input", str(source)])
         if mutation == "replay-id":
             commands["project-test"]["replay"]["command_id"] = []
-        else:
+        elif mutation == "replay-command":
             commands["replay-test"]["declared_untracked"] = [[]]
+        elif mutation == "replay-surrogate":
+            commands["replay-test"]["argv"].append("\ud800")
+    surrogate = mutation == "replay-surrogate"
+    _persist_fixture(root, state, schema, escaped_contract=surrogate)
+    reason = "canonical-json-invalid" if surrogate and schema == 5 else "verifier-policy-command-invalid"
+    if mutation == "repro-surrogate":
+        reason = "replay-input-invalid"
+    _reject_unchanged(run_cli, root, args, reason, raw_control=surrogate)
+
+
+@pytest.mark.parametrize("route", ["get", "next", "init", "new-mission", "freshness", "lane-report"])
+def test_authoritative_contract_reads_reject_unencodable_state(completion_session, run_cli, route):
+    root, state, schema = completion_session
+    state.update(passes=False, loop_active=False, phase="halted", terminal_outcome="failed")
+    _append_contract_surrogate(state["acceptance_contract"], "expected-surrogate")
+    _persist_fixture(root, state, schema, escaped_contract=True)
+    args = [route] if route in {"get", "next", "freshness", "lane-report"} else ["init", state["mission"], "--force-mission"]
+    if route == "freshness":
+        args.extend(["--state-file", str(root / ".mission-state" / "sessions" / "test.json")])
+    if route == "new-mission":
+        args.append("--new-mission")
+    if route == "init":
+        reason = "session-already-initialized" if schema == 5 else "acceptance-contract-reinitialization-forbidden"
+    elif route == "new-mission":
+        reason = "canonical-json-invalid" if schema == 5 else "--new-mission requires an existing terminal V5"
+    else:
+        reason = "canonical-json-invalid"
+    _reject_unchanged(run_cli, root, args, reason, raw_control=True)
+
+
+@pytest.mark.parametrize("completion_session", [5], indirect=True, ids=["closed-v5"])
+def test_closed_v5_inspection_rejects_unencodable_raw_contract(completion_session, run_cli):
+    root, state, schema = completion_session
+    _append_contract_surrogate(state["acceptance_contract"], "expected-surrogate")
+    _persist_fixture(root, state, schema, closed_v5=True, escaped_contract=True)
+    _reject_unchanged(run_cli, root, ["get"], "canonical-json-invalid", raw_control=True)
+
+
+@pytest.mark.parametrize("route", ["live-import", "frozen-run", "replay-run"])
+def test_malformed_url_arguments_reject_before_import_or_execution(completion_session, run_cli, route):
+    root, state, schema = completion_session
+    policy = _replay_policy() if route == "replay-run" else _policy()
+    if route == "live-import":
+        policy["commands"][0]["argv"].append("http://[")
+    raw = json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()
+    (root / ".mission" / "verifiers.json").write_bytes(raw)
+    contract = state["acceptance_contract"]
+    digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+    contract["verifier_policy_digest"] = digest
+    commands = {command["id"]: command for command in policy["commands"]}
+    contract["verifier_policy"] = {"digest": digest, "commands": commands}
+    args = ["verification", "run", "--criterion", "AC1"]
+    reason = "verifier-explicit-path-unsupported"
+    if route == "live-import":
+        args = ["acceptance-contract", "import", "--input", str(root / "contract.json")]
+        reason = "verifier-policy-explicit-path-unsupported"
+    else:
+        identifier = "replay-test" if route == "replay-run" else "project-test"
+        commands[identifier]["argv"].append("http://[")
+        if route == "replay-run":
+            source = root / "repro.json"
+            source.write_text(json.dumps({"artifact_kind": "counterexample", "content": "proof"}))
+            args.extend(["--repro-input", str(source)])
     _persist_fixture(root, state, schema)
-    _reject_unchanged(run_cli, root, args, "verifier-policy-command-invalid")
+    _reject_unchanged(run_cli, root, args, reason)
+
+
+def test_explicit_path_parser_rejects_malformed_command_inputs():
+    from mission_application.verifier_policy import explicit_paths_are_supported
+
+    argv = _policy()["commands"][0]["argv"]
+    for argument in ["http://[", "%68ttp://[", "--input=http://[",
+                     "--override-ini=addopts='http://['", "http://example.invalid\uff0fpath"]:
+        assert explicit_paths_are_supported([*argv, argument], {}) is False
+    assert explicit_paths_are_supported(argv, {"PYTEST_ADDOPTS": "--input=http://["}) is False
 
 
 def test_already_passed_contract_closeout_is_not_a_success_shortcut(completion_session, run_cli):
