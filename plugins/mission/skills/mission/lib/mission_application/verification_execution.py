@@ -12,7 +12,7 @@ from mission_application.verification_runner import (
     execute_candidate,
     verifier_definition_digest,
 )
-from acceptance_contract import canonical_contract_digest
+from acceptance_contract import AcceptanceContractError, canonical_contract_digest, frozen_verifier_commands
 
 
 @dataclass(frozen=True)
@@ -44,6 +44,8 @@ def run_verification_receipt_cli(request, services) -> str:
     with reader.transaction():
         state = reader.load()
     contract = state.get("acceptance_contract") if isinstance(state, dict) else None
+    if isinstance(state, dict) and "acceptance_contract" in state:
+        _frozen_commands(contract)
     live_policy = services.load_verifier_policy(cwd)
     if not isinstance(contract, dict) or not isinstance(contract.get("verifier_policy"), dict) or live_policy["digest"] != contract["verifier_policy"].get("digest"):
         raise EvidenceFailure("verifier-policy-stale")
@@ -84,14 +86,16 @@ def run_contract_verifier(state, *, project_root, criterion_id, repro_input=None
     """Execute one contract criterion without accepting caller-declared results."""
     if not isinstance(state, dict):
         raise EvidenceFailure("verification-state-invalid")
-    contract = state.get("acceptance_contract")
-    if not isinstance(contract, dict) or contract.get("schema") != "mission-acceptance-contract/2":
+    if "acceptance_contract" not in state:
+        raise EvidenceFailure("verification-contract-unavailable")
+    contract = state["acceptance_contract"]
+    commands = _frozen_commands(contract)
+    if contract.get("schema") != "mission-acceptance-contract/2":
         raise EvidenceFailure("verification-contract-unavailable")
     criteria = [item for item in contract.get("criteria", []) if isinstance(item, dict) and item.get("id") == criterion_id]
     if len(criteria) != 1:
         raise EvidenceFailure("verification-criterion-unavailable")
     policy = contract.get("verifier_policy")
-    commands = policy.get("commands") if isinstance(policy, dict) else None
     command = commands.get(criteria[0].get("command_id")) if isinstance(commands, dict) else None
     if not isinstance(command, dict):
         raise EvidenceFailure("verification-command-unregistered")
@@ -148,6 +152,13 @@ def run_contract_verifier(state, *, project_root, criterion_id, repro_input=None
         "repro_input_digest": outcome["repro_input_digest"],
         "block_reason": outcome["block_reason"],
     }
+
+
+def _frozen_commands(contract):
+    try:
+        return frozen_verifier_commands(contract)
+    except AcceptanceContractError as exc:
+        raise EvidenceFailure(str(exc)) from exc
 
 
 def _blocked_receipt(contract, policy, criterion_id, command, reason):

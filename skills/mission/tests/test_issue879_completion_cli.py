@@ -6,6 +6,7 @@ path. Actual command receipts still come from the public verification runner.
 """
 from dataclasses import replace
 from datetime import datetime, timezone
+import copy
 import hashlib
 import json
 import subprocess
@@ -14,7 +15,7 @@ import pytest
 
 from .conftest import canonical_review, write_canonical_review_aggregate
 from .test_issue878_candidate_snapshot import _commit_candidate
-from .test_issue878_verification_runner import _contract, _policy
+from .test_issue878_verification_runner import _contract, _policy, _replay_policy
 from .test_issue503_fenced_commit import _request
 
 
@@ -149,6 +150,121 @@ def test_pending_contract_rejects_public_completion_atomically(completion_sessio
     result = _reject_unchanged(run_cli, root, [command], "acceptance-coverage-pending")
     if command == "closeout":
         assert json.loads(result.stdout)["ok"] is False
+
+
+@pytest.mark.parametrize("mutation,reason", [
+    ("command-id-list", "acceptance-contract-invalid"),
+    ("output-list-element", "verifier-policy-command-invalid"),
+    ("external-inputs-null", "verifier-policy-command-invalid"),
+    ("argv-missing", "verifier-policy-command-invalid"),
+])
+def test_malformed_frozen_verifier_rejects_public_completion_atomically(completion_session, run_cli, mutation, reason):
+    root, state, schema = completion_session
+    contract = state["acceptance_contract"]
+    command = contract["verifier_policy"]["commands"]["project-test"]
+    if mutation == "command-id-list":
+        contract["criteria"][0]["command_id"] = []
+    elif mutation == "output-list-element":
+        command["declared_untracked"] = [[]]
+    elif mutation == "external-inputs-null":
+        command["external_inputs"] = None
+    else:
+        command.pop("argv")
+    _persist_fixture(root, state, schema)
+    _reject_unchanged(run_cli, root, ["mark-passes"], reason)
+
+
+@pytest.mark.parametrize("route", ["mark-passes", "closeout", "already-passed", "status", "run", "resume"])
+def test_null_contract_is_present_and_rejects_atomically(completion_session, run_cli, route):
+    root, state, schema = completion_session
+    state["acceptance_contract"] = None
+    if route == "already-passed":
+        state.update(passes=True, loop_active=False, phase="done", terminal_outcome="completed_pass")
+    _persist_fixture(root, state, schema)
+    args = {
+        "already-passed": ["closeout"],
+        "status": ["acceptance-contract", "status"],
+        "run": ["verification", "run", "--criterion", "AC1"],
+        "resume": ["init", state["mission"], "--force-mission"],
+    }.get(route, [route])
+    reason = "session-already-initialized" if route == "resume" and schema == 5 else "acceptance-contract-invalid"
+    _reject_unchanged(run_cli, root, args, reason)
+
+
+def _malformed_verifier_commands(base):
+    """One shape table, shared by live-policy and persisted-policy checks."""
+    yield None
+    for field in base:
+        command = copy.deepcopy(base)
+        command.pop(field)
+        yield command
+    for field, value in [
+        ("unknown", True), ("id", []), ("argv", "command"), ("argv", [[]]),
+        ("kind", []), ("timeout_sec", True), ("timeout_sec", 3601),
+        ("output_limit", 0), ("output_limit", 1048577),
+        ("relative_cwd", []), ("env", {"KEY": []}), ("env", {"KEY": "\x00"}),
+        ("toolchain", {"path": [], "digest": base["toolchain"]["digest"]}),
+        ("declared_untracked", None), ("declared_untracked", [{}]),
+        ("declared_untracked", ["../outside"]), ("declared_untracked", ["out", "out"]),
+        ("external_inputs", None), ("external_inputs", [[]]),
+        ("external_inputs", [{"kind": "local-file", "source_path": "input"}]),
+        ("external_inputs", [{"kind": "local-file", "source_path": [], "target_path": "input"}]),
+        ("external_inputs", [{"kind": "local-file", "source_path": "input", "target_path": "../outside"}]),
+        ("replay", {"command_id": []}), ("test_report", {"format": "junit-xml", "path": "out"}),
+    ]:
+        yield {**copy.deepcopy(base), field: value}
+    replay = {"command_id": "project-test", "max_bytes": 64,
+              "allowed_artifact_kinds": ["counterexample"], "relative_path": "repro.json"}
+    for field, value in [("command_id", []), ("max_bytes", True),
+                         ("allowed_artifact_kinds", [[]]), ("relative_path", None)]:
+        yield {**copy.deepcopy(base), "replay": {**replay, field: value}}
+
+
+def test_shared_validator_closes_live_and_frozen_command_fields_before_sets():
+    from acceptance_contract import AcceptanceContractError, frozen_verifier_commands
+    from mission_application.verifier_policy import VerifierPolicyError, validate
+
+    policy = _policy()
+    contract = _contract("fixture-mission")
+    contract["verifier_policy"] = {"digest": "sha256:" + "a" * 64, "commands": {}}
+    for command in _malformed_verifier_commands(policy["commands"][0]):
+        with pytest.raises(VerifierPolicyError):
+            validate({**policy, "commands": [command]})
+        contract["verifier_policy"]["commands"] = {"project-test": command}
+        before = copy.deepcopy(contract)
+        with pytest.raises(AcceptanceContractError, match="^verifier-policy-command-invalid$"):
+            frozen_verifier_commands(contract)
+        assert contract == before
+    # A supported empty output/input list must keep working.
+    commands = validate(policy)
+    contract["verifier_policy"]["commands"] = commands
+    assert frozen_verifier_commands(contract) == commands
+
+
+@pytest.mark.parametrize("mutation", ["direct-command", "replay-id", "replay-command"])
+def test_runner_and_replay_reject_malformed_frozen_commands_atomically(completion_session, run_cli, mutation):
+    root, state, schema = completion_session
+    policy = _replay_policy()
+    raw = json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()
+    (root / ".mission" / "verifiers.json").write_bytes(raw)
+    contract = state["acceptance_contract"]
+    digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+    contract["verifier_policy_digest"] = digest
+    commands = {command["id"]: command for command in policy["commands"]}
+    contract["verifier_policy"] = {"digest": digest, "commands": commands}
+    args = ["verification", "run", "--criterion", "AC1"]
+    if mutation == "direct-command":
+        commands["project-test"]["external_inputs"] = [{}]
+    else:
+        source = root / "repro.json"
+        source.write_text(json.dumps({"artifact_kind": "counterexample", "content": "proof"}))
+        args.extend(["--repro-input", str(source)])
+        if mutation == "replay-id":
+            commands["project-test"]["replay"]["command_id"] = []
+        else:
+            commands["replay-test"]["declared_untracked"] = [[]]
+    _persist_fixture(root, state, schema)
+    _reject_unchanged(run_cli, root, args, "verifier-policy-command-invalid")
 
 
 def test_already_passed_contract_closeout_is_not_a_success_shortcut(completion_session, run_cli):
@@ -347,13 +463,21 @@ def test_valid_force_approval_cannot_override_acceptance(completion_session, run
         assert json.loads(run_cli("get", cwd=root).stdout)["passes"] is True
 
 
-def test_codecs_keep_contract_and_receipt_evidence(completion_session, run_cli):
+@pytest.mark.parametrize("stored_case", ["pending", "null", "malformed-command"])
+def test_codecs_keep_contract_and_receipt_evidence(completion_session, run_cli, stored_case):
     from mission_kernel import decode_mission_state, project_legacy_document
     from mission_kernel.codec_v5 import encode_v5_state
     from mission_kernel import decode_snapshot
     from mission_persistence.fenced_commit import LocalFencedRepository
 
     root, state, schema = completion_session
+    expected = "acceptance-coverage-pending"
+    if stored_case == "null":
+        state["acceptance_contract"] = None
+        expected = "acceptance-contract-invalid"
+    elif stored_case == "malformed-command":
+        state["acceptance_contract"]["verifier_policy"]["commands"]["project-test"]["external_inputs"] = None
+        expected = "verifier-policy-command-invalid"
     state["verification_receipts"] = [{"criterion_id": "AC1", "status": "blocked"}]
     _persist_fixture(root, state, schema, closed_v5=schema == 5)
     raw = ((root / ".mission-state" / "sessions" / "test.json").read_bytes() if schema == 4
@@ -371,7 +495,8 @@ def test_codecs_keep_contract_and_receipt_evidence(completion_session, run_cli):
     from mission_kernel.commands import MarkPass
     from mission_kernel.transitions import decide
     decision = decide(decode_mission_state(raw), MarkPass())
-    assert decision.rejection.code == "acceptance-coverage-pending"
+    assert decision.rejection.code == expected
+    assert decision.transition is None
     if schema == 5:
         from mission_kernel.json_codec import freeze_json_value
         legacy_extensions = {key: value for key, value in projected.items() if key != "acceptance_contract"}
@@ -380,5 +505,5 @@ def test_codecs_keep_contract_and_receipt_evidence(completion_session, run_cli):
                                                       specialist_gate_satisfied=True, verified_score_index=0))
         assert legacy_decision.accepted, legacy_decision.rejection
         assert legacy_decision.transition.new_state.control.passes is True
-    reason = "legacy passthrough is unavailable" if schema == 5 else "acceptance-coverage-pending"
+    reason = "legacy passthrough is unavailable" if schema == 5 else expected
     _reject_unchanged(run_cli, root, ["mark-passes"], reason)

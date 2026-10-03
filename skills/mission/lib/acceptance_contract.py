@@ -155,6 +155,48 @@ def verifier_definition_digest(command: object) -> str:
     return "sha256:" + hashlib.sha256(canonical_bytes(command)).hexdigest()
 
 
+def frozen_verifier_commands(contract: object) -> dict:
+    """Close persisted bindings before consumers hash, lookup, or capture.
+
+    Criterion/binding shapes belong to the contract; command shapes belong
+    to the frozen policy. This pure boundary is also safe for the kernel.
+    """
+    from verifier_command import VerifierPolicyError, validate_command, validate_command_links
+
+    invalid = "acceptance-contract-invalid"
+    if not isinstance(contract, dict):
+        raise AcceptanceContractError(invalid)
+    criteria = contract.get("criteria")
+    policy = contract.get("verifier_policy")
+    if not isinstance(criteria, list) or not criteria or not isinstance(policy, dict) or set(policy) != {"digest", "commands"}:
+        raise AcceptanceContractError(invalid)
+    if not isinstance(policy["digest"], str) or __import__("re").fullmatch(r"sha256:[0-9a-f]{64}", policy["digest"]) is None:
+        raise AcceptanceContractError(invalid)
+    commands = policy["commands"]
+    if not isinstance(commands, dict) or not commands:
+        raise AcceptanceContractError(invalid)
+    # Validate identifier types before any consumer uses them as map keys.
+    for item in criteria:
+        if not isinstance(item, dict) or type(item.get("required")) is not bool:
+            raise AcceptanceContractError(invalid)
+        _text(item.get("id"), invalid)
+        _text(item.get("command_id"), invalid)
+    try:
+        for identifier, command in commands.items():
+            if not isinstance(identifier, str) or not identifier:
+                raise VerifierPolicyError("verifier-policy-command-invalid")
+            validate_command(command)
+            if command["id"] != identifier:
+                raise VerifierPolicyError("verifier-policy-command-invalid")
+        validate_command_links(commands)
+    except VerifierPolicyError as exc:
+        raise AcceptanceContractError("verifier-policy-command-invalid") from exc
+    for item in criteria:
+        if item["command_id"] not in commands:
+            raise AcceptanceContractError(invalid)
+    return commands
+
+
 def status(contract: object) -> dict:
     if not isinstance(contract, dict):
         return {"present": False}

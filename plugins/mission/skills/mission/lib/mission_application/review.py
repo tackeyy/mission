@@ -24,18 +24,17 @@ from scoring_provenance import reduce_review_aggregate as _canonical_review_redu
 
 from .ports import LegacyMissionRepository
 from .compatibility import compatibility_delta
+from acceptance_contract import AcceptanceContractError, frozen_verifier_commands
 
 
 def capture_acceptance_candidates(project_root, data: dict, load_policy: Callable) -> dict[str, str]:
     """Recapture each required verifier candidate only under its frozen policy."""
-    contract = data.get("acceptance_contract")
-    if contract is None:
+    if "acceptance_contract" not in data:
         return {}
-    if not isinstance(contract, dict):
-        raise ValueError("acceptance-contract-invalid")
-    policy = contract.get("verifier_policy")
-    commands = policy.get("commands") if isinstance(policy, dict) else None
-    if not isinstance(commands, dict) or load_policy(project_root).get("digest") != policy.get("digest"):
+    contract = data["acceptance_contract"]
+    commands = frozen_verifier_commands(contract)
+    policy = contract["verifier_policy"]
+    if load_policy(project_root).get("digest") != policy.get("digest"):
         raise ValueError("verifier-policy-stale")
     criteria = contract.get("criteria")
     if not isinstance(criteria, list):
@@ -90,7 +89,9 @@ def closeout_already_passed(data: dict) -> bool:
     """Permit the legacy shortcut only when completion has no contract."""
     if data.get("passes") is not True:
         return False
-    if data.get("acceptance_contract") is not None:
+    if "acceptance_contract" in data:
+        if not isinstance(data["acceptance_contract"], dict):
+            raise ReviewFailure("acceptance-contract-invalid", reason="acceptance-contract-invalid")
         raise ReviewFailure(
             "acceptance contract requires completion revalidation",
             reason="acceptance-revalidation-required",
@@ -505,10 +506,12 @@ def mark_pass(
                 if services.capture_acceptance_candidates is not None
                 else {}
             )
+        except AcceptanceContractError as exc:
+            raise ReviewFailure(str(exc), reason=str(exc)) from exc
         except (OSError, ValueError) as exc:
             raise ReviewFailure("acceptance candidate capture failed", reason="acceptance-candidate-unavailable") from exc
         frozen_candidates = freeze_json_value(acceptance_candidates)
-        if data.get("acceptance_contract") is not None:
+        if "acceptance_contract" in data:
             reason = acceptance_completion_rejection(
                 decode_mission_state(json.dumps(data).encode("utf-8")),
                 MarkPass(acceptance_candidate_digests=frozen_candidates),

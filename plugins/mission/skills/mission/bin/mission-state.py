@@ -13934,7 +13934,7 @@ def cmd_verification_run(args):
         )
     except EvidenceFailure as exc:
         print(exc.code, file=sys.stderr)
-        sys.exit(exc.code)
+        sys.exit(2)
     print(output)
 
 

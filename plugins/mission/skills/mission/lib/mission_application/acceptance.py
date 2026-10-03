@@ -78,9 +78,11 @@ def prepare_acceptance_contract_import_operation(raw, *, session_id, compatibili
 def acceptance_contract_status(state: object) -> dict:
     if not isinstance(state, dict):
         raise EvidenceFailure("state-invalid")
-    contract = state.get("acceptance_contract")
-    if not isinstance(contract, dict):
+    if "acceptance_contract" not in state:
         return status(None)
+    contract = state["acceptance_contract"]
+    if not isinstance(contract, dict):
+        raise EvidenceFailure("acceptance-contract-invalid")
     stored = dict(contract)
     binding = stored.pop("verifier_policy", None)
     result = status(stored)
