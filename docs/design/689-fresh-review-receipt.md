@@ -232,7 +232,7 @@ terminal commit 後・応答前の停止は同一 operation の再応答で回�
 
 1. contract・凍結 verifier policy の shape と identity が有効。
 2. required criteria 全てに、最新の通常 verification receipt が passed、現 candidate と定義・policy が一致。
-3. 各 required criterion について、その criterion を含む最新の attempt（request）が、現 contract/input/candidate に束縛された completed fresh review receipt である。加えて §4 の全体 coverage receipt が現候補に対して存在する。
+3. 各 required criterion について、その criterion を含む最新の attempt（request）が、現 contract/input/candidate に束縛された completed fresh review receipt である。加えて §4「実効 coverage の選び方」により、最新の全体 attempt が現候補に対する有効な全体 coverage receipt である（それより前の全体 attempt の receipt は数えない）。
 4. 全て `independent=true`、criterion search 完了、全 ledger の実効 coverage valid、open obligation がない。
 5. required obligation または禁止副作用へ束縛された未解決 finding がゼロ。Medium も含む。
 
