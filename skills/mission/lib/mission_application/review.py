@@ -19,7 +19,7 @@ from mission_kernel.model import (
     NotApplicableRevisionScope,
     ReviewInputRef,
 )
-from mission_kernel.transitions import Decision
+from mission_kernel.transitions import Decision, acceptance_completion_rejection
 from scoring_provenance import reduce_review_aggregate as _canonical_review_reduction
 
 from .ports import LegacyMissionRepository
@@ -58,6 +58,15 @@ def capture_acceptance_candidates(project_root, data: dict, load_policy: Callabl
     return result
 
 
+@dataclass(frozen=True)
+class AcceptanceCandidateServices:
+    project_root: object
+    load_policy: Callable
+
+    def __call__(self, data: dict) -> dict[str, str]:
+        return capture_acceptance_candidates(self.project_root, data, self.load_policy)
+
+
 REVIEW_COMMAND_OWNERS = {
     "aggregate-reviews": "A2.review",
     "closeout": "A2.review",
@@ -75,6 +84,18 @@ class ReviewFailure(ValueError):
         super().__init__(message)
         self.message = message
         self.reason = reason
+
+
+def closeout_already_passed(data: dict) -> bool:
+    """Permit the legacy shortcut only when completion has no contract."""
+    if data.get("passes") is not True:
+        return False
+    if data.get("acceptance_contract") is not None:
+        raise ReviewFailure(
+            "acceptance contract requires completion revalidation",
+            reason="acceptance-revalidation-required",
+        )
+    return True
 
 
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -486,6 +507,14 @@ def mark_pass(
             )
         except (OSError, ValueError) as exc:
             raise ReviewFailure("acceptance candidate capture failed", reason="acceptance-candidate-unavailable") from exc
+        frozen_candidates = freeze_json_value(acceptance_candidates)
+        if data.get("acceptance_contract") is not None:
+            reason = acceptance_completion_rejection(
+                decode_mission_state(json.dumps(data).encode("utf-8")),
+                MarkPass(acceptance_candidate_digests=frozen_candidates),
+            )
+            if reason is not None:
+                raise ReviewFailure(reason, reason=reason)
         verification = services.verify_force_approval(data) if request.force else None
         try:
             services.validate_artifact_gate(data)
@@ -554,7 +583,7 @@ def mark_pass(
             artifact_gate_satisfied=True,
             specialist_gate_satisfied=not request.force,
             verified_score_index=None if request.force else latest_index,
-            acceptance_candidate_digests=freeze_json_value(acceptance_candidates),
+            acceptance_candidate_digests=frozen_candidates,
             at=request.at,
             compatibility=compatibility_delta(
                 data,

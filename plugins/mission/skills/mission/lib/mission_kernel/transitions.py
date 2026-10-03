@@ -984,7 +984,11 @@ def _maximum_agreement_delta(payload: dict[str, object]) -> float | None:
 
 def _acceptance_completion_ready(state: MissionState, command: MarkPass) -> None:
     """Keep contract-enabled sessions pending until typed coverage exists."""
-    document = _evidence_document(state)
+    document = (
+        state.legacy_passthrough.thaw()
+        if state.legacy_passthrough is not None
+        else state.extensions.thaw()
+    )
     contract = document.get("acceptance_contract")
     if contract is None:
         return
@@ -1027,19 +1031,32 @@ def _acceptance_completion_ready(state: MissionState, command: MarkPass) -> None
     for criterion in required:
         criterion_id = criterion["id"]
         command_id = criterion.get("command_id")
-        command = commands.get(command_id) if isinstance(command_id, str) else None
-        if not isinstance(command, dict):
+        verifier_command = commands.get(command_id) if isinstance(command_id, str) else None
+        if not isinstance(verifier_command, dict):
             raise _Rejected("acceptance-contract-invalid")
         latest = next((item for item in reversed(history) if item["criterion_id"] == criterion_id), None)
         if latest is None:
             raise _Rejected("acceptance-receipt-missing")
         if latest.get("status") != "passed":
             raise _Rejected("acceptance-receipt-not-passed")
-        if (latest.get("contract_digest") != contract_digest or latest.get("verifier_policy_digest") != policy_digest or latest.get("verifier_definition_digest") != verifier_definition_digest(command)):
+        if (latest.get("contract_digest") != contract_digest or latest.get("verifier_policy_digest") != policy_digest or latest.get("verifier_definition_digest") != verifier_definition_digest(verifier_command)):
             raise _Rejected("acceptance-receipt-stale")
         if latest.get("candidate_digest") != candidates[criterion_id]:
             raise _Rejected("acceptance-receipt-stale")
     raise _Rejected("acceptance-fresh-review-pending")
+
+
+def acceptance_completion_rejection(state: MissionState, command: MarkPass) -> str | None:
+    """Preflight the same pure guard before an approval provider can publish.
+
+    This grants no transition authority: MarkPass repeats the guard against
+    the repository's authoritative state at the actual completion decision.
+    """
+    try:
+        _acceptance_completion_ready(state, command)
+    except _Rejected as exc:
+        return exc.code
+    return None
 
 
 def _mark_pass(state: MissionState, raw_command: object) -> Transition:

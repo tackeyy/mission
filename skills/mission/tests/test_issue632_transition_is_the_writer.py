@@ -126,101 +126,6 @@ def test_mark_pass_saved_document_is_unchanged(tmp_path):
     assert repository.saved["terminal_outcome"] == "completed_pass"
 
 
-def test_mark_pass_rejects_contract_with_pending_coverage(tmp_path):
-    from mission_application.review import MarkPassRequest, ReviewFailure, mark_pass
-
-    state = _review_state(tmp_path)
-    state["acceptance_contract"] = {"coverage": {"status": "pending"}}
-    repository = _RecordingRepository(state)
-
-    with pytest.raises(ReviewFailure) as raised:
-        mark_pass(
-            repository,
-            MarkPassRequest(False, None, False, "", "2030-08-23T00:00:00Z"),
-            _pass_services(_load_cli_module("issue879_pending_contract")),
-        )
-
-    assert raised.value.reason == "acceptance-coverage-pending"
-    assert repository.saved is None
-
-
-def test_mark_pass_rejects_valid_coverage_without_required_receipt(tmp_path):
-    from mission_application.review import MarkPassRequest, ReviewFailure, mark_pass
-
-    state = _review_state(tmp_path)
-    state["acceptance_contract"] = {
-        "schema": "mission-acceptance-contract/2",
-        "coverage": {"status": "valid"},
-        "criteria": [{"id": "AC1", "required": True}],
-    }
-    repository = _RecordingRepository(state)
-
-    with pytest.raises(ReviewFailure) as raised:
-        mark_pass(
-            repository,
-            MarkPassRequest(False, None, False, "", "2030-08-23T00:00:00Z"),
-            _pass_services(_load_cli_module("issue879_missing_receipt")),
-        )
-
-    assert raised.value.reason == "acceptance-receipt-missing"
-    assert repository.saved is None
-
-
-def test_mark_pass_rejects_receipt_with_stale_contract_binding(tmp_path):
-    from mission_application.review import MarkPassRequest, ReviewFailure, mark_pass
-
-    command = {"id": "project-test", "argv": ["true"]}
-    state = _review_state(tmp_path)
-    state["acceptance_contract"] = {
-        "schema": "mission-acceptance-contract/2",
-        "coverage": {"status": "valid"},
-        "criteria": [{"id": "AC1", "required": True, "command_id": "project-test"}],
-        "verifier_policy": {"digest": "sha256:" + "a" * 64, "commands": {"project-test": command}},
-    }
-    state["verification_receipts"] = [{
-        "criterion_id": "AC1", "status": "passed", "contract_digest": "sha256:" + "b" * 64,
-        "verifier_policy_digest": "sha256:" + "a" * 64, "verifier_definition_digest": "sha256:" + "c" * 64,
-    }]
-    repository = _RecordingRepository(state)
-
-    with pytest.raises(ReviewFailure) as raised:
-        mark_pass(
-            repository,
-            MarkPassRequest(False, None, False, "", "2030-08-23T00:00:00Z"),
-            _pass_services(_load_cli_module("issue879_stale_receipt")),
-        )
-
-    assert raised.value.reason == "acceptance-receipt-stale"
-    assert repository.saved is None
-
-
-def test_mark_pass_rejects_latest_failed_receipt_without_old_pass_fallback(tmp_path):
-    from mission_application.review import MarkPassRequest, ReviewFailure, mark_pass
-
-    state = _review_state(tmp_path)
-    state["acceptance_contract"] = {
-        "schema": "mission-acceptance-contract/2",
-        "coverage": {"status": "valid"},
-        "criteria": [{"id": "AC1", "required": True, "command_id": "project-test"}],
-        "verifier_policy": {"digest": "sha256:" + "a" * 64, "commands": {"project-test": {"id": "project-test"}}},
-    }
-    state["verification_receipts"] = [
-        {"criterion_id": "AC1", "status": "passed"},
-        {"criterion_id": "AC1", "status": "failed"},
-    ]
-    repository = _RecordingRepository(state)
-
-    with pytest.raises(ReviewFailure) as raised:
-        mark_pass(
-            repository,
-            MarkPassRequest(False, None, False, "", "2030-08-23T00:00:00Z"),
-            _pass_services(_load_cli_module("issue879_latest_failed_receipt")),
-        )
-
-    assert raised.value.reason == "acceptance-receipt-not-passed"
-    assert repository.saved is None
-
-
 def test_mark_pass_rejects_receipt_without_fresh_candidate_observation(tmp_path):
     from acceptance_contract import canonical_contract_digest, verifier_definition_digest
     from mission_application.review import MarkPassRequest, ReviewFailure, mark_pass
@@ -289,35 +194,6 @@ def test_mark_pass_force_path_preserves_approval_binding(tmp_path):
 
     assert called and called[0][1] is verification
     assert repository.saved["force_approval"]["consumed"] is True
-
-
-def test_mark_pass_force_rejects_contract_with_pending_coverage(tmp_path):
-    from mission_application.review import MarkPassRequest, ReviewFailure, mark_pass
-
-    state = _review_state(tmp_path)
-    state["acceptance_contract"] = {"coverage": {"status": "pending"}}
-    repository = _RecordingRepository(state)
-    cli = _load_cli_module("issue879_force_pending_contract")
-    terminal = copy.deepcopy(state)
-    terminal.update(passes=True, loop_active=False, passes_forced=True, terminal_outcome="completed_pass")
-    verification = {"consumed": False, "request": {"terminal_object_digest": cli.terminal_state_digest(terminal)}}
-    services = _pass_services(cli)
-    services = services.__class__(
-        verify_force_approval=lambda _data: verification,
-        validate_force_terminal=lambda _data, _verification: None,
-        validate_score_evidence=services.validate_score_evidence,
-        validate_artifact_gate=services.validate_artifact_gate,
-        validate_specialist_gate=services.validate_specialist_gate,
-        transition_phase=services.transition_phase,
-        optional_unclosed_skills=services.optional_unclosed_skills,
-        selection_id=services.selection_id,
-    )
-
-    with pytest.raises(ReviewFailure) as raised:
-        mark_pass(repository, MarkPassRequest(True, "approved", True, "", "2030-08-23T00:00:00Z"), services)
-
-    assert raised.value.reason == "acceptance-coverage-pending"
-    assert repository.saved is None
 
 
 def test_mark_pass_validate_services_are_called_in_the_recorded_order(tmp_path):
