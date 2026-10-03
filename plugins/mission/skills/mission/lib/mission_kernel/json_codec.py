@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import math
 from typing import Any
 
-from .errors import MissionStateDecodeError
+from .errors import CanonicalStateEncodingError, MissionStateDecodeError, StateBoundaryError
 from .model import FrozenJsonObject, FrozenJsonValue, thaw_json_value
 
 STATE_LIMIT = 4 * 1024 * 1024
@@ -87,3 +88,31 @@ def encode_json_object(document: FrozenJsonObject) -> bytes:
 
 def thaw_json_object(document: FrozenJsonObject) -> dict[str, Any]:
     return document.thaw()
+
+
+@contextmanager
+def canonical_state_encoding():
+    """Translate projection/encoding failures at the shared state boundary.
+
+    Compatibility readers and writers use the same kernel encoder. Its
+    parser exceptions must remain a coded input rejection for every caller.
+    """
+    try:
+        yield
+    except StateBoundaryError as exc:
+        if exc.code == "canonical-json-invalid" and not isinstance(exc, CanonicalStateEncodingError):
+            raise CanonicalStateEncodingError(exc.code, exc.detail) from exc
+        raise
+    except (TypeError, ValueError) as exc:
+        code = getattr(exc, "code", "canonical-json-invalid")
+        detail = str(exc) if hasattr(exc, "code") else f"{code}: state projection cannot be canonically encoded"
+        error_type = CanonicalStateEncodingError if code == "canonical-json-invalid" else StateBoundaryError
+        raise error_type(code, detail) from exc
+
+
+def encode_legacy_document(document: dict) -> bytes:
+    """Check UTF-8 renderability while retaining historical non-finite scores."""
+    with canonical_state_encoding():
+        return json.dumps(
+            document, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")

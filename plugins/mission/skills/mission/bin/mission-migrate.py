@@ -35,7 +35,10 @@ def migrate_one(state_file: Path, execute: bool, remove_legacy: bool, force: boo
         return {"status": "skipped", "reason": "state.json not found"}
 
     try:
-        data = json.loads(state_file.read_text())
+        data = _gs.read_session_json(state_file)
+    except _gs.CanonicalStateEncodingError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        raise SystemExit(2)
     except Exception as e:
         return {"status": "error", "reason": f"invalid JSON: {e}"}
 

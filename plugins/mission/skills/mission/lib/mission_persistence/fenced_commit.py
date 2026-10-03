@@ -19,8 +19,14 @@ from typing import Callable, Optional, Union
 from mission_kernel import decode_mission_state, decode_snapshot, project_legacy_document as _kernel_project_legacy_document
 from mission_kernel.codec_v5 import encode_v5_state
 from mission_kernel.identifiers import TOKEN128_RE
+from mission_kernel.errors import (
+    CanonicalStateEncodingError,
+    StateBoundaryError as FencedCommitError,  # Retain the public persistence error identity.
+)
 from mission_kernel.json_codec import (
     STATE_LIMIT,
+    canonical_state_encoding,
+    encode_legacy_document,
     decode_json_object,
     encode_json_object,
     thaw_json_object,
@@ -105,30 +111,6 @@ _SESSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _TRANSACTION_RE = re.compile(r"[0-9a-f]{32}")
 _TIMESTAMP_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
-
-
-class FencedCommitError(ValueError):
-    def __init__(self, code: str, detail: str):
-        super().__init__(detail)
-        self.code = code
-        self.detail = detail
-
-
-@contextmanager
-def canonical_state_encoding():
-    """Translate projection/encoding failures at the shared persistence boundary.
-
-    Compatibility readers and writers use the same kernel encoder. Its
-    parser exceptions must remain a coded input rejection for every caller.
-    """
-    try:
-        yield
-    except FencedCommitError:
-        raise
-    except (TypeError, ValueError) as exc:
-        code = getattr(exc, "code", "canonical-json-invalid")
-        detail = str(exc) if hasattr(exc, "code") else f"{code}: state projection cannot be canonically encoded"
-        raise FencedCommitError(code, detail) from exc
 
 
 def project_legacy_document(state):
@@ -2123,6 +2105,8 @@ class LocalFencedRepository:
             state = decode_mission_state(state_bytes)
         except Exception as exc:
             raise FencedCommitError(getattr(exc, "code", "record-invalid"), "state generation is invalid") from exc
+        with canonical_state_encoding():
+            encode_json_object(decode_json_object(state_bytes))
         if state.identity.session_id is not None and state.identity.session_id != session_id:
             raise FencedCommitError("lineage-mismatch", "state session identity differs")
         if not isinstance(state.lease, FencedLease) or state.lease.fencing_epoch != commit.fencing_epoch:
@@ -2220,6 +2204,34 @@ class LocalFencedRepository:
                 session_id, commit, manifest_bytes
             )
             return state
+
+    def read_pinned_head(self, session_id: str, head_bytes: bytes) -> RepositorySnapshot:
+        """Verify an already captured head and its immutable lineage without relocking.
+
+        Direct readers may hold the shared state lock already. Digest and stable
+        file checks bind every referenced byte to this head; missing or changing
+        objects fail closed. This read does not admit or publish a transaction.
+        """
+        session_id = _session_id(session_id)
+        head = parse_head(head_bytes, session_id)
+        descriptor = None
+        try:
+            descriptor = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            self._root_descriptor = descriptor
+            self._root_identity = _directory_identity(os.fstat(descriptor))
+            self._verify_root()
+            snapshot = self._read_snapshot_from_head_unlocked(
+                session_id, head, head_bytes, _sha256(head_bytes)
+            )
+            self._verify_root()
+            return snapshot
+        except OSError as exc:
+            raise FencedCommitError("repository-invalid", "repository root cannot be pinned") from exc
+        finally:
+            self._root_descriptor = None
+            self._root_identity = None
+            if descriptor is not None:
+                os.close(descriptor)
 
     def read(self, session_id: str) -> RepositorySnapshot:
         session_id = _session_id(session_id)

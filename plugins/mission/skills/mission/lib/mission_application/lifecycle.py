@@ -51,6 +51,8 @@ from mission_kernel.transitions import (
     handoff_discard_refusal,
 )
 from provider_public_contract import SpecialistPublicContractError
+from mission_kernel.errors import StateBoundaryError
+from mission_kernel.json_codec import encode_legacy_document
 from .compatibility import compatibility_delta
 from .ports import (
     AggregateIndexError,
@@ -699,9 +701,7 @@ def _typed_state(raw_state: dict):
             "validated_at",
             compatible.get("updated_at") or compatible.get("started_at"),
         )
-    return decode_mission_state(
-        json.dumps(compatible, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    )
+    return decode_mission_state(encode_legacy_document(compatible))
 
 
 def _mark_halt_decision_state(raw_state: dict):
@@ -741,6 +741,8 @@ def diagnose_terminalizable_state(document: dict) -> str:
     """Classify why a document can or cannot supply halt claims."""
     try:
         candidate = _typed_state(document)
+    except StateBoundaryError:
+        raise
     except (TypeError, ValueError, UnicodeError):
         return TERMINALIZABLE_UNDECODABLE
     if (
@@ -1571,6 +1573,8 @@ def set_fields(
             # Preserve the established structured CLI rejection for unsafe
             # legacy provider records.  Typed A4 decode now reaches this gate
             # before the adapter-level validator, but must not erase its path.
+            raise
+        except StateBoundaryError:
             raise
         except (TypeError, ValueError, UnicodeError) as error:
             raise LifecycleFailure(

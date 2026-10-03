@@ -540,14 +540,20 @@ def test_legacy_v4_read_propagates_structural_bugs(monkeypatch, tmp_path):
 
 def test_a1_a5_application_modules_have_no_persistence_or_direct_writer_dependency():
     application_root = LIB_DIR / "mission_application"
+    violations = []
+    for path in sorted(application_root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            imported = (
+                [node.module or ""] if isinstance(node, ast.ImportFrom)
+                else [alias.name for alias in node.names] if isinstance(node, ast.Import)
+                else []
+            )
+            if any(module.startswith("mission_persistence") for module in imported):
+                violations.append(f"{path.name}:{node.lineno}")
+    assert not violations, "application imports persistence: " + ", ".join(violations)
     for name in ("lifecycle.py", "review.py", "artifact.py", "planning.py", "runtime_guard.py"):
         tree = ast.parse((application_root / name).read_text(encoding="utf-8"))
-        imported = {
-            node.module or ""
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom)
-        }
-        assert not any(module.startswith("mission_persistence") for module in imported)
         # Attribute ``replace`` here means filesystem publication (for example
         # ``Path.replace``).  A direct ``dataclasses.replace(...)`` Name call is
         # intentionally outside this inventory because it does not write bytes.

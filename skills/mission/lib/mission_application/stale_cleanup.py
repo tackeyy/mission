@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 
+from mission_kernel.errors import CanonicalStateEncodingError
+
 
 @dataclass(frozen=True)
 class CleanupStaleRequest:
@@ -17,6 +19,7 @@ class CleanupStaleServices:
     path_from_string: object
     path_exists: object
     iter_state_files: object
+    preflight_session_paths: object
     load_authoritative_state: object
     lease_fields_present: object
     expired_lease_without_heartbeat: object
@@ -49,6 +52,7 @@ def run_cleanup_stale(request, services):
         "warnings": [],
         "dry_run": not request.execute,
     }
+    services.preflight_session_paths(search_roots, services.iter_state_files)
     pid_sessions: dict[int, list[str]] = {}
     for root in search_roots:
         if not services.path_exists(root):
@@ -278,11 +282,15 @@ def run_cleanup_stale(request, services):
                                     "pid": pid,
                                     "mission": (data.get("mission") or "")[:80],
                                 })
+                except CanonicalStateEncodingError:
+                    raise
                 except Exception as error:
                     results["errors"].append({
                         "path": services.path_to_string(state_file),
                         "error": str(error),
                     })
+            except CanonicalStateEncodingError:
+                raise
             except Exception as error:
                 results["errors"].append({
                     "path": services.path_to_string(state_file),

@@ -348,3 +348,29 @@ def test_reconcile_can_abandon_dead_running_invocation_but_cannot_reapply_it(run
         "--status", "completed", cwd=tmp_path, env_extra=env,
     )
     assert reapplied.returncode == 2
+
+
+def test_invoke_command_rejects_unencodable_state_before_preflight_or_spawn(run_cli, tmp_path):
+    # This legacy prevalidation runs before the repository transaction. A
+    # later writer guard cannot protect it from deciding on hostile state.
+    from .test_issue879_completion_cli import _public_bytes
+
+    marker, env = _prepare_command_provider(run_cli, tmp_path)
+    state_path = _state_path(tmp_path)
+    state = json.loads(state_path.read_bytes())
+    state["custom_note"] = "\ud800"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    before = _public_bytes(tmp_path)
+
+    result = run_cli(
+        "specialists", "invoke-command", "--provider", "guarded-command-provider",
+        "--iteration", "1", "--phase", "planning", "--json",
+        cwd=tmp_path, env_extra=env,
+    )
+
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "canonical-json-invalid" in result.stderr
+    assert "state projection cannot be canonically encoded" in result.stderr
+    assert "surrogates not allowed" not in result.stderr
+    assert not marker.exists()
+    assert _public_bytes(tmp_path) == before
