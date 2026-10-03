@@ -131,7 +131,7 @@ def test_cached_module_cannot_supply_the_pinned_factory(installed_adapter, monke
 
     module, _, _, register = installed_adapter
     marker = module.parent / 'executed'
-    module.write_text('def factory(): return object()\n')
+    module.write_text(ADAPTER_SOURCE)
     register()
     cached = ModuleType('neutral_adapter')
     cached.__file__ = str(module)
@@ -184,80 +184,68 @@ def test_factory_reexported_from_main_is_not_pinned_code(installed_adapter, monk
     assert not marker.exists()
 
 
-@pytest.mark.parametrize('route', ['constructor', 'classmethod', 'constructor-object', 'metaclass'])
-def test_foreign_class_factory_cannot_forge_its_module_name(installed_adapter, monkeypatch, route):
+@pytest.mark.parametrize('form,definition,attribute', [
+    ('class', 'factory = Adapter', 'factory'),
+    ('classmethod', 'class Factory:\n    @classmethod\n    def create(cls): return Adapter()', 'Factory.create'),
+    ('staticmethod', 'class Factory:\n    @staticmethod\n    def create(): return Adapter()', 'Factory.create'),
+    ('callable-instance', 'class Factory:\n    def __call__(self): return Adapter()\nfactory = Factory()', 'factory'),
+    ('builtin', 'factory = len', 'factory'),
+    ('classmethod-object', 'factory = classmethod(factory)', 'factory'),
+    ('staticmethod-object', 'factory = staticmethod(factory)', 'factory'),
+    ('bound-method', 'class Factory:\n    def create(self): return Adapter()\nfactory = Factory().create', 'factory'),
+])
+def test_factory_requires_a_plain_module_function(installed_adapter, form, definition, attribute):
+    from fresh_review_runtime import resolve_adapter, load_adapter
+    from mission_kernel.fresh_review import FreshReviewError
+
+    module, metadata, _, register = installed_adapter
+    module.write_text(ADAPTER_SOURCE + definition + '\n')
+    (metadata / 'entry_points.txt').write_text(
+        '[mission.fresh_review_adapters]\nneutral = neutral_adapter:' + attribute + '\n')
+    register()
+    with pytest.raises(FreshReviewError, match='fresh-review-adapter-source-invalid'):
+        load_adapter(resolve_adapter('neutral'))
+
+
+def test_partial_wrapping_main_cannot_forge_factory_provenance(installed_adapter, monkeypatch):
     from fresh_review_runtime import resolve_adapter, load_adapter
     from mission_kernel.fresh_review import FreshReviewError
 
     module, _, _, register = installed_adapter
-    marker = module.parent / 'executed'
 
-    class ForeignAdapter:
-        def __init__(self): marker.write_text('executed')
-        def observe_parent(self): pass
-        launch = collect = cancel = recover = observe_parent
+    def foreign_factory(adapter_type, marker):
+        marker.write_text('executed')
+        return adapter_type()
 
-    if route == 'classmethod':
-        ForeignAdapter.__init__ = classmethod(ForeignAdapter.__init__)
-    if route == 'constructor-object':
-        class ForeignConstructor:
-            def __call__(self): marker.write_text('executed')
-
-        ForeignAdapter.__init__ = ForeignConstructor()
-    if route == 'metaclass':
-        class ForeignMeta(type):
-            def __call__(cls):
-                marker.write_text('executed')
-                return object()
-
-        ForeignAdapter = ForeignMeta('ForeignAdapter', (), {})
-
-    ForeignAdapter.__module__ = 'neutral_adapter'
-    monkeypatch.setattr(sys.modules['__main__'], 'factory', ForeignAdapter, raising=False)
-    module.write_text('from __main__ import factory\n')
+    monkeypatch.setattr(sys.modules['__main__'], 'foreign_factory', foreign_factory, raising=False)
+    module.write_text(ADAPTER_SOURCE + '''
+from functools import partial
+from pathlib import Path
+from __main__ import foreign_factory
+local_function = factory
+factory = partial(foreign_factory, Adapter, Path(__file__).with_name('executed'))
+# A callable can advertise all three provenance fields without being a function.
+factory.__module__ = __name__
+factory.__globals__ = globals()
+factory.__code__ = local_function.__code__
+''')
     register()
     with pytest.raises(FreshReviewError, match='fresh-review-adapter-source-invalid'):
         load_adapter(resolve_adapter('neutral'))
-    assert not marker.exists()
+    assert not module.with_name('executed').exists()
 
 
-def test_source_defined_class_factory_remains_usable(installed_adapter):
+@pytest.mark.parametrize('definition', ['def factory(): return Adapter()', 'factory = lambda: Adapter()'])
+def test_plain_function_and_local_lambda_remain_usable(installed_adapter, definition):
     from fresh_review_runtime import resolve_adapter, load_adapter
 
     module, _, _, register = installed_adapter
-    module.write_text(ADAPTER_SOURCE.replace('def factory(): return Adapter()', 'factory = Adapter'))
+    module.write_text(ADAPTER_SOURCE.replace('def factory(): return Adapter()', definition))
     register()
     assert load_adapter(resolve_adapter('neutral')).observe_parent().thaw() == {'parent_identity': 'neutral-parent'}
 
 
-def test_source_defined_classmethod_factory_remains_usable(installed_adapter):
-    from fresh_review_runtime import resolve_adapter, load_adapter
-
-    module, metadata, _, register = installed_adapter
-    module.write_text(ADAPTER_SOURCE + '''
-class Factory:
-    @classmethod
-    def create(cls): return Adapter()
-''')
-    (metadata / 'entry_points.txt').write_text('[mission.fresh_review_adapters]\nneutral = neutral_adapter:Factory.create\n')
-    register()
-    assert load_adapter(resolve_adapter('neutral')).observe_parent().thaw() == {'parent_identity': 'neutral-parent'}
-
-
-def test_source_defined_callable_factory_remains_usable(installed_adapter):
-    from fresh_review_runtime import resolve_adapter, load_adapter
-
-    module, _, _, register = installed_adapter
-    module.write_text(ADAPTER_SOURCE + '''
-class Factory:
-    def __call__(self): return Adapter()
-factory = Factory()
-''')
-    register()
-    assert load_adapter(resolve_adapter('neutral')).observe_parent().thaw() == {'parent_identity': 'neutral-parent'}
-
-
-@pytest.mark.parametrize('changed', ['file', 'origin', 'module-cache', 'code', 'globals'])
+@pytest.mark.parametrize('changed', ['file', 'origin', 'spec', 'module-cache', 'code', 'foreign-code', 'globals', 'module-name'])
 def test_loaded_module_identity_must_still_match_its_source(installed_adapter, changed):
     from fresh_review_runtime import resolve_adapter, load_adapter
     from mission_kernel.fresh_review import FreshReviewError
@@ -266,14 +254,18 @@ def test_loaded_module_identity_must_still_match_its_source(installed_adapter, c
     actions = {
         'file': '__file__ = "foreign.py"',
         'origin': '__spec__.origin = "foreign.py"',
+        'spec': '__spec__ = importlib.util.spec_from_file_location(__name__, __file__)',
         'module-cache': 'sys.modules[__name__] = ModuleType(__name__)',
         'code': 'factory.__code__ = factory.__code__.replace(co_filename="foreign.py")',
+        'foreign-code': 'namespace = {}; exec(compile("def foreign(): return Adapter()", "foreign.py", "exec"), namespace); factory.__code__ = namespace["foreign"].__code__',
         'globals': 'factory = FunctionType(factory.__code__, dict(globals()))',
+        'module-name': 'factory.__module__ = "foreign"',
     }
     source = ADAPTER_SOURCE.replace('def factory(): return Adapter()',
                                     'def factory():\n    marker.write_text("executed")\n    return Adapter()')
     module.write_text(source + '''
 import sys
+import importlib.util
 from pathlib import Path
 from types import FunctionType, ModuleType
 marker = Path(__file__).with_name('executed')
@@ -282,6 +274,69 @@ marker = Path(__file__).with_name('executed')
     with pytest.raises(FreshReviewError, match='fresh-review-adapter-source-invalid'):
         load_adapter(resolve_adapter('neutral'))
     assert not module.with_name('executed').exists()
+    assert 'neutral_adapter' not in sys.modules
+
+
+@pytest.mark.parametrize('swap', ['during-first-read', 'after-first-read'])
+def test_transient_source_swap_cannot_execute_unverified_bytes(installed_adapter, monkeypatch, swap):
+    import fresh_review_runtime as runtime
+    from mission_kernel.fresh_review import FreshReviewError
+
+    module, _, _, register = installed_adapter
+    approved = ADAPTER_SOURCE.encode()
+    foreign = approved + b'\nfrom pathlib import Path\nPath(__file__).with_name("executed").write_text("foreign")\n'
+    module.write_bytes(approved)
+    register()
+    pin = runtime.resolve_adapter('neutral')
+    original_read = runtime.read_stable_bytes
+    reads = 0
+    swapped = False
+
+    def swap_at_capture(path):
+        nonlocal reads, swapped
+        if Path(path) != module:
+            return original_read(path)
+        reads += 1
+        # Read 1 is callback pin resolution; read 2 captures bytes for compilation.
+        if reads == 2 and swap == 'during-first-read':
+            module.write_bytes(foreign)
+            raw = original_read(path)
+            module.write_bytes(approved)
+            swapped = True
+            return raw
+        raw = original_read(path)
+        if reads == 2 and swap == 'after-first-read':
+            module.write_bytes(foreign)
+            swapped = True
+        elif reads == 3 and swap == 'after-first-read':
+            # A forbidden compilation re-read gets foreign bytes and restores the
+            # file before the following digest check, which then sees approved bytes.
+            # The correct loader checks this read's bytes and rejects before exec.
+            module.write_bytes(approved)
+        return raw
+
+    monkeypatch.setattr(runtime, 'read_stable_bytes', swap_at_capture)
+    with pytest.raises(FreshReviewError, match='fresh-review-adapter-source-invalid'):
+        runtime.load_adapter(pin)
+    assert swapped
+    assert module.read_bytes() == approved
+    assert not module.with_name('executed').exists()
+
+
+def test_reexported_dependency_function_is_not_the_entry_point_factory(installed_adapter):
+    from fresh_review_runtime import resolve_adapter, load_adapter
+    from mission_kernel.fresh_review import FreshReviewError
+
+    module, _, _, register = installed_adapter
+    dependency = module.with_name('neutral_dependency.py')
+    dependency.write_text(ADAPTER_SOURCE)
+    module.write_text('from neutral_dependency import factory\n')
+    register()
+    try:
+        with pytest.raises(FreshReviewError, match='fresh-review-adapter-source-invalid'):
+            load_adapter(resolve_adapter('neutral'))
+    finally:
+        sys.modules.pop('neutral_dependency', None)
 
 
 def test_source_replaced_after_pin_read_is_not_executed(installed_adapter, monkeypatch):

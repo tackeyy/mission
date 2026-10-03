@@ -16,7 +16,7 @@ import os
 from pathlib import Path
 import re
 import sys
-from types import BuiltinFunctionType, FunctionType, MethodDescriptorType, MethodType, WrapperDescriptorType
+from types import FunctionType
 from typing import Protocol
 
 from mission_kernel.fresh_review import FreshReviewError, canonical_digest
@@ -157,7 +157,12 @@ def _source_digest(module):
 
 
 def _load_pinned_factory(pin, entry):
-    """Compile the exact pinned bytes, without import caches or loader code."""
+    """Bind entry-point bytes to a plain factory function defined by those bytes.
+
+    Imports, other modules and objects reachable from __main__ that the function
+    calls are dependency code outside the pin. Other factory forms are rejected
+    with fresh-review-adapter-source-invalid.
+    """
     invalid = 'fresh-review-adapter-source-invalid'
     if pin.module in sys.modules:
         raise FreshReviewError(invalid)
@@ -176,28 +181,15 @@ def _load_pinned_factory(pin, entry):
     sys.modules[pin.module] = module
     try:
         exec(code, module.__dict__)
-        factory = module
-        for part in entry.attr.split('.'):
-            factory = getattr(factory, part)
+        factory = getattr(module, entry.attr, None)
         if (sys.modules.get(pin.module) is not module or module.__file__ != origin
-                or module.__spec__ is not spec or spec.origin != origin
-                or getattr(factory, '__module__', None) != pin.module):
+                or module.__spec__ is not spec or spec.origin != origin):
             raise FreshReviewError(invalid)
-        if isinstance(factory, type):
-            callbacks = (factory.__new__, factory.__init__, type(factory).__call__)
-        elif callable(factory):
-            callbacks = (factory,)
-        else:
+        if type(factory) is not FunctionType:
             raise FreshReviewError(invalid)
-        callback_types = (FunctionType, MethodType, BuiltinFunctionType, MethodDescriptorType, WrapperDescriptorType)
-        callbacks = tuple(callback if isinstance(callback, callback_types)
-                          else getattr(type(callback), '__call__', None) for callback in callbacks)
-        callbacks = tuple(callback.__func__ if isinstance(callback, MethodType) else callback
-                          for callback in callbacks)
-        if any(not isinstance(callback, callback_types) for callback in callbacks):
-            raise FreshReviewError(invalid)
-        if any(callback.__globals__ is not module.__dict__ or callback.__code__.co_filename != origin
-               for callback in callbacks if isinstance(callback, FunctionType)):
+        if (factory.__globals__ is not module.__dict__
+                or factory.__code__.co_filename != origin
+                or factory.__module__ != pin.module):
             raise FreshReviewError(invalid)
         return factory
     except BaseException:

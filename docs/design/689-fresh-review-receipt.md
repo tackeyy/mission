@@ -111,6 +111,7 @@ fresh context と実際に取り込んだ入力を証明する情報がない。
 従って registry の信頼規則と saga の遷移を再利用し、approval と planning の意味を混ぜない。
 approval 用 fork callback を起動しただけでは fresh reviewer と認めない。
 source pin は entry-point module の pin であり、host 全体・依存コードの誠実性を証明しない。
+pin は entry-point module の bytes を固定し、factory はその bytes で定義した通常の関数に限定し、factory が呼ぶ import・他 module・`__main__` の object は pin 外の依存コードとして扱う。
 host adapter を trust root とする限界を公開仕様に書く。
 
 launch receipt は閉じた `mission-fresh-review-launch/1` とする。
