@@ -53,7 +53,7 @@ E はこの保証を残し、E に link のない legacy findings の migration/
 - E2・E3 の段階では event 機構が無いため、終端要約の event ref は `absent(reason="events-not-enabled")` と明示する。E4 で event を導入した後の遷移からだけ event を出し、それ以前の遷移を遡って event 化しない（event の無い期間を未測定として扱うことを E から I〈#884〉への要求とする。I 側の確定事項ではない）。
 **決定（設計レビュー 3 巡目の後に追加。E2〈と E3〉の実装着手前に設計レビューを受け直す）**:
 - 予約の検査は `repair begin` だけでなく、E3 の disposition 開始と、開始済み attempt の終端前の書込み（fence 付きの実行 intent、reconcile の途中記録など）を含む**全ての state mutation の適用後**に行う。各 attempt の予約は、その attempt 自身の終端前の書込み（種類ごとに固定の上限サイズ）と終端要約をまとめて確保する。attempt 自身の書込みはその予約から消費し、他の mutation は予約領域を使えない。
-- effects の公開が staging の成功後に失敗した場合（[skills/mission/lib/mission_persistence/fenced_commit.py:5214](https://github.com/tackeyy/mission/blob/8f40f542f8fed8660728234d41295ee3212deeab/skills/mission/lib/mission_persistence/fenced_commit.py#L5214)）も、公開 head は進んでいない扱いとし、staging 失敗と同じ回復に入る。現在の fence の下の `repair reconcile` が、staged generation が無傷ならその公開を冪等に再試行し、無傷でなければ state のみの `blocked` 終端 commit を行う。どの分岐でも成功を作らない。
+- （置き換え済み）staging 成功後の公開失敗を含む回復は、下記「公開の回復は head を観測して判定する」に従う。head を観測せずに「進んでいない」とみなす旧規則は廃止する。
 **決定（予約の一本化・公開の回復・E1 の stale。PR #904 の独立 Checker の指摘を受けて追加。E2・E3 着手前の設計再レビューの対象）**:
 - **予約の一本化（最終決定）**: 予約は attempt ごとに「その attempt 自身の終端前の書込み（種類ごとに固定の上限サイズ）＋終端要約」をまとめて確保し、確保済み予約はその総和とする。これとは別に、停止と回復に要る mutation（halt / mark-halt、lease の解放・takeover・更新、既存 attempt の `repair reconcile`、dispatch 済みの D request の終端 commit）のための固定の system 予約を置く。検査は**全ての state mutation の適用後**に行い、通常の mutation は「既存上限 − system 予約 − 確保済み予約」以内、停止と回復の mutation は「既存上限 − 確保済み予約」以内でなければならない（system 予約は使えるが attempt の予約は使えない）。attempt 自身の書込みはその attempt の予約から消費する。超える場合は state を変えず `repair-state-capacity-exhausted` で拒否する。
 - **公開の回復は head を観測して判定する**: effects の staging 後・公開後のどの時点で失敗しても、`repair reconcile`（現在の fence の下）はまず公開 head を読む。head が当該 attempt の終端を含む generation へ進んでいれば終端は記録済みとして何も追記しない。head が進んでいなければ、staged generation が無傷なら公開を冪等に再試行し、無傷でなければ state のみの `blocked` 終端 commit を行う。crash の権威境界は head の置換であり（[skills/mission/tests/test_issue503_fenced_commit.py:786](https://github.com/tackeyy/mission/blob/8f40f542f8fed8660728234d41295ee3212deeab/skills/mission/tests/test_issue503_fenced_commit.py#L786) の `test_head_replacement_is_the_crash_authority_boundary` が固定）、同じ attempt に終端を 2 つ作らない。
@@ -77,7 +77,7 @@ E はこの保証を残し、E に link のない legacy findings の migration/
 
 verified の必須条件:
 
-1. 元反例の実行が同じ criterion/command/typed repro で `failed` と観測されている。blocked、自己申告 actual、未実行を失敗と数えない。D の original replay が未確認なら、まず保存された introduced snapshot で baseline replay を観測する。snapshot が保存されていなければ UNKNOWN/open のまま。
+1. 元反例の実行が同じ criterion/command/typed repro で `failed` と観測されている。blocked、自己申告 actual、未実行を失敗と数えない。D の original replay が未確認なら、まず保存された introduced snapshot で baseline replay を観測する（B の現 primitive は project_root から capture するため、未merge の D の候補保存に依存する）。snapshot が保存されていなければ UNKNOWN/open のまま。
 2. 新候補はその失敗候補から **replay 対象 snapshot digest が変化**している。iteration、HEAD、説明文、別 command の map 変更だけでは修復扱いにしない。最新の同一反例 failed receipt を baseline とし、同じ bytes の失敗後の成功は観測履歴には残すが repair_verified にしない。
 3. 新候補で、同じ criterion、元 `repro_digest`、登録 replay.command_id、definition/policy/contract、B runner digest が一致する **新規の passed replay receipt** がある。通常 verifier の成功で代替しない。caller の `resolved=true` / `status=verified` を受け付けない。
 4. prepare、実行直前、実行後、公開直前の候補観測が一致し、公開時の現 operation/lease/fence を通る。receipt は immutable artifact ref と同じ state commit に束縛される。過去 operation の receipt を新 attempt として流用しない。
