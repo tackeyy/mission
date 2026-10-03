@@ -12,6 +12,7 @@ import hashlib
 import json
 import re
 
+from .errors import StateBoundaryError
 from .json_codec import freeze_json_value
 from .model import ContentAddressedRef, FrozenJsonObject
 
@@ -23,10 +24,9 @@ _ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z')
 _DIGEST = re.compile(r'sha256:[0-9a-f]{64}\Z')
 
 
-class FreshReviewError(ValueError):
+class FreshReviewError(StateBoundaryError):
     def __init__(self, code):
-        super().__init__(code)
-        self.code = code
+        super().__init__(code, code)
 
 
 def canonical_bytes(value):

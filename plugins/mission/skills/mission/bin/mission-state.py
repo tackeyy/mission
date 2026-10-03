@@ -378,19 +378,20 @@ from mission_persistence.repository_binding import (  # noqa: E402
 )
 from mission_persistence.fenced_commit import (  # noqa: E402
     FencedCommitError,
+    CanonicalStateEncodingError,
     LocalFencedRepository,
     compute_intent_digest,
 )
 from mission_persistence.reinitialization import V5MissionReinitializer  # noqa: E402
 from mission_persistence.local_uow import VerifiedBlobSet  # noqa: E402
-from mission_application.fresh_review import FreshReviewError, StateReadError, run_read_fresh_review_checked_json
+from mission_kernel.fresh_review import FreshReviewError
 from mission_persistence.authoritative_reader import (  # noqa: E402
     AuthoritativeSnapshot,
     authoritative_snapshot_from_document,
     expected_session_id_for_live_path,
     is_live_session_path,
     read_authoritative_snapshot,
-    load_authoritative_snapshot,
+    read_session_json, preflight_session_paths, load_authoritative_snapshot,
     read_legacy_compatibility_snapshot,
     summarize_authoritative_pass_rate_population,
 )
@@ -589,7 +590,7 @@ def _validate_schema_version(data: dict) -> int | None:
 
 
 def _load_state_json(sf: Path) -> dict:
-    data = _read_legacy_json_file(sf)
+    data = read_session_json(sf)
     _validate_schema_version(data)
     return data
 
@@ -601,18 +602,13 @@ def _load_authoritative_state(
     legacy_compatibility: bool = False,
     allow_missing_schema_session_mismatch: bool = False,
 ) -> tuple[AuthoritativeSnapshot, dict]:
-    try:
-        snapshot = load_authoritative_snapshot(
-            sf, archive_validation,
-            legacy_compatibility=legacy_compatibility,
-            allow_missing_schema_session_mismatch=allow_missing_schema_session_mismatch,
-            archive_resolver=_validated_archive_for_state_path,
-            archive_reader=read_validated_archive_authoritative_snapshot,
-            schema_error_type=UnsupportedSchemaVersionError,
-        )
-    except FreshReviewError as error:
-        print(f"ERROR: {error.code}", file=sys.stderr)
-        raise SystemExit(2)
+    snapshot = load_authoritative_snapshot(
+        sf, archive_validation, legacy_compatibility=legacy_compatibility,
+        allow_missing_schema_session_mismatch=allow_missing_schema_session_mismatch,
+        archive_resolver=_validated_archive_for_state_path,
+        archive_reader=read_validated_archive_authoritative_snapshot,
+        schema_error_type=UnsupportedSchemaVersionError,
+    )
     return snapshot, snapshot.document_copy()
 
 
@@ -1664,7 +1660,7 @@ def _enforce_session_lease_for_write(path: Path, data: dict) -> LeaseDecision | 
     latest = None
     if path.exists():
         try:
-            candidate = _read_legacy_json_file(path)
+            candidate = read_session_json(path)
             if _is_session_state_shape(candidate):
                 latest = candidate
         except (OSError, json.JSONDecodeError):
@@ -1740,6 +1736,8 @@ def _reject_fenced_lease_for_cli(
     try:
         target_path = state_path or resolve_state_file(Path.cwd())
         _snapshot, state = _load_authoritative_state(target_path)
+    except (CanonicalStateEncodingError, FreshReviewError):
+        raise
     except (OSError, ValueError, FencedCommitError):
         pass
     owner = state.get("owner_session_id")
@@ -1988,7 +1986,7 @@ def backup_state(path: Path) -> None:
     """A-4: 更新前に .bak をコピー生成."""
     if path.exists():
         _validate_specialist_public_state(
-            _read_legacy_json_file(path)
+            read_session_json(path)
         )
         bak = path.with_suffix(path.suffix + ".bak")
         atomic_write_bytes(bak, path.read_bytes())
@@ -3187,7 +3185,9 @@ def _warn_s3_file_overlap(cwd: Path, planned_files: list[str], cur_sid: str) -> 
         return
     for sf_other in _iter_state_files(cwd):
         try:
-            other = _read_legacy_json_file(sf_other)
+            other = read_session_json(sf_other)
+        except (CanonicalStateEncodingError, FreshReviewError):
+            raise
         except Exception:
             continue
         if not other.get("loop_active") or other.get("session_id") == cur_sid:
@@ -4279,7 +4279,7 @@ def cmd_specialists(args):
     try:
         state_path = resolve_state_file(Path.cwd())
         if state_path.exists():
-            state_context = _read_legacy_json_file(state_path)
+            state_context = read_session_json(state_path)
             _validate_specialist_public_state(state_context)
     except (OSError, UnicodeError, json.JSONDecodeError, RuntimeError):
         state_context = None
@@ -4554,7 +4554,7 @@ def cmd_specialists_accounting(args):
     if not sf.exists():
         print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
         sys.exit(1)
-    data = _read_legacy_json_file(sf)
+    data = read_session_json(sf)
     _validate_specialist_public_state(data)
     report = {
         "ok": True,
@@ -4663,7 +4663,7 @@ def cmd_specialists_summary(args):
     if not sf.exists():
         print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
         sys.exit(1)
-    data = _read_legacy_json_file(sf)
+    data = read_session_json(sf)
     _validate_specialist_public_state(data)
     summary = specialist_usage_summary(data)
     result = {
@@ -5707,6 +5707,7 @@ def cmd_invoke_command_provider(args):
         path_exists=Path.exists,
         read_bytes=Path.read_bytes,
         read_text=Path.read_text,
+        read_session_json=read_session_json,
         inspect_repository_bytes=inspect_repository_bytes,
         v5_format=RepositoryFormat.V5,
     )
@@ -6563,7 +6564,9 @@ def _artifact_profile_coverage(cwd: Path, data: dict) -> dict:
     states = []
     for path in _iter_state_files(cwd, include_archive=True):
         try:
-            candidate = _read_legacy_json_file(path)
+            candidate = read_session_json(path)
+        except (CanonicalStateEncodingError, FreshReviewError):
+            raise
         except (OSError, UnicodeError, ValueError, TypeError):
             continue
         if isinstance(candidate, dict):
@@ -6607,7 +6610,7 @@ def _legacy_evidence_repository(cwd: Path, sf: Path, *, stamp: bool) -> LegacyV4
     )
 
     def read_state() -> dict:
-        data = _read_legacy_json_file(sf)
+        data = read_session_json(sf)
         lease["decision"] = _enforce_session_lease_for_write(sf, data)
         return data
 
@@ -6714,7 +6717,7 @@ def cmd_progress_get(args):
     if not sf.exists():
         print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
         sys.exit(1)
-    data = _read_legacy_json_file(sf)
+    _snapshot, data = _load_authoritative_state(sf, legacy_compatibility=True)
     progress = data.get("progress") or {}
     if args.json:
         print(json.dumps({"ok": True, "progress": progress}, indent=2, ensure_ascii=False))
@@ -6927,6 +6930,8 @@ def _read_init_peer_state(path: Path) -> dict:
     try:
         _snapshot, document = _load_authoritative_state(path)
         return document
+    except (CanonicalStateEncodingError, FreshReviewError):
+        raise
     except (OSError, ValueError, FencedCommitError):
         return _read_legacy_json_file(path)
 
@@ -7248,7 +7253,7 @@ def _resolve_queue_enqueue_shas(cwd: Path, args) -> tuple[str, str]:
             "merge queue --from-state requires a current session state file; use manual --head-sha/--base-sha fallback"
         )
     try:
-        state = _read_legacy_json_file(state_path)
+        state = read_session_json(state_path)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise MergeQueueError(
             "merge queue --from-state requires a readable JSON session state; use manual --head-sha/--base-sha fallback"
@@ -7774,7 +7779,9 @@ def _parallel_status(store: _ParallelGroupStore, group_id: str) -> tuple[Path, d
             state_content, _identity = _read_parallel_regular_at(
                 store.sessions_fd, name, limit=4 * 1024 * 1024
             )
-            state = json.loads(state_content.decode("utf-8"))
+            state = read_session_json(session_dir(store.cwd), name=name, source=state_content)
+        except (CanonicalStateEncodingError, FreshReviewError):
+            raise
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             raise ValueError("parallel group session state is malformed or unsafe") from exc
         if not _is_mission_state_record(state) or state.get("logical_group_id") != group_id:
@@ -8068,11 +8075,7 @@ def _activity_state_file(cwd: Path) -> Path:
 
 
 def _read_legacy_json_file(path: Path) -> dict:
-    try:
-        return run_read_fresh_review_checked_json(path)
-    except StateReadError as error:
-        print(f"ERROR: {error}", file=sys.stderr)
-        raise SystemExit(2)
+    return read_session_json(path)
 
 
 def _parse_captured_json(text: str):
@@ -8188,7 +8191,7 @@ def _legacy_lifecycle_repository(
         if strict_read:
             data = _load_state_json(sf)
         else:
-            data = _read_legacy_json_file(sf)
+            data = read_session_json(sf)
         if pre_admit_lease:
             if _state_file_identity(sf) != loaded_identity:
                 raise ValueError("state changed while being read")
@@ -8675,6 +8678,8 @@ def cmd_next(args):
         snapshot, data = _load_authoritative_state(
             sf, legacy_compatibility=True
         )
+    except (CanonicalStateEncodingError, FreshReviewError):
+        raise
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
@@ -8801,6 +8806,8 @@ def _guard_resolved_root(value: Optional[str]) -> Optional[str]:
 def _guard_session_fact(sf: Path) -> GuardSessionFact:
     try:
         snapshot, _document = _load_authoritative_state(sf)
+    except (CanonicalStateEncodingError, FreshReviewError):
+        raise
     except Exception as exc:
         return GuardSessionFact(
             state_file=str(sf),
@@ -9227,6 +9234,8 @@ def cmd_freshness(args):
         raise SystemExit(2) from exc
     try:
         snapshot, _data = _load_authoritative_state(sf)
+    except (CanonicalStateEncodingError, FreshReviewError):
+        raise
     except Exception as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         raise SystemExit(2) from exc
@@ -9380,6 +9389,8 @@ def cmd_codex_preflight(args):
     if state_present:
         try:
             snapshot, data = _load_authoritative_state(sf, legacy_compatibility=True)
+        except (CanonicalStateEncodingError, FreshReviewError):
+            raise
         except Exception:
             snapshot = None
             data = {}
@@ -9504,12 +9515,16 @@ def _permission_preflight(cwd: Path) -> dict:
         }
     try:
         _snapshot, data = _load_authoritative_state(sf)
+    except (CanonicalStateEncodingError, FreshReviewError):
+        raise
     except (OSError, ValueError, FencedCommitError):
         # Preserve the established v1-v4 schema diagnostic instead of
         # collapsing malformed version fields into a permission failure.
         try:
             legacy_candidate = _read_legacy_json_file(sf)
             _validate_schema_version(legacy_candidate)
+        except (CanonicalStateEncodingError, FreshReviewError):
+            raise
         except UnsupportedSchemaVersionError:
             raise
         except (OSError, ValueError, json.JSONDecodeError):
@@ -9666,6 +9681,8 @@ def _record_permission_probe_observation(
                 file=sys.stderr,
             )
         return result.halt_recorded, result.terminal_outcome
+    except (CanonicalStateEncodingError, FreshReviewError):
+        raise
     except UnsupportedSchemaVersionError:
         raise
     except FencedCommitError as error:
@@ -10445,11 +10462,13 @@ def _force_envelope_replayed(cwd: Path, envelope: dict) -> bool:
     sessions = state_dir(cwd) / "sessions"
     for candidate in sessions.glob("*.json"):
         try:
-            other = _read_legacy_json_file(candidate)
+            other = read_session_json(candidate)
             recorded = other.get("force_approval") if isinstance(other, dict) else None
             if not isinstance(recorded, dict):
                 continue
             validated = validate_recorded_envelope(recorded)
+        except (CanonicalStateEncodingError, FreshReviewError):
+            raise
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
             # A malformed record must never become a bypass; it is not a
             # reusable approved envelope, and audit will flag it separately.
@@ -10546,7 +10565,7 @@ def _current_review_lineage(cwd: Path, data: dict, revision_scope: dict) -> dict
     members = []
     try:
         for state_path in _iter_state_files(cwd):
-            state = _read_legacy_json_file(state_path)
+            state = read_session_json(state_path)
             if state.get("review_group_id") != group:
                 continue
             member_generation = state.get("review_generation")
@@ -11305,7 +11324,7 @@ def _emit_finalize_failure(
     state_file = resolve_state_file(Path.cwd())
     if state_file.exists():
         try:
-            state_data = _read_legacy_json_file(state_file)
+            state_data = read_session_json(state_file)
         except (OSError, json.JSONDecodeError):
             state_data = {}
     context = _guidance_context_for_state(
@@ -14824,7 +14843,7 @@ def _terminalize_state_file(
         coordinator = janitor_coordinator("legacy-v4")
         return LegacyV4Repository(
             lock=lambda: StateLock(lock_file(proj)),
-            read_state=lambda: _read_legacy_json_file(sf),
+            read_state=lambda: read_session_json(sf),
             write_state=write_terminal_state,
             backup_state=lambda: backup_state(sf),
             aggregate_recover=coordinator.recover,
@@ -14930,6 +14949,7 @@ def cmd_cleanup_stale(args):
         path_from_string=Path,
         path_exists=Path.exists,
         iter_state_files=_iter_state_files,
+        preflight_session_paths=preflight_session_paths,
         load_authoritative_state=_load_authoritative_state,
         lease_fields_present=_lease_fields_present,
         expired_lease_without_heartbeat=_expired_lease_without_heartbeat,
@@ -14974,6 +14994,8 @@ def cmd_list(args):
                     "mission": snapshot.mission[:80],
                     "updated_at": snapshot.updated_at,
                 })
+            except (CanonicalStateEncodingError, FreshReviewError):
+                raise
             except Exception as e:
                 results.append({"path": str(sf), "error": str(e)})
     print(json.dumps(results, indent=2, ensure_ascii=False))
@@ -15087,6 +15109,8 @@ def cmd_lane_report(args):
                     legacy_compatibility=True,
                     allow_missing_schema_session_mismatch=True,
                 )
+            except (CanonicalStateEncodingError, FreshReviewError):
+                raise
             except Exception as exc:
                 if is_live_session_path(sf):
                     print(
@@ -15152,22 +15176,21 @@ def cmd_halt(args):
         search_roots = [Path(args.root)] if getattr(args, "root", None) else _default_search_roots()
         category = _normalize_halt_category(getattr(args, "category", None))
         halted = []
-        for root in search_roots:
-            if not root.exists():
-                continue
-            for sf in _iter_state_files(root):
-                try:
-                    data = _read_legacy_json_file(sf)
-                    if data.get("loop_active") and not data.get("passes") and not data.get("halt_reason"):
-                        proj = _project_root_of(sf)
-                        changed = _terminalize_state_file(
-                            sf, proj, reason=args.reason, category=category,
-                            set_terminal_phase=True,
-                        )
-                        if changed:
-                            halted.append(str(proj))
-                except Exception as e:
-                    print(f"WARN: skip {sf}: {e}", file=sys.stderr)
+        for sf in preflight_session_paths(search_roots, _iter_state_files):
+            try:
+                data = _read_legacy_json_file(sf)
+                if data.get("loop_active") and not data.get("passes") and not data.get("halt_reason"):
+                    proj = _project_root_of(sf)
+                    changed = _terminalize_state_file(
+                        sf, proj, reason=args.reason, category=category,
+                        set_terminal_phase=True,
+                    )
+                    if changed:
+                        halted.append(str(proj))
+            except (CanonicalStateEncodingError, FreshReviewError):
+                raise
+            except Exception as e:
+                print(f"WARN: skip {sf}: {e}", file=sys.stderr)
         print(json.dumps({"ok": True, "halted": halted, "halt_category": category}))
     else:
         if getattr(args, "root", None):
@@ -15231,6 +15254,8 @@ def _collect_states(
                 legacy_compatibility=True,
                 allow_missing_schema_session_mismatch=True,
             )
+        except (CanonicalStateEncodingError, FreshReviewError):
+            raise
         except UnsupportedSchemaVersionError:
             raise
         except Exception:
@@ -15305,7 +15330,9 @@ def _collect_learning_brief_states(
                 continue
             try:
                 canonical_bytes = read_state_archive_file_bytes(project_root, canonical_path)
-                canonical_state = json.loads(canonical_bytes.decode("utf-8"))
+                canonical_state = read_session_json(canonical_path, source=canonical_bytes)
+            except (CanonicalStateEncodingError, FreshReviewError):
+                raise
             except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
                 continue
             if not _is_mission_state_record(canonical_state):
@@ -15777,8 +15804,10 @@ def _publish_state_archive_compaction(
     target_ref = _state_archive_reference(cwd, target)
     try:
         canonical_bytes = read_state_archive_file_bytes(cwd, canonical_ref)
-        canonical_data = json.loads(canonical_bytes.decode("utf-8"))
+        canonical_data = read_session_json(canonical, source=canonical_bytes)
         target_bytes = read_state_archive_file_bytes(cwd, target_ref)
+    except (CanonicalStateEncodingError, FreshReviewError):
+        raise
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise WorktreeArchiveError("canonical state is unreadable") from exc
     if not _is_mission_state_record(canonical_data):
@@ -15968,7 +15997,7 @@ def cmd_resolve_archive(args):
                     live_path = target_state_root / "sessions" / f"{session_id}.json"
                     if live_path.exists():
                         try:
-                            live_data = _read_legacy_json_file(live_path)
+                            live_data = read_session_json(live_path)
                             if live_data.get("loop_active") is True:
                                 print(
                                     f"ERROR: live session {session_id!r} は loop_active=true のまま稼働中です; "

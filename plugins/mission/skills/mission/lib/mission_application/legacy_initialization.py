@@ -3,6 +3,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from mission_kernel.fresh_review import FreshReviewError
+from mission_kernel.errors import CanonicalStateEncodingError
+
 
 @dataclass(frozen=True)
 class LegacyV4InitializationRequest:
@@ -219,6 +222,8 @@ def initialize_legacy_v4(request, services):
         for other_state_file in services.iter_state_files(cwd):
             try:
                 other = services.read_init_peer_state(other_state_file)
+            except (CanonicalStateEncodingError, FreshReviewError):
+                raise
             except Exception:
                 continue
             if other.get("session_id") == current_session_id:
@@ -354,7 +359,8 @@ def initialize_legacy_v4(request, services):
                 existing_mission_id = existing_data.get("mission_id", "")
                 new_mission_id = initial.get("mission_id", "")
                 if (
-                    existing_mission_id
+                    not request.new_mission
+                    and existing_mission_id
                     and new_mission_id
                     and existing_mission_id != new_mission_id
                 ):
@@ -411,7 +417,11 @@ def initialize_legacy_v4(request, services):
                         f".mission-state/sessions/{sid}-{new_mission_id[:8]}-"
                         f"{services.time.time_ns()}-assumptions.md"
                     )
-                elif existing_mission_id and existing_mission_id == new_mission_id:
+                elif (
+                    not request.new_mission
+                    and existing_mission_id
+                    and existing_mission_id == new_mission_id
+                ):
                     if "planning_policy_version" not in existing_data:
                         initial.pop("planning_policy_version", None)
                     else:
@@ -474,6 +484,8 @@ def initialize_legacy_v4(request, services):
                         f"上書きで復旧します: {move_error}",
                         file=services.stderr,
                     )
+            except (CanonicalStateEncodingError, FreshReviewError):
+                raise
             except Exception as error:
                 services.printer(
                     f"WARNING: 旧ミッション (id={existing_mission_id[:8]}) のアーカイブに失敗。"
@@ -497,6 +509,8 @@ def initialize_legacy_v4(request, services):
             for state_path in services.iter_state_files(cwd):
                 try:
                     prior = services.read_init_peer_state(state_path)
+                except (CanonicalStateEncodingError, FreshReviewError):
+                    raise
                 except (OSError, ValueError, services.fenced_commit_error):
                     continue
                 if prior.get("review_group_id") != initial["review_group_id"]:

@@ -10,6 +10,8 @@ import copy
 import hashlib
 import json
 import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -45,6 +47,35 @@ def _persisted_fixture_document(root):
     return json.loads((state_root / manifest['state']['object']).read_bytes())
 
 
+def _rewrite_fixture_document(root, mutate):
+    """Forge a coherent persisted fixture without admitting it through a writer."""
+    state_root = root / '.mission-state'
+    path = state_root / 'sessions' / 'test.json'
+    head = json.loads(path.read_bytes())
+    if head.get('schema') != 'mission-head/1':
+        mutate(head)
+        path.write_text(json.dumps(head))
+        return
+    manifest = json.loads((state_root / head['state_generation']['path']).read_bytes())
+    document = _persisted_fixture_document(root)
+    mutate(document)
+
+    def publish(value, directory, suffix):
+        payload = json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
+        digest = hashlib.sha256(payload).hexdigest()
+        relative = f'{directory}/{digest}{suffix}'
+        (state_root / relative).write_bytes(payload)
+        return {'digest': 'sha256:' + digest, 'path': relative, 'size': len(payload)}
+
+    state_ref = publish(document, 'objects', '.blob')
+    manifest['state'] = {'digest': state_ref['digest'], 'object': state_ref['path'], 'size': state_ref['size']}
+    generation_ref = publish(manifest, 'generations', '.json')
+    commit = json.loads((state_root / head['commit']['path']).read_bytes())
+    commit.update(state=state_ref, generation=generation_ref)
+    head.update(commit=publish(commit, 'commits', '.json'), state_generation=generation_ref)
+    path.write_text(json.dumps(head, sort_keys=True, separators=(',', ':')))
+
+
 def _persist_fixture(root, state, schema, *, closed_v5=False, escaped_contract=False,
                      operation_id="fixture-genesis"):
     """Arrange flat v4 or a fenced v5 container, without generic set.
@@ -58,31 +89,14 @@ def _persist_fixture(root, state, schema, *, closed_v5=False, escaped_contract=F
         path.write_bytes(raw)
         return
     if escaped_contract:
-        # Publish a valid fixture first, then forge coherent lineage. Public
-        # persistence boundaries must reject the hostile state on every load.
+        # Publish valid state, then forge coherent lineage. A hostile JSON
+        # escape must reach the reader without using the writer to admit it.
         safe = dict(state)
         safe.pop('acceptance_contract')
         _persist_fixture(root, safe, schema, closed_v5=closed_v5, operation_id=operation_id)
-        state_root = root / '.mission-state'
-        head = json.loads(path.read_bytes())
-        manifest = json.loads((state_root / head['state_generation']['path']).read_bytes())
-        document = _persisted_fixture_document(root)
-        document.get('extensions', document)['acceptance_contract'] = state['acceptance_contract']
-
-        def publish(value, directory, suffix):
-            payload = json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
-            digest = hashlib.sha256(payload).hexdigest()
-            relative = f'{directory}/{digest}{suffix}'
-            (state_root / relative).write_bytes(payload)
-            return {'digest': 'sha256:' + digest, 'path': relative, 'size': len(payload)}
-
-        state_ref = publish(document, 'objects', '.blob')
-        manifest['state'] = {'digest': state_ref['digest'], 'object': state_ref['path'], 'size': state_ref['size']}
-        generation_ref = publish(manifest, 'generations', '.json')
-        commit = json.loads((state_root / head['commit']['path']).read_bytes())
-        commit.update(state=state_ref, generation=generation_ref)
-        head.update(commit=publish(commit, 'commits', '.json'), state_generation=generation_ref)
-        path.write_text(json.dumps(head, sort_keys=True, separators=(',', ':')))
+        def inject(document):
+            document.get('extensions', document)['acceptance_contract'] = state['acceptance_contract']
+        _rewrite_fixture_document(root, inject)
         return
     from mission_kernel import decode_snapshot, decode_mission_state, project_legacy_document
     from mission_kernel.codec_v5 import encode_v5_state, _state_payload, _review_json
@@ -738,3 +752,236 @@ def test_codecs_keep_contract_and_receipt_evidence(completion_session, run_cli, 
         assert legacy_decision.transition.new_state.control.passes is True
     reason = "legacy passthrough is unavailable" if schema == 5 else expected
     _reject_unchanged(run_cli, root, ["mark-passes"], reason)
+
+
+@pytest.mark.parametrize('args', [
+    ('set', 'complexity=Simple'),
+    ('advance', '--phase', 'planning'),
+    ('activity', 'start', '--kind', 'active', '--reason', 'implementation'),
+    ('activity', 'end'),
+    ('progress', 'get', '--json'),
+    ('progress', 'update', '--total', '10', '--completed', '1', '--json'),
+    ('progress', 'clear', '--json'),
+    ('mark-halt', '--reason', 'fixture', '--category', 'other'),
+    ('refresh-pid', '--no-reactivate'),
+], ids=['set', 'advance', 'activity-start', 'activity-end', 'progress-get',
+        'progress-update', 'progress-clear', 'mark-halt', 'refresh-pid'])
+@pytest.mark.parametrize('completion_session,closed_v5', [(4, False), (5, False), (5, True)],
+                         indirect=['completion_session'], ids=['flat-v4', 'container-v4', 'container-v5'])
+def test_repository_routes_reject_unencodable_state_without_publication(completion_session, run_cli, args, closed_v5):
+    root, state, schema = completion_session
+    state['acceptance_contract']['criteria'][0]['expected'] = '\ud800'
+    _persist_fixture(root, state, schema, escaped_contract=True, closed_v5=closed_v5)
+    result = _reject_unchanged(run_cli, root, args, 'canonical-json-invalid', raw_control=True)
+    output = result.stdout + result.stderr
+    assert 'state projection cannot be canonically encoded' in output
+    assert 'UnicodeEncodeError' not in output
+    assert 'surrogates not allowed' not in output
+
+
+@pytest.mark.parametrize('completion_session,closed_v5', [(4, False), (5, False), (5, True)],
+                         indirect=['completion_session'], ids=['flat-v4', 'container-v4', 'container-v5'])
+def test_repository_read_port_rejects_unencodable_state(completion_session, closed_v5):
+    import contextlib
+    from mission_persistence.fenced_commit import FencedCommitError, LocalFencedRepository
+    from mission_persistence.legacy_v4 import LegacyV4Repository
+
+    root, state, schema = completion_session
+    state['acceptance_contract']['criteria'][0]['expected'] = '\ud800'
+    _persist_fixture(root, state, schema, escaped_contract=True, closed_v5=closed_v5)
+    path = root / '.mission-state' / 'sessions' / 'test.json'
+    repository = (LocalFencedRepository(path.parent.parent) if schema == 5 else
+                  LegacyV4Repository(lock=contextlib.nullcontext,
+                      read_state=lambda: json.loads(path.read_bytes()),
+                      write_state=lambda *_args, **_kwargs: pytest.fail('unexpected publication'),
+                      backup_state=lambda: pytest.fail('unexpected backup'),
+                      add_to_aggregate=lambda: None, remove_from_aggregate=lambda: None))
+    before = _public_bytes(root)
+    with pytest.raises(FencedCommitError) as caught:
+        repository.read('test')
+    assert caught.value.code == 'canonical-json-invalid'
+    assert str(caught.value) == 'canonical-json-invalid: state projection cannot be canonically encoded'
+    assert _public_bytes(root) == before
+
+
+def test_repository_reads_keep_unicode_and_historical_nonfinite_scores(completion_session, run_cli):
+    root, state, schema = completion_session
+    state['acceptance_contract']['criteria'][0]['expected'] = '日本語 café'
+    _persist_fixture(root, state, schema)
+    before = _public_bytes(root)
+    result = run_cli('progress', 'get', '--json', cwd=root)
+    assert result.returncode == 0, result.stdout + result.stderr
+    result = run_cli('get', cwd=root)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout)['acceptance_contract']['criteria'][0]['expected'] == '日本語 café'
+    assert _public_bytes(root) == before
+    if schema == 4:
+        state['score_history'][0]['composite'] = float('nan')
+        path = root / '.mission-state' / 'sessions' / 'test.json'
+        path.write_text(json.dumps(state, ensure_ascii=False))
+        before = _public_bytes(root)
+        for args in [('get',), ('progress', 'get', '--json')]:
+            result = run_cli(*args, cwd=root)
+            assert result.returncode == 0, result.stdout + result.stderr
+        assert json.loads(run_cli('get', cwd=root).stdout)['acceptance_contract']['criteria'][0]['expected'] == '日本語 café'
+        assert _public_bytes(root) == before
+
+
+@pytest.mark.parametrize('route', ['parallel-closeout', 'parallel-status', 'halt-all',
+                                  'permission-preflight', 'codex-preflight', 'codex-preflight-strict', 'list', 'cleanup-stale', 'init-peer',
+                                      'stats', 'learning', 'specialists-summary', 'specialists-accounting', 'queue'])
+def test_direct_session_routes_reject_unencodable_state(completion_session, run_cli, route):
+    root, state, schema = completion_session
+    state.update(logical_group_id='group-902', issue_ref='902')
+    if route.startswith('parallel'):
+        state.update(passes=True, loop_active=False, phase='done', terminal_outcome='completed_pass',
+                     lease_expires_at='2000-01-01T00:00:00Z')
+        run_cli('parallel-init', '--group-id', 'group-902', '--issue-ref', '902', cwd=root, check=True)
+    _persist_fixture(root, state, schema)
+    if route.startswith('parallel'):
+        _rewrite_fixture_document(root, lambda doc: doc.update(lease_expires_at='2000-01-01T00:00:00Z'))
+        # Prove the hostile fixture is otherwise a pass candidate, not an
+        # already rejected child that could hide the publication regression.
+        healthy = run_cli('parallel-status', '--group-id', 'group-902', cwd=root)
+        assert healthy.returncode == 0, healthy.stderr
+        assert json.loads(healthy.stdout)['children']['902']['status'] == 'pass'
+    _rewrite_fixture_document(root, lambda doc: doc.update(custom_note='\ud800'))
+    args = {
+        'parallel-closeout': ('parallel-closeout', '--group-id', 'group-902'),
+        'parallel-status': ('parallel-status', '--group-id', 'group-902'),
+        'halt-all': ('halt', '--all', '--root', str(root), '--reason', 'fixture', '--category', 'other'),
+        'permission-preflight': ('permission-preflight', '--json'),
+        'codex-preflight': ('codex-preflight', '--json'),
+        'codex-preflight-strict': ('codex-preflight', '--json', '--strict'),
+        'list': ('list',),
+        'cleanup-stale': ('cleanup-stale', '--root', str(root), '--execute'),
+        'init-peer': ('init', 'peer fixture', '--issue-ref', '902'),
+        'stats': ('stats', '--root', str(root)),
+        'learning': ('learning', 'brief', '--root', str(root)),
+        'specialists-summary': ('specialists', 'summary', '--json'),
+        'specialists-accounting': ('specialists', 'accounting', '--json'),
+        'queue': ('queue', 'enqueue', '--from-state',
+                  '--issue-ref', '902', '--pr-ref', '903'),
+    }[route]
+    _reject_unchanged(run_cli, root, args, 'canonical-json-invalid',
+                      env={'MISSION_SEARCH_ROOTS': str(root),
+                           **({'MISSION_SESSION_ID': 'fresh'} if route == 'init-peer' else {})},
+                      raw_control=True)
+
+
+def test_halt_all_validates_all_sessions_before_publication(completion_session, run_cli):
+    root, state, schema = completion_session
+    _persist_fixture(root, state, schema)
+    peer = dict(state, session_id='z-invalid', custom_note='\ud800')
+    (root / '.mission-state' / 'sessions' / 'z-invalid.json').write_text(json.dumps(peer))
+    _reject_unchanged(run_cli, root,
+                      ['halt', '--all', '--root', str(root), '--reason', 'fixture', '--category', 'other'],
+                      'canonical-json-invalid', raw_control=True)
+
+
+def test_cleanup_stale_preflights_batch_before_changing_healthy_session(completion_session, run_cli):
+    """A later corrupt peer must stop cleanup before an eligible session is halted."""
+    root, state, schema = completion_session
+    state.update(pid=None, lease_expires_at="2000-01-01T00:00:00Z",
+                 last_activity_at="2000-01-01T00:00:00Z", updated_at="2000-01-01T00:00:00Z")
+    _persist_fixture(root, state, schema)
+    # V5 initialization admits a fresh lease; expire that lease in the fixture.
+    _rewrite_fixture_document(root, lambda doc: doc.update(
+        lease_expires_at="2000-01-01T00:00:00Z",
+        last_activity_at="2000-01-01T00:00:00Z", updated_at="2000-01-01T00:00:00Z"))
+    healthy_path = root / ".mission-state" / "sessions" / "test.json"
+    before = _public_bytes(root)
+    dry_run = run_cli("cleanup-stale", "--root", str(root), cwd=root)
+    assert dry_run.returncode == 0, dry_run.stderr
+    assert str(healthy_path) in [item["path"] for item in json.loads(dry_run.stdout)["would_halt"]]
+    assert _public_bytes(root) == before
+
+    peer = dict(state, session_id="z-invalid", custom_note="\ud800")
+    (healthy_path.parent / "z-invalid.json").write_text(json.dumps(peer))
+    _reject_unchanged(run_cli, root, ["cleanup-stale", "--root", str(root), "--execute"],
+                      "canonical-json-invalid", raw_control=True)
+
+
+def test_audit_rejects_unencodable_sessions_before_snapshot_publication(completion_session, tmp_path_factory):
+    root, state, schema = completion_session
+    _persist_fixture(root, state, schema)
+    _rewrite_fixture_document(root, lambda doc: doc.update(custom_note='\ud800'))
+    before = _public_bytes(root)
+    target = tmp_path_factory.mktemp('audit-output') / 'snapshot.json'
+    script = Path(__file__).resolve().parents[3] / 'scripts' / 'mission-audit.py'
+    result = subprocess.run([sys.executable, str(script), '--root', str(root), '--json',
+                             '--snapshot-out', str(target)], capture_output=True, text=True)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert 'canonical-json-invalid' in result.stdout + result.stderr
+    assert not target.exists()
+    assert _public_bytes(root) == before
+
+
+@pytest.mark.parametrize('boundary', ['archive-target', 'frozen-live'])
+def test_archive_resolution_rejects_unencodable_state_before_publication(completion_session, run_cli, boundary):
+    root, state, schema = completion_session
+    state.update(passes=False, loop_active=False, phase='halted', halt_reason='fixture',
+                 halt_category='other', terminal_outcome='failed', pid=None, project_root=str(root))
+    _persist_fixture(root, state, schema)
+    target = root / '.mission-state' / 'archive' / 'state-fixture.json'
+    target.parent.mkdir(exist_ok=True)
+    archived = dict(state)
+    if boundary == 'archive-target':
+        archived['custom_note'] = '\ud800'
+    target.write_text(json.dumps(archived))
+    if boundary == 'frozen-live':
+        _rewrite_fixture_document(root, lambda doc: doc.update(custom_note='\ud800'))
+    _reject_unchanged(run_cli, root,
+                      ['resolve-archive', '--path', str(target), '--status', 'resolved',
+                       '--frozen-snapshot', '--json'],
+                      'canonical-json-invalid', raw_control=True)
+
+
+@pytest.mark.parametrize("completion_session", [5], indirect=True, ids=["v5-container"])
+def test_queue_from_state_resolves_healthy_v5_scores(completion_session, run_cli):
+    root, state, schema = completion_session
+    state["custom_note"] = "日本語 café"
+    _persist_fixture(root, state, schema)
+    before = _public_bytes(root)
+    scope = state["score_history"][-1]["revision_scope"]
+
+    result = run_cli("queue", "enqueue", "--from-state", "--issue-ref", "902",
+                     "--pr-ref", "903", cwd=root)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    queued = json.loads(result.stdout)["entry"]
+    assert queued["status"] == "queued"
+    assert queued["accepted_base_sha"] == scope["base_sha"]
+    assert queued["head_sha"] == scope["head_sha"]
+    published = json.loads((root / ".mission-state" / "merge-queue.json").read_bytes())
+    assert published["entries"][0] == queued
+    after = _public_bytes(root)
+    assert {key: after[key] for key in before} == before
+    assert set(after) - set(before) == {"merge-queue.json"}
+
+
+@pytest.mark.parametrize("completion_session", [5], indirect=True, ids=["v5-container"])
+def test_parallel_closeout_resolves_healthy_v5_pass_child(completion_session, run_cli):
+    root, state, schema = completion_session
+    state.update(logical_group_id="group-902", issue_ref="902", passes=True,
+                 loop_active=False, phase="done", terminal_outcome="completed_pass",
+                 custom_note="日本語 café")
+    run_cli("parallel-init", "--group-id", "group-902", "--issue-ref", "902",
+            cwd=root, check=True)
+    _persist_fixture(root, state, schema)
+    _rewrite_fixture_document(root, lambda doc: doc.update(lease_expires_at="2000-01-01T00:00:00Z"))
+    before = _public_bytes(root)
+
+    result = run_cli("parallel-closeout", "--group-id", "group-902", cwd=root)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout)["outcome"] == "pass"
+    manifest_key = "sessions/group-902.group.json"
+    manifest = json.loads((root / ".mission-state" / manifest_key).read_bytes())
+    assert manifest["status"] == "terminal"
+    assert manifest["outcome"] == "pass"
+    after = _public_bytes(root)
+    assert after[manifest_key] != before[manifest_key]
+    assert {key: value for key, value in after.items() if key != manifest_key} == {
+        key: value for key, value in before.items() if key != manifest_key
+    }

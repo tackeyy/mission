@@ -45,12 +45,14 @@ from mission_common import (  # noqa: E402
 from mission_kernel.fresh_review import FreshReviewError
 from mission_persistence.authoritative_reader import (  # noqa: E402
     AuthoritativeSnapshot,
+    CanonicalStateEncodingError,
     authoritative_snapshot_from_document,
     authoritative_snapshot_from_validated_archive_bytes,
     expected_session_id_for_live_path,
     is_live_session_path,
     legacy_compatibility_snapshot_from_document,
     read_legacy_compatibility_snapshot,
+    read_session_json,
     summarize_authoritative_pass_rate_population,
 )
 from mission_kernel.errors import MissionStateDecodeError  # noqa: E402
@@ -843,7 +845,7 @@ def _preflight_generation_state(
     if not stat.S_ISREG(current_stat.st_mode):
         return None, "manifest-state-missing"
     try:
-        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state = read_session_json(state_path)
     except OSError:
         return None, "manifest-state-access-error"
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -1157,8 +1159,8 @@ def load_records(
                     )
                 else:
                     authoritative_snapshot = read_authoritative_record(path)
-            except FreshReviewError as error:
-                raise SnapshotError(str(error)) from error
+            except (CanonicalStateEncodingError, FreshReviewError):
+                raise
             except Exception as error:
                 try:
                     authoritative_snapshot = _read_compaction_canonical_snapshot(path)
@@ -1189,6 +1191,8 @@ def load_records(
                             "authoritative session is unreadable: %s" % path
                         ) from error
                     continue
+                except (CanonicalStateEncodingError, FreshReviewError):
+                    raise
                 except Exception:
                     if is_live_session_path(path):
                         if state_read_errors is not None:
@@ -1429,7 +1433,7 @@ def _record_from_payload(
             authoritative_document,
             expected_session_id=expected_session_id_for_live_path(path),
         )
-    except FreshReviewError:
+    except (CanonicalStateEncodingError, FreshReviewError):
         raise
     except Exception:
         authoritative_snapshot = legacy_compatibility_snapshot_from_document(
@@ -4031,6 +4035,9 @@ def main(argv: list[str] | None = None) -> int:
                 "id": document["content_digest"],
                 "digest": document["content_digest"],
             }
+    except CanonicalStateEncodingError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 2
     except SpecialistPublicContractError as error:
         payload = {
             "ok": False,

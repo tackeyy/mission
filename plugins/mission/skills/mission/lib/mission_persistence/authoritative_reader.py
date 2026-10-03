@@ -35,8 +35,8 @@ from mission_common import (
 )
 
 from .fenced_commit import (
-    FencedCommitError, LocalFencedRepository, canonical_state_encoding,
-    encode_legacy_document, project_legacy_document,
+    CanonicalStateEncodingError, FencedCommitError, LocalFencedRepository, canonical_state_encoding, encode_legacy_document,
+    project_legacy_document,
 )
 from .repository_binding import (
     RepositoryFormat,
@@ -931,15 +931,60 @@ def summarize_authoritative_pass_rate_population(
     }
 
 
+def preflight_session_paths(roots, discover):
+    """Reject unrenderable batch inputs before any target is modified.
+
+    Other read failures keep their per-route compatibility handling. Re-read
+    each target at use time as well; this preflight does not authorize writes.
+    """
+    paths = [path for root in roots if root.exists() for path in discover(root)]
+    for path in paths:
+        try:
+            read_session_json(path)
+        except (CanonicalStateEncodingError, FreshReviewError):
+            raise
+        except Exception:
+            continue
+    return paths
+
+
+def read_session_json(session_path: Union[Path, str], *, source: Union[str, bytes, None] = None, name: Optional[str] = None, resolve_head: bool = True):
+    """Read direct session JSON with the shared UTF-8 renderability boundary.
+
+    Flat legacy documents retain historical JSON/score tolerance. A v5 head
+    resolves through verified lineage rather than being treated as state.
+    Callers with an already pinned read can supply its bytes without reopening
+    flat state. Administrative consumers can retain a raw head to reject its
+    unsupported record shape. This check never rewrites retained public bytes.
+    """
+    path = Path(session_path)
+    if name is not None:
+        path = path / name
+    source = source if source is not None else path.read_bytes()
+    with canonical_state_encoding():
+        source = source.encode("utf-8") if isinstance(source, str) else source
+    document = json.loads(source.decode("utf-8"))
+    encode_legacy_document(document)
+    if resolve_head and isinstance(document, dict) and document.get("schema") == "mission-head/1":
+        snapshot = read_authoritative_snapshot(path, source=source)
+        encode_legacy_document(snapshot.raw_document_copy())
+        return snapshot.document_copy()
+    if isinstance(document, dict):
+        decode_projection(document.get("extensions", {}) if document.get("schema_version") == 5 else document)
+    return document
+
+
 def read_authoritative_snapshot(
     session_path: Union[Path, str],
     *,
     expected_session_id: Optional[str] = None,
+    source: Optional[bytes] = None,
 ) -> AuthoritativeSnapshot:
     """Read a legacy document or resolve a v5 head through verified lineage."""
 
     path = Path(session_path)
-    source = read_stable_bytes(path, limit=STATE_LIMIT)
+    pinned_source = source
+    source = source if source is not None else read_stable_bytes(path, limit=STATE_LIMIT)
     inspected = _inspect_repository_bytes(
         source, expected_session_id=expected_session_id
     )
@@ -952,7 +997,10 @@ def read_authoritative_snapshot(
             raise ValueError("v5 head has no session identity")
         repository = LocalFencedRepository(path.parent.parent)
         try:
-            repository_snapshot = repository.read(selected_session_id)
+            repository_snapshot = (
+                repository.read(selected_session_id) if pinned_source is None
+                else repository.read_pinned_head(selected_session_id, source)
+            )
         except FencedCommitError as error:
             if error.code.startswith("fresh-review-"):
                 raise FreshReviewError(error.code) from error
@@ -977,12 +1025,21 @@ def read_authoritative_snapshot(
     return _bind_expected_session_id(snapshot, expected_session_id)
 
 
+def _decode_authoritative_mission_state(state_bytes):
+    try:
+        return decode_mission_state(state_bytes)
+    except MissionStateDecodeError as error:
+        if error.code.startswith("fresh-review-"):
+            raise FreshReviewError(error.code) from error
+        raise
+
+
 def load_authoritative_snapshot(
     session_path, archive_validation=None, *, legacy_compatibility=False,
     allow_missing_schema_session_mismatch=False, archive_resolver, archive_reader,
     schema_error_type,
 ):
-    """Select authoritative bytes without relaxing the fresh-review contract."""
+    """Select authoritative state without absorbing boundary rejections."""
     expected_session_id = expected_session_id_for_live_path(session_path)
     try:
         if archive_validation is None:
@@ -990,17 +1047,16 @@ def load_authoritative_snapshot(
         if archive_validation is not None:
             return archive_reader(archive_validation)
         return read_authoritative_snapshot(session_path, expected_session_id=expected_session_id)
+    except (CanonicalStateEncodingError, FreshReviewError):
+        raise
     except Exception as original_error:
-        code = getattr(original_error, "code", "")
-        if code.startswith("fresh-review-"):
-            raise FreshReviewError(code) from original_error
         if legacy_compatibility and archive_validation is None:
             try:
                 return read_legacy_compatibility_snapshot(
                     session_path, expected_session_id=expected_session_id,
                     allow_missing_schema_session_mismatch=allow_missing_schema_session_mismatch,
                 )
-            except FreshReviewError:
+            except (CanonicalStateEncodingError, FreshReviewError):
                 raise
             except MissionStateDecodeError as exc:
                 if exc.code in {"schema-version-type", "unsupported-schema-version"}:
@@ -1008,17 +1064,8 @@ def load_authoritative_snapshot(
                 raise original_error
             except Exception:
                 raise original_error
-        if isinstance(original_error, MissionStateDecodeError) and code in {
+        if isinstance(original_error, MissionStateDecodeError) and original_error.code in {
             "schema-version-type", "unsupported-schema-version"
         }:
             raise schema_error_type(str(original_error)) from original_error
-        raise
-
-
-def _decode_authoritative_mission_state(state_bytes):
-    try:
-        return decode_mission_state(state_bytes)
-    except MissionStateDecodeError as error:
-        if error.code.startswith("fresh-review-"):
-            raise FreshReviewError(error.code) from error
         raise

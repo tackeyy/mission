@@ -52,3 +52,16 @@ def test_migrate_backfills_pid(tmp_path):
     m.migrate_one(sd / "state.json", execute=True, remove_legacy=False)
     d = json.loads((sd / "sessions" / "s.json").read_text())
     assert "pid" in d and d["pid"] is None
+
+
+def test_migration_cli_rejects_unencodable_state_before_publication(tmp_path):
+    import subprocess
+    import sys
+
+    sd = _state(tmp_path, passes=True, custom_note='\ud800')
+    before = {p.relative_to(sd): p.read_bytes() for p in sd.rglob('*') if p.is_file()}
+    result = subprocess.run([sys.executable, str(MIGRATE_PY), str(tmp_path), '--execute'],
+                            capture_output=True, text=True)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert 'canonical-json-invalid' in result.stdout + result.stderr
+    assert {p.relative_to(sd): p.read_bytes() for p in sd.rglob('*') if p.is_file()} == before

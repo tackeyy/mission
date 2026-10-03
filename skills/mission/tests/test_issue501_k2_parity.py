@@ -301,6 +301,7 @@ def test_decide_and_guidance_share_one_named_transition_table():
         "executor-handoff-record-step",
         "executor-handoff-reject-canonical-drift",
         "executor-handoff-verify-step",
+        "fresh-review-prepare",
         "progress-clear",
         "progress-update",
         "verification-record",

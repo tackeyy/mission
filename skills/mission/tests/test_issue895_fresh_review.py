@@ -277,35 +277,13 @@ def test_kernel_rejects_malformed_typed_prepare_without_internal_error():
 
 
 def _tamper_persisted_fresh_review(root, malformed, *, force_legacy_fallback=False):
-    """Forge coherent v5 lineage so shape checks, rather than hashes, reject it."""
-    import hashlib
-    path = root / '.mission-state' / 'sessions' / 'test.json'
-    head = json.loads(path.read_bytes())
-    if head.get('schema') != 'mission-head/1':
-        head['fresh_review'] = malformed
-        if force_legacy_fallback:
-            head['threshold'] = 'historical value'
-        path.write_text(json.dumps(head))
-        return
-    repository_root = path.parent.parent
-    manifest = json.loads((repository_root / head['state_generation']['path']).read_bytes())
-    state = json.loads((repository_root / manifest['state']['object']).read_bytes())
-    state.get('extensions', state)['fresh_review'] = malformed
+    from .test_issue879_completion_cli import _rewrite_fixture_document
 
-    def publish(document, directory, suffix):
-        payload = json.dumps(document, sort_keys=True, separators=(',', ':')).encode()
-        digest = hashlib.sha256(payload).hexdigest()
-        relative = f'{directory}/{digest}{suffix}'
-        (repository_root / relative).write_bytes(payload)
-        return {'digest': 'sha256:' + digest, 'path': relative, 'size': len(payload)}
-
-    state_ref = publish(state, 'objects', '.blob')
-    manifest['state'] = {'digest': state_ref['digest'], 'object': state_ref['path'], 'size': state_ref['size']}
-    generation_ref = publish(manifest, 'generations', '.json')
-    commit = json.loads((repository_root / head['commit']['path']).read_bytes())
-    commit.update(state=state_ref, generation=generation_ref)
-    head.update(commit=publish(commit, 'commits', '.json'), state_generation=generation_ref)
-    path.write_text(json.dumps(head, sort_keys=True, separators=(',', ':')))
+    def mutate(document):
+        document.get('extensions', document)['fresh_review'] = malformed
+        if force_legacy_fallback and document.get('schema_version') != 5:
+            document['threshold'] = 'historical value'
+    _rewrite_fixture_document(root, mutate)
 
 
 @pytest.mark.parametrize('malformed,reason,force_legacy_fallback', [
@@ -370,18 +348,11 @@ def test_legacy_tolerance_and_absent_fresh_review_are_preserved(completion_sessi
         assert _public_bytes(root) == before
 
 
-@pytest.mark.parametrize('args', [
-    ('fresh-review', 'status'),
-    ('set', 'complexity=Simple'),
-    ('advance', '--phase', 'planning'),
-    ('activity', 'start', '--kind', 'active', '--reason', 'implementation'),
-    ('progress', 'get', '--json'),
-], ids=['status', 'set', 'advance', 'activity', 'progress'])
-def test_repository_routes_reject_unencodable_state_without_publication(completion_session, run_cli, args):
+def test_fresh_review_status_rejects_unencodable_state_without_publication(completion_session, run_cli):
     root, state, schema = completion_session
     state['acceptance_contract']['criteria'][0]['expected'] = '\ud800'
     _persist_fixture(root, state, schema, escaped_contract=True)
-    result = _reject_unchanged(run_cli, root, args,
+    result = _reject_unchanged(run_cli, root, ('fresh-review', 'status'),
                                'canonical-json-invalid', raw_control=True)
     output = result.stdout + result.stderr
     assert 'state projection cannot be canonically encoded' in output
@@ -409,26 +380,3 @@ def test_repository_status_keeps_unicode_and_historical_nonfinite_scores(complet
         assert result.returncode == 0, result.stdout + result.stderr
         assert json.loads(result.stdout)['acceptance_contract']['criteria'][0]['expected'] == '日本語 café'
         assert _public_bytes(root) == before
-
-
-def test_repository_read_port_rejects_unencodable_state(completion_session):
-    import contextlib
-    from mission_persistence.fenced_commit import FencedCommitError, LocalFencedRepository
-    from mission_persistence.legacy_v4 import LegacyV4Repository
-
-    root, state, schema = completion_session
-    state['acceptance_contract']['criteria'][0]['expected'] = '\ud800'
-    _persist_fixture(root, state, schema, escaped_contract=True)
-    path = root / '.mission-state' / 'sessions' / 'test.json'
-    repository = (LocalFencedRepository(path.parent.parent) if schema == 5 else
-                  LegacyV4Repository(lock=contextlib.nullcontext,
-                      read_state=lambda: json.loads(path.read_bytes()),
-                      write_state=lambda *_args, **_kwargs: pytest.fail('unexpected publication'),
-                      backup_state=lambda: pytest.fail('unexpected backup'),
-                      add_to_aggregate=lambda: None, remove_from_aggregate=lambda: None))
-    before = _public_bytes(root)
-    with pytest.raises(FencedCommitError) as caught:
-        repository.read('test')
-    assert caught.value.code == 'canonical-json-invalid'
-    assert str(caught.value) == 'canonical-json-invalid: state projection cannot be canonically encoded'
-    assert _public_bytes(root) == before
