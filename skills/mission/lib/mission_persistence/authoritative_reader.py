@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any, Optional, Tuple, Union
 
 from mission_kernel import MissionState, decode_mission_state, project_legacy_document
+from mission_kernel.fresh_review import FreshReviewError, decode_projection
+from mission_kernel.codec_v4 import MissionStateDecodeError
 from mission_kernel.json_codec import (
     _reject_duplicate_json_pairs,
     decode_json_object,
@@ -32,7 +34,7 @@ from mission_common import (
     session_role,
 )
 
-from .fenced_commit import LocalFencedRepository
+from .fenced_commit import FencedCommitError, LocalFencedRepository
 from .repository_binding import (
     RepositoryFormat,
     RepositorySelectionError,
@@ -288,6 +290,7 @@ def _legacy_compatibility_snapshot(
 
     if "schema" in document or {"commit", "state_generation"} & set(document):
         raise ValueError("legacy compatibility input uses an unsupported format")
+    decode_projection(document)
     schema_origin = read_schema_version(document, max_reader_version=4)
     identity_values = (document.get("mission"), document.get("mission_id"))
     has_identity = any(isinstance(value, str) and value for value in identity_values)
@@ -486,6 +489,7 @@ def _snapshot_from_document(
     raw_document: Optional[FrozenJsonObject] = None,
 ) -> AuthoritativeSnapshot:
     values = thaw_json_object(document)
+    decode_projection(values)
     loop_active = values.get("loop_active", False)
     passes = values.get("passes", False)
     awaiting_user = values.get("awaiting_user", False)
@@ -769,7 +773,7 @@ def authoritative_snapshot_from_document(
         raise ValueError("sealed state document uses an unsupported format")
     schema_origin = read_schema_version(values, max_reader_version=5)
     if schema_origin is SchemaOrigin.V5:
-        state = decode_mission_state(state_bytes)
+        state = _decode_authoritative_mission_state(state_bytes)
         snapshot = _snapshot_from_k1_state(
             state,
             frozen,
@@ -803,7 +807,7 @@ def authoritative_snapshot_from_validated_archive_bytes(
         raise ValueError("validated archive state uses an unsupported format")
     schema_origin = read_schema_version(values, max_reader_version=5)
     if schema_origin is SchemaOrigin.V5:
-        state = decode_mission_state(state_bytes)
+        state = _decode_authoritative_mission_state(state_bytes)
         snapshot = _snapshot_from_k1_state(
             state,
             frozen,
@@ -939,7 +943,12 @@ def read_authoritative_snapshot(
         if selected_session_id is None:
             raise ValueError("v5 head has no session identity")
         repository = LocalFencedRepository(path.parent.parent)
-        repository_snapshot = repository.read(selected_session_id)
+        try:
+            repository_snapshot = repository.read(selected_session_id)
+        except FencedCommitError as error:
+            if error.code.startswith("fresh-review-"):
+                raise FreshReviewError(error.code) from error
+            raise
         state_document = decode_json_object(repository_snapshot.state_bytes)
         snapshot = _snapshot_from_k1_state(
             repository_snapshot.state,
@@ -958,3 +967,50 @@ def read_authoritative_snapshot(
         document, schema_origin=schema_origin, state_bytes=source
     )
     return _bind_expected_session_id(snapshot, expected_session_id)
+
+
+def load_authoritative_snapshot(
+    session_path, archive_validation=None, *, legacy_compatibility=False,
+    allow_missing_schema_session_mismatch=False, archive_resolver, archive_reader,
+    schema_error_type,
+):
+    """Select authoritative bytes without relaxing the fresh-review contract."""
+    expected_session_id = expected_session_id_for_live_path(session_path)
+    try:
+        if archive_validation is None:
+            archive_validation = archive_resolver(session_path)
+        if archive_validation is not None:
+            return archive_reader(archive_validation)
+        return read_authoritative_snapshot(session_path, expected_session_id=expected_session_id)
+    except Exception as original_error:
+        code = getattr(original_error, "code", "")
+        if code.startswith("fresh-review-"):
+            raise FreshReviewError(code) from original_error
+        if legacy_compatibility and archive_validation is None:
+            try:
+                return read_legacy_compatibility_snapshot(
+                    session_path, expected_session_id=expected_session_id,
+                    allow_missing_schema_session_mismatch=allow_missing_schema_session_mismatch,
+                )
+            except FreshReviewError:
+                raise
+            except MissionStateDecodeError as exc:
+                if exc.code in {"schema-version-type", "unsupported-schema-version"}:
+                    raise schema_error_type(str(exc)) from exc
+                raise original_error
+            except Exception:
+                raise original_error
+        if isinstance(original_error, MissionStateDecodeError) and code in {
+            "schema-version-type", "unsupported-schema-version"
+        }:
+            raise schema_error_type(str(original_error)) from original_error
+        raise
+
+
+def _decode_authoritative_mission_state(state_bytes):
+    try:
+        return decode_mission_state(state_bytes)
+    except MissionStateDecodeError as error:
+        if error.code.startswith("fresh-review-"):
+            raise FreshReviewError(error.code) from error
+        raise

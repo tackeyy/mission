@@ -417,6 +417,9 @@ def initialize(
     try:
         current = repository.current_mission()
     except (OSError, TypeError, UnicodeError, ValueError) as error:
+        code = getattr(error, "code", "")
+        if code.startswith("fresh-review-"):
+            raise LifecycleFailure(code, reason=code) from error
         raise LifecycleFailure(
             "new mission rejected: session document is undecodable; repair or restore "
             "the authoritative session repository before retrying --new-mission",

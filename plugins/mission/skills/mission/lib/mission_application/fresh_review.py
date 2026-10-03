@@ -174,3 +174,27 @@ def run_fresh_review_status_cli(args, services):
                                        for item in projection.requests]}, ensure_ascii=False, indent=2)
     except FreshReviewError as exc:
         services.fail(exc.code, 2)
+
+
+def run_read_fresh_review_checked_json(path):
+    """Read legacy state without relaxing its reserved fresh-review key.
+
+    Other fields retain the existing JSON tolerance; typed authoritative
+    reads and repository loads enforce the same request decoder separately.
+    """
+    document = json.loads(Path(path).read_text(encoding="utf-8"))
+    if isinstance(document, dict):
+        if document.get("schema") == "mission-head/1":
+            from mission_persistence.authoritative_reader import read_authoritative_snapshot
+            try:
+                read_authoritative_snapshot(path)
+            except FreshReviewError:
+                raise
+            except (OSError, ValueError):
+                # Historical raw consumers tolerated other invalid evidence.
+                # This change tightens only the reserved fresh-review field.
+                pass
+        else:
+            values = document.get("extensions", {}) if document.get("schema_version") == 5 else document
+            decode_projection(values)
+    return document

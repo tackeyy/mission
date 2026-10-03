@@ -34,7 +34,7 @@ def _public_bytes(root):
     }
 
 
-def _persist_fixture(root, state, schema, *, closed_v5=False):
+def _persist_fixture(root, state, schema, *, closed_v5=False, operation_id="fixture-genesis"):
     """Arrange flat v4 or a fenced v5 container, without generic set.
 
     Normal v5 genesis retains v4 payloads. Closed schema-5 payloads are an
@@ -55,7 +55,7 @@ def _persist_fixture(root, state, schema, *, closed_v5=False):
     path.unlink()
     fixture_time = datetime.now(timezone.utc)
     repository = LocalFencedRepository(root / ".mission-state", clock=lambda: fixture_time)
-    request = _request(operation_id="fixture-genesis", lease_id="test-lease",
+    request = _request(operation_id=operation_id, lease_id="test-lease",
                        command_type="init", argv=("init", "completion fixture"))
     admitted = repository.begin(request)
     if not closed_v5:

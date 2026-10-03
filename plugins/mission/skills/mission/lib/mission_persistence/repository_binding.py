@@ -11,6 +11,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Generic, Optional, TypeVar
 
+from mission_kernel.fresh_review import decode_projection
 from mission_kernel.json_codec import decode_json_object, thaw_json_object
 from mission_kernel.model import FrozenJsonObject
 from mission_kernel.versions import read_schema_version
@@ -98,6 +99,7 @@ def inspect_repository_bytes(
         and document_session != expected_session_id
     ):
         raise RepositorySelectionError("repository-session-mismatch")
+    decode_projection(document)
     return RepositoryFormatInspection(
         RepositoryFormat.LEGACY_V4, frozen, document_session
     )

@@ -2099,7 +2099,9 @@ class LocalFencedRepository:
         try:
             state = decode_mission_state(state_bytes)
         except Exception as exc:
-            raise FencedCommitError(getattr(exc, "code", "record-invalid"), "state generation is invalid") from exc
+            code = getattr(exc, "code", "record-invalid")
+            detail = code if code.startswith("fresh-review-") else "state generation is invalid"
+            raise FencedCommitError(code, detail) from exc
         if state.identity.session_id is not None and state.identity.session_id != session_id:
             raise FencedCommitError("lineage-mismatch", "state session identity differs")
         if not isinstance(state.lease, FencedLease) or state.lease.fencing_epoch != commit.fencing_epoch:

@@ -42,6 +42,7 @@ from mission_common import (  # noqa: E402
     opaque_token,
     state_identity,
 )
+from mission_kernel.fresh_review import FreshReviewError
 from mission_persistence.authoritative_reader import (  # noqa: E402
     AuthoritativeSnapshot,
     authoritative_snapshot_from_document,
@@ -1156,6 +1157,8 @@ def load_records(
                     )
                 else:
                     authoritative_snapshot = read_authoritative_record(path)
+            except FreshReviewError as error:
+                raise SnapshotError(str(error)) from error
             except Exception as error:
                 try:
                     authoritative_snapshot = _read_compaction_canonical_snapshot(path)
@@ -1165,6 +1168,8 @@ def load_records(
                             expected_session_id=expected_session_id_for_live_path(path),
                             allow_missing_schema_session_mismatch=True,
                         )
+                except FreshReviewError as decode_error:
+                    raise SnapshotError(str(decode_error)) from decode_error
                 except MissionStateDecodeError as decode_error:
                     if decode_error.code in {
                         "schema-version-type", "unsupported-schema-version"
@@ -1424,6 +1429,8 @@ def _record_from_payload(
             authoritative_document,
             expected_session_id=expected_session_id_for_live_path(path),
         )
+    except FreshReviewError:
+        raise
     except Exception:
         authoritative_snapshot = legacy_compatibility_snapshot_from_document(
             authoritative_document,
@@ -4035,7 +4042,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(json.dumps(payload, ensure_ascii=False), file=sys.stderr)
         return 2
-    except SnapshotError as error:
+    except (SnapshotError, FreshReviewError) as error:
         print(f"ERROR: invalid state snapshot: {error}", file=sys.stderr)
         return 2
     filtered = filter_records(records, since, until, after)

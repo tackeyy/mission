@@ -6,6 +6,7 @@ import copy
 import contextlib
 import json
 import secrets
+from mission_kernel.fresh_review import decode_projection
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Callable, ContextManager, Iterable
@@ -382,6 +383,7 @@ class LegacyV4Repository:
         document = self._guarded_call(self._read_state)
         if not isinstance(document, dict):
             return document
+        decode_projection(document)
         self._loaded_document = copy.deepcopy(document)
         return copy.deepcopy(document)
 

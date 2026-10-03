@@ -274,3 +274,97 @@ def test_kernel_rejects_malformed_typed_prepare_without_internal_error():
     decision = decide(state, command)
     assert not decision.accepted
     assert decision.rejection.code == 'fresh-review-request-shape-invalid'
+
+
+def _tamper_persisted_fresh_review(root, malformed, *, force_legacy_fallback=False):
+    """Forge coherent v5 lineage so shape checks, rather than hashes, reject it."""
+    import hashlib
+    path = root / '.mission-state' / 'sessions' / 'test.json'
+    head = json.loads(path.read_bytes())
+    if head.get('schema') != 'mission-head/1':
+        head['fresh_review'] = malformed
+        if force_legacy_fallback:
+            head['threshold'] = 'historical value'
+        path.write_text(json.dumps(head))
+        return
+    repository_root = path.parent.parent
+    manifest = json.loads((repository_root / head['state_generation']['path']).read_bytes())
+    state = json.loads((repository_root / manifest['state']['object']).read_bytes())
+    state.get('extensions', state)['fresh_review'] = malformed
+
+    def publish(document, directory, suffix):
+        payload = json.dumps(document, sort_keys=True, separators=(',', ':')).encode()
+        digest = hashlib.sha256(payload).hexdigest()
+        relative = f'{directory}/{digest}{suffix}'
+        (repository_root / relative).write_bytes(payload)
+        return {'digest': 'sha256:' + digest, 'path': relative, 'size': len(payload)}
+
+    state_ref = publish(state, 'objects', '.blob')
+    manifest['state'] = {'digest': state_ref['digest'], 'object': state_ref['path'], 'size': state_ref['size']}
+    generation_ref = publish(manifest, 'generations', '.json')
+    commit = json.loads((repository_root / head['commit']['path']).read_bytes())
+    commit.update(state=state_ref, generation=generation_ref)
+    head.update(commit=publish(commit, 'commits', '.json'), state_generation=generation_ref)
+    path.write_text(json.dumps(head, sort_keys=True, separators=(',', ':')))
+
+
+@pytest.mark.parametrize('malformed,reason,force_legacy_fallback', [
+    ({'schema': 'future', 'requests': []}, 'fresh-review-projection-schema-invalid', False),
+    (None, 'fresh-review-projection-shape-invalid', True),
+])
+def test_authoritative_reads_and_writes_reject_forged_projection(
+    completion_session, run_cli, malformed, reason, force_legacy_fallback,
+):
+    root, _ = _prepare(completion_session, run_cli)
+    if completion_session[2] == 5:
+        prepared_state = json.loads(run_cli('get', cwd=root).stdout)
+        _persist_fixture(root, prepared_state, 5, closed_v5=True, operation_id='closed-extension-fixture')
+    _tamper_persisted_fresh_review(root, malformed, force_legacy_fallback=force_legacy_fallback)
+    before = _public_bytes(root)
+    for args in [('get',), ('get', '--field', 'fresh_review'), ('set', 'complexity=Simple')]:
+        result = run_cli(*args, cwd=root, env_extra={'MISSION_OPERATION_ID': 'reject-forged-state'})
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert reason in result.stdout + result.stderr
+        assert _public_bytes(root) == before
+
+
+def test_authoritative_fallback_consumers_do_not_skip_forged_requests(completion_session, run_cli):
+    root, _ = _prepare(completion_session, run_cli)
+    _tamper_persisted_fresh_review(root, {'schema': 'mission-fresh-review/1', 'requests': [], 'extra': 1})
+    before = _public_bytes(root)
+    for args in [('next',), ('list',), ('stats', '--json'), ('codex-preflight',),
+                 ('permission-preflight',), ('progress', 'get', '--json'),
+                 ('repair-aggregate-index',), ('repair-aggregate-index', '--execute'),
+                 ('init', 'replacement', '--new-mission')]:
+        result = run_cli(*args, cwd=root, env_extra={'MISSION_OPERATION_ID': 'reject-forged-fallback'})
+        assert result.returncode == 2, (args, result.stdout, result.stderr)
+        assert 'fresh-review-projection-shape-invalid' in result.stdout + result.stderr, args
+        assert _public_bytes(root) == before
+    import subprocess
+    import sys
+    from pathlib import Path
+    audit = Path(__file__).resolve().parents[3] / 'scripts' / 'mission-audit.py'
+    result = subprocess.run([sys.executable, str(audit), '--root', str(root), '--json'],
+                            cwd=root, capture_output=True, text=True)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert 'fresh-review-projection-shape-invalid' in result.stdout + result.stderr
+    assert _public_bytes(root) == before
+
+
+def test_legacy_tolerance_and_absent_fresh_review_are_preserved(completion_session, run_cli):
+    root, state, schema = completion_session
+    _persist_fixture(root, state, schema)
+    before = _public_bytes(root)
+    result = run_cli('get', cwd=root)
+    assert result.returncode == 0, result.stderr
+    assert 'fresh_review' not in json.loads(result.stdout)
+    assert _public_bytes(root) == before
+    if schema == 4:
+        path = root / '.mission-state' / 'sessions' / 'test.json'
+        state.update(threshold='historical value', acceptance_contract=None)
+        path.write_text(json.dumps(state))
+        before = _public_bytes(root)
+        result = run_cli('get', cwd=root)
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout)['acceptance_contract'] is None
+        assert _public_bytes(root) == before
