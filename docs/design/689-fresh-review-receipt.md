@@ -185,7 +185,7 @@ ledger の omission を valid と呼ぶ自己申告だけでは足りず、kerne
 従って C の「contract.coverage が valid」という直接比較を receipt による実効 coverage 判定へ置き換える。
 契約の immutable identity/revision を書き換えず、coverage は pending から valid または理由付き open へ進む。
 決定（全体 coverage receipt）: 全体 coverage receipt とは、`completed` かつ `independent=true` で、criterion_ids が全 required criterion を含む request の coverage receipt を指す。実効 coverage を valid にできるのはこれだけで、部分 request（required criterion の一部だけを選んだ request）の coverage receipt は記録するが実効 coverage を valid にしない。実効 coverage は、現 contract・現 candidate に束縛された最新の全体 coverage receipt から導出する。criterion ごとの探索完了は複数 request を合成してよいが（§5）、完了には現候補に対する全体 coverage receipt が別途必須である。
-新しい全体 coverage receipt が open/blocked なら古い valid へ fallback しない（部分 request の coverage receipt はこの判定に使わないが、それが持つ open obligation は §5 の条件 4 で完了を止める）。
+決定（実効 coverage の選び方）: 実効 coverage は、criterion_ids が全 required criterion を含む request のうち**最新の attempt**（outcome を問わない。`running`・`dispatch-unknown` の request も含む）だけで判定する。その attempt が `completed` かつ `independent=true` で、現 contract・現 candidate に束縛された coverage receipt を持つときだけ valid とし、`failed`/`blocked`/`abandoned-unknown`/実行中/`independent=false`/coverage open のいずれかなら実効 coverage は open または pending とする。それより前の全体 attempt の valid receipt へは戻らない。部分 request の coverage receipt はこの判定に使わないが、それが持つ open obligation は §5 の条件 4 で完了を止める。
 
 `CommitFreshReviewResult` の一つの public state commit で、terminal receipt、output content-addressed ref、
 output digest、coverage receipt、open obligations/findings、request 消費を束縛する。
@@ -197,7 +197,7 @@ public head が参照しない staged bytes は成功ではない。receipt だ�
 v5 は現 fenced repository を使い、別の transaction system を増設しない。
 
 決定（終端 receipt の variant）: `mission-fresh-review-terminal/1` は `outcome` で分岐する閉じた variant とする。
-全 variant 共通の必須 field は `request_id/request_digest/nonce/operation_id/fencing_epoch/outcome/reason/candidate_digest/budget_used/ended_at`。
+全 variant 共通の必須 field は `request_id/request_digest/nonce/dispatch_operation_id/dispatch_fencing_epoch/commit_operation_id/commit_fencing_epoch/outcome/reason/candidate_digest/budget_used/ended_at`（dispatch 前に終わる `blocked` では `dispatch_*` に予約時の値を入れる）。
 variant ごとの field は次のとおりで、表にない field の存在・`null` による欠落表現は decoder が拒否する。
 
 | outcome | 到達条件 | launch receipt | output ref/digest | coverage receipt・findings | 完了 gate |
@@ -213,6 +213,7 @@ variant ごとの field は次のとおりで、表にない field の存在・`
 `independent=false` の inline 実行は `completed` として保存できるが、完了 gate では無効のままとする。
 `launch_attempted=true` の `blocked` の後に同じ child から届いた報告・output は、request が consumed のため import を拒否する。
 output import は二段で判定する。第一段は送り手の照合で、operation_id・fencing_epoch・request_id/nonce・running 記録の launch receipt にある child identity が一致するかを見る。一致しなければ別の書き手または古い書き手として command 単位で拒否し、state を変えず request はその時点の状態に残す（consumed request への報告もここで拒否する）。これは保存される終端ではない。
+決定（takeover 後の照合値と記録）: 第一段で child の報告と突き合わせる operation_id・fencing_epoch は、**保存済みの dispatch 側の値**（running 記録の launch receipt に保存した値）とする。child は起動した dispatch に属するためである。報告を取り込む書き手（通常の import、または lease takeover 後の `fresh-review reconcile`）は、自身の operation_id と**現行の lease/fencing_epoch** で repository の fence を通る。旧 writer は現行 epoch と一致しないため fence で拒否される。終端 receipt には `dispatch_operation_id`/`dispatch_fencing_epoch`（照合した dispatch 側）と `commit_operation_id`/`commit_fencing_epoch`（公開した書き手側）を分けて記録し、§4 の終端 variant 表の共通 field の `operation_id`/`fencing_epoch` はこの 2 組で置き換える。
 第二段は照合済み child の output の中身の検査で、schema、output 内の request_digest、候補 binding、予算を見る。不合格なら次の行のとおり `failed` 終端とする。
 （この二段の境界は設計レビュー 3 巡目の後に追加した決定であり、D2（#896）の実装着手前に改めて設計レビューにかける。）
 running の request に対する output import が検査で不合格になった場合は拒否で終わらせず、`failed` 終端として保存する。
