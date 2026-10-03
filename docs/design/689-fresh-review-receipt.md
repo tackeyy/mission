@@ -187,12 +187,16 @@ ledger の omission を valid と呼ぶ自己申告だけでは足りず、kerne
 決定（全体 coverage receipt）: 全体 coverage receipt とは、`completed` かつ `independent=true` で、criterion_ids が全 required criterion を含む request の coverage receipt を指す。実効 coverage を valid にできるのはこれだけで、部分 request（required criterion の一部だけを選んだ request）の coverage receipt は記録するが実効 coverage を valid にしない。実効 coverage の導出は直後の「実効 coverage の選び方」に従い、最新の全体 attempt だけで判定する。criterion ごとの探索完了は複数 request を合成してよいが（§5）、完了には、最新の全体 attempt が現候補に対する有効な全体 coverage receipt であることが別途必須である。
 決定（実効 coverage の選び方）: 実効 coverage は、criterion_ids が全 required criterion を含む request のうち**最新の attempt**だけで判定する。attempt は状態を問わず、`pending`（準備済みで未 dispatch）・`dispatch-unknown`・`running` の request も含む。「最新」は時刻ではなく、projection へ request が追加された順（`PrepareFreshReview` の commit 順）で決める。それより前の全体 attempt の receipt へは戻らない。部分 request の coverage receipt はこの判定に使わないが、それが持つ open obligation は §5 の条件 4 で完了を止める。最新の全体 attempt から `effective_coverage` と §5 の理由コードを次のとおり決める。
 
-| 最新の全体 attempt | `effective_coverage` | 完了 gate の理由コード |
-|---|---|---|
-| 全体 attempt が存在しない | `pending` | `acceptance-fresh-review-pending` |
-| `pending`・`dispatch-unknown`・`running` | `pending` | `acceptance-fresh-review-pending` |
-| `completed` かつ `independent=true` で、現 contract・現 candidate に束縛された coverage receipt が valid | `valid` | （他の条件へ進む） |
-| 上記以外（`failed`・`blocked`・`abandoned-unknown`・`independent=false`・coverage が open・contract/candidate 不一致） | `open` | `acceptance-coverage-open`（不一致は `acceptance-fresh-review-stale`） |
+| 判定順 | 最新の全体 attempt | `effective_coverage` | 完了 gate の理由コード |
+|---|---|---|---|
+| 1 | 全体 attempt が存在しない | `pending` | `acceptance-fresh-review-missing` |
+| 2 | 状態を問わず、request が束縛した contract・input・candidate が現在と一致しない | `open` | `acceptance-fresh-review-stale` |
+| 3 | `pending`・`dispatch-unknown`・`running` | `pending` | `acceptance-fresh-review-pending` |
+| 4 | `completed` だが `independent=false` | `open` | `acceptance-fresh-review-non-independent` |
+| 5 | `failed`・`blocked`・`abandoned-unknown`、または `completed` で coverage が open | `open` | `acceptance-coverage-open` |
+| 6 | `completed` かつ `independent=true` で coverage receipt が valid | `valid` | （§5 の他の条件へ進む） |
+
+行は上から順に評価し、最初に当てはまった行を採る（実行途中でも古い候補に束縛された attempt は stale を返す）。
 
 `CommitFreshReviewResult` の一つの public state commit で、terminal receipt、output content-addressed ref、
 output digest、coverage receipt、open obligations/findings、request 消費を束縛する。
@@ -243,8 +247,8 @@ terminal commit 後・応答前の停止は同一 operation の再応答で回�
 4. 全て `independent=true`、criterion search 完了、全 ledger の実効 coverage valid、open obligation がない。
 5. required obligation または禁止副作用へ束縛された未解決 finding がゼロ。Medium も含む。
 
-無条件 `acceptance-fresh-review-pending` を以上へ置換し、missing/stale/non-independent/
-coverage-open/unresolved-finding を区別する理由コードを返す。
+無条件 `acceptance-fresh-review-pending` を以上へ置換し、fresh review に関する判定は §4「実効 coverage の選び方」の表の順と理由コード（`acceptance-fresh-review-missing`・`acceptance-fresh-review-stale`・`acceptance-fresh-review-pending`・`acceptance-fresh-review-non-independent`・`acceptance-coverage-open`）に従う。
+条件 5 の未解決 finding は `acceptance-unresolved-finding` で拒否する。
 一つの review が全条件を覆ってよい。部分 receipt を合成する場合も、各 criterion の最新 attempt が
 failed/blocked/non-independent なら古い成功へ fallback しない。running request もその対象 criterion を未達にする。
 MarkPass に application が観測した fresh candidate map を typed carrier として渡し、kernel は保存 request と比較する。
