@@ -212,7 +212,7 @@ variant ごとの field は次のとおりで、表にない field の存在・`
 同一 operation の再応答は保存済み terminal をそのまま返す。再試行は `fresh-review prepare` で新しい request（新しい nonce）を作る。
 `independent=false` の inline 実行は `completed` として保存できるが、完了 gate では無効のままとする。
 `launch_attempted=true` の `blocked` の後に同じ child から届いた報告・output は、request が consumed のため import を拒否する。
-§3 の「rejected」は保存される終端ではなく、command 単位の拒否を指す。state を変えず、request はその時点の状態に残る。
+command 単位の拒否（binding 不一致の import、stale fence、consumed request への報告など）は保存される終端ではない。state を変えず、request はその時点の状態に残る。
 running の request に対する output import が検査で不合格になった場合は拒否で終わらせず、`failed` 終端として保存する。
 
 pending→dispatch-unknown→running→terminal を採用する。spawn 前 durable intent、receipt 後 running、
