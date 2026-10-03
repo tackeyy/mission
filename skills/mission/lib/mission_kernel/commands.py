@@ -89,6 +89,7 @@ class MarkPass:
     artifact_gate_satisfied: bool = False
     specialist_gate_satisfied: bool = False
     verified_score_index: Optional[int] = None
+    acceptance_candidate_digests: FrozenJsonObject = FrozenJsonObject(())
     at: Optional[str] = None
     compatibility: CompatibilityPayload = EMPTY_COMPATIBILITY_PAYLOAD
 

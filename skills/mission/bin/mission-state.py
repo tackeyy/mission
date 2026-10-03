@@ -177,9 +177,11 @@ from mission_projection.stats import (  # noqa: E402
 )
 from mission_application.ports import AuditMetadata, ExecutionRequest  # noqa: E402
 from mission_application.review import (  # noqa: E402
+    AcceptanceCandidateServices,
     MarkPassRequest,
     MarkPassServices,
     ReviewFailure,
+    closeout_already_passed,
     legacy_manual_score_ref,
     legacy_review_input_ref,
     mark_pass as run_mark_pass,
@@ -14039,7 +14041,12 @@ def cmd_closeout(args):
     sf = resolve_state_file(Path.cwd())
     if sf.exists():
         _snapshot, current = _load_authoritative_state(sf)
-        if current.get("passes") is True:
+        try:
+            already_passed = closeout_already_passed(current)
+        except ReviewFailure as error:
+            print(f"ERROR: {error.message}", file=sys.stderr)
+            sys.exit(2)
+        if already_passed:
             next_stdout = io.StringIO()
             with contextlib.redirect_stdout(next_stdout):
                 cmd_next(argparse.Namespace())
@@ -14235,6 +14242,7 @@ def cmd_mark_passes(args):
                 transition_phase=_transition_phase,
                 optional_unclosed_skills=_unclosed_optional_specialist_skills,
                 selection_id=_current_selection_id,
+                capture_acceptance_candidates=AcceptanceCandidateServices(cwd, load_verifier_policy),
                 early_stop_evaluation=lambda data, latest, at: _early_stop_evaluation(
                     cwd, data, latest, at, getattr(args, "early_stop_rationale", None)
                 ),

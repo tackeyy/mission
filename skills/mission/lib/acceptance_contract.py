@@ -150,6 +150,11 @@ def canonical_contract_digest(contract: dict) -> str:
     return digest(identity)
 
 
+def verifier_definition_digest(command: object) -> str:
+    """Identify one frozen verifier definition at the contract boundary."""
+    return "sha256:" + hashlib.sha256(canonical_bytes(command)).hexdigest()
+
+
 def status(contract: object) -> dict:
     if not isinstance(contract, dict):
         return {"present": False}

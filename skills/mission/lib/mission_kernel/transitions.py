@@ -982,10 +982,88 @@ def _maximum_agreement_delta(payload: dict[str, object]) -> float | None:
     return maximum
 
 
+def _acceptance_completion_ready(state: MissionState, command: MarkPass) -> None:
+    """Keep contract-enabled sessions pending until typed coverage exists."""
+    document = (
+        state.legacy_passthrough.thaw()
+        if state.legacy_passthrough is not None
+        else state.extensions.thaw()
+    )
+    contract = document.get("acceptance_contract")
+    if contract is None:
+        return
+    if not isinstance(contract, dict):
+        raise _Rejected("acceptance-contract-invalid")
+    if contract.get("coverage") != {"status": "valid"}:
+        raise _Rejected("acceptance-coverage-pending")
+    criteria = contract.get("criteria")
+    if not isinstance(criteria, list):
+        raise _Rejected("acceptance-contract-invalid")
+    required = []
+    for item in criteria:
+        if not isinstance(item, dict) or type(item.get("required")) is not bool or not isinstance(item.get("id"), str) or not item["id"]:
+            raise _Rejected("acceptance-contract-invalid")
+        if item["required"]:
+            required.append(item)
+    if not required:
+        raise _Rejected("acceptance-contract-invalid")
+    history = document.get("verification_receipts")
+    if not isinstance(history, list):
+        raise _Rejected("acceptance-receipt-missing")
+    if any(not isinstance(item, dict) or not isinstance(item.get("criterion_id"), str) or not isinstance(item.get("status"), str) for item in history):
+        raise _Rejected("acceptance-receipt-invalid")
+    policy = contract.get("verifier_policy")
+    commands = policy.get("commands") if isinstance(policy, dict) else None
+    policy_digest = policy.get("digest") if isinstance(policy, dict) else None
+    if not isinstance(commands, dict) or not isinstance(policy_digest, str):
+        raise _Rejected("acceptance-contract-invalid")
+    try:
+        from acceptance_contract import canonical_contract_digest, verifier_definition_digest
+        contract_digest = canonical_contract_digest(contract)
+    except (TypeError, ValueError):
+        raise _Rejected("acceptance-contract-invalid")
+    try:
+        candidates = command.acceptance_candidate_digests.thaw()
+    except AttributeError:
+        raise _Rejected("acceptance-candidate-invalid")
+    if not isinstance(candidates, dict) or set(candidates) != {item["id"] for item in required} or not all(isinstance(value, str) for value in candidates.values()):
+        raise _Rejected("acceptance-candidate-missing")
+    for criterion in required:
+        criterion_id = criterion["id"]
+        command_id = criterion.get("command_id")
+        verifier_command = commands.get(command_id) if isinstance(command_id, str) else None
+        if not isinstance(verifier_command, dict):
+            raise _Rejected("acceptance-contract-invalid")
+        latest = next((item for item in reversed(history) if item["criterion_id"] == criterion_id), None)
+        if latest is None:
+            raise _Rejected("acceptance-receipt-missing")
+        if latest.get("status") != "passed":
+            raise _Rejected("acceptance-receipt-not-passed")
+        if (latest.get("contract_digest") != contract_digest or latest.get("verifier_policy_digest") != policy_digest or latest.get("verifier_definition_digest") != verifier_definition_digest(verifier_command)):
+            raise _Rejected("acceptance-receipt-stale")
+        if latest.get("candidate_digest") != candidates[criterion_id]:
+            raise _Rejected("acceptance-receipt-stale")
+    raise _Rejected("acceptance-fresh-review-pending")
+
+
+def acceptance_completion_rejection(state: MissionState, command: MarkPass) -> str | None:
+    """Preflight the same pure guard before an approval provider can publish.
+
+    This grants no transition authority: MarkPass repeats the guard against
+    the repository's authoritative state at the actual completion decision.
+    """
+    try:
+        _acceptance_completion_ready(state, command)
+    except _Rejected as exc:
+        return exc.code
+    return None
+
+
 def _mark_pass(state: MissionState, raw_command: object) -> Transition:
     command = raw_command
     assert isinstance(command, MarkPass)
     control = _active_control(state)
+    _acceptance_completion_ready(state, command)
     if type(command.force) is not bool:
         raise _Rejected("invalid-force-flag")
     if command.force:
