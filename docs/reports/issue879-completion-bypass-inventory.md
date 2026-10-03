@@ -70,6 +70,11 @@ v4 flat と v5 fenced container の両方を実行する。
 | D0 追補: `acceptance-contract status` の不正binding・criterion・command・Unicode | `test_status_rejects_malformed_persisted_contract_atomically` と上記共有表: 同じ閉じたvalidatorを表示・digest前に通し、exit 2で拒否。正常契約とキー欠落は `test_status_keeps_valid_and_contractless_sessions_readable` で維持 |
 | D0 追補: runner の通常 / blocked receipt のcanonical失敗 | `test_runner_rejects_uncanonical_contract_before_receipt_generation`: 契約全体のcanonical検査を共有境界へ置き、実行・receipt生成前に拒否 |
 | D0 追補: 既pass closeout の不正frozen command | `test_already_passed_closeout_validates_frozen_commands`: 共有validatorの理由コードで拒否し、公開bytesと制御値を保持 |
+| D0 parser追補: malformed URL argv のlive import / frozen run / replay run | `test_malformed_url_arguments_reject_before_import_or_execution`: URL parserのValueErrorを明示path拒否へ変換。`test_explicit_path_parser_rejects_malformed_command_inputs` はpercent escape・option内・環境変数の同形も確認 |
+| D0 parser追補: v5 containerのUnicodeとcompletion / 既pass / force | 既存の `test_malformed_frozen_verifier_rejects_public_completion_atomically` / `test_already_passed_closeout_validates_frozen_commands` を拡張。argv / expectedの孤立surrogateを共有projection境界で `canonical-json-invalid` に拒否 |
+| D0 parser追補: get / next / init / new-mission / freshness / lane-report | `test_authoritative_contract_reads_reject_unencodable_state`: encoding不能な契約を読み取り・再初期化前に拒否。通常initの既存理由とv4のnew-mission拒否も維持 |
+| D0 parser追補: closed schema 5のraw契約のinspection | `test_closed_v5_inspection_rejects_unencodable_raw_contract`: consumer projectionに表示されないextensionsも共有snapshot境界でUTF-8検査し、audit snapshotへ不正契約を渡さない |
+| D0 parser追補: replay command / replay入力本文のUnicode | `test_runner_and_replay_reject_malformed_frozen_commands_atomically`: v4/v5ともreceipt追加なし。入力本文は `replay-input-invalid`、v5の契約projectionは `canonical-json-invalid` |
 | D0: runner / replay の不正command・replay command_id | `test_runner_and_replay_reject_malformed_frozen_commands_atomically`: 同じ共有validatorで exit 2、receipt追加なし |
 | D0: present null の mark-passes / closeout / 既pass / status / runner / 通常init | `test_null_contract_is_present_and_rejects_atomically`: null を契約なしに変換しない。v5 init は既存の `session-already-initialized` 拒否を維持 |
 | D0: v4 / closed-v5 kernel の null・不正command | `test_codecs_keep_contract_and_receipt_evidence[null / malformed-command]`: pure gate が理由コード付き拒否、transition なし |
@@ -205,7 +210,7 @@ PR をさらに分けない理由は、C の completion authority、公開 CLI�
    D0 の公開経路では、その前に `acceptance_contract.py::frozen_verifier_commands` を通す。
 
 
-## D0 の実装と検証
+## D0 の実装と検証（初回の履歴）
 
 テストリスト: 不正な criterion command_id、凍結commandの必須field / 各要素、
 replay の参照とtarget、present null、key-absent legacy、v4 / v5 の公開bytes不変、pure kernel。
@@ -299,7 +304,7 @@ commit分割案: `fix: 永続completion gateの不正形とnull契約を拒否�
 （実装・回帰・mirror）、`docs: completion gateの確定記録とD0の検証経路を更新する`（本書）。
 本作業はcommit / push / PR / mergeを行わない。
 
-## D0 status 追補: 同種検索とRed / Green
+## D0 status 追補: 同種検索とRed / Green（履歴）
 
 追補の開始HEADは `4c3e535ca24eb7e4e88ffb1c015811b2b1408c3e`。cleanな専用worktreeで確認した。
 依頼元から共有された独立探索は、このheadの122入力中34件がstatus経路で期待と異なり、
@@ -335,10 +340,10 @@ v4のcommand / criterion shapeは共有validatorの`verifier-policy-command-inva
 `acceptance-contract-invalid`を保持する。全回帰で公開bytesとpasses / loop_active / phase /
 terminal_outcomeを比較した。surrogate入りv5の制御値は、表示失敗と独立したfenced readerの保存bytesから確認する。
 
-範囲外の発見: 汎用`get`は同じv5 surrogate fixtureでexit 1・internal-errorとなる。
+当時の範囲外の発見（後続parser追補で修正）: 汎用`get`は同じv5 surrogate fixtureでexit 1・internal-errorとなった。
 `mission_persistence/legacy_v4.py:1057` / `:1095`の互換projectionと
 `mission_kernel/json_codec.py:74`のUTF-8 encodingを通るためで、独立した公開CLI probeで確認した。
-汎用state出力のUnicode処理は今回変更していない。status / runnerは上記境界で拒否する。
+このstatus追補では汎用state出力のUnicode処理は変更しなかった。後続parser追補では共有persistence境界を修正した。
 
 テストの検出価値: 既存command形状表をlive / frozen / statusで共有した。
 公開CLIではcommand欠落、criteria空、Unicodeの別境界を代表入力に絞った。
@@ -383,3 +388,145 @@ python3 -m pytest -q \
 追補ではcommit / pushおよびレビューCLIを実行していない。正式review / Checker / CIは次工程で取得する。
 commit案は `fix: 契約参照経路の不正形とcanonicalエラーを拒否する`（実装・回帰・mirror）と
 `docs: status検証と同種検索結果を記録する`（本書）。
+
+## D0 parser追補: 共有URL / state encoding境界
+
+開始HEADは `79ca75a289a5a3df73797525da69f80e43f66b18`（clean）。依頼元から共有された
+正式reviewと独立Checkerはともにchanges-requestedで、Mediumは不正URLの未捕捉ValueErrorと
+v5 retained-v4 containerの孤立surrogateによる未捕捉encoding例外の2件だった。
+これは依頼元のレビュー記録であり、今回レビューCLIを起動したという記録ではない。
+
+`explicit_paths_are_supported` は不正URLをunsupportedとして返し、live importは
+`verifier-policy-explicit-path-unsupported`、frozen / replay実行は
+`verifier-explicit-path-unsupported` で拒否する。valid commandの判定は維持した。
+state projection / encodingはpersistenceの共有境界で `FencedCommitError` に変換し、
+生のUnicodeErrorは `canonical-json-invalid` となる。status / runnerの個別Unicode捕捉は除去した。
+legacy compatibility fallbackもUTF-8 renderabilityを要求するが、歴史的なnon-finite scoreの
+読取互換性は維持する。元の公開bytesを書き換えたり、null契約を除去したりはしない。
+new-missionの既存error変換は共有reasonを保持する。freshness / lane-reportは共有errorの
+表示を保持するだけで、adapterへvalidatorを追加しない。kernelは変更していない。
+
+### 同形検索
+
+以下を実行した。sourceを調査し、配布mirrorは同期後の同一bytesを確認する。
+
+```sh
+rg -n 'urlsplit\(|urlparse\(|shlex\.split\(|unquote\(' skills scripts --glob '*.py' --glob '!**/tests/**'
+rg -n 'urlsplit\(|urlparse\(|shlex\.split\(|unquote\(|PurePosixPath\(|\.resolve\(|\.encode\(' skills/mission/lib/verifier_command.py skills/mission/lib/mission_application/verifier_policy.py skills/mission/lib/mission_application/verification_execution.py skills/mission/lib/mission_application/verification_runner.py
+rg -n 'Path\(|\.resolve\(|\.relative_to\(|\.is_relative_to\(|\.is_absolute\(|urlsplit\(|urlparse\(' skills/mission/lib/verifier_command.py skills/mission/lib/mission_application/verifier_policy.py skills/mission/lib/mission_application/verification_runner.py skills/mission/lib/mission_application/verification_execution.py
+rg -n 'project_legacy_document|encode_json_value\(' skills scripts --glob '*.py' --glob '!**/tests/**'
+rg -n '_load_authoritative_state\(' skills/mission/bin/mission-state.py
+rg -n 'read_authoritative_snapshot\(|read_live_authoritative_snapshot\(|read_authoritative_legacy_compatibility_snapshot\(|project_legacy_document\(|canonical_contract_digest\(|canonical_bytes\(' skills scripts --glob '*.py' --glob '!**/tests/**'
+rg -n 'read_authoritative|read_legacy_compatibility|state_snapshot' skills scripts --glob '*.py' --glob '!**/tests/**'
+```
+
+locatorは特記しない限り `skills/mission/lib/` のpath:line。この追補の差分に対する行番号。
+
+| parser / encoder hit | 判定 / 対応 |
+|---|---|
+| `mission_application/verifier_policy.py:51` | ValueErrorをunsupportedへ変換。live validator `:33` とrunner `verification_runner.py:293` が共有する境界を修正 |
+| `mission_application/verifier_policy.py:61`, `:67`, `:71`, `:90`, `:104` | unquoteはreplacement decode、shlexは既存ValueError捕捉、executable Pathは閉じたargvの文字列。option / envも同じURL境界を通る |
+| `verifier_command.py:9`, `:15`, `:23`; `mission_application/verification_runner.py:41`, `:74`, `:196` | command path / toolchainは閉じた型・NUL・surrogate・traversal検査後にPathへ渡る。candidate `_relative` とsymlink検査も既存理由コードを返す。追加変更なし |
+| `mission_application/verification_runner.py:121`, `:148`, `:183`, `:189`, `:324` | candidate pathは_relativeで検査済み、resolveはproject/materialized rootのfilesystem経路、repro digestのkind/pathは閉じたreplay定義の検査後。command入力からの未捕捉URL parserは他にない |
+| `mission_application/verification_runner.py:202`, `:332` | toolchainのPath / parentは閉じたcommandのpath検査後。既存OSError処理を維持 |
+| `mission_application/verifier_policy.py:126`, `:127`; `mission_application/verification_execution.py:55` | policy file選択はproject / user root、repro入力file読取は既存OSError / ValueError捕捉で `replay-input-invalid`。command定義のpath parserではない |
+| `mission_application/verification_execution.py:109`, `:120` | 探索でreplay入力本文のUTF-8 encodeにも同形を確認。実際のJSON escape入力でRedを取得し、`replay-input-invalid`へ変換。検査済みbytesを再利用 |
+| `provider_public_contract.py:214` | 既存ValueError捕捉でFalseを返す。追加変更なし |
+| `plan_contract.py:163` | plan resource identifier用のURL parserで、verifier入力の消費経路ではない。範囲外。source上のValueError候補であり、この追補では公開CLI再現・修正を行っていない |
+| `mission_persistence/fenced_commit.py:118`, `:134`, `:2703`, `:2809` | shared context / projection wrapperを追加。kernelのencoder例外を理由付きpersistence rejectionへ変換。genesis / stageも同じwrapperを使用。既存coded codec errorの診断文言は保持 |
+| `mission_persistence/legacy_v4.py:447`, `:526`, `:741`, `:1034`, `:1058`, `:1085`, `:1096`, `:1176` | proposal、historical replay、read_snapshot、pre-admission load、admitted loadの全projectionをshared wrapperへ接続 |
+| `mission_persistence/authoritative_reader.py:275`, `:298`, `:474`, `:495`, `:664`, `:680`, `:694`, `:779` | flat / v5 snapshot、closed-v5 raw extensions、archive再hydration、legacy compatibility fallbackの全encoding / projectionを共有境界へ接続。fallbackで不正UTF-8を受理しない |
+| `mission_kernel/json_codec.py:74`; `mission_kernel/codec_v4.py:862` | pure encoderは例外を返す責務のまま。公開persistenceで理由に変換。kernelにIO / application importを追加しない |
+| `mission_kernel/transitions.py:1143`, `:1147` | force approvalのterminal digestは既存TypeError / ValueError / UnicodeError捕捉で `force-approval-binding-invalid`。追加変更なし |
+| `mission_application/lifecycle.py:418`; `mission_application/acceptance.py:132`; `mission_application/verification_execution.py:44` | init reinitは共有canonical reasonを保持、status / verificationは共有load境界を使用。契約のsemantic shapeは既存frozen validatorで検査 |
+| `mission_persistence/fenced_commit.py:557`; `mission_persistence/reinitialization.py:40`; `acceptance_contract.py:31` | record encoderは既存coded error、new-mission archive encoderは上記snapshot検査後、contract helperは既存closed validator / semantic error変換後。追加変更なし |
+
+全authoritative CLI読取call siteも確認した。下表のCLI locatorは `skills/mission/bin/mission-state.py`。
+診断collectorの既存skip / quarantineはsession成功と扱わず、その挙動を変更しない。
+
+| authoritative reader hit | 判定 / 対応 |
+|---|---|
+| `mission-state.py:594`, `:610` | 全CLI読取をshared snapshotへ接続。legacy fallbackも新しいrenderability検査を通す |
+| `mission-state.py:8073`, `:8696`, `:14043` | get / next / closeout: shared reasonを共通CLI rejectionへ渡す。v4/v5の公開CLI回帰で確認 |
+| `mission-state.py:9250`, `:15098` | freshness / lane-report: 既存exit 2の表示でreasonが失われるRedを確認し、shared exceptionを表示。v4/v5で公開bytes / 制御値不変 |
+| `mission-state.py:6373`, `:13975`, `:14816` | archive-worktree / finish sink / janitor: shared readが公開処理に先行し、coded errorで停止。追加分岐なし |
+| `mission-state.py:8762`, `:8824` | stop-verdict: pending readは共通rejection、fact読取不能はread_errorへ渡し、既存 `authoritative-state-unreadable` block。成功へのfallbackはない |
+| `mission-state.py:1767`, `:6953` | lease rejection診断 / peer identity: 前者は診断不能時も元のrejection、後者はlegacy JSON fallbackでsession metadataを扱う。completion / verifierの契約受理経路ではない |
+| `mission-state.py:9403`, `:9527` | runtime readiness / permission preflight: 前者はunreadable診断、後者は既存write-unavailable blocker。shared load例外を捕捉し、contractを完了成功の根拠にしない。追加変更なし |
+| `mission-state.py:14971`, `:15239` | list / stats: malformed recordを既存skip / `authoritative-state-unreadable` quarantineへ渡す。snapshotから不正契約を出力しない。追加変更なし |
+| `state_snapshot.py:48`; `scripts/mission-audit.py:1158`, `:1163`, `:1330` | auditもshared strict / compatibility readerを通る。raw_document_copyも共有encoding検査後のsnapshotのみ。読取不能は既存quarantine。audit側の追加変更なし |
+| `mission_persistence/aggregate_index.py:312`; `mission_application/worktree_archive_specs.py:54` | aggregate / archive: shared snapshot errorをauthority-unreadableまたは公開rejectionへ変換。aggregateのlegacy直読はidentity captureで、契約解釈 / 出力経路ではない |
+
+別入力領域の未確認候補: `mission_application/verification_runner.py:65` はgit filename bytesの
+UTF-8 decodeで、command fieldのparserではない。不正UTF-8のtracked filenameは本追補の
+contract / policy入力とは別領域で、公開再現は未実施。範囲外として返し、修正しない。
+
+### Red / Greenと検出価値
+
+すべて `python3 -m pytest -q skills/mission/tests/test_issue879_completion_cli.py` に下表の
+selectorを付けた。xdist未導入を確認し `-n` は使っていない。
+
+| selector / 段階 | passed | failed | deselected | exit | 秒 |
+|---|---:|---:|---:|---:|---:|
+| `-k 'shared_validator or already_passed_closeout_validates'` baseline | 3 | 0 | 121 | 0 | 7.45 |
+| `-k 'malformed_url or explicit_path_parser'` Red | 0 | 7 | 124 | 1 | 8.22 |
+| 同selector Green | 7 | 0 | 124 | 0 | 10.19 |
+| `-k 'surrogate or unencodable'` 初回Red | 19 | 13 | 125 | 1 | 41.80 |
+| `-k 'authoritative_contract_reads and v4-flat and get'` 診断 | 0 | 1 | 156 | 1 | 1.11 |
+| `-k 'surrogate or unencodable'` fixture / 期待理由調整後Red | 17 | 15 | 125 | 1 | 33.87 |
+| 同selector 共有projection追加後の途中結果 | 30 | 2 | 125 | 1 | 32.95 |
+| 同selector compatibility fallback修正後Green | 32 | 0 | 125 | 0 | 31.74 |
+| `-k repro-surrogate` Red | 0 | 2 | 157 | 1 | 3.75 |
+| `-k 'repro-surrogate or malformed_url or explicit_path_parser'` Green | 9 | 0 | 150 | 0 | 12.96 |
+| `-k 'unencodable and (freshness or lane-report)'` Red | 0 | 4 | 159 | 1 | 4.28 |
+| `-k closed_v5_inspection` Red | 0 | 1 | 163 | 1 | 1.11 |
+| `-k 'closed_v5_inspection or codecs_keep'` Green | 7 | 0 | 157 | 0 | 11.14 |
+
+最後のselectorに `skills/mission/tests/test_issue626_thin_adapter_guard.py` を併記したGreenは
+4 passed / 0 failed / 235 deselected、exit 0、4.10秒。selectorのためguard自体は収集後除外され、
+guardの実行証拠は下記の最終指定テストに含める。
+
+URL Redの公開6ケースはexit 1 / internal-error、pure predicateはInvalid IPv6 URLのValueError。
+Unicode Redはv5 closeout / already-passedのinternal-error、mark / forceのraw codec表示、
+get / next / reinitの共有読取境界を再現した。初回のv4 get期待は診断成功を仮定していたため、
+実際のexit 1を確認して拒否期待へ直した。調整後Redのうち2件は既存の理由コードから
+共有canonical reasonへの期待変更であり、新しいinternal-errorの件数とは数えない。
+途中の2 failuresはlegacy fallbackのget internal-errorとnext exit 0を示した。
+replay本文Redは実JSON escape入力のencodeでexit 1、表示経路の4 failuresはexit 2だがreasonなしだった。
+closed-v5 inspection Redはraw契約がencoding不能でもconsumer projectionだけを表示してexit 0となった。
+auditのraw_document_copyへ同じ契約が届くことをsourceで確認し、shared snapshotにraw encoding検査を追加した。
+
+既存v4/v5 fixture・command表・公開bytes / 制御値検査を拡張し、別の入力表は作らない。
+argv / expectedは閉じたcommand validatorと契約canonical処理の異なる境界、既pass / force /
+runner replayはそれぞれshortcut / provider / receiptの異なる副作用を検査する。
+freshness / lane-reportは共有拒否を表示が消す欠陥を検出する。正常policy、contract-key-absent
+legacy、既存receipt動作は指定回帰を維持する。subprocess費用は上表の実測。
+thin adapterの2箇所はerror表示だけを変更し、baselineは増やさない。
+
+この追補でもcommit / push / review CLIを実行しない。正式review / Checkerの再確認とrequired CIは
+依頼元の次工程。commit案: `fix: verifier入力と永続状態のparser例外を理由付きで拒否する`
+（実装・回帰・mirror）、`docs: parser境界の回帰と同形検索結果を記録する`（本書）。
+
+指定11ファイルの最初の通し実行は343 passed / 3 failed、exit 1、304.73秒。
+3件は既存closed-v5 codec拒否の診断文言の変化で、旧文言と理由コードを保持する修正を行った。
+上記closed-v5 inspectionの追加とともに、次の同じ指定範囲を再実行した。full suiteは実行していない。
+
+```sh
+python3 -m pytest -q \
+  skills/mission/tests/test_issue879_completion_cli.py \
+  skills/mission/tests/test_issue877_acceptance_contract.py \
+  skills/mission/tests/test_issue878_verification_runner.py \
+  skills/mission/tests/test_issue878_candidate_snapshot.py \
+  skills/mission/tests/test_issue632_transition_is_the_writer.py \
+  skills/mission/tests/test_codex_wrapper_sync.py \
+  skills/mission/tests/test_issue626_thin_adapter_guard.py \
+  skills/mission/tests/test_python_module_inventory.py \
+  skills/mission/tests/test_plugins_in_sync.py \
+  skills/mission/tests/test_artifact_hygiene.py \
+  skills/mission/tests/test_vendor_fingerprint.py
+```
+
+最終結果: **347 passed / 0 failed、exit 0、309.17秒**。実行中の編集なし。
+正常policy / 契約キー欠落legacyの回帰、mirror一致、thin-adapter guard、module inventory、
+衛生 / 語彙検査を含む。thin-adapter baselineは変更なし。HEADは開始時の `79ca75a` のまま。
+正式review / Checker / required CIの再確認は未実施で、今回のローカルGreenをacceptedへ読み替えない。
