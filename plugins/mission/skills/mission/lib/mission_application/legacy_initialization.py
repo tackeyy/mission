@@ -337,9 +337,14 @@ def initialize_legacy_v4(request, services):
             try:
                 existing_data = services.read_legacy_json_file(state_target)
                 services.validate_specialist_public_state(existing_data)
-                if not request.new_mission and existing_data.get("acceptance_contract") is not None:
+                if not request.new_mission and "acceptance_contract" in existing_data:
+                    reason = (
+                        "acceptance-contract-reinitialization-forbidden"
+                        if isinstance(existing_data["acceptance_contract"], dict)
+                        else "acceptance-contract-invalid"
+                    )
                     services.printer(
-                        "ERROR: acceptance-contract-reinitialization-forbidden",
+                        f"ERROR: {reason}",
                         file=services.stderr,
                     )
                     services.system_exit(2)

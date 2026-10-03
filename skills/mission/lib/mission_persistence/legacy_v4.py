@@ -46,7 +46,7 @@ from mission_kernel.commands import (
     kernel_command_type,
 )
 from mission_kernel.json_codec import decode_json_object
-from mission_kernel import MissionState, decode_mission_state, project_legacy_document
+from mission_kernel import MissionState, decode_mission_state
 
 from mission_kernel.model import BoundScore, FrozenJsonObject, HaltCategory, Phase
 from mission_kernel.json_codec import freeze_json_value
@@ -65,6 +65,7 @@ from .fenced_commit import (
     PendingLease,
     RepositoryExecutionResult,
     admit_lease,
+    project_legacy_document,
     compute_intent_digest,
     validate_execution_request,
 )

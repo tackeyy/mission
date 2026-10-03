@@ -9249,7 +9249,7 @@ def cmd_freshness(args):
     try:
         snapshot, _data = _load_authoritative_state(sf)
     except Exception as exc:
-        print(json.dumps({"ok": False, "error": "state file is invalid"}, ensure_ascii=False), file=sys.stderr)
+        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         raise SystemExit(2) from exc
     details = {"timestamp_field": None, "age_sec": None}
     for field, value in (
@@ -13934,7 +13934,7 @@ def cmd_verification_run(args):
         )
     except EvidenceFailure as exc:
         print(exc.code, file=sys.stderr)
-        sys.exit(exc.code)
+        sys.exit(2)
     print(output)
 
 
@@ -15103,7 +15103,7 @@ def cmd_lane_report(args):
             except Exception as exc:
                 if is_live_session_path(sf):
                     print(
-                        "ERROR: authoritative live session is unreadable: %s" % sf,
+                        "ERROR: authoritative live session is unreadable: %s" % exc,
                         file=sys.stderr,
                     )
                     sys.exit(2)

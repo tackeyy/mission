@@ -417,10 +417,15 @@ def initialize(
     try:
         current = repository.current_mission()
     except (OSError, TypeError, UnicodeError, ValueError) as error:
+        reason = (
+            "canonical-json-invalid"
+            if getattr(error, "code", None) == "canonical-json-invalid"
+            else "new-mission-session-undecodable"
+        )
         raise LifecycleFailure(
-            "new mission rejected: session document is undecodable; repair or restore "
+            f"{reason}: new mission rejected: session document is undecodable; repair or restore "
             "the authoritative session repository before retrying --new-mission",
-            reason="new-mission-session-undecodable",
+            reason=reason,
         ) from error
     document = current.document_copy()
     diagnosis = diagnose_terminalizable_state(document)

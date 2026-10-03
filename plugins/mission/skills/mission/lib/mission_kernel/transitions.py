@@ -989,11 +989,16 @@ def _acceptance_completion_ready(state: MissionState, command: MarkPass) -> None
         if state.legacy_passthrough is not None
         else state.extensions.thaw()
     )
-    contract = document.get("acceptance_contract")
-    if contract is None:
+    if "acceptance_contract" not in document:
         return
+    contract = document["acceptance_contract"]
     if not isinstance(contract, dict):
         raise _Rejected("acceptance-contract-invalid")
+    from acceptance_contract import AcceptanceContractError, frozen_verifier_commands
+    try:
+        commands = frozen_verifier_commands(contract)
+    except AcceptanceContractError as exc:
+        raise _Rejected(str(exc)) from exc
     if contract.get("coverage") != {"status": "valid"}:
         raise _Rejected("acceptance-coverage-pending")
     criteria = contract.get("criteria")
@@ -1013,7 +1018,6 @@ def _acceptance_completion_ready(state: MissionState, command: MarkPass) -> None
     if any(not isinstance(item, dict) or not isinstance(item.get("criterion_id"), str) or not isinstance(item.get("status"), str) for item in history):
         raise _Rejected("acceptance-receipt-invalid")
     policy = contract.get("verifier_policy")
-    commands = policy.get("commands") if isinstance(policy, dict) else None
     policy_digest = policy.get("digest") if isinstance(policy, dict) else None
     if not isinstance(commands, dict) or not isinstance(policy_digest, str):
         raise _Rejected("acceptance-contract-invalid")
