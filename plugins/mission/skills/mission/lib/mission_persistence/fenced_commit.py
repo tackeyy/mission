@@ -114,6 +114,10 @@ class FencedCommitError(ValueError):
         self.detail = detail
 
 
+class CanonicalStateEncodingError(FencedCommitError):
+    """Renderability rejection that compatibility fallbacks must not absorb."""
+
+
 @contextmanager
 def canonical_state_encoding():
     """Translate projection/encoding failures at the shared persistence boundary.
@@ -123,12 +127,15 @@ def canonical_state_encoding():
     """
     try:
         yield
-    except FencedCommitError:
+    except FencedCommitError as exc:
+        if exc.code == "canonical-json-invalid" and not isinstance(exc, CanonicalStateEncodingError):
+            raise CanonicalStateEncodingError(exc.code, exc.detail) from exc
         raise
     except (TypeError, ValueError) as exc:
         code = getattr(exc, "code", "canonical-json-invalid")
         detail = str(exc) if hasattr(exc, "code") else f"{code}: state projection cannot be canonically encoded"
-        raise FencedCommitError(code, detail) from exc
+        error_type = CanonicalStateEncodingError if code == "canonical-json-invalid" else FencedCommitError
+        raise error_type(code, detail) from exc
 
 
 def project_legacy_document(state):
@@ -2230,6 +2237,34 @@ class LocalFencedRepository:
                 session_id, commit, manifest_bytes
             )
             return state
+
+    def read_pinned_head(self, session_id: str, head_bytes: bytes) -> RepositorySnapshot:
+        """Verify an already captured head and its immutable lineage without relocking.
+
+        Direct readers may hold the shared state lock already. Digest and stable
+        file checks bind every referenced byte to this head; missing or changing
+        objects fail closed. This read does not admit or publish a transaction.
+        """
+        session_id = _session_id(session_id)
+        head = parse_head(head_bytes, session_id)
+        descriptor = None
+        try:
+            descriptor = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            self._root_descriptor = descriptor
+            self._root_identity = _directory_identity(os.fstat(descriptor))
+            self._verify_root()
+            snapshot = self._read_snapshot_from_head_unlocked(
+                session_id, head, head_bytes, _sha256(head_bytes)
+            )
+            self._verify_root()
+            return snapshot
+        except OSError as exc:
+            raise FencedCommitError("repository-invalid", "repository root cannot be pinned") from exc
+        finally:
+            self._root_descriptor = None
+            self._root_identity = None
+            if descriptor is not None:
+                os.close(descriptor)
 
     def read(self, session_id: str) -> RepositorySnapshot:
         session_id = _session_id(session_id)

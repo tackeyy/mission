@@ -10,6 +10,8 @@ protocol in ``aggregate_index`` for their rebuildable aggregate index.
 
 from __future__ import annotations
 
+from .authoritative_reader import read_session_json
+
 import copy
 import json
 import os
@@ -70,7 +72,7 @@ def capture_record(target: Path) -> CapturedRecord:
     except OSError as exc:
         raise AdministrativeCommitError("record-unreadable", str(exc)) from exc
     try:
-        document = json.loads(payload.decode("utf-8"))
+        document = read_session_json(target, source=payload, resolve_head=False)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise AdministrativeCommitError("record-invalid", str(exc)) from exc
     if not isinstance(document, dict):

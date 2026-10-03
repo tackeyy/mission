@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from mission_persistence.fenced_commit import CanonicalStateEncodingError
+
 
 @dataclass(frozen=True)
 class LegacyV4InitializationRequest:
@@ -219,6 +221,8 @@ def initialize_legacy_v4(request, services):
         for other_state_file in services.iter_state_files(cwd):
             try:
                 other = services.read_init_peer_state(other_state_file)
+            except CanonicalStateEncodingError:
+                raise
             except Exception:
                 continue
             if other.get("session_id") == current_session_id:
@@ -471,6 +475,8 @@ def initialize_legacy_v4(request, services):
                         f"上書きで復旧します: {move_error}",
                         file=services.stderr,
                     )
+            except CanonicalStateEncodingError:
+                raise
             except Exception as error:
                 services.printer(
                     f"WARNING: 旧ミッション (id={existing_mission_id[:8]}) のアーカイブに失敗。"
@@ -494,6 +500,8 @@ def initialize_legacy_v4(request, services):
             for state_path in services.iter_state_files(cwd):
                 try:
                     prior = services.read_init_peer_state(state_path)
+                except CanonicalStateEncodingError:
+                    raise
                 except (OSError, ValueError, services.fenced_commit_error):
                     continue
                 if prior.get("review_group_id") != initial["review_group_id"]:

@@ -1,6 +1,8 @@
 """Application use case for aggregate-reviews."""
 from __future__ import annotations
 
+from mission_persistence.fenced_commit import CanonicalStateEncodingError
+
 from dataclasses import dataclass
 import hashlib
 import json
@@ -124,6 +126,8 @@ def _aggregate_reviews(request, services):
         raise services.system_exit(2)
     try:
         _source_snapshot, source_state = services.load_authoritative_state(sf)
+    except CanonicalStateEncodingError:
+        raise
     except Exception as exc:
         services.printer(f"ERROR: authoritative state is unavailable: {exc}", file=services.stderr)
         raise services.system_exit(2)

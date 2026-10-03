@@ -1782,3 +1782,16 @@ def test_python39_reader_annotations_do_not_use_pep604_path_union():
     ).read_text(encoding="utf-8")
 
     assert "Path | str" not in source
+
+
+@pytest.mark.parametrize('source,error', [
+    ('{"mission":"fixture"}'.encode('utf-16'), UnicodeDecodeError),
+    (b'\xef\xbb\xbf{"mission":"fixture"}', json.JSONDecodeError),
+])
+def test_direct_session_reader_keeps_utf8_json_syntax_rejections(source, error):
+    from mission_persistence.authoritative_reader import read_session_json
+
+    # Direct CLI reads historically decode UTF-8 text. Accepting Python's
+    # automatic bytes encoding detection would change unrelated decode errors.
+    with pytest.raises(error):
+        read_session_json(Path('fixture.json'), source=source)

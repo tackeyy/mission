@@ -33,7 +33,7 @@ from mission_common import (
 )
 
 from .fenced_commit import (
-    LocalFencedRepository, canonical_state_encoding, encode_legacy_document,
+    CanonicalStateEncodingError, LocalFencedRepository, canonical_state_encoding, encode_legacy_document,
     project_legacy_document,
 )
 from .repository_binding import (
@@ -927,15 +927,58 @@ def summarize_authoritative_pass_rate_population(
     }
 
 
+def preflight_session_paths(roots, discover):
+    """Reject unrenderable batch inputs before any target is modified.
+
+    Other read failures keep their per-route compatibility handling. Re-read
+    each target at use time as well; this preflight does not authorize writes.
+    """
+    paths = [path for root in roots if root.exists() for path in discover(root)]
+    for path in paths:
+        try:
+            read_session_json(path)
+        except CanonicalStateEncodingError:
+            raise
+        except Exception:
+            continue
+    return paths
+
+
+def read_session_json(session_path: Union[Path, str], *, source: Union[str, bytes, None] = None, name: Optional[str] = None, resolve_head: bool = True):
+    """Read direct session JSON with the shared UTF-8 renderability boundary.
+
+    Flat legacy documents retain historical JSON/score tolerance. A v5 head
+    resolves through verified lineage rather than being treated as state.
+    Callers with an already pinned read can supply its bytes without reopening
+    flat state. Administrative consumers can retain a raw head to reject its
+    unsupported record shape. This check never rewrites retained public bytes.
+    """
+    path = Path(session_path)
+    if name is not None:
+        path = path / name
+    source = source if source is not None else path.read_bytes()
+    with canonical_state_encoding():
+        source = source.encode("utf-8") if isinstance(source, str) else source
+    document = json.loads(source.decode("utf-8"))
+    encode_legacy_document(document)
+    if resolve_head and isinstance(document, dict) and document.get("schema") == "mission-head/1":
+        snapshot = read_authoritative_snapshot(path, source=source)
+        encode_legacy_document(snapshot.raw_document_copy())
+        return snapshot.document_copy()
+    return document
+
+
 def read_authoritative_snapshot(
     session_path: Union[Path, str],
     *,
     expected_session_id: Optional[str] = None,
+    source: Optional[bytes] = None,
 ) -> AuthoritativeSnapshot:
     """Read a legacy document or resolve a v5 head through verified lineage."""
 
     path = Path(session_path)
-    source = read_stable_bytes(path, limit=STATE_LIMIT)
+    pinned_source = source
+    source = source if source is not None else read_stable_bytes(path, limit=STATE_LIMIT)
     inspected = _inspect_repository_bytes(
         source, expected_session_id=expected_session_id
     )
@@ -947,7 +990,10 @@ def read_authoritative_snapshot(
         if selected_session_id is None:
             raise ValueError("v5 head has no session identity")
         repository = LocalFencedRepository(path.parent.parent)
-        repository_snapshot = repository.read(selected_session_id)
+        repository_snapshot = (
+            repository.read(selected_session_id) if pinned_source is None
+            else repository.read_pinned_head(selected_session_id, source)
+        )
         state_document = decode_json_object(repository_snapshot.state_bytes)
         snapshot = _snapshot_from_k1_state(
             repository_snapshot.state,

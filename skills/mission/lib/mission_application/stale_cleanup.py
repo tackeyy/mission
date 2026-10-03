@@ -4,6 +4,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 
+from mission_persistence.authoritative_reader import preflight_session_paths
+from mission_persistence.fenced_commit import CanonicalStateEncodingError
+
 
 @dataclass(frozen=True)
 class CleanupStaleRequest:
@@ -49,6 +52,7 @@ def run_cleanup_stale(request, services):
         "warnings": [],
         "dry_run": not request.execute,
     }
+    preflight_session_paths(search_roots, services.iter_state_files)
     pid_sessions: dict[int, list[str]] = {}
     for root in search_roots:
         if not services.path_exists(root):
@@ -278,11 +282,15 @@ def run_cleanup_stale(request, services):
                                     "pid": pid,
                                     "mission": (data.get("mission") or "")[:80],
                                 })
+                except CanonicalStateEncodingError:
+                    raise
                 except Exception as error:
                     results["errors"].append({
                         "path": services.path_to_string(state_file),
                         "error": str(error),
                     })
+            except CanonicalStateEncodingError:
+                raise
             except Exception as error:
                 results["errors"].append({
                     "path": services.path_to_string(state_file),
