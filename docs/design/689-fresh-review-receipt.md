@@ -204,13 +204,16 @@ variant ごとの field は次のとおりで、表にない field の存在・`
 |---|---|---|---|---|---|
 | `completed` | adapter が child の終了と output を観測し、output が schema・予算・binding 検査を通過 | 必須 | 必須 | 必須 | `independent=true` の時だけ有効 |
 | `failed` | launch 後に child の異常終了、output 不正・予算超過・binding 不一致を観測 | 必須 | output bytes が存在すれば診断用として保持可、無ければ欠落 | 持たない | 無効 |
-| `blocked` | launch 前に起動不能・能力/identity/入力受領が観測不能・入力超過・登録 pin 不一致 | 持たない | 持たない | 持たない | 無効 |
+| `blocked` | 有効な launch receipt を保存できなかったすべての場合。起動前の起動不能・入力超過・登録 pin 不一致に加え、起動後に identity・入力受領・能力強制が観測不能、または adapter の launch 報告が field 不正・binding 不一致の場合を含む | 持たない（`launch_attempted: bool` を必須とし、起動後の場合は true。adapter の `cancel` を呼んだ結果を `cancel_result` に記録） | 持たない | 持たない | 無効 |
 | `abandoned-unknown` | dispatch-unknown または running の中断後、exact child と output を観測できない | running に達していれば必須、dispatch-unknown からなら持たない | 持たない | 持たない | 無効 |
 
 `reason` は variant ごとの閉じた理由コード集合から選ぶ。`completed` 以外は理由コード必須で、`completed` は `none`。
 どの variant でも terminal commit が request を consumed にし、同じ nonce の再利用・二重 terminal を拒否する。
 同一 operation の再応答は保存済み terminal をそのまま返す。再試行は `fresh-review prepare` で新しい request（新しい nonce）を作る。
 `independent=false` の inline 実行は `completed` として保存できるが、完了 gate では無効のままとする。
+`launch_attempted=true` の `blocked` の後に同じ child から届いた報告・output は、request が consumed のため import を拒否する。
+§3 の「rejected」は保存される終端ではなく、command 単位の拒否を指す。state を変えず、request はその時点の状態に残る。
+running の request に対する output import が検査で不合格になった場合は拒否で終わらせず、`failed` 終端として保存する。
 
 pending→dispatch-unknown→running→terminal を採用する。spawn 前 durable intent、receipt 後 running、
 terminal 前 candidate recapture を守る。dispatch-unknown は既存 saga と同じく自動 redispatch しない。[S9]
