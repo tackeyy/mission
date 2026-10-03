@@ -1,10 +1,24 @@
 # 必須条件の completion gate: 経路と検証証拠
 
 対象: [Issue 879](https://github.com/tackeyy/mission/issues/879) /
-[draft PR 893](https://github.com/tackeyy/mission/pull/893)。
+[merged PR 893](https://github.com/tackeyy/mission/pull/893)。
 基点は `baabdd957e3929304c8d353c968a894ed02537b9`、開始 head は
-`a3dafc43f29df323374b20803e2ae38688068dc4`。以下はその head に対する未コミットの作業結果。
-正式 review・独立 Checker・required CI の accepted/green を示す記録ではない。
+`a3dafc43f29df323374b20803e2ae38688068dc4`。C の実装は 2026-10-03 12:40 JST に
+merge commit `93c0833efc55a90f535d7c525ac533c7897b3cbf` として取り込まれた。
+本書は C の履歴と、後続 [D0: Issue 894](https://github.com/tackeyy/mission/issues/894) の形状検証を記録する。
+
+## C の確定記録
+
+以下は GitHub の一次記録（PR 893 のコメント、required CI run、merge commit）で確認した値である。
+
+- [PR 893 の review / Checker / merge](https://github.com/tackeyy/mission/pull/893):
+  reviewed head `b1b30145cf596c4577ed5ea86de3d016754fd31c` で異系統 review round 1 と
+  独立 Checker がともに accepted、High / Medium はともに 0 件。
+- 同 PR の独立反例探索は 71 入力（must-reject 63、must-accept 8）を実行し、
+  product defect は 0 件、harness の誤りは 2 件。
+- [required CI run 37093400756](https://github.com/tackeyy/mission/actions/runs/37093400756) は全 success。
+- [merge commit 93c0833](https://github.com/tackeyy/mission/commit/93c0833efc55a90f535d7c525ac533c7897b3cbf)
+  は 2026-10-03 12:40 JST の merge。以下の Red / 途中結果は過去の記録として保持する。
 
 ## 実装の結論
 
@@ -51,6 +65,11 @@ v4 flat と v5 fenced container の両方を実行する。
 | `halt` / `mark-halt` | `test_halt_stops_a_contract_session_without_claiming_success`: 停止は許可するが `passes=false`, phase=halted, outcome=failed。契約も維持 |
 | v4 decode/encode/projection | `test_codecs_keep_contract_and_receipt_evidence`: 契約と receipt を legacy projection に保持し、kernel/CLI が拒否 |
 | closed schema 5 decode/encode | 同関数: extensions の契約/receipt を保持し、pure kernel が pending coverage を拒否。契約なしの pure MarkPass は従来どおり成功 |
+| D0: 不正な criterion command_id / 凍結 command の欠落field・出力要素・external inputs | `test_malformed_frozen_verifier_rejects_public_completion_atomically`: lookup / hash / capture 前に `acceptance-contract-invalid` または `verifier-policy-command-invalid` で拒否 |
+| D0: live / frozen command の閉じた形 | `test_shared_validator_closes_live_and_frozen_command_fields_before_sets`: 必須fieldと各要素の表を共有し、live の set 化前検査も検証 |
+| D0: runner / replay の不正command・replay command_id | `test_runner_and_replay_reject_malformed_frozen_commands_atomically`: 同じ共有validatorで exit 2、receipt追加なし |
+| D0: present null の mark-passes / closeout / 既pass / status / runner / 通常init | `test_null_contract_is_present_and_rejects_atomically`: null を契約なしに変換しない。v5 init は既存の `session-already-initialized` 拒否を維持 |
+| D0: v4 / closed-v5 kernel の null・不正command | `test_codecs_keep_contract_and_receipt_evidence[null / malformed-command]`: pure gate が理由コード付き拒否、transition なし |
 | 契約なし normal pass、既 pass closeout | `test_contractless_completion_and_already_passed_closeout_remain_usable`: 公開成功動作と再 closeout の bytes 不変を維持 |
 
 source inventory: `skills/mission/lib/mission_application/review.py` の `mark_pass` と
@@ -80,10 +99,11 @@ pending/missing/stale/latest-failure/force-pending の簡易 repository 5 関数
 subprocess の費用は実測結果に記録する。純粋な単体検査だけでは CLI と publication の境界を代替できない。
 CI は `.github/workflows/ci.yml` の Python shards → `make test-shard` が `skills/mission` を収集する。
 `scripts/ci_shard_targets.py::expand_target` は tracked ファイルだけを列挙するため、
-新しい回帰は commit 後にその経路に入る。現状は未追跡で、明示ファイル指定によるローカル実行だけを検証した。
+C の回帰ファイルは PR 893 で tracked となり、required CI run 37093400756 で実行された。
+D0 は同じ tracked ファイルを拡張するため、その収集経路を共有する。
 draft skip は検証成功と扱わない。
 
-## Red と途中結果
+## C の Red と途中結果（履歴）
 
 - `python3 -m pytest -q -n 4 skills/mission/tests/test_issue879_completion_cli.py`:
   pytest-xdist が未導入で収集前停止、exit 4（pass/fail は未測定）。後の実行は一時領域に置いた pure Python test dependencies を使う。
@@ -106,7 +126,7 @@ draft skip は検証成功と扱わない。
   修正前 2 passed / 2 failed、exit 1、18.07 秒。v4 の通常 init が exit 0 となり、
   保存済み contract と score history を除去した。修正後 4 passed / 0 failed、exit 0、13.12 秒。
 
-## 最終対象検証
+## C の最終対象検証（履歴）
 
 対象全体の初回は 555 passed / 1 failed、exit 1、237.82 秒。
 失敗は `test_issue626_thin_adapter_guard.py::test_repository_scan_matches_the_headroom_free_baseline_exactly`。
@@ -154,13 +174,14 @@ python3 -m pytest -q -n 4 --dist loadfile \
 ```
 
 592 passed / 0 failed、exit 0、436.98 秒。full suite は実行していない。
-未追跡の新規ファイルは tracked-only の衛生・語彙テストの対象外なので、同じ scanner でも別途確認した。
+C の commit 前には新規ファイルが tracked-only の衛生・語彙テストの対象外だったため、
+当時は同じ scanner でも別途確認した。PR 893 ではそれらも tracked ファイルとして検査対象に入った。
 新規 2 ファイルの衛生・語彙検査、`git diff --check`、
 `python3 scripts/check-thin-adapter-ratchet.py` はすべて exit 0。
 
 reviewed area は repo の 600 行 accountability 帯、1,400 行未満。
 PR をさらに分けない理由は、C の completion authority、公開 CLI、拒否時の publication、
-配布 mirror が同じ受入条件を構成するため。実装・回帰・mirror を 1 commit、証拠文書を別 commit とする案。
+配布 mirror が同じ受入条件を構成したため。C は PR 893 として merge 済み。
 
 ## 未解決・範囲外
 
@@ -173,5 +194,104 @@ PR をさらに分けない理由は、C の completion authority、公開 CLI�
    `mission_persistence/legacy_v4.py::V5CompatibilityRepository.load/read_snapshot` により拒否される。
    codec/kernel の証拠保持と公開 CLI の非変更拒否は検証するが、schema 5 の公開成功経路は
    C で新設しない。この既存境界の修正・新規 Issue 起票は行わない。
-3. 正式 review・独立 Checker・50 入力以上の独立した探索・required CI は未実施。
-   commit/push/merge はこの作業では行わない。次は未コミット差分を規定の review に渡す。
+3. C の review / Checker / 独立探索 / CI / merge は上の確定記録を参照。
+   D0 の正式 review・独立 Checker・required CI は別工程であり、C の accepted を流用しない。
+4. candidate capture の低水準 primitive を共有validatorなしで直接呼ぶ場合の型不正は対象外。
+   `skills/mission/lib/mission_application/verification_runner.py::capture_candidate` の
+   `tuple(declared_untracked)` / `for item in external_inputs` は null 入力で TypeError を返す。
+   D0 の公開経路では、その前に `acceptance_contract.py::frozen_verifier_commands` を通す。
+
+
+## D0 の実装と検証
+
+テストリスト: 不正な criterion command_id、凍結commandの必須field / 各要素、
+replay の参照とtarget、present null、key-absent legacy、v4 / v5 の公開bytes不変、pure kernel。
+
+- `skills/mission/lib/verifier_command.py::validate_command` / `validate_command_links` が
+  IO のない閉じた形状検査を担う。live policy は同じ検査を使用し、出力要素を set 化する前に検査する。
+- `skills/mission/lib/acceptance_contract.py::frozen_verifier_commands` は criterion / binding の
+  不正を `acceptance-contract-invalid`、command の不正を `verifier-policy-command-invalid` に分ける。
+  candidate capture、mark-pass preflight、kernel、runner / replay の lookup / hash / capture より前に使う。
+- 契約はキーの存在で判定する。present null は拒否し、キー欠落legacyを維持する。
+  通常initにも同じpresence規則を適用し、archiveの例外処理が拒否をwarningへ変えないようにする。
+- CLI adapter の変更は runner のエラーを exit 2 へ変換する1行だけ。判断はlibにあり、
+  thin-adapter baseline を増やさない。kernel にIO・application importを追加していない。
+
+Red / Green の実測（すべて `python3 -m pytest -q`、xdist 未導入につき `-n` なし）:
+
+| 対象 / selector | passed | failed | deselected | exit | 秒 |
+|---|---:|---:|---:|---:|---:|
+| `test_issue879_completion_cli.py`（baseline） | 72 | 0 | 0 | 0 | 203.14 |
+| 同ファイル `-k malformed_frozen`（Red） | 0 | 8 | 72 | 1 | 26.24 |
+| 同ファイル `-k malformed_frozen`（Green） | 8 | 0 | 72 | 0 | 18.38 |
+| 同ファイル `-k null_contract`（Red） | 1 | 11 | 80 | 1 | 20.26 |
+| 同ファイル `-k null_contract`（途中） | 11 | 1 | 80 | 1 | 28.02 |
+| 同ファイル `-k 'null_contract or malformed_frozen or contractless'`（Green） | 22 | 0 | 70 | 0 | 45.02 |
+| 同ファイル + `test_issue632_transition_is_the_writer.py` + `test_issue626_thin_adapter_guard.py`、`-k 'shared_validator or runner_and_replay or codecs'` | 13 | 0 | 201 | 0 | 41.14 |
+
+Red の不正shapeでは6件が internal-error / exit 1、必須argv欠落2件はshape検査を通過して
+coverage-pendingで拒否された。nullは完了やstatusがexit 0となる経路、およびrunnerの
+理由文字列を `sys.exit` に渡してexit 1となる経路を再現した。
+途中のv4 initは理由コードをValueErrorで投げたためarchive処理がwarningへ変換した。
+公開前のSystemExitへ揃え、公開bytes不変のGreenを確認した。
+
+独立探索は純粋validatorに対して不正97入力 / 正常8入力を実行し、
+不正は全拒否、正常は全受理、TypeError / KeyError / AttributeErrorは0件。
+入力分類の訂正4件（base未変更、既存の `.` 許容、正常test report、optional replay null）は
+不正97入力の数に含めない。これは公開CLIの原子性や正式reviewの代替ではない。
+null / key-absentのcapture・status・既pass・preflight・runnerも独立したread-only検査で確認した。
+
+テストの検出価値: commandの形状表は純粋な共有検査で1度だけ検証し、公開CLIでは
+lookup / capture / replay / presenceの別境界を代表入力で検査する。
+既存の `_policy` / `_replay_policy` / completion fixture とbytes比較を再利用した。
+writerのcandidate欠落テストは完全なcommand fixtureへ更新し、同じ欠落保証を保持する。
+codec回帰はclosed-v5のextensionsでも下位gateが不正shapeを見ることを追加検証する。
+CLI subprocessの費用は上表の実測。全面入力表を全CLIへ複製するより安く、
+pure testだけでは検出できない公開state / backup / approval receiptの副作用も検査できる。
+
+最終の指定14ファイル検証:
+
+```sh
+python3 -m pytest -q \
+  skills/mission/tests/test_issue879_completion_cli.py \
+  skills/mission/tests/test_issue632_transition_is_the_writer.py \
+  skills/mission/tests/test_issue877_acceptance_contract.py \
+  skills/mission/tests/test_issue878_verification_runner.py \
+  skills/mission/tests/test_issue878_candidate_snapshot.py \
+  skills/mission/tests/test_codex_wrapper_sync.py \
+  skills/mission/tests/test_issue626_thin_adapter_guard.py \
+  skills/mission/tests/test_command_inventory.py \
+  skills/mission/tests/test_python_module_inventory.py \
+  skills/mission/tests/test_plugins_in_sync.py \
+  skills/mission/tests/test_artifact_hygiene.py \
+  skills/mission/tests/test_vendor_fingerprint.py \
+  skills/mission/tests/test_mark_passes_threshold.py \
+  skills/mission/tests/test_terminal_outcome.py
+```
+
+399 passed / 0 failed、exit 0、427.78秒。full suiteは実行していない。
+mirror一致、thin-adapter baseline一致、inventory / import、衛生・語彙を含む。
+新規validatorのsource / mirrorはuntrackedなので、同じ衛生・語彙scannerでも個別に検査した。
+文書の結果追記後は全変更ファイルを同じscannerで確認し、`git diff --check`もexit 0。
+テスト実行中はファイルを編集していない。
+
+上表の実際のコマンド（Red / Greenは同じコマンドを再実行）:
+
+```sh
+python3 -m pytest -q skills/mission/tests/test_issue879_completion_cli.py
+python3 -m pytest -q skills/mission/tests/test_issue879_completion_cli.py -k malformed_frozen
+python3 -m pytest -q skills/mission/tests/test_issue879_completion_cli.py -k null_contract
+python3 -m pytest -q skills/mission/tests/test_issue879_completion_cli.py -k 'null_contract or malformed_frozen or contractless'
+python3 -m pytest -q skills/mission/tests/test_issue879_completion_cli.py -k 'shared_validator or runner_and_replay or codecs' skills/mission/tests/test_issue632_transition_is_the_writer.py skills/mission/tests/test_issue626_thin_adapter_guard.py
+```
+
+D0の正式review / 独立Checker / required CI / GitHubへの公開は実施していない。
+独立したread-only探索の結果を正式なacceptedへ読み替えない。
+HEADは基点`93c0833efc55a90f535d7c525ac533c7897b3cbf`のまま。
+最終確認時のローカル`origin/main`は`93a631c68d23b8b9e9b5fac1a981347702580a08`
+（[設計文書PR 898](https://github.com/tackeyy/mission/pull/898)）へ1commit進んでいた。
+差分は`docs/design/689-fresh-review-receipt.md`のみ。Git操作禁止に従い統合はしていない。
+次工程では最新baseを確認してからcandidateをfreezeし、review / Checker / CIを同じheadで取得する。
+commit分割案: `fix: 永続completion gateの不正形とnull契約を拒否する`
+（実装・回帰・mirror）、`docs: completion gateの確定記録とD0の検証経路を更新する`（本書）。
+本作業はcommit / push / PR / mergeを行わない。
