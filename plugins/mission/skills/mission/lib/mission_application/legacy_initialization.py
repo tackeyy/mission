@@ -355,7 +355,8 @@ def initialize_legacy_v4(request, services):
                 existing_mission_id = existing_data.get("mission_id", "")
                 new_mission_id = initial.get("mission_id", "")
                 if (
-                    existing_mission_id
+                    not request.new_mission
+                    and existing_mission_id
                     and new_mission_id
                     and existing_mission_id != new_mission_id
                 ):

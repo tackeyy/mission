@@ -878,6 +878,29 @@ def test_halt_all_validates_all_sessions_before_publication(completion_session, 
                       'canonical-json-invalid', raw_control=True)
 
 
+def test_cleanup_stale_preflights_batch_before_changing_healthy_session(completion_session, run_cli):
+    """A later corrupt peer must stop cleanup before an eligible session is halted."""
+    root, state, schema = completion_session
+    state.update(pid=None, lease_expires_at="2000-01-01T00:00:00Z",
+                 last_activity_at="2000-01-01T00:00:00Z", updated_at="2000-01-01T00:00:00Z")
+    _persist_fixture(root, state, schema)
+    # V5 initialization admits a fresh lease; expire that lease in the fixture.
+    _rewrite_fixture_document(root, lambda doc: doc.update(
+        lease_expires_at="2000-01-01T00:00:00Z",
+        last_activity_at="2000-01-01T00:00:00Z", updated_at="2000-01-01T00:00:00Z"))
+    healthy_path = root / ".mission-state" / "sessions" / "test.json"
+    before = _public_bytes(root)
+    dry_run = run_cli("cleanup-stale", "--root", str(root), cwd=root)
+    assert dry_run.returncode == 0, dry_run.stderr
+    assert str(healthy_path) in [item["path"] for item in json.loads(dry_run.stdout)["would_halt"]]
+    assert _public_bytes(root) == before
+
+    peer = dict(state, session_id="z-invalid", custom_note="\ud800")
+    (healthy_path.parent / "z-invalid.json").write_text(json.dumps(peer))
+    _reject_unchanged(run_cli, root, ["cleanup-stale", "--root", str(root), "--execute"],
+                      "canonical-json-invalid", raw_control=True)
+
+
 def test_audit_rejects_unencodable_sessions_before_snapshot_publication(completion_session, tmp_path_factory):
     root, state, schema = completion_session
     _persist_fixture(root, state, schema)

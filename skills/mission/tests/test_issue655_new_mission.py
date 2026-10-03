@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -131,6 +132,31 @@ def test_halted_session_requires_explicit_new_mission_and_archives_old_generatio
     assert current["mission"] == "second mission"
     assert current["mission_id"] != archived["mission_id"]
     assert current["loop_active"] is True
+
+    # The v5 reinitializer already archives the terminal generation and reserves
+    # the restart registry. Legacy initialization must not publish a second copy.
+    audit_script = Path(__file__).resolve().parents[3] / "scripts" / "mission-audit.py"
+    audit = subprocess.run(
+        [sys.executable, str(audit_script), "--root", str(tmp_path), "--json"],
+        capture_output=True, text=True,
+    )
+    assert audit.returncode == 0, audit.stderr
+    findings = json.loads(audit.stdout)["findings"]
+    critical = [finding for finding in findings if finding["priority"] in {"P0", "P1"}]
+    extra_archives = list((tmp_path / ".mission-state" / "archive").glob("state-*"))
+    assumptions = current["assumptions_path"]
+    violations = []
+    if extra_archives:
+        violations.append(f"duplicate legacy archives: {[path.name for path in extra_archives]}")
+    if not assumptions.startswith(f".mission-state/sessions/{session_id}-restart-"):
+        violations.append(f"reserved restart registry replaced: {assumptions}")
+    if critical:
+        violations.append(f"critical audit findings: {critical}")
+    assert not violations, "\n".join(violations)
+    assert (tmp_path / assumptions).read_text(encoding="utf-8") == "# Assumption Registry\n"
+    stats = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path, env_extra=env)
+    assert stats.returncode == 0, stats.stderr
+    assert json.loads(stats.stdout)["duplicate_state_group_count"] == 0
 
 
 def test_new_mission_with_same_text_gets_new_identity_and_active_state(
