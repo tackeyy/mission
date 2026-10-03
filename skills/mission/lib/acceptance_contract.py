@@ -194,15 +194,30 @@ def frozen_verifier_commands(contract: object) -> dict:
     for item in criteria:
         if item["command_id"] not in commands:
             raise AcceptanceContractError(invalid)
+    # Check the complete persisted value before any downstream hashing,
+    # process execution, or rendering, including fields outside the binding.
+    canonical_bytes(contract)
     return commands
 
 
 def status(contract: object) -> dict:
     if not isinstance(contract, dict):
         return {"present": False}
+    if contract.get("schema") == POLICY_BOUND_SCHEMA:
+        frozen_verifier_commands(contract)
+    elif contract.get("schema") == SCHEMA:
+        imported = dict(contract)
+        imported.pop("imported_at", None)
+        try:
+            validate(imported)
+        except AcceptanceContractError as exc:
+            raise AcceptanceContractError("acceptance-contract-invalid") from exc
+        canonical_bytes(contract)
+    else:
+        raise AcceptanceContractError("acceptance-contract-invalid")
     return {
         "present": True,
-        "digest": digest(contract),
+        "digest": canonical_contract_digest(contract),
         "coverage": contract.get("coverage"),
         "requirement_text": contract.get("requirement_text"),
         "requirements": contract.get("requirements"),

@@ -35,7 +35,7 @@ def _public_bytes(root):
     }
 
 
-def _persist_fixture(root, state, schema, *, closed_v5=False):
+def _persist_fixture(root, state, schema, *, closed_v5=False, escaped_contract=False):
     """Arrange flat v4 or a fenced v5 container, without generic set.
 
     Normal v5 genesis retains v4 payloads. Closed schema-5 payloads are an
@@ -61,7 +61,19 @@ def _persist_fixture(root, state, schema, *, closed_v5=False):
     admitted = repository.begin(request)
     if not closed_v5:
         target = replace(snapshot.state, lease=admitted.pending_lease.target, snapshot_provenance=None)
-        repository.initialize(request, state_bytes=project_legacy_document(target))
+        if escaped_contract:
+            # A directly persisted JSON escape need not be UTF-8 encodable
+            # after decoding. Project the control/lease, then inject the
+            # hostile contract before the real fenced genesis publication.
+            safe = dict(state)
+            safe.pop("acceptance_contract")
+            target = replace(target, legacy_passthrough=freeze_json_value(safe))
+            document = json.loads(project_legacy_document(target))
+            document["acceptance_contract"] = state["acceptance_contract"]
+            payload = json.dumps(document).encode()
+        else:
+            payload = project_legacy_document(target)
+        repository.initialize(request, state_bytes=payload)
         assert json.loads(path.read_bytes())["schema"] == "mission-head/1"
         return
     def sized(reference):
@@ -128,15 +140,20 @@ def completion_session(request, state_dir, run_cli):
     return root, state, request.param
 
 
-def _reject_unchanged(run_cli, root, args, reason, *, env=None):
+def _reject_unchanged(run_cli, root, args, reason, *, env=None, raw_control=False):
+    def document():
+        if not raw_control:
+            return json.loads(run_cli("get", cwd=root).stdout)
+        from mission_persistence.fenced_commit import LocalFencedRepository
+        return json.loads(LocalFencedRepository(root / ".mission-state").read("test").state_bytes)
     before = _public_bytes(root)
-    document_before = json.loads(run_cli("get", cwd=root).stdout)
+    document_before = document()
     public_before = document_before.get("control", document_before)
     result = run_cli(*args, cwd=root, env_extra=env)
     assert result.returncode == 2, result.stdout + result.stderr
     assert reason in result.stderr + result.stdout
     assert _public_bytes(root) == before
-    document_after = json.loads(run_cli("get", cwd=root).stdout)
+    document_after = document()
     public_after = document_after.get("control", document_after)
     for key in ("passes", "loop_active", "phase", "terminal_outcome"):
         assert public_after.get(key) == public_before.get(key)
@@ -191,6 +208,71 @@ def test_null_contract_is_present_and_rejects_atomically(completion_session, run
     _reject_unchanged(run_cli, root, args, reason)
 
 
+@pytest.mark.parametrize("mutation,reason", [
+    ("command-fields", "verifier-policy-command-invalid"),
+    ("contract-fields", "acceptance-contract-invalid"),
+    ("command-surrogate", "verifier-policy-command-invalid"),
+    ("criterion-surrogate", "acceptance-contract-invalid"),
+    ("digest-surrogate", "canonical-json-invalid"),
+])
+def test_status_rejects_malformed_persisted_contract_atomically(completion_session, run_cli, mutation, reason):
+    root, state, schema = completion_session
+    contract = state["acceptance_contract"]
+    command = contract["verifier_policy"]["commands"]["project-test"]
+    if mutation == "command-fields":
+        command.pop("argv")
+    elif mutation == "contract-fields":
+        contract["criteria"] = []
+    elif mutation == "command-surrogate":
+        command["argv"].append("\ud800")
+    elif mutation == "criterion-surrogate":
+        contract["criteria"][0]["command_id"] = "\ud800"
+    else:
+        contract["criteria"][0]["expected"] = "\ud800"
+    surrogate = mutation.endswith("surrogate")
+    _persist_fixture(root, state, schema, escaped_contract=surrogate)
+    # v5 projects before reaching contract semantics. Invalid Unicode there
+    # must also be a controlled canonical rejection, without publication.
+    if surrogate and schema == 5:
+        reason = "canonical-json-invalid"
+    _reject_unchanged(run_cli, root, ["acceptance-contract", "status"], reason,
+                      raw_control=surrogate and schema == 5)
+
+
+@pytest.mark.parametrize("present", [True, False])
+def test_status_keeps_valid_and_contractless_sessions_readable(completion_session, run_cli, present):
+    root, state, schema = completion_session
+    if not present:
+        state.pop("acceptance_contract")
+    _persist_fixture(root, state, schema)
+    before = _public_bytes(root)
+    result = run_cli("acceptance-contract", "status", cwd=root)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout)["present"] is present
+    assert _public_bytes(root) == before
+
+
+@pytest.mark.parametrize("blocked", [False, True])
+def test_runner_rejects_uncanonical_contract_before_receipt_generation(completion_session, run_cli, blocked):
+    root, state, schema = completion_session
+    state["acceptance_contract"]["criteria"][0]["expected"] = "\ud800"
+    _persist_fixture(root, state, schema, escaped_contract=True)
+    args = ["verification", "run", "--criterion", "AC1"]
+    if blocked:
+        repro = root / "repro.json"
+        repro.write_text(json.dumps({"artifact_kind": "counterexample", "content": "proof"}))
+        args += ["--repro-input", str(repro)]
+    _reject_unchanged(run_cli, root, args, "canonical-json-invalid", raw_control=schema == 5)
+
+
+def test_already_passed_closeout_validates_frozen_commands(completion_session, run_cli):
+    root, state, schema = completion_session
+    state.update(passes=True, loop_active=False, phase="done", terminal_outcome="completed_pass")
+    state["acceptance_contract"]["verifier_policy"]["commands"]["project-test"].pop("argv")
+    _persist_fixture(root, state, schema)
+    _reject_unchanged(run_cli, root, ["closeout"], "verifier-policy-command-invalid")
+
+
 def _malformed_verifier_commands(base):
     """One shape table, shared by live-policy and persisted-policy checks."""
     yield None
@@ -200,7 +282,8 @@ def _malformed_verifier_commands(base):
         yield command
     for field, value in [
         ("unknown", True), ("id", []), ("argv", "command"), ("argv", [[]]),
-        ("kind", []), ("timeout_sec", True), ("timeout_sec", 3601),
+        ("argv", ["\x00"]), ("argv", ["\ud800"]),
+        ("kind", []), ("timeout_sec", True), ("timeout_sec", "5"), ("timeout_sec", 3601),
         ("output_limit", 0), ("output_limit", 1048577),
         ("relative_cwd", []), ("env", {"KEY": []}), ("env", {"KEY": "\x00"}),
         ("toolchain", {"path": [], "digest": base["toolchain"]["digest"]}),
@@ -210,18 +293,22 @@ def _malformed_verifier_commands(base):
         ("external_inputs", [{"kind": "local-file", "source_path": "input"}]),
         ("external_inputs", [{"kind": "local-file", "source_path": [], "target_path": "input"}]),
         ("external_inputs", [{"kind": "local-file", "source_path": "input", "target_path": "../outside"}]),
+        ("external_inputs", [{"kind": "local-file", "source_path": "input", "target_path": "input"}] * 2),
         ("replay", {"command_id": []}), ("test_report", {"format": "junit-xml", "path": "out"}),
     ]:
         yield {**copy.deepcopy(base), field: value}
     replay = {"command_id": "project-test", "max_bytes": 64,
               "allowed_artifact_kinds": ["counterexample"], "relative_path": "repro.json"}
     for field, value in [("command_id", []), ("max_bytes", True),
+                         ("command_id", "missing"),
                          ("allowed_artifact_kinds", [[]]), ("relative_path", None)]:
         yield {**copy.deepcopy(base), "replay": {**replay, field: value}}
 
 
 def test_shared_validator_closes_live_and_frozen_command_fields_before_sets():
     from acceptance_contract import AcceptanceContractError, frozen_verifier_commands
+    from mission_application.acceptance import acceptance_contract_status
+    from mission_application.artifact import EvidenceFailure
     from mission_application.verifier_policy import VerifierPolicyError, validate
 
     policy = _policy()
@@ -234,11 +321,39 @@ def test_shared_validator_closes_live_and_frozen_command_fields_before_sets():
         before = copy.deepcopy(contract)
         with pytest.raises(AcceptanceContractError, match="^verifier-policy-command-invalid$"):
             frozen_verifier_commands(contract)
+        with pytest.raises(EvidenceFailure, match="^verifier-policy-command-invalid$"):
+            acceptance_contract_status({"acceptance_contract": contract})
         assert contract == before
     # A supported empty output/input list must keep working.
     commands = validate(policy)
     contract["verifier_policy"]["commands"] = commands
     assert frozen_verifier_commands(contract) == commands
+
+
+def test_status_uses_shared_closed_contract_binding_validation():
+    from mission_application.acceptance import acceptance_contract_status
+    from mission_application.artifact import EvidenceFailure
+
+    base = _contract("fixture-mission")
+    base["verifier_policy"] = {"digest": "sha256:" + "a" * 64,
+                               "commands": {"project-test": _policy()["commands"][0]}}
+    for field, value in [("criteria", []), ("criteria", {}),
+                         ("verifier_policy", {**base["verifier_policy"], "extra": True}),
+                         ("verifier_policy", {"commands": base["verifier_policy"]["commands"]}),
+                         ("verifier_policy", {"digest": "bad", "commands": base["verifier_policy"]["commands"]}),
+                         ("verifier_policy", {"digest": base["verifier_policy"]["digest"], "commands": {}})]:
+        with pytest.raises(EvidenceFailure, match="^acceptance-contract-invalid$"):
+            acceptance_contract_status({"acceptance_contract": {**base, field: value}})
+    for field, value in [("id", []), ("required", "true"), ("command_id", []),
+                         ("command_id", "missing")]:
+        contract = copy.deepcopy(base)
+        contract["criteria"][0][field] = value
+        with pytest.raises(EvidenceFailure, match="^acceptance-contract-invalid$"):
+            acceptance_contract_status({"acceptance_contract": contract})
+    contract = copy.deepcopy(base)
+    contract["verifier_policy"]["commands"]["project-test"]["id"] = "other-command"
+    with pytest.raises(EvidenceFailure, match="^verifier-policy-command-invalid$"):
+        acceptance_contract_status({"acceptance_contract": contract})
 
 
 @pytest.mark.parametrize("mutation", ["direct-command", "replay-id", "replay-command"])

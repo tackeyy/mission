@@ -83,13 +83,12 @@ def acceptance_contract_status(state: object) -> dict:
     contract = state["acceptance_contract"]
     if not isinstance(contract, dict):
         raise EvidenceFailure("acceptance-contract-invalid")
-    stored = dict(contract)
-    binding = stored.pop("verifier_policy", None)
-    result = status(stored)
-    if result["present"]:
-        result["digest"] = canonical_contract_digest(contract)
-        result["imported_at"] = contract.get("imported_at")
-        result["verifier_policy"] = binding
+    try:
+        result = status(contract)
+    except AcceptanceContractError as exc:
+        raise EvidenceFailure(str(exc)) from exc
+    result["imported_at"] = contract.get("imported_at")
+    result["verifier_policy"] = contract.get("verifier_policy")
     return result
 
 
@@ -134,9 +133,14 @@ def run_acceptance_contract_status_cli(args, services) -> str:
     cwd = Path.cwd()
     state_file = _state_file(cwd, services)
     repository = services.repository(cwd, state_file, stamp=False, strict_read=True)
-    with repository.transaction():
-        data = repository.load()
     try:
+        with repository.transaction():
+            data = repository.load()
         return json.dumps(acceptance_contract_status(data), ensure_ascii=False, indent=2)
     except EvidenceFailure as exc:
         services.fail(exc.code, 2)
+    except (AcceptanceContractError, UnicodeError) as exc:
+        # A retained v4 payload inside a v5 container is projected by the
+        # reader before contract validation. Invalid Unicode must not escape
+        # that read-only boundary as an internal error.
+        services.fail(str(exc) if isinstance(exc, AcceptanceContractError) else "canonical-json-invalid", 2)

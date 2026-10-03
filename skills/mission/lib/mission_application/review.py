@@ -90,8 +90,10 @@ def closeout_already_passed(data: dict) -> bool:
     if data.get("passes") is not True:
         return False
     if "acceptance_contract" in data:
-        if not isinstance(data["acceptance_contract"], dict):
-            raise ReviewFailure("acceptance-contract-invalid", reason="acceptance-contract-invalid")
+        try:
+            frozen_verifier_commands(data["acceptance_contract"])
+        except AcceptanceContractError as exc:
+            raise ReviewFailure(str(exc), reason=str(exc)) from exc
         raise ReviewFailure(
             "acceptance contract requires completion revalidation",
             reason="acceptance-revalidation-required",

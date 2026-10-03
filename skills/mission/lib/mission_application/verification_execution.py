@@ -41,8 +41,11 @@ def run_verification_receipt_cli(request, services) -> str:
         cwd, state_file, stamp=False, strict_read=True, pre_admit_lease=True,
         session_id=state_file.stem,
     )
-    with reader.transaction():
-        state = reader.load()
+    try:
+        with reader.transaction():
+            state = reader.load()
+    except UnicodeError as exc:
+        raise EvidenceFailure("canonical-json-invalid") from exc
     contract = state.get("acceptance_contract") if isinstance(state, dict) else None
     if isinstance(state, dict) and "acceptance_contract" in state:
         _frozen_commands(contract)
