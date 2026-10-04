@@ -36,7 +36,7 @@
 - **repository 数**: **41〜42**（検証済み。公式サイトは 9 言語・41 repo、HuggingFace の個票は言語別内訳の合計で同程度）。
 - **task 数**: 300（9 言語: Ruby 44/6repo, Rust 43/7repo, PHP 43/4repo, Java 43/6repo, Go 42/5repo, C 30/4repo, JS 26/3repo, TS 17/4repo, C++ 12/2repo）。
 - **license**: SWE-bench と同じ構築方式（**UNKNOWN**、個別確認なし）。
-- **Det（評価環境の存在）**: あり（検証済み。SWE-bench と同じ Docker ベース評価）。**network 遮断・3 回再実行の一致（884 §5.1 の凍結要件）は未確認（UNKNOWN）**。
+- **Det（評価環境の存在）**: あり（推定。SWE-bench と同じ Docker ベース評価と報告されているが、個別には確かめていない）。**network 遮断・3 回再実行の一致（884 §5.1 の凍結要件）は未確認（UNKNOWN）**。
 - **Cx4（自然な依頼由来）**: SWE-bench と同じ構築方式（実際の GitHub issue/PR から収集）であれば満たす可能性が高いが、個別確認はしていない（**暫定判断・UNKNOWN**）。
 - **判定**: 41〜42 repo も 180（必要総単位数 192）に届かない。SWE-bench 本体との重複（同一言語圏・類似収集手順）の有無は未確認。
 
@@ -93,7 +93,7 @@
 - **license**: **MIT**（検証済み）。
 - **Det（評価環境の存在）**: あり（検証済み）。RepoLaunch という LLM エージェントが各 GitHub repository から「テスト可能な container 化環境」を自動生成し、"executable docker sandbox" で評価する。**884 §5.1 の凍結 Det 要件（network を遮断した 3 回の再実行で検査ごとの結果が一致すること）は本調査では未確認（UNKNOWN）**。"executable docker sandbox" という記述からは network 遮断の有無を読み取れない。
 - **汚染対策**: 評価時に agent へ `FAIL_TO_PASS`/`test_patch` 等の解答フィールドを渡さない設計、月次更新で leaderboard 比較用に分割（いずれも検証済み）。収集対象が「2024 年以降に作られた実際の GitHub issue」である点は、学習データのカットオフが古い model に対しては汚染リスクを下げる（ただし本調査の "Con" 基準＝ mission repository への文字列の非存在、とは別物）。
-- **Cx4（自然な依頼由来）**: 上記の汚染対策の項と同じ出典で「2024 年以降に作られた実際の GitHub issue」を収集対象としていることが検証済みであり、満たすと判断できる。
+- **Cx4（自然な依頼由来）**: 「2024 年以降に作られた実際の GitHub issue」を収集対象としていることは検証済み。ただし「Mission や特定の agent を狙って作られていない」ことまでは個別に確かめていないため、他の候補と同じく**暫定判断**とする（884 §5.1 の Cx4 は I2b の判定対象）。
 - **Cx1〜Cx3 推定（再評価・弱い推定への訂正）**: gold patch の統計 **median 2 files・3 hunks・24 lines** は検証済みだが、**この統計の出典は MultiLang（431 repo・8 言語）ではなく、同じ SWE-bench-Live 系列の別の母集団である Python 専用版（93 repository・1,319 task、[arXiv 2505.23419 "SWE-bench Goes Live!"](https://arxiv.org/html/2505.23419v2)）である**（2026-10-04 に出典を再確認。MultiLang の README・データセットページには同等の gold patch 統計は記載されていなかった）。したがって「MultiLang の約半数が Cx1/Cx3 を満たす」という推定は、**別の母集団（Python のみ・93 repo）の統計を MultiLang（8 言語・431 repo）へ外挿した弱い推定**であり、以前の記述が示唆していたような MultiLang 自体の実測ではない。さらにこの推定は Cx2（検査 3 件以上・fail-to-pass 1 件以上）を考慮していない（gold patch の行数・ファイル数のみで、検査数の分布は未調査・UNKNOWN）。「単一ファイル・5 行未満の修正の成功率が 48%」という別の分析も、同じ Python 専用版の文脈由来である可能性が高く、個別には確認していない。
 - **判定**: **431 repo は 180（必要総単位数 192）を上回り 560（必要総単位数 572）には届かない水準**。license・汚染対策・Cx4 は検証済みで整備されているが、**Cx1〜3 通過率は異なる母集団からの弱い推定にすぎず、Det の network 遮断要件も未確認**であるため、「おそらく可」と言える確度は従来の記述より低い。pilot での実測が必須。
 
@@ -201,7 +201,7 @@
 grep -rIl -E "SWE-bench|SWE-smith|SWE-Gym|Multi-SWE-bench|SWE-PolyBench|SWE-rebench|SWE-bench-Live|SWE-bench Pro|swe-bench|facebook/|grpc/|elastic/" . --exclude-dir=.git
 ```
 
-**結果: ヒットしたのは本書（`docs/design/925-public-benchmark-survey.md`）自身のみ**（本書がこれらの名称を調査対象として記述しているため）。mission repository のソース・テスト・ドキュメントの他の箇所には現れていない。したがって現時点では Con1 に抵触する文字列は見つからなかった。**ただし、これは Con1 の正式判定ではない**: (1) commit A は未確定で、判定対象は「commit A 時点」の repository と package であり、本調査時点とは一致しない可能性がある。(2) 実際の Con1 検査対象は benchmark の **候補名**ではなく、選定された pool の **`task_id`** と各 upstream の **正確な `owner/repo`** 文字列であり、本調査はそれらをまだ列挙していない。(3) verified-complex・baseline の package の中身は本調査では検索範囲に含めていない（当該 package は本 worktree の `.git` 管理下にあるため上記の grep 範囲に含まれるが、package 自体を明示的に特定して検索したわけではない）。**正式な Con1 判定は、pool manifest 確定後（884 §5.0 手順3）に I2b/I2d が行う。**
+**結果: ヒットしたのは本書（`docs/design/925-public-benchmark-survey.md`）自身のみ**（本書がこれらの名称を調査対象として記述しているため）。mission repository のソース・テスト・ドキュメントの他の箇所には現れていない。したがって現時点では Con1 に抵触する文字列は見つからなかった。**ただし、これは Con1 の正式判定ではない**: (1) commit A は未確定で、判定対象は「commit A 時点」の repository と package であり、本調査時点とは一致しない可能性がある。(2) 実際の Con1 検査対象は benchmark の **候補名**ではなく、選定された pool の **`task_id`** と各 upstream の **正確な `owner/repo`** 文字列であり、本調査はそれらをまだ列挙していない。(3) 上の grep は worktree の tracked file（`skills/` 以下の Mission の source を含む）を対象にしたが、verified-complex・baseline として凍結する package（commit A で固定する配布物）を特定して検索したものではない。**正式な Con1 判定は、pool manifest 確定後（884 §5.0 手順3）に I2b/I2d が行う。**
 
 ### 明示する UNKNOWN（本書で確認できなかった事項）
 
@@ -217,6 +217,9 @@ grep -rIl -E "SWE-bench|SWE-smith|SWE-Gym|Multi-SWE-bench|SWE-PolyBench|SWE-rebe
 - Bitcoin block timestamp の **実時刻からのずれの仕様上の上限**（884 本文も同じ点を UNKNOWN としており、Δ=24h の十分性の最終判断に必要）。
 - repository の管理者が merged PR を削除できるか、fork・GH Archive 等の外部写しで main の履歴を照合できるか（884 §5.0 が I2b に要求した項目だが、本書では調査していない。**次の調査ステップとして持ち越す**）。
 - 全単位の組を比較する G1〜G3 の計算量と clone の容量（884 §5.1 が I2b に要求した項目だが、本書では見積もっていない）。
+- **control（正常版から始める課題）を作れるか**: 候補はいずれも gold patch（upstream の修正）を配布物に含むと報告されているが、SWE-bench 以外では、gold patch を当てた状態が pinned 環境で全検査を通る（＝正常版として使える）ことを確認していない（UNKNOWN。I2c の evaluator で全件確かめる）。
+- **G の export で足りるか**: G（#882）の worker への書き出しが、公開 benchmark の task（repository の checkout・課題文・評価環境）を表せるかは確認していない（UNKNOWN。I2c の bundle の入口で扱う）。
+- **配布物の snapshot を正規化できるか**: 884 §5.0 は commit A で入力 snapshot の digest（正規化 tar）を固定することを求めるが、各候補の配布物（HuggingFace の dataset・container image）を決定的な tar に正規化できるかは確認していない（UNKNOWN。I2d で扱う）。
 - Det の全件再実行に要る計算量（監査標本への切替が必要かの判断材料。本書では見積もっていない）。
 
 ---
