@@ -289,15 +289,15 @@ final latch は `budget enter-final`（明示）か `at ≥ repair の締切`（
 
 ### 4.3 終端と精算の state 容量（設計レビュー round 1 の High 4）
 
-決定: F の予約は、その dispatch の**終端と精算を書く bytes** も、spawn の前に E0 の機構で確保する。E の改訂設計は、書込み種別ごとの最大増分 Δ を最大形の encode で測って固定し、終端していない item ごとに「残りの段の Δ の和」を state から導出し、全 writer で `state_capacity_verdict(base, proposed, encoded_len)` 1 つで `len(encoded) + Σ残り予約 ≤ STATE_LIMIT − S_sys` を検査する。[D05]
+決定: F の予約は、その dispatch の**終端と精算を書く bytes** も、spawn の前に E0 の機構で確保する。E の改訂設計は、書込み種別ごとの最大増分 Δ を最大形の encode で測って固定し、終端していない item ごとに「残りの段の Δ の和」を state から導出し、全 writer で `state_capacity_verdict(base, proposed, encoded_len)` 1 つで `len(encoded) + Σ残り予約 ≤ STATE_LIMIT − S_sys_remaining` を検査する（S_sys_remaining は未書込の halt slot 分と残り takeover 回数 `max(0, N_L − 記録済み回数)` の分の残量で、proposed の state から導出する。halt・takeover・reactivate を消費しても予約済み item の残り予約は減らない）。[D05]
 
 - **開いている予約を E0 の「終端していない item」として扱う。** 予約 1 件の残り予約 = `Δ_settle + Δ_terminal(entry)`。
   - `Δ_settle`: F の精算行（`Settlement`・`PhaseCharge` の更新・`ProgressSignature` の新規行を含む最大形）
   - `Δ_terminal(entry)`: B の verification receipt（#1）、provider の terminal 更新（#3）、承認 verifier の receipt / force の `force_approval`（#5・#6）は F が新しく予約する。D/E の入口（#2・#7・#8）と回復（#9 の `recover`・`system-recover`。書く terminal は回復する D/E の dispatch のもの）は E0 が既に D request・repair attempt・disposition の段として予約しているので 0 とし、二重に予約しない
 - **予約 commit が容量の検査点になる。** 予約行自身の Δ と上の残り予約を足して `state_capacity_verdict` が通らなければ、`state-capacity-exhausted` で拒否し、起動しない。4 MiB [S28] の近くで予約が通った場合も、終端と精算の bytes は既に確保されているので、終端の commit は検査を通る（通らなければ Δ の定数の欠陥で、E0 の `state-capacity-invariant-broken`）。
 - **予約を持たない B receipt の扱いを変える**: E の改訂設計は B receipt を予約された終端として扱わず、公開時に超えたら拒否する。[D05] F の policy を持つ session ではこれを置き換え、B receipt は予約に含まれる終端となる。policy の無い session では E の規則のまま。
-- **停止系の書込み**: `StopSlots`（拒否の計数、final latch、exhaustion、`BudgetStop`）は policy の受付時に確保する固定長 slot で、以後は上書きだけ（増分 0）。`budget stop` の書込みは「halt の field と F の slot の上書きだけ」になるので、E0 が S_sys を使える停止系と判定する対象に含めてもらう（E0 への要求）。拒否の記録が容量で失敗した場合も起動しない。
-- **所有**: Δ の表・最大形の encode test・`state_capacity_verdict`・S_sys・全 writer の検査は E0 が持つ。F は自分の書込み種別（予約行・精算行・slot・B receipt と provider terminal と承認 receipt の予約）の Δ 定数と最大形 test を、E0 の拡張点へ足す（F1 で型と Δ、F2a で入口の配線）。F は E0 の予約量を変えず、時間の予約は F、bytes の機構は E0 という分担を保つ。
+- **停止系の書込み**: `StopSlots`（拒否の計数、final latch、exhaustion、`BudgetStop`）は policy の受付時に確保する固定長 slot で、以後は上書きだけ（増分 0）。`budget stop` の書込みは「halt の field と F の slot の上書きだけ」になるので、E0 が増分 0 の停止系と判定する対象に含めてもらう（E0 への要求。E の main の設計 §2 で受け手が定義済み）。拒否の記録が容量で失敗した場合も起動しない。
+- **所有**: Δ の表・最大形の encode test・`state_capacity_verdict`・S_sys_remaining・全 writer の検査は E0（E0b #918）が持つ。F は自分の書込み種別（予約行・精算行・slot・B receipt と provider terminal と承認 receipt の予約）の Δ 定数と最大形 test を、E0 の拡張点へ足す（F1 で型と Δ、F2a で入口の配線）。F は E0 の予約量を変えず、時間の予約は F、bytes の機構は E0 という分担を保つ。
 
 ### 4.4 修復が最終検証の時間を使わないこと（設計レビュー round 1 の High 2）
 
@@ -481,7 +481,7 @@ final latch は `budget enter-final`（明示）か `at ≥ repair の締切`（
 [D02]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/docs/design/689-fresh-review-receipt.md#L211-L238 "docs/design/689-fresh-review-receipt.md:211-238 — terminal variant（budget_used・cancel_result）と dispatch saga（D2c 以降は未 merge）"
 [D03]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/docs/design/880-repair-lineage.md#L48-L59 "docs/design/880-repair-lineage.md:48-59 — E の旧版の容量予約と公開の回復; 25 保存方式（改訂版は D05）"
 [D04]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/docs/design/880-repair-lineage.md#L155-L166 "docs/design/880-repair-lineage.md:155-166 — repair の公開 command（未 merge）; 112 再検証の intent→実行→公開"
-[D05]: https://github.com/tackeyy/mission/blob/9e99f068199373045b1383d530c65caf9838ff4a/docs/design/880-repair-lineage.md#L54-L69 "docs/design/880-repair-lineage.md（docs/880-e2e3-decisions）:54-69 — 容量予約の再設計（56 書込み種別と Δ、61 state から導出する予約、62 受付時の全段確保、63 検査式と S_sys、65 state_capacity_verdict と全 writer、66 予約を持たない B receipt、68 E と F の境界）; 400 E0 の順序の決定"
+[D05]: https://github.com/tackeyy/mission/blob/8b3bf2361334bf10c8679be6bd06d200872930bc/docs/design/880-repair-lineage.md#L54-L90 "docs/design/880-repair-lineage.md（main 8b3bf236）:54-90 — 容量予約（書込み種別と Δ、state から導出する予約、受付時の全段確保、検査式と S_sys_remaining、state_capacity_verdict と全 writer、予約を持たない B receipt、E と F の境界、停止系、移行と legacy-full）"
 [D06]: https://github.com/tackeyy/mission/blob/aa6047923e6e7aefd263014e72a8217521b98831/docs/design/884-evaluation-aggregation.md#L22-L61 "docs/design/884-evaluation-aggregation.md（docs/884-eval-prereg）:22 RpcProcess の単一 deadline を予算の共通単位に、35 全 arm 同じ wall-clock 上限、61 予算内の定義; 178 T は smoke 後に凍結"
 
 ### 決定（orchestrator, 2026-10-04）
