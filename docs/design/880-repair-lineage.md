@@ -52,9 +52,9 @@ E はこの保証を残し、E に link のない legacy findings の migration/
 - E2・E3 の段階では event 機構が無いため、終端要約の event ref は `absent(reason="events-not-enabled")` と明示する。E4 で event を導入した後の遷移からだけ event を出し、それ以前の遷移を遡って event 化しない（event の無い期間を未測定として扱うことを E から I〈#884〉への要求とする。I 側の確定事項ではない）。下記「stale の保持」の marker は event ではなく state の記録であり、E1 から書く。
 
 **決定（容量予約の再設計。設計再レビュー round 1 の High 1。E0 で実装）**:
-- **固定の予約では足りない理由**: D request には件数の上限が無い（受付の `prepare_request_state` は nonce と request_id の重複だけを拒否する、[S40]）。consume は最大 256 KiB の result を state に凍結する（[S41]）。D2b の completed terminal の findings 数にも上限が無い（[R01]）。lease takeover は takeover のたびに lease_history を 1 件追記する（[S42]）。総量 4 MiB の検査（[S43]・[S44]）だけでは、書込み種別ごとの最大増分を検査できない。
+- **固定の予約では足りない理由**: D request には件数の上限が無い（受付の `prepare_request_state` は nonce と request_id の重複だけを拒否する、[S40]）。consume は最大 256 KiB の result を state に凍結する（[S41]）。D2b の completed terminal の findings 数にも上限が無く、decoder は重複だけを拒否する（[R01]・[R02]）。この点は下記「D 終端の findings 上限」で D 側に上限を置いて閉じる。lease takeover は takeover のたびに lease_history を 1 件追記する（[S42]）。総量 4 MiB の検査（[S43]・[S44]）だけでは、書込み種別ごとの最大増分を検査できない。
 - **書込み種別と最大増分**: kernel に閉じた書込み種別の表を置き、種別ごとに「encode 後の bytes の最大増分 Δ」を定数で持つ。state の encoder（[S45]）と D の result 長の検査（[S46]）はどちらも `ensure_ascii=False`・`sort_keys`・同じ区切りで encode するので、state へ埋め込んだ result 部分は `max_output_bytes` を超えない。Δ は推定値で決めず、種別ごとに「全 field を上限長にした最大形」を実際に encode して測る test で固定する。上限長の無い field を含む種別は Δ を定義できないため、その field を effects へ移すか閉じた上限を足すまで E0 を完了としない。初期の種別は次のとおり。
-  - D request の受付・dispatch（reserve）・consume・terminal。terminal には E1 の lineage 導入を含める。E1 は 1 terminal あたり最大 K 件の finding に lineage を作り、K を超えた分は固定長の overflow record 1 件にまとめる。overflow record は、D の新しい attempt で K 件以内に収まるまで `acceptance-unresolved-finding` として completion を止める（fail-closed。D の terminal schema は変えない）。K の値は E0 で Δ と合わせて決め、本書では固定しない
+  - D request の受付・dispatch（reserve）・consume・terminal。terminal の Δ は 4 variant の最大形の最大値とし、completed は findings を F_MAX 件・各 ref を上限長にした形で測る（下記「D 終端の findings 上限」）。terminal には E1 の lineage 導入を含め、1 terminal あたり最大 F_MAX 件の lineage の最大形を足す。E の lineage の上限 K は F_MAX と同じ値で、全ての D finding origin が lineage を持つ。上限を超えた finding をまとめる別の record は置かない
   - repair attempt の begin・実行 intent・reconcile の途中記録・終端要約、disposition の各段
   - 下記「stale の保持」の `last_candidate_change` slot（lineage 導入時に確保し、以後は上書きだけなので増分 0）
   - halt / mark-halt、lease takeover の履歴 1 件
@@ -67,6 +67,18 @@ E はこの保証を残し、E に link のない legacy findings の migration/
 - **未終端の件数上限は state に置かない**: 正しさには不要である。受付時の容量検査が実質の上限になる（D request 1 件の予約は result だけで 256 KiB を超える）。dispatch の並行数・子プロセス数の上限は F（[Issue 881: 修復と最終検証の予算を予約して実行を制御する](https://github.com/tackeyy/mission/issues/881)。本文の「子プロセスを無制限に増やさない」）の範囲とし、E の終端保証は F の上限に依存しない。
 - **E と F の境界**: state bytes の予約は E に置く。F は時間・phase の予算で、#881 本文の依存は「E の merge 後」である。F の設計書は本書の照合時点で未作成（`docs/design/` に #881 の文書が無い）。F が dispatch 前の拒否を足す場合は、本決定の受付時検査より前に置いてよいが、容量の検査を置き換えない。F の status 表示は `state_capacity_verdict` の残量を読むだけにする。
 - **実装の置き場所**: 新しい子 E0 として E1 の前に置く（§9）。E1 の lineage 導入は D terminal の Δ を増やすので、E0 より前に E1 を入れると D の終端が容量で失敗しうる。
+
+**決定（D 終端の findings 上限。設計再レビュー round 2 の High。D 側は #896 の output import の PR で実装し、E0 は最大形の test で検証する）**:
+- **上限を元で置く理由**: E の側で lineage の数を K に限っても、D の completed terminal そのものが件数無制限の `findings`（[R01]）を state に持つので、terminal の Δ が定まらない。dispatch 済みの request が 4 MiB の上限の下で終端を記録できない状態が残る。そこで上限は findings を生む D の側に置く。
+- **kernel 定数**: D の kernel（`BUDGET_LIMITS` と同じ `mission_kernel/fresh_review.py`、[R03]）に `FRESH_REVIEW_FINDINGS_LIMIT = F_MAX` を置く。推奨値は 64（下記「F_MAX の値」）。
+- **1 件の ref の encode 長**: finding ref は `ContentAddressedRef` で、decoder は kind（`fresh-review-finding`）・relative_path（digest から決まる固定の形）・digest（`sha256:` と 64 桁）を固定長に閉じているが、`size` は 1 以上の int で上限が無い（[R02] の `_reference`）。D 側で `size ≤ BUDGET_LIMITS['max_output_bytes']`（256 KiB）を足し、1 件の encode 長を固定する（最大形で 238 bytes。区切りを含め 239 bytes。本書の設計時に encode して測った値で、E0 の test が正とする）。
+- **D の decoder（閉じた型の厳格化）**: `decode_terminal_receipt` の completed 分岐（[R02]）は、findings が F_MAX 件を超える場合と、ref の `size` が上限を超える場合を `fresh-review-findings-over-limit` で拒否する。D2b の閉じた型を狭める変更であり、緩める変更ではない。
+- **D の output import**: #896 の output import（D 設計の第二段の中身の検査、[D05]）は、output 内の findings の総数が F_MAX を超える場合、または finding 1 件の content-addressed 保存が size の上限を超える場合、`completed` を作らず `failed` 終端とする。理由は `TerminalReason` に新設する `output-findings-over-limit` で、`REASONS_BY_OUTCOME` の failed の集合（[R04]）に加える。failed 終端は findings を持たない固定形（output ref/digest は診断用に保持可、[R05]）なので、Δ は findings の数によらない。
+- **超過した output の扱い**: failed 終端の findings は D の origin にならない。これは output が不正な場合の既存の failed と同じで、現在候補に有効な completed の独立レビューが無いので completion は D3 の fresh-review 系の理由で止まる。output bytes は failed の output ref に残る。解消には新しい D attempt（範囲を絞った request など）が要る。新しい attempt が前の output の反例を拾い直すことは保証されない（D の trust root の限界、[D04]。新しい attempt が古い反例を落とす危険は件数上限が無くても同じ）。
+- **E 側の帰結**: K = F_MAX なので全ての D finding origin が lineage を持つ。旧決定の overflow record と、その「後の D attempt で K 件以内に収まれば解放」の規則は削除した（全 D origin を未解決として照合する §2 末尾の規則と矛盾していたため）。§2 末尾の「全 D origin は、その lineage が解決しない限り未解決」はそのまま残る。
+- **他の field の上限**: Δ を定めるには terminal の他の field も上限長を要する。budget_used・fencing epoch の int は failed・blocked・abandoned では上限を検査していない（[R02]）。E0 の「上限長の無い field を含む種別は Δ を定義できない」規則がここにも当たるので、#896 の同じ PR で int の閉じた上限（2^63−1 以下）を足す。`ended_at` など時刻の文字列が `datetime.fromisoformat` の受理だけで長さが閉じるかは本書で照合していない（**UNKNOWN**）。閉じない場合は同じ PR で長さの上限を足す。
+- **担当する PR と順序**: D の decoder の上限と import の failed 化は、#896 のうち output import と terminal 公開を入れる PR（D2d）で実装する。保存される completed terminal を作る writer はその PR で初めて入る（origin/main `9c948878` では terminal の decoder を呼ぶのは pure な coverage 判定だけ、[R06]）ので、上限より前に保存された completed terminal は存在しない。E0 は §9 の決定どおり #896 の後に入るため、E0 を上限の担当にすると、上限の無い completed terminal が保存されうる期間ができる。E0 は D の上限を前提に、completed terminal の最大形（findings F_MAX 件・全 field 上限長）を encode して Δ を固定する test を持つ。#896 が上限なしで merge された場合は E0 に着手せず、D 側の修正を先に入れる（保存済みの上限超過 terminal を後から拒否すると decode が壊れるため）。
+- **F_MAX の値**: 推奨は 64。根拠は 3 つ。(1) state の予約: D request 1 件の予約は result 256 KiB に、findings の ref 64 × 239 bytes（約 15 KiB）と lineage 64 件の最大形を足したものになる。lineage 1 件を 2 KiB と仮定すると（**推定**。E0 の最大形 test で確定する）約 400 KiB で、4 MiB の中で 9 件程度の未終端 D request を受け付けられる。256 にすると 1 件で約 830 KiB になり、4 件程度に減る。(2) D の予算との関係: 1 回のレビューの replay 上限は 16（[R03] の `max_replays`）で、replay で観測した反例は必ず収まる（64 はその 4 倍）。(3) output 長からの上限: output は 256 KiB 以下で、finding 1 件の最小の encode 長は D2d の output schema が決まるまで確定しない（**UNKNOWN**）ため、output 長だけからは閉じた上限を導けない。値は orchestrator の確定待ち（§9 の未決 6）。
 
 **決定（stale の保持。設計再レビュー round 1 の High 2。E1 で実装し、旧「E1 の stale は読取時に導出するだけ」を置き換える）**:
 - **読取だけの観測は保持できない**: status は R1.query で state を書かず（§8）、拒否された command は state を変えない（[T08] の `test_alternate_completion_and_evidence_writes_reject_atomically`）。そこで「候補の変化を観測した」を **commit に含まれた観測**に限り、completion の受入れを候補と commit の順序に束縛する。
@@ -90,7 +102,7 @@ E はこの保証を残し、E に link のない legacy findings の migration/
 - **persistence の変更**: E2 は fenced commit の回復契約と公開 API を変えない（使うのは `begin`・`lookup_operation`・`read`・`stage`・`commit` と retry loop だけ）。persistence に入る変更は E0 の容量検査の呼出しだけである。
 - §4 の「exact 保存済み結果を回収できれば current fence で reconcile」は、上の手順 2〜3（head または operation record に記録済みの結果）を指す。それ以外の保存場所から結果を回収しない。
 新予約キーとその descendants は generic set、init/reinit、compatibility delta、review/score import、specialist evidence、downgrade の authority 注入から保護する。現 generic-set 専用 field と specialist authority 遮断を拡張する。[skills/mission/lib/mission_kernel/commands.py:397-455][S09][skills/mission/lib/mission_kernel/transitions.py:1837-1861][S30]
-全 D terminal finding を同じ commit の reducer で lineage に導入する（未merge D writer への追加）。E 導入前の保存済み D rows は専用初回 mutation で決定的に取り込む。読取や completion で projection が欠落していても **D の全 origin と union して open とみなす**。最新 review だけから再構成しない。不正な projection を空とみなして通す経路を作らない。
+全 D terminal finding を同じ commit の reducer で lineage に導入する（未merge D writer への追加）。completed terminal の findings は D 側で F_MAX 件以下に閉じる（上の「D 終端の findings 上限」）ので、導入できない origin は残らない。E 導入前の保存済み D rows は専用初回 mutation で決定的に取り込む。読取や completion で projection が欠落していても **D の全 origin と union して open とみなす**。最新 review だけから再構成しない。不正な projection を空とみなして通す経路を作らない。
 
 ## 3. Typed reducer と解決の権威
 
@@ -145,7 +157,7 @@ reverification 実行は短い fenced intent 保存→lock を放して B 実行
 
 ## 5. Completion gate
 
-決定: D3 の条件5を pure `effective_unresolved_findings` に接続する。D が導入した全 finding origins と E lineage を照合し、対応 lineage 欠落、open、repairing、deferred、stale verified（§2「stale の保持」の (1)(2) を満たさないものを含む）、無効 disposition、findings 超過の overflow record（§2「容量予約の再設計」）は未解決。required obligation または禁止副作用に関連すれば **High/Medium/Low 全て** `acceptance-unresolved-finding`。severity は優先順位と報告にだけ使う。[docs/design/689-fresh-review-receipt.md:239-273][D03]
+決定: D3 の条件5を pure `effective_unresolved_findings` に接続する。D が導入した全 finding origins と E lineage を照合し、対応 lineage 欠落、open、repairing、deferred、stale verified（§2「stale の保持」の (1)(2) を満たさないものを含む）、無効 disposition は未解決。completed terminal の findings は D 側で F_MAX 件以下に閉じ、全 origin が lineage を持つ（§2「D 終端の findings 上限」）ので、上限超過を表す別の未解決理由は置かない。required obligation または禁止副作用に関連すれば **High/Medium/Low 全て** `acceptance-unresolved-finding`。severity は優先順位と報告にだけ使う。[docs/design/689-fresh-review-receipt.md:239-273][D03]
 
 有効な verified または §3 の独立 rejected がある finding だけを除ける。関係の shape が不正なら拒否、関係が不明なら open obligation として保守的に遮断する。optional criterion でも required requirement を指す・禁止副作用に関係する場合は免除しない。元 ledger に context と記された義務の発見も D の supplemental open obligation を保持する。[docs/design/689-fresh-review-receipt.md:132-237][D02]
 
@@ -229,29 +241,41 @@ CIはPython shards→`make test-shard`→tracked testsの選択で配線され�
 
 ## 9. Reviewed lines・分割・orchestrator判断
 
-予測reviewed linesは **3,740〜4,950行**（追加+削除、未実測。設計再レビュー round 1 の決定で E0 を追加し、E1〜E3 を増やした。旧見積は 2,900〜3,800行）。canonical実装、codec/command配線、対応回帰、inventory、利用文書を含み、配布mirrorを除く。repoは600行で分割しない理由、1,400行で分割を要求する。[AGENTS.md:116-172][S25] 一括実装PRは提案しない。各600行以上の子は閉じたcommand familyのproducer/consumer/codec/拒否保証を同時に成立させる必要を説明し、実diffを再計測する。
+予測reviewed linesは **3,730〜4,950行**（追加+削除、未実測。設計再レビュー round 1 の決定で E0 を追加し、E1〜E3 を増やした。round 2 で overflow record を削除し、E0 に F_MAX の最大形 test を足した。旧見積は 2,900〜3,800行）。D 側の findings 上限（decoder・import の failed 化・int の上限・test）は #896 の見積に入り、本書の合計には含めない（推定 +40〜80行）。canonical実装、codec/command配線、対応回帰、inventory、利用文書を含み、配布mirrorを除く。repoは600行で分割しない理由、1,400行で分割を要求する。[AGENTS.md:116-172][S25] 一括実装PRは提案しない。各600行以上の子は閉じたcommand familyのproducer/consumer/codec/拒否保証を同時に成立させる必要を説明し、実diffを再計測する。
 
 子の番号は未起票。以下は各1PRで閉じられる提案で、起票・本文変更は本ステップの範囲外。
 
 | 順序 | 見積 | 子の受入条件と安全な中間状態 |
 |---|---:|---|
-| E0: state 容量の予約 | 650〜850 | D1（受付・consume）と D2b（terminal 型）依存。§2「容量予約の再設計」の書込み種別と Δ の定数・最大形の encode test、state から導出する予約、受付時の全段確保、全 writer（v5 stage・v4 flat save・init/reinit）の検査、S_sys と lease takeover、`write_state` 注入箇所の inventory test、status の残量表示を完結。lineage は作らない |
-| E1: durable lineageとunresolved gate | 890〜1,200 | D3とE0依存。§2「stale の保持」の slot と同じ commit での更新・completion の (1)(2)、1 terminal あたり K 件の lineage と overflow record を含む。全D originsのtyped lineage、v4/v5 codecs、汎用writer保護、resume/stale、status、completion unionを一つのPRで完結。解決commandは未公開なので必須findingは全て遮断 |
+| E0: state 容量の予約 | 660〜870 | D1（受付・consume）と D2b（terminal 型）、#896 の findings 上限（§2「D 終端の findings 上限」）依存。§2「容量予約の再設計」の書込み種別と Δ の定数・最大形の encode test（completed terminal は findings F_MAX 件・全 field 上限長、lineage は F_MAX 件）、state から導出する予約、受付時の全段確保、全 writer（v5 stage・v4 flat save・init/reinit）の検査、S_sys と lease takeover、`write_state` 注入箇所の inventory test、status の残量表示を完結。lineage は作らない |
+| E1: durable lineageとunresolved gate | 870〜1,180 | D3とE0依存。§2「stale の保持」の slot と同じ commit での更新・completion の (1)(2)、1 terminal あたり最大 F_MAX 件の lineage（全 origin を導入）を含む。全D originsのtyped lineage、v4/v5 codecs、汎用writer保護、resume/stale、status、completion unionを一つのPRで完結。解決commandは未公開なので必須findingは全て遮断 |
 | E2: repair/replayの原子的再検証 | 880〜1,160 | E1依存。begin/reverify/reconcile（§2「公開の回復」の手順。内容から導出する終端 operation ID、`publication-result-lost`、CAS 敗北時の再判定。fenced commit の回復契約は変えない）、同一反例failed→新候補passed、immutable receipt/effects、latest/unknown/fence、最小CLI失敗→修復→成功経路。独立disposition未実装なので棄却は不可 |
 | E3: 独立disposition | 670〜890 | E2とD2 runtime契約依存。disposition の各段を E0 の予約に載せ、candidate-bound disposition の slot 判定を含む。専用request/terminal、deferred/rejected、scope/alias/trust判定を一つのPRで完結。adapter未対応はblocked、required risk受容を成功にしない |
 | E4: 比較履歴・event・最終統合 | 650〜850 | E3依存。before/after normal/consumer/evaluator refs、regression/unmeasured、不変event/export、保持証拠と再開、公開利用手順とinventoryを完結。Iの集計ロジックは変更しない |
 
-増分の内訳（推定）: E1 +140〜200（slot・同一 commit の更新・completion 条件・overflow）、E2 +30〜60（operation ID の導出・結果喪失の終端・CAS 敗北の test）、E3 +20〜40（予約と slot）。過去の実測との比 ×1.6 で補正すると E1・E2 の上限は 1,400行を超える（E1 1,424〜1,920、E2 1,408〜1,856）。着手前に実 diff の見込みを再計測し、超える場合は分割案を出す。
+増分の内訳（推定）: E0 +10〜20（F_MAX の最大形 test）、E1 +120〜180（slot・同一 commit の更新・completion 条件。overflow を削除した分を除いた）、E2 +30〜60（operation ID の導出・結果喪失の終端・CAS 敗北の test）、E3 +20〜40（予約と slot）。過去の実測との比 ×1.6 で補正すると E0 は 1,056〜1,392行、E1・E2 の上限は 1,400行を超える（E1 1,392〜1,888、E2 1,408〜1,856）。着手前に実 diff の見込みを再計測し、超える場合は分割案を出す。
 
 E2以前もattempt/receiptの最小履歴は保存する。E4まで比較が未測定であることを明示し、親880の「改悪を測れる履歴」を未完了として残す。子をRefsで親へ結び自身をCloses、最後のE4を#880本体に残す場合は親本文を最終統合の条件へ更新する。ここでは本文を変更しない。
 
-orchestratorの未決事項は次の5点（4・5 は設計再レビュー round 1 で追加）。型・reducer・gateの上記選択はこの案に固定し、未決を実装者に自由選択させない。
+orchestratorの未決事項は次の6点（4・5 は設計再レビュー round 1、6 は round 2 で追加。4・5 は末尾の決定で確定済み）。型・reducer・gateの上記選択はこの案に固定し、未決を実装者に自由選択させない。
 
 1. **分割と親の完了条件**。推奨はD3→E1→E2→E3→E4。子起票と#880本文の再編をorchestratorが決定する。未決のままではbranchごとの受入条件が確定しない。
 2. **独立dispositionのruntime範囲**。推奨はDと同じfixture公開経路をrepo保証とし、実host対応はD4/外部adapterに委ねる。実host成功をE必須にする場合、host/API/観測能力と権限の指定待ち。fixture成功を実host成功とは報告しない。
 3. **Iとのevent契約とbaseline保持**。推奨は§6のrefs/status/comparison可否をEが供給し、全割当・正誤/不要変更・費用の集計はIが担当。I側が必要とするevaluator artifact形式と保管期間/容量の合意が必要。未合意でも通常/replay receipt履歴は保持し、意味上の改悪はUNKNOWNとする。
 4. **E0 の起票と順序**（設計再レビュー round 1 で追加）。推奨は E0 を #880 の新しい子として起票し、D3 の前（D2b の後）に置く。D3 の terminal writer が最初から E0 の検査を通るためである。D3 の後に置く場合は、D3 単独の期間に D の終端が容量で失敗しうることを受け入れる判断になる。E0 を E1 へ含める案は、E1 が 1,540〜2,050行になり分割閾値を超えるため推奨しない。既存の決定 1（D3→E1→E2→E3→E4）はこの点だけ未決として残る。
 5. **lease_history が S_sys を使い切ったときの回復手段**（owner 判断）。§2 の決定では takeover を `state-capacity-exhausted` で拒否し、mission は停止したまま残る（fail-closed だが進行不能）。履歴の圧縮・新 session への移行のどちらを用意するか、または停止を許容するかは E の範囲外で、owner の指定待ち。
+6. **F_MAX の値**（設計再レビュー round 2 で追加）。推奨は 64（§2「D 終端の findings 上限」の「F_MAX の値」）。大きくすると未終端の D request を同時に受け付けられる件数が減り、小さくすると上限超過の failed が増える。未決のままでは #896 の D2d と E0 の最大形 test の定数が決まらない。
+
+### 設計をまたぐ義務
+
+本書の決定が他の設計・子へ課す義務。各義務の受け手の設計書・Issue 本文への反映は orchestrator が行い、本ステップでは変更しない。
+
+| 受け手 | 義務 | 根拠 |
+|---|---|---|
+| D #896 の output import の PR（D2d） | `FRESH_REVIEW_FINDINGS_LIMIT = F_MAX` の定数、completed terminal の decoder での件数・ref size の上限（`fresh-review-findings-over-limit`）、上限超過の output を `failed`（`output-findings-over-limit`）にする import、terminal の int field の上限。D2b の閉じた型を狭める変更として、保存される completed terminal を作る writer と同じ PR で入れる | §2「D 終端の findings 上限」 |
+| E0 | D の上限を前提に、completed terminal（findings F_MAX 件）と lineage F_MAX 件の最大形を encode して Δ を固定する test。#896 が上限なしで merge された場合は着手しない | §2「容量予約の再設計」「D 終端の findings 上限」 |
+| D2c・D2d・D3 の writer | E0 の容量検査を通る | 末尾の決定（orchestrator / owner） |
+| I（#884） | event の無い期間（E4 より前）を未測定として扱う（要求であり I 側の確定事項ではない） | §2「終端の公開は二段」 |
 
 ### 決定（orchestrator）
 
@@ -265,7 +289,7 @@ closed-v5 public bridge、精密依存graph、contract差替え、汎用resolved
 
 ## 出典（全て照合headに固定）
 
-[S01]〜[S39]・[T*]・[D*] のリンクは全て `8f40f542f8fed8660728234d41295ee3212deeab`。各ラベルのfile:lineはこのheadで読んだ範囲。設計再レビュー round 1 で追加した [S40]〜[S67] は `d25a66c6abed33a4c0fbd1036e22bdf49da3c606`（D1 の merge 後。引用した persistence・kernel の各ファイルは `origin/main` `9c948878d878bbadbfb98a1d62a43d67fcc700c7` と差分なし）、[R01] は `9c948878d878bbadbfb98a1d62a43d67fcc700c7`（D2b の merge 後）で読んだ範囲。
+[S01]〜[S39]・[T*]・[D*] のリンクは全て `8f40f542f8fed8660728234d41295ee3212deeab`。各ラベルのfile:lineはこのheadで読んだ範囲。設計再レビュー round 1 で追加した [S40]〜[S67] は `d25a66c6abed33a4c0fbd1036e22bdf49da3c606`（D1 の merge 後。引用した persistence・kernel の各ファイルは `origin/main` `9c948878d878bbadbfb98a1d62a43d67fcc700c7` と差分なし）、[R01] は `9c948878d878bbadbfb98a1d62a43d67fcc700c7`（D2b の merge 後）で読んだ範囲。設計再レビュー round 2 で追加した [R02]〜[R06]・[D05] も同じ `9c948878` で読んだ範囲。
 
 [S01]: https://github.com/tackeyy/mission/blob/8f40f542f8fed8660728234d41295ee3212deeab/skills/mission/lib/acceptance_contract.py#L66-L155 "acceptance_contract.py:66-155 — A ledger、criteria、coverage、digest"
 [S02]: https://github.com/tackeyy/mission/blob/8f40f542f8fed8660728234d41295ee3212deeab/skills/mission/lib/mission_application/verification_execution.py#L85-L167 "mission_application/verification_execution.py:85-167 — B replay selection/binding/receipt"
@@ -395,7 +419,24 @@ closed-v5 public bridge、精密依存graph、contract差替え、汎用resolved
 
 [R01]: https://github.com/tackeyy/mission/blob/9c948878d878bbadbfb98a1d62a43d67fcc700c7/skills/mission/lib/mission_kernel/fresh_review_receipts.py#L197-L204 "skills/mission/lib/mission_kernel/fresh_review_receipts.py:197-204 — CompletedFreshReview.findings（件数上限なし。検査は同ファイル 315-319 で重複のみ）"
 
+[R02]: https://github.com/tackeyy/mission/blob/9c948878d878bbadbfb98a1d62a43d67fcc700c7/skills/mission/lib/mission_kernel/fresh_review_receipts.py#L232-L319 "skills/mission/lib/mission_kernel/fresh_review_receipts.py:232-319 — _reference（size は 1 以上の int で上限なし）と decode_terminal_receipt（completed の findings は重複だけを拒否、budget_used・epoch の int は 0 以上だけを検査）"
+
+[R03]: https://github.com/tackeyy/mission/blob/9c948878d878bbadbfb98a1d62a43d67fcc700c7/skills/mission/lib/mission_kernel/fresh_review.py#L21-L24 "skills/mission/lib/mission_kernel/fresh_review.py:21-24 — BUDGET_LIMITS（max_replays 16・max_output_bytes 256 KiB）と ID・digest の形"
+
+[R04]: https://github.com/tackeyy/mission/blob/9c948878d878bbadbfb98a1d62a43d67fcc700c7/skills/mission/lib/mission_kernel/fresh_review_receipts.py#L117-L148 "skills/mission/lib/mission_kernel/fresh_review_receipts.py:117-148 — TerminalReason と REASONS_BY_OUTCOME"
+
+[R05]: https://github.com/tackeyy/mission/blob/9c948878d878bbadbfb98a1d62a43d67fcc700c7/skills/mission/lib/mission_kernel/fresh_review_receipts.py#L207-L212 "skills/mission/lib/mission_kernel/fresh_review_receipts.py:207-212 — FailedFreshReview（findings を持たず、output ref/digest は任意）"
+
+[R06]: https://github.com/tackeyy/mission/blob/9c948878d878bbadbfb98a1d62a43d67fcc700c7/skills/mission/lib/mission_kernel/fresh_review_coverage.py#L79-L94 "skills/mission/lib/mission_kernel/fresh_review_coverage.py:79-94 — pure な coverage 判定での terminal の decode（origin/main で decode_terminal_receipt を呼ぶ唯一の非 test 箇所）"
+
+[D05]: https://github.com/tackeyy/mission/blob/9c948878d878bbadbfb98a1d62a43d67fcc700c7/docs/design/689-fresh-review-receipt.md#L229-L231 "docs/design/689-fresh-review-receipt.md:229-231 — output import の第二段（中身の検査）と不合格時の failed 終端"
+
 ### 決定（orchestrator / owner, 2026-10-04。設計再レビュー round 1 の後）
 
 - §9 の 4（E0 の起票と順序）: E0 を #880 の新しい子として起票し、D2 本体（#896）の merge 後・D3a（#913）の前に置く。D2c・D2d の writer は E0 の容量検査の対象に含め、D3 の writer は最初から検査を通る。E0 を E1 に含めると 1,400 行を超えるため含めない。
 - §9 の 5（lease takeover が S_sys を使い切った後の回復、owner 決定）: 初版は停止を許容する。使い切った時点で takeover を理由付きで拒否し、mission を halt する。黙って進めない。履歴の圧縮・新 session への移行は、必要になった時点で別 Issue とする。
+
+### 決定（orchestrator, 2026-10-04。設計再レビュー round 2 の後）
+
+- 容量の High（D の completed terminal の findings に上限が無く、終端の Δ が定まらない）は、上限を D の側に置いて閉じる。F_MAX を kernel 定数とし、D の decoder が超過を拒否し、#896 の output import が超過した output を固定形の `failed` 終端にする。E の lineage 上限 K は F_MAX と同じで、overflow record とその解放規則は削除する。「全 D origin は、その lineage が解決しない限り未解決」の規則は変えない（§2「D 終端の findings 上限」）。F_MAX の値は §9 の未決 6。
+- §9 の 6（F_MAX の値、orchestrator 決定）: F_MAX = 64 とする。根拠は §2「決定（D 終端の findings 上限）」の試算（1 request の予約が約 400 KiB に収まり、`max_replays` の 4 倍）。値は #896（D2d）と E0 の最大形テストで固定し、変更は設計の更新として扱う。
