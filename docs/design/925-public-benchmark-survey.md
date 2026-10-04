@@ -95,7 +95,7 @@
 - **汚染対策**: 評価時に agent へ `FAIL_TO_PASS`/`test_patch` 等の解答フィールドを渡さない設計、月次更新で leaderboard 比較用に分割（いずれも検証済み）。収集対象が「2024 年以降に作られた実際の GitHub issue」である点は、学習データのカットオフが古い model に対しては汚染リスクを下げる（ただし本調査の "Con" 基準＝ mission repository への文字列の非存在、とは別物）。
 - **Cx4（自然な依頼由来）**: 「2024 年以降に作られた実際の GitHub issue」を収集対象としていることは検証済み。ただし「Mission や特定の agent を狙って作られていない」ことまでは個別に確かめていないため、他の候補と同じく**暫定判断**とする（884 §5.1 の Cx4 は I2b の判定対象）。
 - **Cx1〜Cx3 推定（再評価・弱い推定への訂正）**: gold patch の統計 **median 2 files・3 hunks・24 lines** は検証済みだが、**この統計の出典は MultiLang（431 repo・8 言語）ではなく、同じ SWE-bench-Live 系列の別の母集団である Python 専用版（93 repository・1,319 task、[arXiv 2505.23419 "SWE-bench Goes Live!"](https://arxiv.org/html/2505.23419v2)）である**（2026-10-04 に出典を再確認。MultiLang の README・データセットページには同等の gold patch 統計は記載されていなかった）。したがって「MultiLang の約半数が Cx1/Cx3 を満たす」という推定は、**別の母集団（Python のみ・93 repo）の統計を MultiLang（8 言語・431 repo）へ外挿した弱い推定**であり、以前の記述が示唆していたような MultiLang 自体の実測ではない。さらにこの推定は Cx2（検査 3 件以上・fail-to-pass 1 件以上）を考慮していない（gold patch の行数・ファイル数のみで、検査数の分布は未調査・UNKNOWN）。「単一ファイル・5 行未満の修正の成功率が 48%」という別の分析も、同じ Python 専用版の文脈由来である可能性が高く、個別には確認していない。
-- **判定**: **431 repo は 180（必要総単位数 192）を上回り 560（必要総単位数 572）には届かない水準**。license・汚染対策・Cx4 は検証済みで整備されているが、**Cx1〜3 通過率は異なる母集団からの弱い推定にすぎず、Det の network 遮断要件も未確認**であるため、「おそらく可」と言える確度は従来の記述より低い。pilot での実測が必須。
+- **判定**: **431 repo は 180（必要総単位数 192）を上回り 560（必要総単位数 572）には届かない水準**。license と汚染対策は検証済みで整備されている（Cx4 は暫定判断）が、**Cx1〜3 通過率は異なる母集団からの弱い推定にすぎず、Det の network 遮断要件も未確認**であるため、「おそらく可」と言える確度は従来の記述より低い。pilot での実測が必須。
 
 ### 1.9 SWE-bench Pro（Scale AI）
 
@@ -162,12 +162,12 @@
 | Multi-SWE-bench | **上限 39（2,456候補の値。最終1,632instanceの repo数は UNKNOWN）** | 7言語（非Python） | 環境あり（検証済み）／遮断要件は UNKNOWN | データ: CC BY 4.0／repo: 未確認 | 満たす可能性高い（暫定） | UNKNOWN | 否 |
 | SWE-PolyBench | 21 | 4言語 | 推定（未確認）／遮断要件も UNKNOWN | **MIT（検証済み）** | UNKNOWN | UNKNOWN | 否 |
 | SWE-rebench | **3,468** | Python | 部分的（7,500/21,336 instance に image あり。repo数換算は UNKNOWN）／遮断要件も UNKNOWN | CC-BY-4.0（検証済み）＋per-repo license 保持 | 満たす可能性高い（暫定） | UNKNOWN | **repo数は十分だが Det 母数が未確定** |
-| SWE-bench-Live/MultiLang | **431** | 8言語 | 環境あり（検証済み）／遮断要件は UNKNOWN | **MIT（検証済み）** | **満たす（検証済み。2024年以降の実issueのみ収集）** | **弱い推定 ~50%（別母集団からの外挿。下記参照）** | **弱い推定では満たす可能性（約215 推定 vs 必要192）が、560（必要572）には届かない** |
+| SWE-bench-Live/MultiLang | **431** | 8言語 | 環境あり（検証済み）／遮断要件は UNKNOWN | **MIT（検証済み）** | 暫定判断（2024 年以降の実 issue を収集することは検証済み） | **弱い推定 ~50%（別母集団からの外挿。下記参照）** | **弱い推定では満たす可能性（約215 推定 vs 必要192）が、560（必要572）には届かない** |
 | SWE-bench Pro（public のみ） | 11（held-out含め最大23） | 多言語 | 推定（未確認）／遮断要件も UNKNOWN | GPL系（検証済み。Lic判定は要確認） | UNKNOWN | 最高（検証済み統計） | 否 |
 
 **180〜560 という要求数（総単位数 192〜572）に対する結論**:
 
-1. **単独で 192（K=180 相当）を満たす確度が最も高いのは SWE-bench-Live/MultiLang（431 repo）**。license・汚染対策・Cx4 は検証済みで揃っているが、**Cx1〜3 の通過率推定（約50%）は MultiLang 自体の実測ではなく、同系列の別母集団（Python 専用版・93 repo・1,319 task、arXiv 2505.23419）の gold patch 統計を外挿した弱い推定であり、Det の network 遮断要件も未確認**。弱い推定の50%でも約215 repoが残り192はクリアできる見込みだが、**Lic（upstream ごとの license 未確認）・Con（mission repo との文字列一致。現時点のmission repoでは未検出＝§5.1「Con チェック」参照）・G1〜G3（系譜の重複排除）の減少分を考慮すると、余裕は大きくない**。572（K=560相当）には明らかに届かない。
+1. **単独で 192（K=180 相当）を満たす確度が最も高いのは SWE-bench-Live/MultiLang（431 repo）**。license と汚染対策は検証済みで揃っている（Cx4 は暫定判断）が、**Cx1〜3 の通過率推定（約50%）は MultiLang 自体の実測ではなく、同系列の別母集団（Python 専用版・93 repo・1,319 task、arXiv 2505.23419）の gold patch 統計を外挿した弱い推定であり、Det の network 遮断要件も未確認**。弱い推定の50%でも約215 repoが残り192はクリアできる見込みだが、**Lic（upstream ごとの license 未確認）・Con（mission repo との文字列一致。現時点のmission repoでは未検出＝§5.1「Con チェック」参照）・G1〜G3（系譜の重複排除）の減少分を考慮すると、余裕は大きくない**。572（K=560相当）には明らかに届かない。
 2. **SWE-rebench（3,468 repo）は repo 数の天井としては唯一 572 を大きく超える候補**だが、**Det の土台を満たす repo 数が「7,500/21,336 instance」から逆算できておらず未確定（最大の UNKNOWN）**。この数字が判明しない限り、572 を狙う根拠にできない。
 3. **Multi-SWE-bench（上限39）・SWE-PolyBench（21）・SWE-bench Multilingual（41〜42）を合算**すれば単純合計で**約 101〜102 repo**になる（SWE-smith は Cx4 不成立のため合算から除外した）。これは 192 にも遠く届かない規模であり、**license・Cx1〜3 通過率の未確認分、G1〜G3 の重複排除分を考慮すればさらに減る**。
 4. **SWE-bench Pro の public 11 repo は Cx1〜3 の質（平均107行・4.1ファイル）が最も高いと推定される**（Cx4 は UNKNOWN）が、数の確保には使えない。
@@ -178,7 +178,7 @@
 
 ### 推奨
 
-**第一候補は SWE-bench-Live/MultiLang（431 repo、MIT、license・汚染対策・Cx4 検証済み）を主要 pool とし、SWE-rebench の「Docker image 公開済み 7,500 instance」のうち何 repo 分に当たるかを次の調査ステップで確定したうえで、不足分の補完に使う二段構成を推奨する。** ただし MultiLang の Cx1〜3 通過率（約50%）は別母集団からの弱い推定であり、Det の network 遮断要件も未確認なので、**pilot での実測（§6.2 の pilot 12 単位）が必須**である。Multi-SWE-bench・SWE-PolyBench・SWE-bench Multilingual は、G1〜G3 の重複排除後に単位を上積みする第三の供給源として扱う（合算しても約101〜102 repoで単独では足りない）。SWE-bench（12 repo）・SWE-Gym（11 repo）・SWE-bench Pro public（11〜23 repo）は数が小さすぎて単独では使えないが、汚染対策・Cx 品質の参考データとして残す。**SWE-smith は Cx4 不成立のため、この推奨のいずれにも含めない。**
+**第一候補は SWE-bench-Live/MultiLang（431 repo、MIT。license と汚染対策は検証済み、Cx4 は暫定判断）を主要 pool とし、SWE-rebench の「Docker image 公開済み 7,500 instance」のうち何 repo 分に当たるかを次の調査ステップで確定したうえで、不足分の補完に使う二段構成を推奨する。** ただし MultiLang の Cx1〜3 通過率（約50%）は別母集団からの弱い推定であり、Det の network 遮断要件も未確認なので、**pilot での実測（§6.2 の pilot 12 単位）が必須**である。Multi-SWE-bench・SWE-PolyBench・SWE-bench Multilingual は、G1〜G3 の重複排除後に単位を上積みする第三の供給源として扱う（合算しても約101〜102 repoで単独では足りない）。SWE-bench（12 repo）・SWE-Gym（11 repo）・SWE-bench Pro public（11〜23 repo）は数が小さすぎて単独では使えないが、汚染対策・Cx 品質の参考データとして残す。**SWE-smith は Cx4 不成立のため、この推奨のいずれにも含めない。**
 
 ### 180 / 560（必要総単位数 192 / 572）とのギャップ
 
