@@ -1,6 +1,6 @@
 # 全割当から検出・修復・改悪と予算内完遂を集計する設計と事前登録
 
-決定案: 主結果は「予算内に受入可能な成果を残せない率」とし、worker から分離した決定的な外部 evaluator だけで判定する。確認用 cohort は **mission の開発者が作っていない外部の公開 benchmark** から作る（owner 決定 2026-10-04）。**独立単位は upstream の project（code の系譜を共有しない別 repository）** とし、各単位から観測前に 1 task だけを選ぶ。選択は「候補 pool を集める前に commit した seed」と task ごとの key で決め、commit 済みの成果物だけから再現できる。**推定対象は「選んだ K task における、1 run あたり失敗確率の task 平均」** とし、片側 Clopper-Pearson がこの量について run の独立性だけを前提に保守的であることを根拠に判定する（task の母集団への一般化は主張しない。§3.2）。成功基準は verified-complex の上限 ÷ native Goal の下限 ≤ 0.1。各 record は計画した arm の具体的な構成と照合し、照合できない record は仮説に不利な側へ数える。**T に達した run は、凍結した候補を評価する品質の結果**であり、そのために I2a で probe が識別項目をすべての経路（成功・T 到達・例外）で記録するよう直す（§2.3）。段階は smoke → pilot（公開 benchmark の pilot 単位 12 件）→ 検出力計算 → 確認実験の順で、各段の有料実行は owner の承認を要する。H の 12 件は開発・診断専用で、確認判定にも K の計画にも使わない。
+決定案: 主結果は「予算内に受入可能な成果を残せない率」とし、worker から分離した決定的な外部 evaluator だけで判定する。確認用 cohort は **mission の開発者が作っていない外部の公開 benchmark** から作る（owner 決定 2026-10-04）。**独立単位は upstream の project（code の系譜を共有しない別 repository）** とし、各単位から観測前に 1 task だけを選ぶ。選択は「pool を固定した commit を時刻証明つきで公開した後に初めて値が分かる公開 randomness beacon の round」から得た seed と task ごとの key で決め、公開の記録だけから再現と順序の検証ができる（§5.0）。**推定対象は「選んだ K task における、1 run あたり失敗確率の task 平均」** とし、片側 Clopper-Pearson がこの量について run の独立性だけを前提に保守的であることを根拠に判定する（task の母集団への一般化は主張しない。§3.2）。成功基準は verified-complex の上限 ÷ native Goal の下限 ≤ 0.1。各 record は計画した arm の具体的な構成と照合し、照合できない record は仮説に不利な側へ数える。**T に達した run は、凍結した候補を評価する品質の結果**であり、そのために I2a で probe が識別項目をすべての経路（成功・T 到達・例外）で記録するよう直す（§2.3）。段階は smoke → pilot（公開 benchmark の pilot 単位 12 件）→ 検出力計算 → 確認実験の順で、各段の有料実行は owner の承認を要する。H の 12 件は開発・診断専用で、確認判定にも K の計画にも使わない。
 
 対象: [Issue 884: 検出・修復・改悪と予算内完遂を全割当から集計する](https://github.com/tackeyy/mission/issues/884)（親: [Issue 876: 実検証と反例修復で複雑タスクの品質を改善する](https://github.com/tackeyy/mission/issues/876)）。本書は設計と事前登録のみ。実装、テスト追加、benchmark・有料モデルの実行、Issue 起票・本文変更、Git 操作による公開は行っていない。
 
@@ -146,7 +146,7 @@ I2a が merge されるまでに得た record は、T 到達の Goal record が�
 凍結:
 
 - **独立単位は upstream の project** とする。単位は「code の系譜を共有しない repository の集まり」で、fork・mirror・vendoring で系譜がつながる repository は一つの単位にまとめる（判定の機械検査は §5.1 の G1〜G3）。各単位から観測前に 1 task だけを主 task として選び、同じ単位から 2 件以上を主解析に入れない。初期調査の提案も「主解析は独立 task-family 単位」としている。[R08]
-- **主 task の選択**は §5.0 の手順で、候補 pool を集める前に commit した seed と、task ごとの key `SHA-256(seed ‖ "primary" ‖ unit_id ‖ task_id)` で決める。単位の中で key が最小の task を主 task とし、key が同じ場合は `task_id` の UTF-8 bytes の辞書順で小さい方を採る（task_id は pool 内で一意であることを pool の凍結時に検査する）。選択は commit 済みの seed と pool manifest だけから再計算でき、判定の前に再計算して commit 済みの選択一覧と一致することを確かめる（§3.2.1 の検査 3）。
+- **主 task の選択**は §5.0 の手順で、pool を固定した commit B の後に公開される beacon の round から得た seed と、task ごとの key `SHA-256(seed ‖ "primary" ‖ unit_id ‖ task_id)` で決める。単位の中で key が最小の task を主 task とし、key が同じ場合は `task_id` の UTF-8 bytes の辞書順で小さい方を採る（task_id は pool 内で一意であることを pool の凍結時に検査する）。選択は seed と pool manifest だけから再計算でき、判定の前に、時刻の順序とあわせて再計算して commit 済みの選択一覧と一致することを確かめる（§3.2.1 の検査 3）。
 - 確認実験では各 (task, arm) を **1 回だけ**実行する。同じ task の反復は独立な観測として数えない。
 - **推定対象（estimand）**: arm ごとに、選んだ K 件の主 task i について、その arm の 1 run が §3.1 の意味で失敗する確率を `p_arm,i` とし（確率は model の sampling・実行環境の揺らぎなど run ごとの偶然について取る）、`p̄_arm = (1/K) Σ_i p_arm,i` を対象とする。**K 件の task を固定した条件付きの量であり、task の母集団（benchmark 全体・他の課題）の失敗率ではない。**
 - 片側の総有意水準 0.05 を、2 つの片側 Clopper-Pearson 限界へ Bonferroni で分ける（単一 host なので各 0.025）。
@@ -176,7 +176,7 @@ I2a が merge されるまでに得た record は、T 到達の Goal record が�
 
 1. **単位の一意性**: 主 task の `unit_id` がすべて異なる。
 2. **系譜の検査の記録**: commit 済みの pool manifest に、全単位の組について §5.1 の G1〜G3 の検査結果が「系譜の共有なし」として記録され、その記録の digest が事前登録の文書と一致する。
-3. **選択の再現**: commit 済みの seed（§5.0 の手順で得た値）と pool manifest から、主 task・control・pilot・実行順を再計算し、commit 済みの一覧と完全に一致する。
+3. **選択の時刻順と再現**: §5.0 の「検証するもの・検証する者」の表をすべて満たす。すなわち (a) commit A・B の OpenTimestamps の block 時刻と PR の `merged_at` がどちらも round R の公開時刻 − Δ より前、(b) round R を使う有効な試行が試行の記録に 1 件だけ、(c) pool manifest が commit A の snapshot digest に一致する配布物から閾値どおりに決まっている、(d) seed が round R の値で beacon の署名を検証できる、(e) seed と pool manifest から再計算した主 task・control・pilot・実行順が commit C の一覧と完全に一致する。
 4. **run の分離**: 主解析に入る record の `run_id`・worker export の場所・thread ID が arm をまたいで重複しない。同じ割当の attempt が複数ある場合、主解析に入るのは §3.1 の規則で決まる 1 件だけである。
 5. **実行順**: record の開始時刻の順が、commit 済みの実行順と一致する（再実行は元の位置の直後に置いたものとして扱う）。
 
@@ -225,22 +225,50 @@ I2a が merge されるまでに得た record は、T 到達の Goal record が�
 
 ### 5.0 選定の手順と順序（凍結）
 
-順序を守らなかった場合、その選択は無効とし、新しい seed で手順 1 からやり直す（やり直した事実と理由を事前登録の文書に記録する）。
+**守るもの**: 主 task・control・pilot・実行順の選択が、seed を知らない状態で固定した pool からだけ決まったことを、第三者が公開の記録だけで確かめられること。そのため seed は pool の所有者を含む誰にも事前に分からない **公開 randomness beacon** の値だけを使い、pool を固定した記録（commit B）が beacon の公開より前に存在したことを、GitHub と独立した時刻証明でも確かめる。**owner が乱数を作って後で開示する方式（commit-reveal）は採らない**（pool の所有者が commit B より前に seed を知りうるため、pool を seed に合わせて作れてしまい、それを検査で検出できない）。
 
-1. **commit A（pool を集める前）**: 本節の基準と閾値、seed の取り方、key の式、verified-complex と baseline の package SHA と digest を事前登録の文書に commit する。seed は次のどちらかで、owner が選ぶ（§8.1）。
-   - (a) **公開 randomness beacon**: 公開予定時刻が commit B の予定より後の round 番号 R を commit A に書き、seed = round R の値とする。beacon の候補（例: drand）の利用可否・取得と検証の方法は **UNKNOWN**（I2b で調べる）。
-   - (b) **commit-reveal**: owner が 32 bytes の乱数 r を作り、`SHA-256(r)` だけを commit A に書く。r は commit B の後に公開し、seed = r とする。I1 は `SHA-256(r)` と照合する。
-2. **pool を集める**: benchmark の全 task に下記の基準（Lic・Det・Cx・Con）を機械で当て、通った task を系譜の検査（G1〜G3）で単位にまとめる。評価環境での検査の実行（Det）は evaluator だけを動かし、worker（model）は動かさない。
-3. **commit B（seed が分かる前）**: pool manifest（全 task の `task_id`・`unit_id`・基準ごとの判定と証拠の digest・系譜の検査結果）を正規化 JSON にし、その digest を commit する。commit B の時刻が seed の公開（(a) round R の公開時刻、(b) r の公開）より前であることを記録する。後になった場合は手順 1 からやり直す。
-4. **seed の確定と選択（commit C）**: seed から次を決め、一覧を commit する。key は `SHA-256(seed ‖ 用途 ‖ 識別子…)` とし、`‖` は各要素を「4 bytes big-endian の長さ + UTF-8 bytes」で連結する（区切りとの衝突を避けるため）。
+順序を守らなかった場合、その試行は無効とし、新しい commit A（新しい round 番号）で手順 1 からやり直す。やり直した事実と理由は、事前登録の文書の **試行の記録**（追記だけを行う一覧。各試行の commit A・B の SHA、round 番号、無効の理由）に残す。無効にした試行の round 番号・pool は再利用しない。
+
+1. **commit A（pool を集める前）**: 事前登録の文書に次を書いた commit を、公開 repository `tackeyy/mission` の main へ PR として merge する。
+   - benchmark の名称と、厳密な版（release tag・dataset の revision などの不変な識別子）
+   - **入力の snapshot digest**: 候補 pool の元になる benchmark の配布物（task 定義・課題文・検査の一覧・reference・upstream の識別子と base commit）を、path の UTF-8 bytes 順に並べ、mtime・所有者・権限を固定値にした tar の SHA-256。正規化の規則も同じ commit に書く。upstream repository の中身は base commit の SHA で内容が決まるので、snapshot には識別子と SHA だけを含める
+   - §5.1 の基準と閾値、系譜検査 G1〜G3 の閾値、key の式（手順 4）
+   - seed の取り方: beacon の chain（drand mainnet の League of Entropy を推奨。chain hash と公開鍵を書く）と **round 番号 R**、seed = round R の randomness の bytes とすること
+   - **margin** Δ（推奨 24 時間）。R は、その公開時刻 t_R（chain の genesis 時刻と周期から決まる）が commit B の予定より Δ 以上後になるように選ぶ
+   - verified-complex と baseline の package SHA と digest
+2. **commit A の時刻の固定**: commit A の文書の bytes の SHA-256 を OpenTimestamps で stamp し、proof（`.ots`）を保存する。GitHub が付ける時刻として、commit A を入れた PR の `merged_at`（GitHub の server が設定する。commit の author / committer 日時は client が書けるので使わない）を API で取る。
+3. **pool を集める**: commit A に固定した snapshot の task 全件に §5.1 の基準（Lic・Det・Cx・Con）を機械で当て、通った task を系譜の検査（G1〜G3）で単位にまとめる。評価環境での検査の実行（Det）は evaluator だけを動かし、worker（model）は動かさない。
+4. **commit B（beacon の公開より前）**: pool manifest（全 task の `task_id`・`unit_id`・snapshot 内の位置・基準ごとの判定と証拠の digest・系譜の検査結果）を正規化 JSON にし、その digest と commit A の SHA を書いた commit を main へ PR として merge する。commit A と同じく、manifest digest を OpenTimestamps で stamp し、PR の `merged_at` を取る。識別子（`unit_id`、`task_id`）が pool 内で一意であることは commit B の前に検査する。
+5. **時刻の確定**: commit B の OpenTimestamps proof が Bitcoin の block に入って確定するまで待つ。確定した attestation の block 時刻と、commit B の PR の `merged_at` が、どちらも `t_R − Δ` より前でなければならない。**どちらかが `t_R − Δ` より前に得られないまま round R が公開された場合、その試行は無効**で、新しい commit A（新しい R）からやり直す。R は再利用しない。
+6. **seed の確定と選択（commit C）**: round R の値を取得し、beacon の公開鍵で署名を検証してから seed とする。seed から次を決め、一覧と、commit A・B の OpenTimestamps proof を commit する。key は `SHA-256(seed ‖ 用途 ‖ 識別子…)` とし、`‖` は各要素を「4 bytes big-endian の長さ + UTF-8 bytes」で連結する（区切りとの衝突を避けるため）。
    - **pilot 単位**: `SHA-256(seed ‖ "pilot" ‖ unit_id)` が小さい 12 単位。確認には使わない。
    - **確認の単位の順位**: 残りの単位を `SHA-256(seed ‖ "unit" ‖ unit_id)` の昇順に並べる。確認で使うのは常にこの順位の先頭 K 単位で、K は §6.3 で後から決める（順位を先に commit するので、K の選び方で単位を選べない）。
    - **主 task**: 各単位の中で `SHA-256(seed ‖ "primary" ‖ unit_id ‖ task_id)` が最小の task（§3.2）。
    - **control**: 確認の先頭 K 単位のうち `SHA-256(seed ‖ "control" ‖ unit_id)` が小さい ⌈K/2⌉ 単位（K 確定後に計算して commit する）。
    - **実行順**: `SHA-256(seed ‖ "order" ‖ assignment_id)` の昇順（§7.3）。
-   - key が同じ場合は、識別子（`unit_id`、`task_id`、`assignment_id`）の UTF-8 bytes の辞書順で小さい方を先にする。識別子は pool 内で一意であることを commit B の前に検査する。
-5. **commit C より前に、pool のどの task でも worker を動かさない。** smoke と開発の worker run は H だけで行う（smoke で pilot 単位を使うのは commit C の後）。
-6. **package を動かさない**: commit A の後に verified-complex または baseline の package を変えた場合、選択は無効になる。新しい seed で手順 1 からやり直し、すでに worker の結果を見た task（pilot・smoke）は新しい pool から除く。
+   - key が同じ場合は、識別子（`unit_id`、`task_id`、`assignment_id`）の UTF-8 bytes の辞書順で小さい方を先にする。
+7. **commit C より前に、pool のどの task でも worker を動かさない。** smoke と開発の worker run は H だけで行う（smoke で pilot 単位を使うのは commit C の後）。
+8. **package を動かさない**: commit A の後に verified-complex または baseline の package を変えた場合、その試行は無効になる。新しい commit A（新しい R）で手順 1 からやり直し、すでに worker の結果を見た task（pilot・smoke）は新しい pool から除く。
+
+**検証するもの・検証する者**: §3.2.1 の検査 3 は、I2c の検証関数が次をすべて公開の材料から計算し、I1 がその結果を入力として要求する。材料はすべて公開されるので、第三者も同じ関数で再計算できる。
+
+| 確かめること | 材料 |
+|---|---|
+| commit A・B の OpenTimestamps の block 時刻 < `t_R − Δ` | `.ots` proof と Bitcoin の block header |
+| commit A・B の PR の `merged_at` < `t_R − Δ` | GitHub API |
+| 試行の記録で、round R を使う有効な試行が 1 件だけで、A・B がその試行のものである | main の履歴 |
+| pool manifest に載る task がすべて commit A の snapshot digest に一致する配布物の中にあり、Lic・Cx・Con・G1〜G3 の判定が snapshot と閾値から再計算した結果と一致する（Det は記録した評価の証拠の digest を照合する） | snapshot、pool manifest |
+| seed が round R の値で、beacon の公開鍵で署名が検証できる | beacon の公開 endpoint、commit A の chain hash と公開鍵 |
+| seed と pool manifest から再計算した選択が commit C の一覧と一致する | commit C |
+
+どれか一つでも通らなければ `invalid_cohort` とする（§3.3）。
+
+**残る信頼の前提（正直に書く）**:
+
+- **「commit B が t_R − Δ より前に存在した」ことは GitHub に依存しない。** OpenTimestamps の proof は、stamp した digest が Bitcoin の block に含まれたこと、つまりその block の時刻までに digest が存在したことを、Bitcoin の proof-of-work の連鎖だけで示す。GitHub が `merged_at` を偽っても、この主張は崩れない。Bitcoin の block 時刻は実時刻とずれうるので Δ でこれを吸収する（ずれの上限の仕様は本書では照合していない。**UNKNOWN**。I2b で確かめ、Δ が足りるかを報告する）。block header を第三者の explorer から取る場合は、その explorer を信頼することになる。自分の Bitcoin node から取れば、この前提は消える。
+- **「commit A・B と別の候補を隠し持っていない」ことは、OpenTimestamps では示せない。** OpenTimestamps は存在を示すが、公開されたことは示さない。同じ R に対して複数の pool を stamp しておき、seed を見てから都合のよいものを出すこと（grinding）は、存在の証明だけでは防げない。これを防ぐのは次の 2 つで、**GitHub を「公開した時刻」の記録元として信頼する前提が残る**: (i) pool は commit A の snapshot と閾値から機械で決まり、Det の評価結果以外に選ぶ余地が無いこと（検査 3 で再計算する）、(ii) 有効な試行は main の試行の記録に 1 件だけで、その `merged_at` が `t_R − Δ` より前であること（後から別の A・B を公開しても `merged_at` が t_R より後になり通らない）。GitHub の `merged_at` の改ざんを外部から検出する手段は本書では持たない（**UNKNOWN**）。
+- **seed の予測不能性は beacon に依存する。** drand の値は複数の運営者による threshold 署名で作られ、threshold 以上の運営者が共謀すれば事前に知りうる。drand の運営者の構成・threshold・round の周期・公開 endpoint は本書では確かめていない（**UNKNOWN**。I2b で調べて報告する）。drand が使えない場合は、同じ性質（公開時刻が事前に決まり、署名を検証できる）を持つ別の公開 beacon を owner が選ぶ。
+- **commit A が pool を集める前に作られたこと自体は検証しない。** seed は t_R まで誰にも分からないので、pool を A の前に集めていても、seed に合わせて pool を選ぶことはできない。検証に要るのは「B < t_R − Δ」と「B が A の snapshot から決まる」ことだけである。
 
 ### 5.1 選定基準（凍結。閾値は commit A の前に owner が確定する）
 
@@ -366,7 +394,7 @@ T・M・g は smoke の実測を見て pilot 前に凍結する（T は全 arm �
 
 `mission-benchmark-aggregate/1`（JSON）。Markdown は JSON からだけ描画する。
 
-- `inputs`: 割当計画の digest、record 群の digest、evaluator の digest（H では生成器 bytes・catalog、公開 benchmark では bundle digest と evaluator adapter の識別）、事前登録文書の commit SHA（§5.0 の commit A・B・C を含む）、seed の取り方と値（beacon の round 番号または commit-reveal の digest）、pool manifest の digest、選択一覧の digest、§3.2.1 の検査結果、各 arm の仕様（§2.2 の照合項目すべて）、host・Codex version・model・effort・permission・T・M・g。
+- `inputs`: 割当計画の digest、record 群の digest、evaluator の digest（H では生成器 bytes・catalog、公開 benchmark では bundle digest と evaluator adapter の識別）、事前登録文書の commit SHA（§5.0 の commit A・B・C を含む）、seed の取り方と値（beacon の chain hash・round 番号 R・公開時刻・Δ・round R の値と署名）、commit A・B の OpenTimestamps proof の digest と attestation の block 時刻、commit A・B の PR の `merged_at`、入力の snapshot digest と benchmark の版、試行の記録の digest、pool manifest の digest、選択一覧の digest、§3.2.1 の検査結果、各 arm の仕様（§2.2 の照合項目すべて）、host・Codex version・model・effort・permission・T・M・g。
 - `assignments[]`: 計画した全割当。`assignment_id`、attempt の一覧、task、`unit_id`（H では family）、`fixture_group`（worker/control）、`primary`（主 task か）、実行順の位置、planned arm、構成照合の結果（項目ごとの一致・不一致・欠落）、run の `outcome`/`reason`/`fidelity`・`deadline_reached`・`turn_start_sent`、候補の digest（probe と評価直前）、評価の `status`/`reason`/`case_count`、§3.1 の結果（`success`/`quality_failure`/`non_quality` と理由）、段ごとの評価（S0/S2/S3。無ければ `unmeasured` と理由）、帰属、偽完了の旗、実行量・費用・時間・介入（値または null と理由）。
 - `arms{}`: 主結果（主 task の x, K, F, 片側限界）、参考の対称 ITT と除外版、副次項目（分子・分母・null 理由）、偽完了、理由コード別の件数、分類別の内訳（§4）、task 単位の参考集計（`reference_only: true`）。
 - `primary_judgement`: §3.3 の判定値と、判定に使った数値。判定は主 task（1 単位 1 件）の値と §3.2.1 の検査結果だけから計算し、task 単位の集計を入力に取らない。`claims_allowed`: 判定値から機械的に決まる許可文だけ（自由記述を置かない）。
@@ -394,8 +422,8 @@ T・M・g は smoke の実測を見て pilot 前に凍結する（T は全 arm �
 |---|---|---:|---:|---|
 | I1: 集計と判定 | 割当計画の型（planned arm・primary・attempt・unit_id）、record・評価・E event の結合、全割当の会計、§3.1 の 3 値分類と仮説に不利な側への計数、主 task の区間計算と判定、§3.2.1 の検査 4・5（run の分離・実行順）、検査 1〜3 の証拠を入力の型として要求し無ければ `invalid_cohort` にすること（fail-closed）、偽完了、帰属、JSON schema と Markdown 描画。偽の割当欠落・重複・分母 0・event 欠落・evaluator 欠落・同じ単位の重複で `achieved` を出さないこと（§3.2 の反例）・task 単位の値が判定へ入らないこと・Poisson 二項での片側限界の保守性（§3.2 の数値確認 2 種）を Red にするテスト | 690〜870 | 1,104〜1,392 | `Refs #884` |
 | I2a: probe の識別項目と record の照合 | §2.3 の probe の変更（`provider_version` の前後取得、識別項目の入れ物、`turn_start_sent`、deadline の型付けと `assignment_deadline_reached`）と、§2.2 の record ごとの構成照合（Mission 2 版の区別を含む）。T 到達・例外・EOF・skill 未観測の各経路で識別項目が揃うこと、deadline と EOF が区別されることを Red にするテスト | 400〜520 | 640〜832 | `Refs #884` |
-| I2b: 公開 benchmark の調査報告 | 文書のみ。候補 benchmark ごとに、license（データと upstream）、§5.1 の基準 Lic・Det・Cx・Con を満たす task 数と別 project の単位数（G1〜G3 適用後）、評価環境と network 遮断の可否、control を作れるか、G の export で足りるか、seed の取り方（beacon の可否）、clone の容量と計算量を実測または **UNKNOWN** で報告し、owner の選択を仰ぐ | 150〜250 | 240〜400 | `Refs #884` |
-| I2c: 選定・bundle・evaluator | §5.0 の key と選択（pilot・順位・主 task・control・実行順）の計算と再計算、基準 Lic・Det・Cx・Con と系譜検査 G1〜G3 の機械判定、pool manifest、§5.2 の bundle の入口（digest 検証・閉じた schema・束縛）と公開 benchmark 用の evaluator adapter、§3.2.1 の検査 1〜3 の証拠の生成。seed と pool の順序違反・key の衝突・系譜の共有・bundle digest 不一致・未知 key・benchmark 由来 code の非実行を Red にするテスト | 640〜820 | 1,024〜1,312 | `Refs #884` |
+| I2b: 公開 benchmark の調査報告 | 文書のみ。候補 benchmark ごとに、license（データと upstream）、§5.1 の基準 Lic・Det・Cx・Con を満たす task 数と別 project の単位数（G1〜G3 適用後）、評価環境と network 遮断の可否、control を作れるか、G の export で足りるか、seed の beacon（drand の chain・周期・運営者と threshold・取得と署名検証の方法）と OpenTimestamps の使える範囲（Bitcoin の block 時刻のずれと Δ が足りるか）、配布物の snapshot を正規化できるか、clone の容量と計算量を実測または **UNKNOWN** で報告し、owner の選択を仰ぐ | 150〜250 | 240〜400 | `Refs #884` |
+| I2c: 選定・bundle・evaluator | §5.0 の key と選択（pilot・順位・主 task・control・実行順）の計算と再計算、基準 Lic・Det・Cx・Con と系譜検査 G1〜G3 の機械判定、pool manifest、§5.2 の bundle の入口（digest 検証・閉じた schema・束縛）と公開 benchmark 用の evaluator adapter、§3.2.1 の検査 1〜3 の証拠の生成。seed と pool の順序違反（時刻証明の欠落・`t_R − Δ` 以後の attestation や `merged_at`・round R の再利用・有効な試行の重複・snapshot と pool manifest の不一致・beacon の署名不正）・key の衝突・系譜の共有・bundle digest 不一致・未知 key・benchmark 由来 code の非実行を Red にするテスト | 640〜820 | 1,024〜1,312 | `Refs #884` |
 | I3: runner と ablation | 計画に従う end-to-end runner（task の書き出し → G probe（§2.1 の M と T）→ wall 時間の測定 → 凍結 → 評価）、commit 済みの実行順での実行、run 数・wall 時間の上限と停止規則、再実行の上限、同じ初回成果からの ablation variant、offline の契約テストと H での診断手順 | 600〜780 | 960〜1,248 | `Closes #884` |
 
 合計は raw 2,480〜3,240、×1.6 で 3,968〜5,184（2 巡目時点の 3 PR は raw 1,620〜2,100、×1.6 で 2,592〜3,360）。
@@ -412,7 +440,7 @@ TDD・既存の CI 経路（`make test-shard` → Quality）・配布 mirror・a
 2. **host の範囲**: 確認実験を Codex のみとするか。CC は Goal の lifecycle を観測できず、現状では unsupported（§1）。
 3. **baseline arm を pilot・確認に含めるか**: 含めると pilot で約 143 USD 相当、確認で (K + ⌈K/2⌉) × 5.94 USD 相当が加わる。主判定には不要で、#876 の改善の帰属にだけ使う。
 4. **公開 benchmark の選択（I2b の報告の後）**: 確認用 cohort を外部の公開 benchmark から作ることは決定済み（2026-10-04）。I2b の報告を見て、使う benchmark と版、bundle と pool manifest の保管場所（license が公開 repo への保存を許すか）を決める。
-5. **選定基準の閾値と seed の取り方（commit A の前）**: Cx1〜Cx3 の閾値（推奨: source file 2 件以上・検査 3 件以上・変更 10 行以上）、Con2 の閾値、G3 の閾値（推奨 20%）、cohort の構成比（欠陥入り : control、推奨 2:1）、seed を公開 beacon（推奨。可否は I2b）と commit-reveal のどちらで取るか。
+5. **選定基準の閾値と seed の取り方（commit A の前）**: Cx1〜Cx3 の閾値（推奨: source file 2 件以上・検査 3 件以上・変更 10 行以上）、Con2 の閾値、G3 の閾値（推奨 20%）、cohort の構成比（欠陥入り : control、推奨 2:1）、margin Δ（推奨 24 時間）。seed は公開 beacon だけを使う（commit-reveal は採らない。§5.0）。使う beacon は drand mainnet を推奨とし、I2b が使えないと報告した場合だけ、同じ性質を持つ別の beacon を選ぶ。
 6. **ablation の可否**: J の profile に gate のみ / gate + 反例探索の切替を入れるか。入れない場合 ablation は未実施と報告する。
 7. **I1 の着手時期**: Issue 884 は E・F・G・H の merge 後を条件にしている。E4 の event schema が確定してから着手するのが推奨。先に着手する場合、段の項目は全件 `unmeasured` とし、E4 後に結合を追加する。
 8. **必要な単位数が足りない場合の扱い**: §5.1 の基準を満たす別 project が 180〜560 以上ある公開 benchmark が無い場合、複数の benchmark を合わせるか（系譜検査は benchmark をまたいで行う）、確認実験を行わず「未検証」のままとするか。1 単位から複数 task を主解析に入れること（§3.2 の推定対象は条件付きなので統計的には成り立つが、「K 個の別 project」という主張が成り立たなくなる）、task 単位の解析へ戻すこと、閾値（1/10）を後から変えることは、owner が観測前に事前登録を改めない限り選ばない。
@@ -439,14 +467,14 @@ TDD・既存の CI 経路（`make test-shard` → Quality）・配布 mirror・a
 
 ## 9. 事前登録として凍結する項目
 
-確認実験の前に、本書の該当節と追記（§5.0 の commit A〜C、pilot 後の K・T・M・g・Codex version・各 arm の仕様と package digest・bundle digest・主 task・control・実行順の一覧）を commit し、その commit SHA を report の `inputs` に記録する。
+確認実験の前に、本書の該当節と追記（§5.0 の commit A〜C・試行の記録・commit A・B の OpenTimestamps proof、pilot 後の K・T・M・g・Codex version・各 arm の仕様と package digest・bundle digest・主 task・control・実行順の一覧）を commit し、その commit SHA を report の `inputs` に記録する。
 
 1. 主結果の 3 値分類（`success`/`quality_failure`/`non_quality` と `non_quality` の閉じた列挙）、仮説に不利な側への計数、予算時点の候補の規則（§3.1）、受入可能の判定器、予算の単位（共通の wall-clock 上限 T）。
 2. 再実行規則（turn 開始前の基盤障害（`turn_start_sent == 0`）のみ、1 割当 1 回、各段・各 arm で計画割当数の 10% が上限、両 arm 対称、元 record を attempt として保持）。
 3. 解析単位（upstream の project、単位ごとに seed から選んだ主 task 1 件、確認実験では 1 run / task / arm）、推定対象（選んだ K task の 1 run あたり失敗確率の平均）、独立性の検査（§3.2.1）、区間の方法（片側 Clopper-Pearson ×2、各 0.025、Bonferroni、`RR_upper ≤ 0.1`）、guard（control 割当の失敗率）（§3.2）。
 4. 判定値・優先順・報告文（§3.3）。
 5. arm の定義（§2）、終了条件と turn 上限 M（§2.1）、arm 仕様と record ごとの照合項目・不一致時の扱い（§2.2）、T 到達を品質の結果とする扱いと識別項目の記録・経路ごとの分類（§2.3）、baseline SHA `ed1d1c2723c55c08f06a82d6e397b164323b5b59`、verified-complex の package SHA（J merge 後に凍結）。
-6. 公開 benchmark からの選定の手順と順序（§5.0）、選定基準 Lic・Det・Cx・Con と系譜検査 G1〜G3 の閾値（§5.1）、規模・構成比・使用回数（§5.1）、bundle と evaluator の受け入れ境界（§5.2）。
+6. 公開 benchmark からの選定の手順と順序（§5.0。seed は公開 beacon の round R の値だけ、commit A に benchmark の版・入力の snapshot digest・閾値・beacon の chain と R・Δ・package SHA を固定、commit A・B を main への merge と OpenTimestamps で時刻固定、`t_R − Δ` に間に合わない試行は無効で R を再利用しない、試行の記録は追記のみ）、選定基準 Lic・Det・Cx・Con と系譜検査 G1〜G3 の閾値（§5.1）、規模・構成比・使用回数（§5.1）、bundle と evaluator の受け入れ境界（§5.2）。
 7. K の決め方（§6.3）、停止規則と各段の run 数・wall 時間の上限（§6.1、§6.4）。
 8. 副次項目の定義、偽完了の独立集計、帰属の順序（§4）。
 
