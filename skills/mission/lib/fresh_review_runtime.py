@@ -16,7 +16,6 @@ import os
 from pathlib import Path
 import re
 import sys
-from types import FunctionType
 from typing import Protocol
 
 from mission_kernel.fresh_review import FreshReviewError, canonical_digest
@@ -157,11 +156,12 @@ def _source_digest(module):
 
 
 def _load_pinned_factory(pin, entry):
-    """Bind entry-point bytes to a plain factory function defined by those bytes.
+    """Only guarantee module code compiled from the exact registered-digest bytes,
+    without import/bytecode caches, substituted files or a compilation re-read.
 
-    Imports, other modules and objects reachable from __main__ that the function
-    calls are dependency code outside the pin. Other factory forms are rejected
-    with fresh-review-adapter-source-invalid.
+    All behavior of those executed bytes, including defining, wrapping, importing,
+    calling or replacing code objects, is outside the pin and trusted by the user
+    who registered it; a non-callable factory is fresh-review-adapter-source-invalid.
     """
     invalid = 'fresh-review-adapter-source-invalid'
     if pin.module in sys.modules:
@@ -181,15 +181,13 @@ def _load_pinned_factory(pin, entry):
     sys.modules[pin.module] = module
     try:
         exec(code, module.__dict__)
-        factory = getattr(module, entry.attr, None)
+        factory = module
+        for part in entry.attr.split('.'):
+            factory = getattr(factory, part, None)
         if (sys.modules.get(pin.module) is not module or module.__file__ != origin
                 or module.__spec__ is not spec or spec.origin != origin):
             raise FreshReviewError(invalid)
-        if type(factory) is not FunctionType:
-            raise FreshReviewError(invalid)
-        if (factory.__globals__ is not module.__dict__
-                or factory.__code__.co_filename != origin
-                or factory.__module__ != pin.module):
+        if not callable(factory):
             raise FreshReviewError(invalid)
         return factory
     except BaseException:
@@ -227,6 +225,8 @@ def _resolve_adapter(identifier):
     try:
         module = entry.module
         if entry.extras:
+            raise FreshReviewError('fresh-review-adapter-entry-point-invalid')
+        if not _MODULE.fullmatch(entry.value.partition(':')[2].strip()):
             raise FreshReviewError('fresh-review-adapter-entry-point-invalid')
     except (AttributeError, AssertionError, TypeError, ValueError) as exc:
         raise FreshReviewError('fresh-review-adapter-entry-point-invalid') from exc
