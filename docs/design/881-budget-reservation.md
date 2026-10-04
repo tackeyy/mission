@@ -226,32 +226,48 @@ final latch は `budget enter-final`（明示）か `at ≥ repair の締切`（
 | B の verifier（#1・#2） | 監督 process の中で: verifier へ SIGKILL→0.2 秒の wait→再送 [S16]（1 秒に切り上げ）→候補と報告の読取り（`post_run_sec` 以内）。監督 process が超過したら親が: 監督が率いる process group G（§4.2）へ SIGTERM→`term_grace_sec`→SIGKILL→`kill_wait_sec` | `1 + post_run_sec + term_grace_sec + kill_wait_sec` |
 | command provider（#3） | process group へ SIGTERM→`term_grace_sec`→SIGKILL→`kill_wait_sec`→pipe の回収（`collect_sec` 以内） | `term_grace_sec + kill_wait_sec + collect_sec` |
 | adapter（#7・#8） | 実行中の呼出し子へ SIGTERM→`term_grace_sec`→SIGKILL→`kill_wait_sec`→`cancel` 呼出し（`cancel_call_sec` 以内）→その超過時の SIGTERM→`term_grace_sec`→SIGKILL→`kill_wait_sec` | `2 × (term_grace_sec + kill_wait_sec) + cancel_call_sec` |
-| 承認 verifier（#5・#6） | 締切を渡さない。5 秒の join と最大 4 回の 0.2 秒待ち [S22] | 固定。`reserved_sec = 6 + commit_margin_sec` として扱う |
+| 承認 verifier（#5・#6） | 締切を渡さない。起動からの 5 秒（readiness を含む）と最大 4 回の 0.2 秒待ち [S22]（1 秒に切り上げ）→group の掃除（§4.2。`kill_wait_sec`） | 固定。`reserved_sec = 5 + 1 + kill_wait_sec + commit_margin_sec`（初期値 17）として扱う |
 | 回復（#9 の `recover` / `system-recover`） | `recover` の呼出し子へ SIGTERM→`term_grace_sec`→SIGKILL→`kill_wait_sec` | `term_grace_sec + kill_wait_sec` |
 
-初期値では B 14 秒、provider 5 秒、adapter 16 秒、承認 verifier 6 秒、回復 3 秒。これに `commit_margin_sec` を足した時間が、分類の締切の手前に確保される。
+初期値では B 14 秒、provider 5 秒、adapter 16 秒、承認 verifier 7 秒、回復 3 秒。これに `commit_margin_sec` を足した時間が、分類の締切の手前に確保される。
+
+**正常終了の経路も group の掃除を通す**（§4.2「全ての終了経路での group の掃除」）。正常終了は子の締切より前に起き、掃除の待ちは `kill_wait_sec` 以下なので、各行の `cleanup_sec` に収まる。締切後の経路では、各行の最後の「SIGKILL→`kill_wait_sec`」がこの掃除そのもので、待ちは増えない。承認 verifier だけは締切を渡さない固定枠なので、掃除の `kill_wait_sec` を固定枠へ足した（round 3 で 6 秒から 7 秒）。
 
 **親の待ちに無期限のものを残さない。** 現状の無期限の待ち（provider の `communicate()` [S20]、失敗経路の `wait(timeout=5)` の後に残る child [S39]）は、上の順序へ置き換える。SIGKILL の後 `kill_wait_sec` で終了を確認できない場合は、それ以上待たずに `kill-unconfirmed` を記録する（§3.3）。
 
 ### 4.2 締切付きの呼出し境界（設計レビュー round 1 の High 3）
 
 - **B の verifier**: `run_contract_verifier` 全体（候補の採取、Popen、候補と報告の読取り）を fork した監督 process で実行する。承認 verifier と同じ仕組み（`multiprocessing.get_context("fork")`、pipe、process group の回収）を使う。[S22]
-  - **process group は verifier が存在する前に決まる**（設計レビュー round 2 の High 2）。監督 process は最初の文で `os.setsid()` を呼び、自分を leader とする group G（pgid = 監督の pid）を作る。承認 verifier の child が既に同じ形をとっている（mission-state.py:10335-10338 [S22]）。G の id は fork の戻り値として親が最初から知っており、pipe での受け渡しは無い。
+  - **process group は親が起動の時点で作り、子の user code より前に存在させる**（設計レビュー round 2 の High 2、round 3 の High）。手順は下の「子の起動と group の確保」に従う。G の id（pgid = 監督の pid）は fork の戻り値として親が最初から知っており、pipe での受け渡しは無い。
   - 監督は verifier を **新しい session を作らずに** 起動する。現状の runner は `start_new_session=True` で verifier を別 session にする（verification_runner.py:329-331 [S16]）ので、予算付き session の監督下では runner がこれを指定しない引数を受け取る。verifier とその子孫は G を継承する。`git ls-files` [S42] も監督の中で走るので G に入る。
   - runner の凍結 `timeout_sec` による打ち切りは、監督下では `killpg(child.pid)`（verification_runner.py:363 と 386 の 2 箇所）ではなく verifier の pid への SIGKILL にする（verifier は group leader ではないため。G へ送ると監督自身も止まる）。打ち切り後に pipe を閉じて抜ける既存の動き（同 366-368）は変えないので、子孫が pipe を持ち続けても監督の読取りは止まらない。残った子孫は親の G への送信で掃く。
-  - 親は、監督から結果を受け取った後、または監督の締切を過ぎた時点で、**監督を reap する前に** `killpg(G, SIGKILL)` を送り、G に残る子孫を掃く。監督が未 reap（生存中か zombie）の間は pid が再利用されないので、G が別の group を指すことは無い。fork から `setsid` までの間は子孫が存在しないので、その間の `killpg` が ESRCH になった場合は監督の pid へ直接送れば足りる（承認 verifier の `_stop_approval_verifier_child` と同じ fallback）。
+  - 親は、監督から結果を受け取った後、監督が異常終了した後、または監督の締切を過ぎた時点のいずれでも、下の「全ての終了経路での group の掃除」を行ってから精算する。旧版の「`killpg` が ESRCH なら監督の pid へ送れば足りる」は撤回する（round 3 の High。2 つの送信の間に監督が `setsid` して verifier を起動すると、verifier が G に残るため）。readiness の handshake により、親が G へ送る時点で G は必ず存在する。
   - 旧版の「監督が verifier の pgid を起動直後に pipe で送る」方式は撤回する。受け渡しの前に監督が止まると、verifier の group へ親が届かない窓が残るためである。
   - verifier の締切は、予約時に観測した wall 時刻と monotonic 時刻の組から `child_deadline_at` を monotonic へ換算して渡す（現状の runner は Popen の後に締切を決める [S42] ので、前段の時間を締切に含めるため）。凍結 `timeout_sec` は変えず、`min(凍結 timeout, 換算した締切)` で打ち切る。F の締切で打ち切った場合は status を `blocked`、`block_reason` を `budget-deadline` とし、`timeout`（policy の判定）と区別する。B の receipt の閉じた `block_reason` 集合へ 1 値を足す。fork が使えない host では予算付き session の `verification run` を `budget-deadline-unenforceable` で拒否する。
-- **command provider**: `start_new_session=True` で起動し、締切を予約時刻からの絶対時刻にする（起動後の記録 commit の lock 待ちも締切に含める）。`communicate()` の timeout は「締切 − 現在」で毎回計算する。締切後は §4.1 の順序で回収する。
-- **adapter（D2c・E3）**: `observe_parent/launch/collect/cancel/recover` の各呼出しを、fork した呼出し子の中で行う。呼出し子も B の監督と同じく最初の文で `os.setsid()` を呼び、親は fork の戻り値の pid を group として扱う（受け渡しの窓を作らない）。`recover` の呼出し子は §3.6 の予約の締切に従う。呼出し子の締切は `min(adapter_call_sec, child_deadline_at − 現在)`（`cancel` は `cancel_call_sec`）。戻り値は `max_output_bytes` と閉じた observation の上限で pipe 越しに受け取り、親は締切付きで読む。締切で `collect` の呼出し子を回収した後、`cancel` を呼び、その結果を D の `blocked`/`failed` terminal の `cancel_result` に記録する。[D02] `cancel` の呼出しが超過した場合や、adapter が起動した reviewer の終了を観測できない場合は `kill-unconfirmed` とし、reconcile の `recover` が終了を観測するまで同時予約数を解放しない。D2c は全ての adapter 呼出しを 1 つの application の seam から行うこと（判断事項 3）。
-- **承認 verifier**: 既存の固定上限をそのまま使う。
+- **command provider**: `start_new_session=True` で起動し、締切を予約時刻からの絶対時刻にする（起動後の記録 commit の lock 待ちも締切に含める）。`setsid` は exec の前に子の中で行われ、`Popen` は exec が成功するまで戻らないので、provider のコードが走る前に G（pgid = child の pid）が存在する。pipe の読取りは「締切 − 現在」で毎回計算する。締切後は §4.1 の順序で回収する。正常終了の経路でも、child の終了を reap せずに観測してから group を掃除し、その後に reap する（`communicate()`・`wait()`・`poll()` は reap するので、終了の観測に使わない。観測の手段は下の「全ての終了経路での group の掃除」）。
+- **adapter（D2c・E3）**: `observe_parent/launch/collect/cancel/recover` の各呼出しを、fork した呼出し子の中で行う。呼出し子も B の監督と同じく下の「子の起動と group の確保」で起動し、親は fork の戻り値の pid を group として扱う（受け渡しの窓を作らない）。各呼出しの後、正常終了でも下の「全ての終了経路での group の掃除」を行う。`recover` の呼出し子は §3.6 の予約の締切に従う。呼出し子の締切は `min(adapter_call_sec, child_deadline_at − 現在)`（`cancel` は `cancel_call_sec`）。戻り値は `max_output_bytes` と閉じた observation の上限で pipe 越しに受け取り、親は締切付きで読む。締切で `collect` の呼出し子を回収した後、`cancel` を呼び、その結果を D の `blocked`/`failed` terminal の `cancel_result` に記録する。[D02] `cancel` の呼出しが超過した場合や、adapter が起動した reviewer の終了を観測できない場合は `kill-unconfirmed` とし、reconcile の `recover` が終了を観測するまで同時予約数を解放しない。D2c は全ての adapter 呼出しを 1 つの application の seam から行うこと（判断事項 3）。
+- **承認 verifier**: 既存の固定上限（5 秒の join と 0.2 秒の待ち）は保つが、起動と終了を下の 2 つの規則へ揃える（round 3 の High。F2a の範囲の要求）。現状の `_run_approval_verifier`（mission-state.py:10406-10433 [S22]）は、正常終了の経路で `child.join` が直下の child だけを reap し、group の子孫を掃かない。callback が pipe を閉じて孫を残すと、予約の精算後も孫が動き続ける。また `_approval_verifier_child` は `os.setsid()` の失敗を `contextlib.suppress(OSError)` で握りつぶす（同 10335-10338）ので、group を作れないまま callback を走らせうる。変更は次の 3 点に限る。
+  - `setsid` の失敗を握りつぶさず、readiness を書かずに終了する（親は `approval verifier rejected the evidence` と同じ拒否にする）。
+  - `child.join` で待たず、`child.sentinel` と受信 pipe を締切付きで待つ（sentinel は reap しない）。
+  - 正常終了・拒否・timeout のどの経路でも、`child.join` の前に group を掃除する。予算 policy の無い session にも同じ変更が入る（反例が policy の有無に依存しないため）。
+
+**子の起動と group の確保（B の監督・adapter の呼出し子・承認 verifier の子に共通）**。fork の後、子の最初の処理で `os.setsid()` を呼ぶ。成功したら readiness pipe へ 1 byte を書き、親からの go を受け取るまで user code（runner・adapter の呼出し・callback）を始めない。失敗したら readiness を書かずに終了する。親は readiness を受け取って初めて「G が存在する」とみなし、go を送る。
+- readiness を待つ時間は子の締切に含める（承認 verifier は起動からの 5 秒に含める）。待ちを越えた、または readiness より先に pipe が閉じた場合、子はまだ go を受け取っていないので user code を走らせておらず、子孫は存在しない。親は子の pid へ SIGKILL を送り reap して、その dispatch を拒否として精算する。
+- 親が go を送る前に crash した場合、子は go の pipe の EOF で user code を始めずに終了する。
+- provider は `start_new_session=True`（Python の `Popen` が exec 前に `setsid` する）で同じ性質を得るので、handshake を足さない。
+- これにより、親が G へ送る時点で G は必ず存在し、ESRCH の窓は無い。
+
+**全ての終了経路での group の掃除**（正常終了・拒否・例外・締切のいずれも）。結果を受け取った後（または締切後の §4.1 の順序の途中）、**leader を reap する前に** `killpg(G, SIGKILL)` を送り、leader を reap し、`kill_wait_sec` 以内に G が空になる（`killpg(G, 0)` が ESRCH を返す）ことを確かめる。確かめられなければ `kill-unconfirmed`（全額計上。§3.3）とする。**精算はこの掃除の後に行う。**
+- leader が未 reap（生存中か zombie）の間は pid が再利用されないので、G が別の group を指すことは無い。leader を reap した後も、G に member が残る間は POSIX 上その id は再利用されない。
+- leader の終了は reap せずに観測する。fork 系の子は `multiprocessing` の sentinel、provider は reap しない待ち（`os.waitid` の `WNOWAIT`、または kqueue の `EVFILT_PROC`/`NOTE_EXIT`）を使う。macOS で `os.waitid` が使えるかは **UNKNOWN**（F2a で確かめ、使えなければ kqueue）。
+- zombie の孫に対する `killpg(G, 0)` が ESRCH を返すまでの時間（reparent 先が reap するまで）は macOS で未実測（**UNKNOWN**）。返らなければ `kill-unconfirmed` になり、過大計上の側に倒れる。
 
 **前提（保証の外）**: 上の上限は、親 process が締切後の待ちを定数どおりに進められることを前提とする。親の停止・OS の stall・lock の 5 秒待ちが `commit_margin_sec` を越えて続く場合、精算は `settle_by` より遅れうる。そのときも子は回収済み（または `kill-unconfirmed`）で、遅れは `late_settlement_sec` として記録し、計上は予約秒を下回らない。
 
 **限界（成功として扱わないもの）**:
 
 - 親 process が crash した後の orphan は、mission から回収できない。予約は `settle_by` 後に全額計上され、結果は記録されない。B の runner は一時ディレクトリの複製で実行するので候補を書き換えないが、一時ディレクトリが残るかは実装で確かめる（**UNKNOWN**）。
-- 監督・呼出し子の group G（provider では起動した child の group）を自ら抜ける孫 process（再度 `setsid` や `setpgid` で別の group へ移るもの）は process group の送信から漏れうる。group の確保を verifier の起動前へ移したことで閉じるのは「受け渡し前に監督が止まる」窓だけで、この漏れは残る。OS の権限境界の代替を主張しない。
+- 監督・呼出し子・承認 verifier の子の group G（provider では起動した child の group）を自ら抜ける子孫（`setsid` や `setpgid` で別の group へ移るもの）は、process group の送信から漏れる。G を起動の時点で親が確保し、全ての終了経路で掃除することで閉じるのは「G が存在しない窓」と「正常終了の後に G に残る子孫」だけで、G を抜けた子孫は掃除の確認（`killpg(G, 0)` の ESRCH）にも現れないので、`kill-unconfirmed` にもならない。この漏れは残る限界として扱い、OS の権限境界の代替を主張しない。
 - adapter が host 側で起動した reviewer の停止は adapter の `cancel` に依存する。F は `cancel` の呼出しを有限にするだけで、その効果は観測結果として記録するにとどまる。
 
 ### 4.3 終端と精算の state 容量（設計レビュー round 1 の High 4）
@@ -268,7 +284,7 @@ final latch は `budget enter-final`（明示）か `at ≥ repair の締切`（
 
 ### 4.4 修復が最終検証の時間を使わないこと（設計レビュー round 1 の High 2）
 
-決定: **保証を「mission の spawn 入口（§3.2 #1〜#11）から起動した作業は final の予約を使えない」に狭め、host の inline 作業（host が起動する subagent を含む。§3.2 #16）は強制の外とし、量を記録する。** 選んだ理由: mission は host の inline 編集・実行と host の subagent を観測も中断もできない。repair の締切以降に state の mutation を拒否しても、ファイルの編集は止まらず、記録だけが失われる。止められないものを止めると称するより、止められるもの（spawn）を確実に止め、止められないものを数えて出すほうが正確である。
+決定: **保証を「mission の spawn 入口（§3.2 #1〜#11）から起動した final 以外の作業（repair 系と非保護の分類の dispatch）は final の予約を使えない」に狭め、host の inline 作業（host が起動する subagent を含む。§3.2 #16）は強制の外とし、量を記録する。** 選んだ理由: mission は host の inline 編集・実行と host の subagent を観測も中断もできない。repair の締切以降に state の mutation を拒否しても、ファイルの編集は止まらず、記録だけが失われる。止められないものを止めると称するより、止められるもの（spawn）を確実に止め、止められないものを数えて出すほうが正確である。
 
 強制できる境界は次のとおり。
 
@@ -306,7 +322,7 @@ final latch は `budget enter-final`（明示）か `at ≥ repair の締切`（
 |---|---|
 | kernel | 新 module（policy/ledger の型・decoder・`admit`・`budget_class`・`cleanup_sec` の表・回復と回復専用枠の admission（§3.6）・`final_infeasible` と exhaustion の導出・reducer・`BUDGET_SPAWN_ENTRIES`）。commands union と transition registry に `ReserveDispatchBudget`・`SettleDispatchBudget`・`EnterFinalPhase`・`BudgetStop`。lifecycle の reducer（MarkHalt・MarkPass・Reactivate・ResumeStale）に ledger がある場合だけ時計の区間の開閉と exhaustion の拒否。`_mark_pass` の予算 guard。generic set の保護集合の拡張 [S07]。E0 の種別表への F の Δ |
 | codec | v4 の `budget_ledger` と v5 の `extensions.budget_ledger` の閉じた復元と、保存面との一致検査 |
-| application | `init --budget-policy` の受付（coverage の検査付き）、`budget status/enter-final/stop/reconcile` の use case。§3.2 の各入口での予約・精算（回復の予約を含む）。監督 process（B。最初に `setsid` し、verifier を新しい session なしで起動する runner の引数を含む。§4.2）、adapter の呼出し子、provider の process group 回収と有限の待ち。mark-pass の preflight の予算 guard |
+| application | `init --budget-policy` の受付（coverage の検査付き）、`budget status/enter-final/stop/reconcile` の use case。§3.2 の各入口での予約・精算（回復の予約を含む）。監督 process（B。readiness の handshake で `setsid` を確かめてから verifier を新しい session なしで起動する runner の引数を含む。§4.2）、adapter の呼出し子、provider の process group 回収と有限の待ち、全ての終了経路での group の掃除（共通の helper）、承認 verifier の起動と掃除の変更（§4.2）。mark-pass の preflight の予算 guard |
 | CLI | parser と 1 use case 呼出しだけ。thin-adapter の baseline を増やさない |
 | inventory | `command_owners.py` に mutation を A1.lifecycle（`budget stop`・`budget enter-final`）と A3.evidence（`budget reconcile`）へ、`budget status` を R1.query へ登録する [S29]。spawn 箇所の inventory test（§3.5）。guidance parity の入力に `$.budget_ledger` [S06]。配布 mirror の同期 |
 | 他の設計への要求 | D2c: envelope に `deadline_at`、全 adapter 呼出しを 1 つの seam から（判断事項 3）。D2c・E2・E3: dispatch の intent に予約の `reservation_id` と分類を同じ commit で書く（回復の分類の入力。§3.6）。E0: F の書込み種別を Δ の表へ、F の slot の上書きを停止系の判定へ（§4.3）。I/G: Mission arm へ policy と `external_deadline_at` を渡す（判断事項 10） |
@@ -326,9 +342,9 @@ final latch は `budget enter-final`（明示）か `at ≥ repair の締切`（
 
 ### 6.3 検証方針
 
-- TDD で、現実的な故障を先に Red にする: 初回の dispatch が repair・final の予約を食い尽くす、retry の二重計上と欠落、crash 後の予約の 0 計上、halt 中の時間の計上、時計の後退、並行予約の二重配賦、締切後も child が残る（孫 process を含む）、provider の回収が終わらない、adapter の `collect` と `cancel` が戻らない、B の監督 process の読取りが戻らない、4 MiB の近くで予約した dispatch の終端が書けない、exhaustion 後や final の時間帯に予約なしの `recover` が走る、回復専用枠を越えて回復が続く、監督が verifier の起動直後（pgid の受け渡し前）に止まり verifier と子孫が残る、final の dispatch が時間不足で拒否された直後に pass（force・**契約の無い session** を含む）が通る、final の dispatch が開いている間に `final_infeasible` で exhaustion になり完了した final を捨てる、`budget stop` が予算の残る session で通る、開いている予約がある状態での mark-passes（**契約の無い session を含む**）、exhaustion 後の force pass、`--phase` を偽った provider が final へ計上される、`pending` の入口が残る状態での `init --budget-policy`、表に無い spawn 箇所の追加。
+- TDD で、現実的な故障を先に Red にする: 初回の dispatch が repair・final の予約を食い尽くす、retry の二重計上と欠落、crash 後の予約の 0 計上、halt 中の時間の計上、時計の後退、並行予約の二重配賦、締切後も child が残る（孫 process を含む）、provider の回収が終わらない、adapter の `collect` と `cancel` が戻らない、B の監督 process の読取りが戻らない、4 MiB の近くで予約した dispatch の終端が書けない、exhaustion 後や final の時間帯に予約なしの `recover` が走る、回復専用枠を越えて回復が続く、監督が verifier の起動直後（pgid の受け渡し前）に止まり verifier と子孫が残る、親の G への送信の直前に子が `setsid` して子孫を起動する（readiness の前に user code が走る）、`setsid` が失敗した子が callback を走らせる、正常終了した B の監督・provider・adapter の呼出し子・承認 verifier の子が pipe を閉じて孫を残し、精算の後も孫が生きている、final の dispatch が時間不足で拒否された直後に pass（force・**契約の無い session** を含む）が通る、final の dispatch が開いている間に `final_infeasible` で exhaustion になり完了した final を捨てる、`budget stop` が予算の残る session で通る、開いている予約がある状態での mark-passes（**契約の無い session を含む**）、exhaustion 後の force pass、`--phase` を偽った provider が final へ計上される、`pending` の入口が残る状態での `init --budget-policy`、表に無い spawn 箇所の追加。
 - 受入（§4.4 の狭めた保証に合わせる）: 制御された時計の fixture で、(a) mission の spawn 入口から起動した repair 系の dispatch は final の予約の時間帯に実行されず、`settle_by ≤ repair の締切` であること、(b) inline の時間を模した稼働時間が `reserve_erosion_sec` に現れ、final が実行できない場合は exhaustion から partial-done になり pass にならないこと、(c) 外部締切が稼働時計より早い場合に外部締切で exhaustion になること、(d) final の dispatch が時間不足で拒否された時点から、final が完了として記録されていない限り pass（force を含む、契約の無い session を含む）が拒否されること、(e) 回復の呼出しが final の時間帯・exhaustion 後に予約なしで走らず、回復専用枠と `overall_deadline` を越えないこと。
-- 変異（検出できることを確かめる対象）: 保護枠の差し引きを外す、`<` と `≤` の取り違え、repair の締切から `final_unspent` を外す、開いている予約を unspent から外す、`cleanup_sec` の項を 1 つ落とす、`charged-full-unknown` を 0 にする、精算を 2 回適用する、子の締切を `policy_timeout` だけにする、並行 dispatch を稼働時計へ足す、kill を直下の child だけにする、provider の締切を起動後の相対時間に戻す、時計の後退を受け付ける、no-progress の候補比較を外す、予算 guard を contract 付き session だけにする、`budget_class` に `--phase` を使う、`Δ_terminal` を 0 にする、`total_sec` を切り上げる、`recover` の予約を外す、回復の分類を caller の引数にする、回復専用枠を補充する、`final_close` から `system_recovery_sec` を外す、監督を `start_new_session` で verifier を起動する旧方式に戻す、親の `killpg(G)` を監督の reap の後に移す、exhaustion から 3 を外す、`final_infeasible` と admission の判定を別の式にする、`final_recorded` に `charged-full-unknown` を数える。各変異で少なくとも 1 件のテストが落ちること、正常系が通ることの両方を固定する。
+- 変異（検出できることを確かめる対象）: 保護枠の差し引きを外す、`<` と `≤` の取り違え、repair の締切から `final_unspent` を外す、開いている予約を unspent から外す、`cleanup_sec` の項を 1 つ落とす、`charged-full-unknown` を 0 にする、精算を 2 回適用する、子の締切を `policy_timeout` だけにする、並行 dispatch を稼働時計へ足す、kill を直下の child だけにする、provider の締切を起動後の相対時間に戻す、時計の後退を受け付ける、no-progress の候補比較を外す、予算 guard を contract 付き session だけにする、`budget_class` に `--phase` を使う、`Δ_terminal` を 0 にする、`total_sec` を切り上げる、`recover` の予約を外す、回復の分類を caller の引数にする、回復専用枠を補充する、`final_close` から `system_recovery_sec` を外す、監督を `start_new_session` で verifier を起動する旧方式に戻す、親の `killpg(G)` を監督の reap の後に移す、正常終了の経路で group の掃除を省く（孫が残り、テストが落ちること）、精算を掃除の前に行う、readiness の handshake を外して user code を先に走らせる、ESRCH のとき監督の pid だけへ送る旧 fallback に戻す、承認 verifier の `setsid` の失敗を握りつぶす、`kill_wait_sec` 内に G が空にならない場合に `kill-unconfirmed` にしない、exhaustion から 3 を外す、`final_infeasible` と admission の判定を別の式にする、`final_recorded` に `charged-full-unknown` を数える。各変異で少なくとも 1 件のテストが落ちること、正常系が通ることの両方を固定する。
 - 抜け穴探索: `admit`・`budget_class`・exhaustion の導出・policy decoder・ledger decoder に対し、正常 / 拒否を合わせて 50 入力以上を独立に作って通す（境界の秒、bool を int として渡す、配分の合計が 9999/10001、未知 field、null、重複 ID、上限超過の開いた予約、逆順の時刻、締切ちょうど、`min_dispatch_sec` ちょうど、latch 後の repair、同時上限ちょうど、候補だけ違う無進捗、`budget_minutes` が 0.01/1.1/大きな値、外部締切が過去・null・稼働時計より後、`final の締切 − at` が `min_final_run_sec` の前後 1 秒、開いた final 予約の有無、回復専用枠の残りちょうど、`system_recovery_sec` が 42/43、total が 869/870 秒）。件数と発見数を PR 本文に書く。本設計では実施していない。
 - 公開 CLI の end-to-end（fixture の verifier・provider・adapter）: 予約→実行→精算、締切での回収、crash 後の精算、予算停止、legacy の不変。
 - 新規テストの費用は **UNKNOWN**。実装後に対象実行で計測する。CI は shard 経由で tracked tests を選ぶ既存経路を使う。
@@ -340,11 +356,11 @@ final latch は `budget enter-final`（明示）か `at ≥ repair の締切`（
 | PR | 範囲 | 依存 | 素の見積 | ×1.6 |
 |---|---|---|---:|---:|
 | F1: 予算の kernel | policy/ledger の型・decoder・codec、generic set 保護、時計の区間と外部締切、`admit`・`budget_class`・`cleanup_sec` の表・回復と回復専用枠の admission・`final_infeasible` と exhaustion の導出、全 reducer、`_mark_pass` の予算 guard（純関数）、`StopSlots`、F の Δ 定数と最大形 test（E0 の拡張点）、`BUDGET_SPAWN_ENTRIES`（全て `pending`）、`budget status`。policy を作る経路が無いので inert | E0 | 700〜850 | 1,120〜1,360 |
-| F2a: 既存入口の admission と bounded kill | #1・#3・#4・#5・#6 の予約と精算、B の監督 process（group の先行確保と runner の引数）、provider の絶対締切・process group・有限の待ち、strict の拒否、crash 後の精算と `budget reconcile`、mark-pass の preflight、no-progress、spawn 箇所の inventory test（既存入口を `covered`、D/E を `pending`） | F1 | 620〜770 | 992〜1,232 |
-| F2b: D/E 入口の admission | #2・#7〜#10 の予約と精算（#9 の回復の予約と回復専用枠の配線を含む）、adapter の呼出し子と `cancel` の順序、`repair begin` の検査、表の D/E を `covered` | F2a、D2c・E2・E3 が main にあること | 500〜650 | 800〜1,040 |
+| F2a: 既存入口の admission と bounded kill | #1・#3・#4・#5・#6 の予約と精算、B の監督 process（readiness の handshake と runner の引数）、provider の絶対締切・process group・有限の待ち、全ての終了経路での group の掃除の helper、承認 verifier の起動と掃除の変更、strict の拒否、crash 後の精算と `budget reconcile`、mark-pass の preflight、no-progress、spawn 箇所の inventory test（既存入口を `covered`、D/E を `pending`） | F1 | 690〜850 | 1,104〜1,360 |
+| F2b: D/E 入口の admission | #2・#7〜#10 の予約と精算（#9 の回復の予約と回復専用枠の配線を含む）、adapter の呼出し子と `cancel` の順序、`repair begin` の検査、表の D/E を `covered` | F2a、D2c・E2・E3 が main にあること | 520〜680 | 832〜1,088 |
 | F2c: 有効化と停止（Closes #881） | `init --budget-policy`（coverage の検査付き、`pending` 0 を要求）、`budget enter-final`・`budget stop`、exhaustion 後の Reactivate 拒否、`next` の差し替え、end-to-end と受入 fixture | F2b | 450〜600 | 720〜960 |
 
-合計 2,270〜2,870 行（×1.6 で 3,632〜4,592 行）。round 2 の改訂（回復の予約と回復専用枠、`final_infeasible`、監督の group の先行確保）で round 1 版の 2,150〜2,750 行から増やした。初版は 1,650〜2,000 行。各 PR は 600 行を越えうるので、PR 本文に分割しない理由（F1 は型・decoder・reducer・codec を同時に成立させないと保存面の検査が空回りする、F2a は予約と回収を同じ入口で同時に入れないと予約だけの中間状態ができる）を書く。行数は実 diff を `scripts/pr_size.py` で再計測する。**有効化は F2c だけに置くので、F1〜F2b の中間状態はどれも policy を持つ session を作れない**（§3.5）。
+合計 2,360〜2,980 行（×1.6 で 3,776〜4,768 行）。round 3 の改訂（readiness の handshake、全ての終了経路での group の掃除、承認 verifier の変更）で round 2 版の 2,270〜2,870 行から増やした（F2a +70〜80、F2b +20〜30。F2b は adapter の呼出し子が F2a の helper を使う配線とテスト）。round 2 の改訂（回復の予約と回復専用枠、`final_infeasible`、監督の group の先行確保）で round 1 版の 2,150〜2,750 行から増やした。初版は 1,650〜2,000 行。各 PR は 600 行を越えうるので、PR 本文に分割しない理由（F1 は型・decoder・reducer・codec を同時に成立させないと保存面の検査が空回りする、F2a は予約と回収を同じ入口で同時に入れないと予約だけの中間状態ができる）を書く。行数は実 diff を `scripts/pr_size.py` で再計測する。**有効化は F2c だけに置くので、F1〜F2b の中間状態はどれも policy を持つ session を作れない**（§3.5）。
 
 ## 8. 判断が必要な事項と対象外
 
@@ -361,11 +377,12 @@ final latch は `budget enter-final`（明示）か `at ≥ repair の締切`（
 9. **予算 policy を必須にするか**。F は policy の無い session を `advisory-only` で通す。J の verified-complex profile で必須にするかは J で決める（旧決定 9 で必須と決定済み）。
 10. **（新規）I/G への要求**。Mission arm の harness が `init --budget-policy` と `external_deadline_at = 起動時刻 + T − 後処理の余白` を渡すこと、余白の値、Mission arm が halt 後に reactivate するか。I の事前登録の凍結項目に含めるかは I で決める。
 11. **（新規）承認 verifier を予約の対象にすること**。推奨は対象にする（§3.2 #5・#6）。予約のために verify-approval の lock 区間の前へ短い transaction を 1 つ足す。
-12. **（新規）保証を狭めること**。§4.4 の「mission の spawn 入口から起動した作業だけが final 予約を使えない。host の inline 作業と host が起動する subagent は強制の外で、侵食量を記録する」を、#881 の受入条件の読み方として採るか。Issue 本文は「reserveはguidanceだけでなくrunner/provider/retryの全dispatch入口で強制する」「初回phaseが修復/最終検証の予約枠を消費し切らない」と書いている。前者は mission の spawn 入口として満たせるが、後者の「初回phase」の主な消費者である host の planner・executor の subagent（§3.2 #16）は mission から止められない。採る場合は、Issue 本文の完了条件を「mission が起動する dispatch は予約枠を消費し切らない。host 側の消費は `reserve_erosion_sec` で可視化し、final が実行できなければ pass にならない」へ更新する必要がある（Issue の更新は orchestrator が行う）。
+12. **（新規）保証を狭めること**。§4.4 の「mission の spawn 入口から起動した final 以外の作業（repair 系と非保護の分類）は final 予約を使えない。host の inline 作業と host が起動する subagent は強制の外で、侵食量を記録する」を、#881 の受入条件の読み方として採るか。Issue 本文は「reserveはguidanceだけでなくrunner/provider/retryの全dispatch入口で強制する」「初回phaseが修復/最終検証の予約枠を消費し切らない」と書いている。前者は mission の spawn 入口として満たせるが、後者の「初回phase」の主な消費者である host の planner・executor の subagent（§3.2 #16）は mission から止められない。採る場合は、Issue 本文の完了条件を「mission が起動する dispatch は予約枠を消費し切らない。host 側の消費は `reserve_erosion_sec` で可視化し、final が実行できなければ pass にならない」へ更新する必要がある（Issue の更新は orchestrator が行う）。
 
 13. **（round 2）回復の予約**。推奨は、`recover` を他の spawn と同じく予約し、分類は回復する dispatch の分類、締切はその分類の締切まで。分類の時間が尽きた後と exhaustion 後は、final 枠から init 時に切り出した固定の回復専用枠 `system_recovery_sec`（初期値 60 秒、補充しない）だけを使う（§3.6）。
 14. **（round 2）B の監督の process group**。推奨は、監督が最初に `setsid` して group を作り、verifier を新しい session なしで起動して group を継承させる（§4.2）。親は fork の戻り値で group を知るので、受け渡しの窓が無い。
 15. **（round 2）final が実行できなくなった時点の扱い**。推奨は、`final_infeasible` を admission と同じ式で導出し、final の完了記録が無く final の予約も開いていなければ exhaustion に含める（§5）。contract の無い予算付き session も対象。
+16. **（round 3）process group の確保と掃除**。推奨は、親が起動の時点で group を作り（fork 系は子の `setsid` の後の readiness と go の handshake、provider は `start_new_session=True`）、正常終了を含む全ての終了経路で leader の reap の前に `killpg(G, SIGKILL)` を送って G が空になるのを確かめてから精算する（§4.2）。承認 verifier の既存の実行（`_run_approval_verifier`）も同じ規則へ変える。
 
 ### 対象外
 
@@ -468,7 +485,7 @@ final latch は `budget enter-final`（明示）か `at ≥ repair の締切`（
 
 - 10（I/G との結合、orchestrator 決定）: 外部評価の harness が Mission arm に budget policy と `external_deadline_at` を渡す。後処理の余白の値は smoke の実測後に I の事前登録で固定する。halt 後の reactivate は評価中は行わない。
 - 11（承認 verifier の予約、orchestrator 決定）: 予約の対象にする。
-- 12（保証の範囲、owner 決定）: 保証を「予算 policy を持つ session で、mission の spawn 入口から起動した作業は final の予約を使えない」に狭める。host が起動する subagent と host の inline 作業の時間は強制の外とし、`reserve_erosion_sec` として記録し、exhaustion 後は force を含めて pass に到達させない。Issue #881 の完了条件をこの範囲に合わせて更新する。
+- 12（保証の範囲、owner 決定）: 保証を「予算 policy を持つ session で、mission の spawn 入口から起動した final 以外の作業（repair 系と非保護の分類の dispatch）は final の予約を使えない」に狭める（round 3 で、final 分類の dispatch を含んでいた文言を狭めた。趣旨は変えない）。host が起動する subagent と host の inline 作業の時間は強制の外とし、`reserve_erosion_sec` として記録し、exhaustion 後は force を含めて pass に到達させない。Issue #881 の完了条件をこの範囲に合わせて更新する。
 - 決定 7 の置き換え: F は F1 → F2a → F2b → F2c の 4 PR とする（各 PR は較正済み見積りで 1,400 行未満）。
 
 ### 決定（owner 指示により推奨案を採用, 2026-10-04。設計レビュー round 2 の後）
@@ -476,3 +493,8 @@ final latch は `budget enter-final`（明示）か `at ≥ repair の締切`（
 - 13（回復の予約）: 推奨案を採る。`recover` は回復する dispatch の分類で予約し、締切はその分類の締切まで。分類の時間が尽きた後と exhaustion 後は、final 枠から切り出した固定の回復専用枠だけを使う（§3.6）。
 - 14（B の監督の process group）: 推奨案を採る。監督が最初に `setsid` し、verifier はその group を継承する（§4.2）。pgid を pipe で渡す旧方式は撤回。
 - 15（final が実行できなくなった時点）: 推奨案を採る。`final_infeasible` を exhaustion の原因 3 として加え、contract の有無に関係なく pass（force を含む）を拒否する（§5）。
+
+### 決定（owner 指示により推奨案を採用, 2026-10-04。設計レビュー round 3 の後）
+
+- 16（process group の確保と掃除）: 推奨案を採る。group は親が起動の時点で確保し（readiness の handshake、provider は `start_new_session=True`）、全ての終了経路で reap の前に group を掃除してから精算する。ESRCH のとき監督の pid へ送る旧 fallback は撤回。承認 verifier の起動と掃除も同じ規則へ変える（F2a）。G を自ら抜ける子孫は残る限界とする（§4.2）。
+- 12 の文言: 「final の予約を使えない」作業を final 以外の作業（repair 系と非保護の分類の dispatch）に狭めた（§4.4）。
