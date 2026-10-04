@@ -7,7 +7,7 @@
 対象: [Issue 881: 修復と最終検証の予算を予約して実行を制御する](https://github.com/tackeyy/mission/issues/881)（親 [Issue 876: 品質改善の全体追跡](https://github.com/tackeyy/mission/issues/876)）。本書は設計のみ。実装、テスト追加、Issue 起票・本文変更、Git 操作による公開は行わない。
 照合 head: `d25a66c6abed33a4c0fbd1036e22bdf49da3c606`（依頼で固定）。本書の「現状」はこの head のソースを指す。remote の main は `9c948878d878bbadbfb98a1d62a43d67fcc700c7`（[D2b #909](https://github.com/tackeyy/mission/issues/909)、PR #911 の merge を含む）へ進んでいる。spawn 箇所の検索（§3.2）だけは両方の head で行い、同じ集合だった。それ以外の差分は照合していない（**UNKNOWN**）。実装の着手時に最新 main で再照合する。
 
-関連設計: E は `origin/docs/880-e2e3-decisions`（`9e99f068`）の改訂版 [D05]、I は `origin/docs/884-eval-prereg`（`aa604792`）[D06] を読んだ。どちらも並行して改訂中で、本書はその時点の記述にだけ結ぶ。
+関連設計: E は main に merge 済みの版（`8b3bf236`）[D05]、I は `origin/docs/884-eval-prereg`（`aa604792`）[D06] を読んだ。どちらも並行して改訂中で、本書はその時点の記述にだけ結ぶ。
 
 引用 [S*] / [T*] / [D*] は末尾の固定 head の `file:line` とリンクへ結ぶ。テスト引用は保持するソース上の契約であり、本ステップのテスト実行結果ではない。
 
@@ -289,7 +289,7 @@ final latch は `budget enter-final`（明示）か `at ≥ repair の締切`（
 
 ### 4.3 終端と精算の state 容量（設計レビュー round 1 の High 4）
 
-決定: F の予約は、その dispatch の**終端と精算を書く bytes** も、spawn の前に E0 の機構で確保する。E の改訂設計は、書込み種別ごとの最大増分 Δ を最大形の encode で測って固定し、終端していない item ごとに「残りの段の Δ の和」を state から導出し、全 writer で `state_capacity_verdict(base, proposed, encoded_len)` 1 つで `len(encoded) + Σ残り予約 ≤ STATE_LIMIT − S_sys_remaining` を検査する（S_sys_remaining は未書込の halt slot 分と残り takeover 回数 `max(0, N_L − 記録済み回数)` の分の残量で、proposed の state から導出する。halt・takeover・reactivate を消費しても予約済み item の残り予約は減らない）。[D05]
+決定: F の予約は、その dispatch の**終端と精算を書く bytes** も、spawn の前に E0 の機構で確保する。E の改訂設計は、書込み種別ごとの最大増分 Δ を最大形の encode で測って固定し、終端していない item ごとに「残りの段の Δ の和」を state から導出し、全 writer で `state_capacity_verdict(base, proposed, encoded_len)` 1 つで `len(encoded) + Σ残り予約 ≤ STATE_LIMIT − S_sys_remaining` を検査する（S_sys_remaining は未書込の halt slot 分と残り takeover 回数 `max(0, N_L − 記録済み回数)` の分の残量で、proposed の state から導出する。halt・takeover の消費や reactivate による残量の回復があっても予約済み item の残り予約は減らず、reactivate は検査に通らなければ拒否される）。[D05]
 
 - **開いている予約を E0 の「終端していない item」として扱う。** 予約 1 件の残り予約 = `Δ_settle + Δ_terminal(entry)`。
   - `Δ_settle`: F の精算行（`Settlement`・`PhaseCharge` の更新・`ProgressSignature` の新規行を含む最大形）
@@ -421,7 +421,7 @@ final latch は `budget enter-final`（明示）か `at ≥ repair の締切`（
 
 ## 固定 head の出典
 
-[S*][T*] のリンクは全て `d25a66c6abed33a4c0fbd1036e22bdf49da3c606`。各ラベルの file:line はこの head で読んだ範囲。テストの引用はコードの保証を指し、本ステップで実行した結果を指さない。[D05][D06] は各 branch の commit に固定する。
+[S*][T*] のリンクは全て `d25a66c6abed33a4c0fbd1036e22bdf49da3c606`。各ラベルの file:line はこの head で読んだ範囲。テストの引用はコードの保証を指し、本ステップで実行した結果を指さない。[D05] は main の commit `8b3bf236`、[D06] は I の branch の commit に固定する。
 
 [S01]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/bin/mission-state.py#L8403-L8420 "mission-state.py:8403-8420 — _validated_budget_minutes（float を返す）"
 [S02]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/bin/mission-state.py#L8423-L8463 "mission-state.py:8423-8463 — BUDGET_PRESSURE_WARN_PCT・BUDGET_SPAWN_ACTIONS・_budget_pressure（started_at からの壁時計）"
