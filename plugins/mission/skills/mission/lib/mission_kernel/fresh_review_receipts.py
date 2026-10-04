@@ -81,7 +81,7 @@ def _timestamp(value):
             raise ValueError('naive')
     except (ValueError, TypeError, OverflowError) as exc:
         raise FreshReviewError('fresh-review-timestamp-invalid') from exc
-    return value
+    return parsed
 
 
 def decode_launch_receipt(value):
@@ -269,13 +269,17 @@ def decode_terminal_receipt(value):
         _digest(fields[key])
     for key in ('dispatch_fencing_epoch', 'commit_fencing_epoch'):
         _integer(fields[key], 'fresh-review-fence-invalid')
-    _timestamp(fields['ended_at'])
+    if fields['commit_fencing_epoch'] < fields['dispatch_fencing_epoch']:
+        raise FreshReviewError('fresh-review-fence-order-invalid')
+    ended = _timestamp(fields['ended_at'])
     used = _closed(fields['budget_used'], BudgetUsed.__dataclass_fields__, 'fresh-review-budget-used-invalid')
     fields['budget_used'] = BudgetUsed(**{key: _integer(item, 'fresh-review-budget-used-invalid')
                                         for key, item in used.items()})
     if 'launch_receipt' in fields:
         raw = fields['launch_receipt']
         fields['launch_receipt'] = launch = decode_launch_receipt(raw)
+        if ended < _timestamp(launch.started_at):
+            raise FreshReviewError('fresh-review-timestamp-order-invalid')
         if _digest(fields['launch_digest']) != canonical_digest(raw):
             raise FreshReviewError('fresh-review-launch-digest-mismatch')
         if (launch.request_id, launch.request_digest, launch.nonce, launch.operation_id, launch.fencing_epoch) != (
@@ -289,11 +293,18 @@ def decode_terminal_receipt(value):
             raise FreshReviewError('fresh-review-output-digest-mismatch')
     if outcome == TerminalOutcome.COMPLETED:
         limits = fields['launch_receipt'].enforced_budget
+        if fields['output_ref'].size > limits.max_output_bytes:
+            raise FreshReviewError('fresh-review-budget-exceeded')
         if any(getattr(fields['budget_used'], used) > getattr(limits, maximum)
                for used, maximum in (('wall_time_sec', 'wall_time_sec'), ('tool_calls', 'max_tool_calls'),
                                      ('replays', 'max_replays'), ('output_bytes', 'max_output_bytes'))):
             raise FreshReviewError('fresh-review-budget-exceeded')
         if type(fields['independent']) is not bool:
+            raise FreshReviewError('fresh-review-independent-invalid')
+        launch = fields['launch_receipt']
+        if fields['independent'] and (launch.context_mode != ContextMode.FRESH
+                or launch.child_identity == launch.parent_identity
+                or launch.context_identity == launch.parent_identity):
             raise FreshReviewError('fresh-review-independent-invalid')
         coverage = _closed(fields['coverage_receipt'], ('status', 'evidence_ref'), 'fresh-review-coverage-invalid')
         status = _choice(coverage['status'], CoverageStatus, 'fresh-review-coverage-invalid')
@@ -309,7 +320,12 @@ def decode_terminal_receipt(value):
     if outcome == TerminalOutcome.BLOCKED:
         if type(fields['launch_attempted']) is not bool:
             raise FreshReviewError('fresh-review-launch-attempted-invalid')
+        if fields['launch_attempted'] and fields['reason'] in (
+                TerminalReason.LAUNCH_UNAVAILABLE, TerminalReason.INPUT_TOO_LARGE):
+            raise FreshReviewError('fresh-review-launch-attempted-invalid')
         fields['cancel_result'] = _choice(fields['cancel_result'], CancelResult, 'fresh-review-cancel-invalid')
+        if fields['launch_attempted'] != (fields['cancel_result'] != CancelResult.NOT_REQUESTED):
+            raise FreshReviewError('fresh-review-cancel-invalid')
     return variant(**fields)
 
 

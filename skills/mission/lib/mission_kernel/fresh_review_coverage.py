@@ -95,6 +95,7 @@ def _validated(attempts, current):
         launch = getattr(receipt, 'launch_receipt', None)
         if launch is not None and (launch.adapter_registration_digest != request.adapter_registration_digest
                 or launch.received_input_digest != request.input_digest
+                or request.input_ref.size > launch.enforced_budget.max_packet_bytes
                 or not set(launch.enforced_tools).issubset(request.allowed_tools)
                 or any(getattr(launch.enforced_budget, key) > getattr(request, key)
                        for key in launch.enforced_budget.__dataclass_fields__)):

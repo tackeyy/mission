@@ -218,3 +218,85 @@ def test_empty_required_set_uses_latest_attempt_rather_than_inventing_a_required
         assert result.reason_code == 'acceptance-fresh-review-pending'
         assert result.request_id == 'request-2'
         assert judge((), (), bindings(())).reason_code == 'acceptance-fresh-review-missing'
+
+
+def altered_launch(row, *, independent=None, **changes):
+    from mission_kernel.fresh_review import canonical_digest
+    from mission_kernel.fresh_review_receipts import decode_terminal_receipt, receipt_document
+    raw = receipt_document(row.terminal_receipt)
+    raw['launch_receipt'].update(changes)
+    raw['launch_digest'] = canonical_digest(raw['launch_receipt'])
+    if independent is not None:
+        raw['independent'] = independent
+    return replace(row, terminal_receipt=decode_terminal_receipt(raw))
+
+
+@pytest.mark.parametrize('excess', [0, 1])
+def test_input_reference_obeys_launch_packet_limit(excess):
+    from mission_kernel.fresh_review_coverage import derive_effective_coverage
+    row = attempt()
+    budget = dict(vars(row.terminal_receipt.launch_receipt.enforced_budget))
+    budget['max_packet_bytes'] = row.request.input_ref.size - excess
+    row = altered_launch(row, enforced_budget=budget)
+    if excess:
+        with pytest.raises(ValueError, match='^fresh-review-launch-binding-mismatch$'):
+            derive_effective_coverage((row,), ('AC1', 'AC2'), bindings((row,)))
+    else:
+        assert derive_effective_coverage((row,), ('AC1', 'AC2'), bindings((row,))).effective_coverage == 'valid'
+
+
+@pytest.mark.parametrize('field,value', [
+    ('context_mode', 'inline'), ('child_identity', 'parent'), ('context_identity', 'parent'),
+])
+def test_each_independence_observation_alone_prevents_valid_coverage(field, value):
+    from mission_kernel.fresh_review_coverage import derive_effective_coverage
+    row = altered_launch(attempt(), independent=False, **{field: value})
+    result = derive_effective_coverage((row,), ('AC1', 'AC2'), bindings((row,)))
+    assert (result.effective_coverage, result.reason_code) == ('open', 'acceptance-fresh-review-non-independent')
+
+
+@pytest.mark.parametrize('field', ['adapter_registration_digest', 'received_input_digest', 'enforced_tools',
+                                  'wall_time_sec', 'max_tool_calls', 'max_replays', 'max_output_bytes', 'max_packet_bytes'])
+def test_each_launch_request_binding_is_checked_individually(field):
+    from mission_kernel.fresh_review import canonical_digest, request_document
+    from mission_kernel.fresh_review_receipts import decode_terminal_receipt, receipt_document
+    from mission_kernel.fresh_review_coverage import derive_effective_coverage
+    row = attempt()
+    if field.startswith('max_') or field == 'wall_time_sec':
+        row = replace(row, request=replace(row.request, **{field: getattr(row.request, field) - 1}))
+        raw = receipt_document(row.terminal_receipt)
+        raw['request_digest'] = raw['launch_receipt']['request_digest'] = canonical_digest(request_document(row.request))
+        raw['launch_digest'] = canonical_digest(raw['launch_receipt'])
+        row = replace(row, terminal_receipt=decode_terminal_receipt(raw))
+    else:
+        value = ['read-candidate'] if field == 'enforced_tools' else 'sha256:' + 'b' * 64
+        row = altered_launch(row, **{field: value})
+    with pytest.raises(ValueError, match='^fresh-review-launch-binding-mismatch$'):
+        derive_effective_coverage((row,), ('AC1', 'AC2'), bindings((row,)))
+
+
+@pytest.mark.parametrize('field', ['request_id', 'nonce'])
+def test_request_identity_reuse_is_rejected(field):
+    from mission_kernel.fresh_review_coverage import derive_effective_coverage
+    first, second = attempt('pending'), attempt('pending', number=2)
+    second = replace(second, request=replace(second.request, **{field: getattr(first.request, field)}))
+    with pytest.raises(ValueError, match='^fresh-review-identity-reused$'):
+        derive_effective_coverage((first, second), ('AC1', 'AC2'), bindings((first,)))
+
+
+@pytest.mark.parametrize('status', ['pending', 'dispatch-unknown', 'running', 'failed', 'blocked', 'abandoned-unknown'])
+def test_attempt_status_cannot_contradict_a_completed_terminal(status):
+    from mission_kernel.fresh_review_coverage import derive_effective_coverage
+    row = replace(attempt(), status=status)
+    code = 'fresh-review-attempt-invalid' if status in ('pending', 'dispatch-unknown', 'running') else 'fresh-review-terminal-binding-mismatch'
+    with pytest.raises(ValueError, match='^' + code + '$'):
+        derive_effective_coverage((row,), ('AC1', 'AC2'), bindings((row,)))
+
+
+def test_equal_priority_partial_failures_use_sorted_criterion_identifiers():
+    from mission_kernel.fresh_review_coverage import judge_fresh_review
+    rows = (attempt(), attempt('pending', number=2, criteria=('AC2',)),
+            attempt('pending', number=3, criteria=('AC1',)))
+    for criteria in (('AC1', 'AC2'), ('AC2', 'AC1')):
+        result = judge_fresh_review(rows, criteria, bindings(rows))
+        assert (result.reason_code, result.request_id) == ('acceptance-fresh-review-pending', 'request-3')
