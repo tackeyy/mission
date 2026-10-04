@@ -230,7 +230,34 @@ def test_installed_nested_factory_is_resolved_from_the_fresh_module(installed_ad
     assert load_adapter(resolve_adapter('neutral')).observe_parent().thaw() == {'parent_identity': 'neutral-parent'}
 
 
-def test_compile_receives_the_identical_read_and_hashed_bytes(installed_adapter, monkeypatch):
+@pytest.mark.parametrize('attribute', ['café', '工場'], ids=['latin-accent', 'unicode-name'])
+def test_unicode_factory_identifier_is_loaded_from_pinned_bytes(installed_adapter, attribute):
+    from fresh_review_runtime import resolve_adapter, load_adapter
+
+    module, metadata, _, register = installed_adapter
+    module.write_text(ADAPTER_SOURCE + f'\ndef {attribute}(): return Adapter()\n', encoding='utf-8')
+    (metadata / 'entry_points.txt').write_text(
+        f'[mission.fresh_review_adapters]\nneutral = neutral_adapter:{attribute}\n', encoding='utf-8')
+    register()
+    assert load_adapter(resolve_adapter('neutral')).observe_parent().thaw() == {'parent_identity': 'neutral-parent'}
+
+
+def test_unicode_module_identifier_is_loaded_from_pinned_bytes(installed_adapter):
+    from fresh_review_runtime import resolve_adapter, load_adapter
+
+    module, metadata, _, register = installed_adapter
+    module.write_text(ADAPTER_SOURCE)
+    register()
+    module.with_name('café.py').write_bytes(module.read_bytes())
+    (metadata / 'entry_points.txt').write_text(
+        '[mission.fresh_review_adapters]\nneutral = café:factory\n', encoding='utf-8')
+    try:
+        assert load_adapter(resolve_adapter('neutral')).observe_parent().thaw() == {'parent_identity': 'neutral-parent'}
+    finally:
+        sys.modules.pop('café', None)
+
+
+def test_compile_receives_the_identical_read_and_hashed_bytes_and_exec_uses_its_result(installed_adapter, monkeypatch):
     import builtins
     from types import SimpleNamespace
     import fresh_review_runtime as runtime
@@ -240,7 +267,7 @@ def test_compile_receives_the_identical_read_and_hashed_bytes(installed_adapter,
     register()
     pin = runtime.resolve_adapter('neutral')
     original_read, original_hash = runtime.read_stable_bytes, runtime.hashlib.sha256
-    reads, hashed, compiled = [], [], []
+    reads, hashed, compiled, executed = [], [], [], []
 
     def track_read(path):
         raw = original_read(path)
@@ -256,14 +283,23 @@ def test_compile_receives_the_identical_read_and_hashed_bytes(installed_adapter,
         # Equal contents alone would let an unchecked filesystem re-read run.
         assert any(source is raw for raw in reads)
         assert any(source is raw for raw in hashed)
-        compiled.append(source)
-        return builtins.compile(source, *args, **kwargs)
+        code = builtins.compile(source, *args, **kwargs)
+        compiled.append(code)
+        return code
+
+    def checked_exec(code, namespace):
+        # Executing another read would bypass the verified compilation entirely.
+        assert len(compiled) == 1 and code is compiled[0]
+        assert namespace is runtime.sys.modules[pin.module].__dict__
+        executed.append(code)
+        return builtins.exec(code, namespace)
 
     monkeypatch.setattr(runtime, 'read_stable_bytes', track_read)
     monkeypatch.setattr(runtime, 'hashlib', SimpleNamespace(sha256=track_hash))
     monkeypatch.setattr(runtime, 'compile', checked_compile, raising=False)
+    monkeypatch.setattr(runtime, 'exec', checked_exec, raising=False)
     assert runtime.load_adapter(pin).observe_parent().thaw() == {'parent_identity': 'neutral-parent'}
-    assert len(compiled) == 1
+    assert len(compiled) == len(executed) == 1
 
 
 @pytest.mark.parametrize('foreign_read', range(1, 7), ids=['read-1', 'read-2', 'read-3', 'read-4', 'read-5', 'read-6'])
@@ -602,8 +638,9 @@ def test_malformed_installed_entry_point_is_reason_coded(installed_adapter, valu
 @pytest.mark.parametrize('value', [
     'neutral_adapter', 'neutral_adapter:', 'neutral_adapter:factory()', 'neutral_adapter:factory..create',
     'neutral_adapter:9factory', 'neutral_adapter:factory extra', 'neutral_adapter:factory/other',
-    'neutral_adapter:factory.',
-], ids=['missing-attr', 'empty-attr', 'call', 'empty-component', 'leading-digit', 'space', 'slash', 'trailing-dot'])
+    'neutral_adapter:factory.', 'neutral_adapter:class', 'neutral_adapter:None', 'neutral_adapter:Factory.class',
+], ids=['missing-attr', 'empty-attr', 'call', 'empty-component', 'leading-digit', 'space', 'slash', 'trailing-dot',
+        'keyword-class', 'keyword-none', 'nested-keyword'])
 def test_invalid_attribute_is_rejected_before_module_execution(installed_adapter, value):
     from fresh_review_runtime import resolve_adapter, load_adapter
     from mission_kernel.fresh_review import FreshReviewError

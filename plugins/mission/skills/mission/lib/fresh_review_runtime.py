@@ -12,6 +12,7 @@ import importlib.machinery
 import importlib.metadata
 import importlib.util
 import json
+import keyword
 import os
 from pathlib import Path
 import re
@@ -31,7 +32,6 @@ _NAME = re.compile(r'[a-z][a-z0-9-]{0,63}\Z')
 _DISTRIBUTION = re.compile(r'[a-z0-9][a-z0-9._-]{0,127}\Z')
 _DIGEST = re.compile(r'sha256:[0-9a-f]{64}\Z')
 _VERSION = re.compile(r'[A-Za-z0-9][A-Za-z0-9.!+_-]{0,127}\Z')
-_MODULE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\Z')
 
 
 @dataclass(frozen=True)
@@ -226,11 +226,12 @@ def _resolve_adapter(identifier):
         module = entry.module
         if entry.extras:
             raise FreshReviewError('fresh-review-adapter-entry-point-invalid')
-        if not _MODULE.fullmatch(entry.value.partition(':')[2].strip()):
+        if any(not part.isidentifier() or keyword.iskeyword(part)
+               for part in entry.value.partition(':')[2].strip().split('.')):
             raise FreshReviewError('fresh-review-adapter-entry-point-invalid')
     except (AttributeError, AssertionError, TypeError, ValueError) as exc:
         raise FreshReviewError('fresh-review-adapter-entry-point-invalid') from exc
-    if not isinstance(module, str) or not _MODULE.fullmatch(module):
+    if not isinstance(module, str) or any(not part.isidentifier() for part in module.split('.')):
         raise FreshReviewError('fresh-review-adapter-entry-point-invalid')
     if _source_digest(module) != registration.source_digest:
         raise FreshReviewError('fresh-review-adapter-source-invalid')
