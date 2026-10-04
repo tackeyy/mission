@@ -46,18 +46,49 @@ E はこの保証を残し、E に link のない legacy findings の migration/
 
 **codec と writer**: キー欠落だけが empty projection。null、未知 schema/field、破損 ref、重複 ID、順序逆転、origin/receipt 不一致は理由付き拒否。typed projection と保存面が異なる場合 encoder も拒否する。state bytes の既存上限を緩めず、[skills/mission/lib/mission_kernel/json_codec.py:12-12][S38] 超過は拒否し履歴を切り捨てない（履歴本文の置き場と終端の予約は直後の「容量と durable な記録」の決定に従う）。
 **決定（容量と durable な記録）**: state に置くのは上限付きの要約と参照だけとする。lineage ごとの observations/attempts の本文、比較履歴、`mission-repair-event/1` の event 本文、baseline の manifest は、D と同じ content-addressed な immutable effects（公開 commit と同じ effects commit で保存）に置き、state の lineage は各 attempt・event の ref・digest・状態・順序だけを持つ。
-終端を必ず記録するための予約の定義と検査の時点は、下記「予約の一本化（最終決定）」に従う（本段落の旧定義と、その次の「予約の総量」節の検査規則は、そこで一本化した規則に置き換える）。effects への保存が容量・IO で失敗した場合は、予約分の中で `blocked` 終端（理由付き）を記録し、過去の証拠や履歴を切り捨てない。予約が足りず新しい attempt を開始できないときは、status で理由付きに表示する。
-**決定（予約の総量と effects 保存失敗時の終端）**:
-- kernel は、開始済みで終端していない attempt（E3 の disposition を含む）の数と固定の予約量から「確保済み予約」を導出する。`repair begin` は、開始後の state bytes に**新しい attempt を含む全 pending attempt の予約総量**を足しても既存上限以内のときだけ受け付ける。attempt 以外のあらゆる state mutation も、確保済み予約の領域を使えず、超える場合は state を変えず `repair-state-capacity-exhausted` で拒否する。終端要約を追記した attempt の予約はその commit で解放する。
-- 終端の公開は二段とする。まず state と effects を同じ公開単位で保存する（既存の generation staging、[skills/mission/lib/mission_persistence/local_uow.py:1587](https://github.com/tackeyy/mission/blob/8f40f542f8fed8660728234d41295ee3212deeab/skills/mission/lib/mission_persistence/local_uow.py#L1587)）。effects の staging が容量・IO で失敗した場合は、effects を含めない state のみの commit で、その attempt の `blocked` 終端要約（理由付き、event ref・比較 ref は理由付き absent）を保存する。この commit は予約の範囲に収まる。state のみの commit も IO で失敗した場合、attempt は pending のまま残り、fence 付きの `repair reconcile` が同じ二段を再試行する。どの経路でも成功を作らず、過去の証拠を落とさない。
-- E2・E3 の段階では event 機構が無いため、終端要約の event ref は `absent(reason="events-not-enabled")` と明示する。E4 で event を導入した後の遷移からだけ event を出し、それ以前の遷移を遡って event 化しない（event の無い期間を未測定として扱うことを E から I〈#884〉への要求とする。I 側の確定事項ではない）。
-**決定（設計レビュー 3 巡目の後に追加。E2〈と E3〉の実装着手前に設計レビューを受け直す）**:
-- 予約の検査は `repair begin` だけでなく、E3 の disposition 開始と、開始済み attempt の終端前の書込み（fence 付きの実行 intent、reconcile の途中記録など）を含む**全ての state mutation の適用後**に行う。各 attempt の予約は、その attempt 自身の終端前の書込み（種類ごとに固定の上限サイズ）と終端要約をまとめて確保する。attempt 自身の書込みはその予約から消費し、他の mutation は予約領域を使えない。
-- （置き換え済み）staging 成功後の公開失敗を含む回復は、下記「公開の回復は head を観測して判定する」に従う。head を観測せずに「進んでいない」とみなす旧規則は廃止する。
-**決定（予約の一本化・公開の回復・E1 の stale。PR #904 の独立 Checker の指摘を受けて追加。E2・E3 着手前の設計再レビューの対象）**:
-- **予約の一本化（最終決定）**: 予約は attempt ごとに「その attempt 自身の終端前の書込み（種類ごとに固定の上限サイズ）＋終端要約」をまとめて確保し、確保済み予約はその総和とする。これとは別に、停止と回復に要る mutation（halt / mark-halt、lease の解放・takeover・更新、既存 attempt の `repair reconcile`、dispatch 済みの D request の終端 commit）のための固定の system 予約を置く。検査は**全ての state mutation の適用後**に行い、通常の mutation は「既存上限 − system 予約 − 確保済み予約」以内、停止と回復の mutation は「既存上限 − 確保済み予約」以内でなければならない（system 予約は使えるが attempt の予約は使えない）。attempt 自身の書込みはその attempt の予約から消費する。超える場合は state を変えず `repair-state-capacity-exhausted` で拒否する。
-- **公開の回復は head を観測して判定する**: effects の staging 後・公開後のどの時点で失敗しても、`repair reconcile`（現在の fence の下）はまず公開 head を読む。head が当該 attempt の終端を含む generation へ進んでいれば終端は記録済みとして何も追記しない。head が進んでいなければ、staged generation が無傷なら公開を冪等に再試行し、無傷でなければ state のみの `blocked` 終端 commit を行う。crash の権威境界は head の置換であり（[skills/mission/tests/test_issue503_fenced_commit.py:786](https://github.com/tackeyy/mission/blob/8f40f542f8fed8660728234d41295ee3212deeab/skills/mission/tests/test_issue503_fenced_commit.py#L786) の `test_head_replacement_is_the_crash_authority_boundary` が固定）、同じ attempt に終端を 2 つ作らない。
-- **E1 の stale は読取時に導出するだけとする**: E1〜E3 の間、stale は現在の候補 map と receipt の binding の差から status/completion の読取時に毎回導出し、invalidation を永続化しない（event 機構は E4 から）。E4 で event を導入した後は、stale を観測した最初の mutation が invalidation event を一度だけ追記する。
+終端を必ず記録するための容量の確保は、下記「決定（容量予約の再設計）」に従う。effects への保存が容量・IO で失敗した場合は、確保済みの予約の中で `blocked` 終端（理由付き）を記録し、過去の証拠や履歴を切り捨てない。予約が足りないときは、新しい D request・attempt・disposition を**開始前に**理由付きで拒否し、status に表示する。開始した後で容量を理由に拒否しない。
+**（置き換え済み）旧決定「予約の総量と effects 保存失敗時の終端」「設計レビュー 3 巡目の後に追加」「予約の一本化・公開の回復・E1 の stale」**: 固定量の予約・D request の終端と reconcile まで含めた固定の system 予約（新しい S_sys は halt と lease takeover だけに限る）・「staged generation が無傷なら公開を再試行する」・「E1〜E3 の stale は読取時に導出するだけで永続化しない」の各規則は、設計再レビュー round 1 の指摘（High 2 件・Medium 1 件）を受けて、下記の「容量予約の再設計」「stale の保持」「公開の回復」に置き換えた。旧規則を根拠に実装しない。旧決定のうち残す規則は次の 2 項だけである。
+- 終端の公開は二段とする。まず state と effects を同じ公開単位で保存する（既存の generation staging、[skills/mission/lib/mission_persistence/local_uow.py:1587](https://github.com/tackeyy/mission/blob/8f40f542f8fed8660728234d41295ee3212deeab/skills/mission/lib/mission_persistence/local_uow.py#L1587)）。effects の staging が容量・IO で失敗した場合は、同じ process の中で effects を含めない state のみの commit を行い、その attempt の `blocked` 終端要約（理由付き、event ref・比較 ref は理由付き absent）を保存する。この commit の増分は attempt の予約に含まれる。state のみの commit も失敗した場合、attempt は pending のまま残り、下記「公開の回復」の `repair reconcile` が判定する。どの経路でも成功を作らず、過去の証拠を落とさない。
+- E2・E3 の段階では event 機構が無いため、終端要約の event ref は `absent(reason="events-not-enabled")` と明示する。E4 で event を導入した後の遷移からだけ event を出し、それ以前の遷移を遡って event 化しない（event の無い期間を未測定として扱うことを E から I〈#884〉への要求とする。I 側の確定事項ではない）。下記「stale の保持」の marker は event ではなく state の記録であり、E1 から書く。
+
+**決定（容量予約の再設計。設計再レビュー round 1 の High 1。E0 で実装）**:
+- **固定の予約では足りない理由**: D request には件数の上限が無い（受付の `prepare_request_state` は nonce と request_id の重複だけを拒否する、[S40]）。consume は最大 256 KiB の result を state に凍結する（[S41]）。D2b の completed terminal の findings 数にも上限が無い（[R01]）。lease takeover は takeover のたびに lease_history を 1 件追記する（[S42]）。総量 4 MiB の検査（[S43]・[S44]）だけでは、書込み種別ごとの最大増分を検査できない。
+- **書込み種別と最大増分**: kernel に閉じた書込み種別の表を置き、種別ごとに「encode 後の bytes の最大増分 Δ」を定数で持つ。state の encoder（[S45]）と D の result 長の検査（[S46]）はどちらも `ensure_ascii=False`・`sort_keys`・同じ区切りで encode するので、state へ埋め込んだ result 部分は `max_output_bytes` を超えない。Δ は推定値で決めず、種別ごとに「全 field を上限長にした最大形」を実際に encode して測る test で固定する。上限長の無い field を含む種別は Δ を定義できないため、その field を effects へ移すか閉じた上限を足すまで E0 を完了としない。初期の種別は次のとおり。
+  - D request の受付・dispatch（reserve）・consume・terminal。terminal には E1 の lineage 導入を含める。E1 は 1 terminal あたり最大 K 件の finding に lineage を作り、K を超えた分は固定長の overflow record 1 件にまとめる。overflow record は、D の新しい attempt で K 件以内に収まるまで `acceptance-unresolved-finding` として completion を止める（fail-closed。D の terminal schema は変えない）。K の値は E0 で Δ と合わせて決め、本書では固定しない
+  - repair attempt の begin・実行 intent・reconcile の途中記録・終端要約、disposition の各段
+  - 下記「stale の保持」の `last_candidate_change` slot（lineage 導入時に確保し、以後は上書きだけなので増分 0）
+  - halt / mark-halt、lease takeover の履歴 1 件
+- **予約は state から導出し、別の台帳を持たない**: 終端していない item（D request の record、repair attempt、disposition）ごとに、残りの予約を「現在の段より後の段の Δ の和」と定める。段を進める書込みの増分はその段の Δ 以下で、残りの予約はちょうど Δ だけ減るので、「現在の bytes ＋ 残り予約の総和」は増えない。**消費は段の前進、解放は終端**（終端で残りの予約は 0 になり、Δ との差の未使用分も同時に戻る）。
+- **受付時に全段を確保する**: D request は受付の mutation（[S40] の `prepare_request_state`）、repair attempt は `repair begin`、disposition は prepare で、その item の全段の予約を足して検査する。超える場合は item を作らず `state-capacity-exhausted` で拒否する。dispatch（`reserve_request`、[S47]）と consume（[S41]）は確保済みの段なので、追加の確保はしない。**dispatch・実行の前にしか容量で拒否しない。**
+- **検査式**: 全ての state mutation の適用後に、通常の mutation には `len(encoded) + Σ残り予約 ≤ STATE_LIMIT − S_sys` を要求する。S_sys は halt / mark-halt と lease takeover N_L 回分の固定の予約で、停止と lease の mutation だけが使える。予約済み item の段の前進は上の不変条件により必ず通る。通らなければ Δ の定数が誤っている欠陥なので `state-capacity-invariant-broken` で拒否し、test で Δ を直す。mutation が停止系かどうかは caller の申告ではなく、kernel が base と proposed の差分から判定する（変更が halt と lease の field に限られる場合だけ停止系）。
+- **lease takeover**: 履歴の件数を事前に限れない（[S42]）。S_sys の残りが 1 件分を下回ったら takeover を `state-capacity-exhausted` で拒否する。この状態から抜ける手段（履歴の圧縮、新しい session への移行）は E の範囲外で、§9 の owner 未決事項とする。`LeaseHistoryEntry`（[S48]）の各 field の長さ上限は本書で照合していない（**UNKNOWN**）。上限が無ければ E0 で閉じた上限を足す。takeover による履歴の追記が stage 時点の state bytes に含まれるかも **UNKNOWN**（commit は admit_lease を再計算する、[S49]）。含まれない場合、E0 は commit 側でも同じ式で判定する。
+- **検査する場所（全 writer）**: kernel の純関数 `state_capacity_verdict(base, proposed, encoded_len)` を 1 つだけ置き、次から呼ぶ。(a) v5 の stage（[S50] の `stage`。4 MiB を検査する `stage_generation`〈[S44]〉の手前）。(b) v4 flat の直接 save（[S51] の `_write_state` 呼出しの前）。(c) v5 container の save（[S52]）は fenced stage へ渡るので (a) で検査する。(d) init / reinit の書込み（[S53]）。B の verification receipt、score、specialist evidence など予約を持たない書込みは、すべて通常の mutation として (a)(b) で検査する。`bin/mission-state.py` の `write_state` 注入箇所（[S54]）が全て (a)(b)(d) を通るかは全件を照合していない（**UNKNOWN**）。E0 は注入箇所の inventory test を置き、通らない経路があれば同じ判定を通す。
+- **予約を持たない書込み**: B の `verification run` は実行前に receipt の Δ で事前に判定し、公開時に再判定する。公開時に超えた場合（間に他の mutation が入った場合）は receipt を公開せず理由付きで拒否する。B receipt は予約された終端ではないので、これで終端の保証は崩れない。
+- **未終端の件数上限は state に置かない**: 正しさには不要である。受付時の容量検査が実質の上限になる（D request 1 件の予約は result だけで 256 KiB を超える）。dispatch の並行数・子プロセス数の上限は F（[Issue 881: 修復と最終検証の予算を予約して実行を制御する](https://github.com/tackeyy/mission/issues/881)。本文の「子プロセスを無制限に増やさない」）の範囲とし、E の終端保証は F の上限に依存しない。
+- **E と F の境界**: state bytes の予約は E に置く。F は時間・phase の予算で、#881 本文の依存は「E の merge 後」である。F の設計書は本書の照合時点で未作成（`docs/design/` に #881 の文書が無い）。F が dispatch 前の拒否を足す場合は、本決定の受付時検査より前に置いてよいが、容量の検査を置き換えない。F の status 表示は `state_capacity_verdict` の残量を読むだけにする。
+- **実装の置き場所**: 新しい子 E0 として E1 の前に置く（§9）。E1 の lineage 導入は D terminal の Δ を増やすので、E0 より前に E1 を入れると D の終端が容量で失敗しうる。
+
+**決定（stale の保持。設計再レビュー round 1 の High 2。E1 で実装し、旧「E1 の stale は読取時に導出するだけ」を置き換える）**:
+- **読取だけの観測は保持できない**: status は R1.query で state を書かず（§8）、拒否された command は state を変えない（[T08] の `test_alternate_completion_and_evidence_writes_reject_atomically`）。そこで「候補の変化を観測した」を **commit に含まれた観測**に限り、completion の受入れを候補と commit の順序に束縛する。
+- **marker**: 各 lineage は固定長の `last_candidate_change` slot（`{generation, candidate_map_digest, operation_id}` または `absent`）を持つ。slot は lineage 導入時に確保し、以後は上書きだけで更新する（増分 0。上の Δ の表に含む）。
+- **書く mutation**: 候補を捕捉する全ての mutation（D request の受付と terminal、`verification run`、`repair begin` / `reverify` / `reconcile`、disposition、mark-passes / closeout の捕捉〈[S10]〉）は、捕捉した候補 map が verified の reverification receipt または candidate-bound disposition の binding と異なる lineage について、**同じ commit で** slot を更新する。E1 から行い、E4 を待たない。
+- **completion の条件**: mark-passes・closeout・force preflight・最終 kernel transition で共通の guard は、verified または candidate-bound rejected を「除ける finding」に数える条件として、(1) completion 自身が捕捉した候補 map の該当 replay snapshot digest が receipt の binding と一致し、かつ (2) その receipt を公開した commit の generation が `last_candidate_change.generation` より大きいことを要求する（slot が `absent` なら (1) だけ）。満たさなければ `acceptance-unresolved-finding`（attempt 理由は `repair-reverification-stale`）。
+- **帰結**: A で verified → いずれかの mutation が候補 B を捕捉して slot を更新 → bytes を A に戻す → completion は (2) を満たさず拒否する。新しい generation の reverification receipt で解消する。status だけが B を見た場合と、B を見た command が拒否された場合は slot が更新されない。そのとき completion は、A の bytes を A に束縛された receipt で判定する。**完了時の bytes と検証時の bytes の一致を条件にしているので fail-closed は保たれる。** §4 の「元 bytes に戻しても invalidation を消さない」は、commit に記録された変化（slot）に対する規則である。
+- **表示**: status は slot（durable な観測）と、読取時の差分（durable でない観測）を別の欄で返す。
+- **event との関係**: E4 の `verification-invalidated` event は、E4 以降に slot を更新した commit の同じ effects commit で出す。E1〜E3 の期間の slot 更新は event 化しない（上の events-not-enabled の規則と同じ）。
+
+**決定（公開の回復。設計再レビュー round 1 の Medium 3〈挙動〉。E2 で実装し、旧「staged generation が無傷なら公開を再試行」を置き換える）**:
+- **staged generation は再利用しない**: stage は同じ instance の registry に束縛され（[S55]）、commit は registry の digest 一致（[S56]）と元 base の CAS（[S57]）を要求する。別 process の `begin` は durable prepare の回復を先に行い（[S58]→[S59]）、head が base なら rollback して stage を破棄し（[S60]）、head が target なら roll forward して確定する（[S61]）。prepare の無い stage は孤立として破棄される（[S62]）。したがって、crash 後に stage を拾って公開し直す経路は既存の契約に無い。
+- **再試行の単位は operation ID**: 終端 commit の operation ID は attempt ID・終端 variant・結果 digest から domain-separated に導出する。同じ内容なら同じ ID で、記録済みの結果を返す。同じ ID で intent が違うと既存の検査が `operation-intent-collision` で拒否する（[S63]・[S64]）ので、内容が違う終端には別の ID を使う。
+- **`repair reconcile` の手順**（現在の fence の下で行う）:
+  1. reconcile 用の request で repository の `begin` を呼ぶ。`begin` は durable prepare の回復を先に行う（[S58]）。
+  2. 回復後の head で attempt が終端済みなら、何も追記せず既存の終端を返す（元の公開が roll forward で確定した場合を含む）。
+  3. attempt の intent に元の終端 operation ID が保存されていれば `lookup_operation`（[S65]）で記録を引き、あれば記録済みの結果を返す。
+  4. attempt が pending のままなら、実行結果は失われている（stage は破棄済み）。結果を作り直さず、新しい operation として `blocked(reason="publication-result-lost")` の終端を stage・commit する。B の実行はやり直さない（新しい attempt で行う）。
+  5. precondition の CAS に負けた場合（`head-cas-mismatch`。retry 可能、[S66]）は `run_with_base_retry`（[S32]）で新しい head から手順 2 の判定をやり直す。final authority の CAS 失敗（retry 不可、[S66]）では再試行せず、reconcile を最初から起動し直す（`begin` の回復が durable prepare を確定か rollback に分ける）。
+- **同じ attempt の終端が高々 1 つである根拠**: 終端の reducer は base の attempt が非終端のときだけ適用し、終端済みなら `repair-attempt-already-terminal` で既存の終端 ref を返す。commit は base CAS（[S57]）を通るので、現在の head の上で判定した終端だけが公開される。元の writer の遅れた commit は、lease takeover 後に `lease-precondition-changed`（[S67]）で拒否される。
+- **persistence の変更**: E2 は fenced commit の回復契約と公開 API を変えない（使うのは `begin`・`lookup_operation`・`read`・`stage`・`commit` と retry loop だけ）。persistence に入る変更は E0 の容量検査の呼出しだけである。
+- §4 の「exact 保存済み結果を回収できれば current fence で reconcile」は、上の手順 2〜3（head または operation record に記録済みの結果）を指す。それ以外の保存場所から結果を回収しない。
 新予約キーとその descendants は generic set、init/reinit、compatibility delta、review/score import、specialist evidence、downgrade の authority 注入から保護する。現 generic-set 専用 field と specialist authority 遮断を拡張する。[skills/mission/lib/mission_kernel/commands.py:397-455][S09][skills/mission/lib/mission_kernel/transitions.py:1837-1861][S30]
 全 D terminal finding を同じ commit の reducer で lineage に導入する（未merge D writer への追加）。E 導入前の保存済み D rows は専用初回 mutation で決定的に取り込む。読取や completion で projection が欠落していても **D の全 origin と union して open とみなす**。最新 review だけから再構成しない。不正な projection を空とみなして通す経路を作らない。
 
@@ -105,16 +136,16 @@ receipt は origin/lineage/repro/contract/candidate、判断対象の evidence r
 | contract/requirement/policy/toolchain binding が変化・読取不能 | 関連する全証拠。凍結 contract を差替えず理由付き blocked。migration で成功を付与しない |
 | 新しい D attempt が準備・実行・失敗 | D の最新 attempt 規則をそのまま適用。E の修復成功が古い search/coverage の fallback を許可しない |
 
-stale は status/completion の **読取時にも現候補との差から導出**する。mutation がなかったから valid とはしない。E4 以降は、次の mutation が invalidation event を一度だけ append し、実効open を durable に反映する（E1〜E3 の間は読取時の導出だけ。上記「E1 の stale」の決定）。候補が一度変化したと観測されたら、元 bytes に戻しただけでは invalidation を消さず、再実行が必要。D も現在候補に束縛された新 attempt を要する。過去候補でverifiedだった事実と現在未検証を表示上分離する。
+stale は status/completion の **読取時にも現候補との差から導出**する。mutation がなかったから valid とはしない。これに加え、E1 から、候補を捕捉した mutation が同じ commit で lineage の `last_candidate_change` slot を更新し、completion は receipt の generation が slot より新しいことを要求する（§2「stale の保持」の決定。旧「E1〜E3 は読取時の導出だけ」は置き換え済み）。E4 以降は slot を更新した commit が同じ effects commit で invalidation event を出す。候補の変化が commit に記録されたら、元 bytes に戻しただけでは invalidation を消さず、再実行が必要。commit に含まれない観測（status の読取、拒否された command）は保持されないが、そのときも completion は完了時の bytes と検証時の bytes の一致を要求する。D も現在候補に束縛された新 attempt を要する。過去候補でverifiedだった事実と現在未検証を表示上分離する。
 
 既存 resume/reactivate は control を更新する reducer である。[skills/mission/lib/mission_kernel/transitions.py:869-947][S11] E はそれを第二の lifecycle に置き換えず、repair projection と保留・未実行 attempt・履歴をそのまま codec から復元する。resume 時に候補を再観測し、unrepaired/unverified と stale を返す。iteration 増加で collection を空にしない。
 
-reverification 実行は短い fenced intent 保存→lock を放して B 実行→候補再取得→fenced terminal publication。execution intent は D と同じ `dispatch-unknown/running/terminal` の共有規律で、finding lifecycle とは別の実行観測とする。中断後の unknown を自動実行し直さない。exact 保存済み結果を回収できれば current fence で reconcile、不明なら open/blocked で終端化し、新しい operation で再実行する。旧 writer の遅着は拒否。公開後・応答前の停止は同一 operation の保存結果を返す。
+reverification 実行は短い fenced intent 保存→lock を放して B 実行→候補再取得→fenced terminal publication。execution intent は D と同じ `dispatch-unknown/running/terminal` の共有規律で、finding lifecycle とは別の実行観測とする。中断後の unknown を自動実行し直さない。head または operation record に記録済みの結果があれば current fence で reconcile してそれを返し、無ければ `blocked(reason="publication-result-lost")` で終端化し、新しい attempt で再実行する（§2「公開の回復」の決定。staged generation の再利用はしない）。旧 writer の遅着は拒否。公開後・応答前の停止は同一 operation の保存結果を返す。
 既存 operation replay が歴史的 state を返す仕組み、fenced lease の旧 token 拒否、transition/effects の公開を再利用する。[skills/mission/lib/mission_application/evidence.py:199-250][S12][skills/mission/lib/mission_persistence/legacy_v4.py:714-773][S13][skills/mission/lib/mission_persistence/fenced_commit.py:1465-1500][S36] v4 flat は既存 lock/lease/effect publication を維持し、v5 と同じ世代CASを持つと主張しない。公開経路は v4 flat と v5 container/v4 payload、closed v5 は typed codec/pure reducer に限定し、公開bridgeを新設しない。[skills/mission/lib/mission_persistence/legacy_v4.py:714-773][S13][skills/mission/lib/mission_persistence/fenced_commit.py:1465-1500][S36][docs/design/689-fresh-review-receipt.md:239-273][D03]
 
 ## 5. Completion gate
 
-決定: D3 の条件5を pure `effective_unresolved_findings` に接続する。D が導入した全 finding origins と E lineage を照合し、対応 lineage 欠落、open、repairing、deferred、stale verified、無効 disposition は未解決。required obligation または禁止副作用に関連すれば **High/Medium/Low 全て** `acceptance-unresolved-finding`。severity は優先順位と報告にだけ使う。[docs/design/689-fresh-review-receipt.md:239-273][D03]
+決定: D3 の条件5を pure `effective_unresolved_findings` に接続する。D が導入した全 finding origins と E lineage を照合し、対応 lineage 欠落、open、repairing、deferred、stale verified（§2「stale の保持」の (1)(2) を満たさないものを含む）、無効 disposition、findings 超過の overflow record（§2「容量予約の再設計」）は未解決。required obligation または禁止副作用に関連すれば **High/Medium/Low 全て** `acceptance-unresolved-finding`。severity は優先順位と報告にだけ使う。[docs/design/689-fresh-review-receipt.md:239-273][D03]
 
 有効な verified または §3 の独立 rejected がある finding だけを除ける。関係の shape が不正なら拒否、関係が不明なら open obligation として保守的に遮断する。optional criterion でも required requirement を指す・禁止副作用に関係する場合は免除しない。元 ledger に context と記された義務の発見も D の supplemental open obligation を保持する。[docs/design/689-fresh-review-receipt.md:132-237][D02]
 
@@ -198,28 +229,33 @@ CIはPython shards→`make test-shard`→tracked testsの選択で配線され�
 
 ## 9. Reviewed lines・分割・orchestrator判断
 
-予測reviewed linesは **2,900〜3,800行**（追加+削除、未実測）。canonical実装、codec/command配線、対応回帰、inventory、利用文書を含み、配布mirrorを除く。repoは600行で分割しない理由、1,400行で分割を要求する。[AGENTS.md:116-172][S25] 一括実装PRは提案しない。各600行以上の子は閉じたcommand familyのproducer/consumer/codec/拒否保証を同時に成立させる必要を説明し、実diffを再計測する。
+予測reviewed linesは **3,740〜4,950行**（追加+削除、未実測。設計再レビュー round 1 の決定で E0 を追加し、E1〜E3 を増やした。旧見積は 2,900〜3,800行）。canonical実装、codec/command配線、対応回帰、inventory、利用文書を含み、配布mirrorを除く。repoは600行で分割しない理由、1,400行で分割を要求する。[AGENTS.md:116-172][S25] 一括実装PRは提案しない。各600行以上の子は閉じたcommand familyのproducer/consumer/codec/拒否保証を同時に成立させる必要を説明し、実diffを再計測する。
 
 子の番号は未起票。以下は各1PRで閉じられる提案で、起票・本文変更は本ステップの範囲外。
 
 | 順序 | 見積 | 子の受入条件と安全な中間状態 |
 |---|---:|---|
-| E1: durable lineageとunresolved gate | 750〜1,000 | D3依存。全D originsのtyped lineage、v4/v5 codecs、汎用writer保護、resume/stale、status、completion unionを一つのPRで完結。解決commandは未公開なので必須findingは全て遮断 |
-| E2: repair/replayの原子的再検証 | 850〜1,100 | E1依存。begin/reverify/reconcile、同一反例failed→新候補passed、immutable receipt/effects、latest/unknown/fence、最小CLI失敗→修復→成功経路。独立disposition未実装なので棄却は不可 |
-| E3: 独立disposition | 650〜850 | E2とD2 runtime契約依存。専用request/terminal、deferred/rejected、scope/alias/trust判定を一つのPRで完結。adapter未対応はblocked、required risk受容を成功にしない |
+| E0: state 容量の予約 | 650〜850 | D1（受付・consume）と D2b（terminal 型）依存。§2「容量予約の再設計」の書込み種別と Δ の定数・最大形の encode test、state から導出する予約、受付時の全段確保、全 writer（v5 stage・v4 flat save・init/reinit）の検査、S_sys と lease takeover、`write_state` 注入箇所の inventory test、status の残量表示を完結。lineage は作らない |
+| E1: durable lineageとunresolved gate | 890〜1,200 | D3とE0依存。§2「stale の保持」の slot と同じ commit での更新・completion の (1)(2)、1 terminal あたり K 件の lineage と overflow record を含む。全D originsのtyped lineage、v4/v5 codecs、汎用writer保護、resume/stale、status、completion unionを一つのPRで完結。解決commandは未公開なので必須findingは全て遮断 |
+| E2: repair/replayの原子的再検証 | 880〜1,160 | E1依存。begin/reverify/reconcile（§2「公開の回復」の手順。内容から導出する終端 operation ID、`publication-result-lost`、CAS 敗北時の再判定。fenced commit の回復契約は変えない）、同一反例failed→新候補passed、immutable receipt/effects、latest/unknown/fence、最小CLI失敗→修復→成功経路。独立disposition未実装なので棄却は不可 |
+| E3: 独立disposition | 670〜890 | E2とD2 runtime契約依存。disposition の各段を E0 の予約に載せ、candidate-bound disposition の slot 判定を含む。専用request/terminal、deferred/rejected、scope/alias/trust判定を一つのPRで完結。adapter未対応はblocked、required risk受容を成功にしない |
 | E4: 比較履歴・event・最終統合 | 650〜850 | E3依存。before/after normal/consumer/evaluator refs、regression/unmeasured、不変event/export、保持証拠と再開、公開利用手順とinventoryを完結。Iの集計ロジックは変更しない |
+
+増分の内訳（推定）: E1 +140〜200（slot・同一 commit の更新・completion 条件・overflow）、E2 +30〜60（operation ID の導出・結果喪失の終端・CAS 敗北の test）、E3 +20〜40（予約と slot）。過去の実測との比 ×1.6 で補正すると E1・E2 の上限は 1,400行を超える（E1 1,424〜1,920、E2 1,408〜1,856）。着手前に実 diff の見込みを再計測し、超える場合は分割案を出す。
 
 E2以前もattempt/receiptの最小履歴は保存する。E4まで比較が未測定であることを明示し、親880の「改悪を測れる履歴」を未完了として残す。子をRefsで親へ結び自身をCloses、最後のE4を#880本体に残す場合は親本文を最終統合の条件へ更新する。ここでは本文を変更しない。
 
-orchestratorの未決事項は次の3点。型・reducer・gateの上記選択はこの案に固定し、未決を実装者に自由選択させない。
+orchestratorの未決事項は次の5点（4・5 は設計再レビュー round 1 で追加）。型・reducer・gateの上記選択はこの案に固定し、未決を実装者に自由選択させない。
 
 1. **分割と親の完了条件**。推奨はD3→E1→E2→E3→E4。子起票と#880本文の再編をorchestratorが決定する。未決のままではbranchごとの受入条件が確定しない。
 2. **独立dispositionのruntime範囲**。推奨はDと同じfixture公開経路をrepo保証とし、実host対応はD4/外部adapterに委ねる。実host成功をE必須にする場合、host/API/観測能力と権限の指定待ち。fixture成功を実host成功とは報告しない。
 3. **Iとのevent契約とbaseline保持**。推奨は§6のrefs/status/comparison可否をEが供給し、全割当・正誤/不要変更・費用の集計はIが担当。I側が必要とするevaluator artifact形式と保管期間/容量の合意が必要。未合意でも通常/replay receipt履歴は保持し、意味上の改悪はUNKNOWNとする。
+4. **E0 の起票と順序**（設計再レビュー round 1 で追加）。推奨は E0 を #880 の新しい子として起票し、D3 の前（D2b の後）に置く。D3 の terminal writer が最初から E0 の検査を通るためである。D3 の後に置く場合は、D3 単独の期間に D の終端が容量で失敗しうることを受け入れる判断になる。E0 を E1 へ含める案は、E1 が 1,540〜2,050行になり分割閾値を超えるため推奨しない。既存の決定 1（D3→E1→E2→E3→E4）はこの点だけ未決として残る。
+5. **lease_history が S_sys を使い切ったときの回復手段**（owner 判断）。§2 の決定では takeover を `state-capacity-exhausted` で拒否し、mission は停止したまま残る（fail-closed だが進行不能）。履歴の圧縮・新 session への移行のどちらを用意するか、または停止を許容するかは E の範囲外で、owner の指定待ち。
 
 ### 決定（orchestrator）
 
-1. **分割を採用する。** D3（#689）→ E1 → E2 → E3 → E4 の順に、各子を 1 PR で閉じる。E1〜E3 は #880 の子として起票し、E4（比較履歴・event・最終統合）を #880 本体に残す。各子は自身を Closes し #880 を Refs で指す。#880 の最後の PR は E4 の受入条件だけで Closes する。
+1. **分割を採用する。** D3（#689）→ E1 → E2 → E3 → E4 の順に、各子を 1 PR で閉じる。E1〜E3 は #880 の子として起票し、E4（比較履歴・event・最終統合）を #880 本体に残す。各子は自身を Closes し #880 を Refs で指す。#880 の最後の PR は E4 の受入条件だけで Closes する。 E0 の追加と順序は上の未決 4 で扱い、この決定にはまだ含まれない（設計再レビュー round 1 の後に追記）。
 2. **独立 disposition の runtime は D と同じ扱いとする。** E3 の保証は tests 配下の fixture adapter を通した公開経路の回帰証拠に限り、実 host の独立性の証明として扱わない。実 host 対応は D4（#897）または外部 adapter に委ね、E の完了条件に含めない。
 3. **I（#884）との event 契約と証拠保持は推奨どおりとする。** E は §6 の refs・status・比較可否を `mission-repair-event/1` で供給し、全割当の分母・正誤・不要変更・費用の集計は I が担う。証拠は公開 head の lineage/event から到達できる限り保持し、GC の対象にしない。容量超過は blocked として記録し、過去の証拠を黙って落とさない。独立 evaluator の artifact 形式は I で決め、E は ref を受け取る欄だけを持つ（未合意の間は意味上の改悪を UNKNOWN とする）。
 
@@ -229,7 +265,7 @@ closed-v5 public bridge、精密依存graph、contract差替え、汎用resolved
 
 ## 出典（全て照合headに固定）
 
-リンクは全て `8f40f542f8fed8660728234d41295ee3212deeab`。各ラベルのfile:lineはこのheadで読んだ範囲。
+[S01]〜[S39]・[T*]・[D*] のリンクは全て `8f40f542f8fed8660728234d41295ee3212deeab`。各ラベルのfile:lineはこのheadで読んだ範囲。設計再レビュー round 1 で追加した [S40]〜[S67] は `d25a66c6abed33a4c0fbd1036e22bdf49da3c606`（D1 の merge 後。引用した persistence・kernel の各ファイルは `origin/main` `9c948878d878bbadbfb98a1d62a43d67fcc700c7` と差分なし）、[R01] は `9c948878d878bbadbfb98a1d62a43d67fcc700c7`（D2b の merge 後）で読んだ範囲。
 
 [S01]: https://github.com/tackeyy/mission/blob/8f40f542f8fed8660728234d41295ee3212deeab/skills/mission/lib/acceptance_contract.py#L66-L155 "acceptance_contract.py:66-155 — A ledger、criteria、coverage、digest"
 [S02]: https://github.com/tackeyy/mission/blob/8f40f542f8fed8660728234d41295ee3212deeab/skills/mission/lib/mission_application/verification_execution.py#L85-L167 "mission_application/verification_execution.py:85-167 — B replay selection/binding/receipt"
@@ -300,3 +336,66 @@ closed-v5 public bridge、精密依存graph、contract差替え、汎用resolved
 [S38]: https://github.com/tackeyy/mission/blob/8f40f542f8fed8660728234d41295ee3212deeab/skills/mission/lib/mission_kernel/json_codec.py#L12-L12 "skills/mission/lib/mission_kernel/json_codec.py:12-12"
 
 [S39]: https://github.com/tackeyy/mission/blob/8f40f542f8fed8660728234d41295ee3212deeab/skills/mission/tests/test_python_module_inventory.py#L95-L103 "skills/mission/tests/test_python_module_inventory.py:95-103"
+
+[S40]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/mission_kernel/fresh_review.py#L324-L336 "skills/mission/lib/mission_kernel/fresh_review.py:324-336 — prepare_request_state — nonce/request_id の重複だけを拒否し、件数上限なし"
+
+[S41]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/mission_kernel/fresh_review.py#L310-L321 "skills/mission/lib/mission_kernel/fresh_review.py:310-321 — consume_request — max_output_bytes 以下の result を record へ凍結（上限値は同ファイル 21-22 の BUDGET_LIMITS で 256 KiB）"
+
+[S42]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/mission_persistence/fenced_commit.py#L1527-L1545 "skills/mission/lib/mission_persistence/fenced_commit.py:1527-1545 — lease takeover で lease_history に 1 件追記"
+
+[S43]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/mission_kernel/json_codec.py#L13 "skills/mission/lib/mission_kernel/json_codec.py:13 — STATE_LIMIT = 4 MiB"
+
+[S44]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/mission_persistence/local_uow.py#L1516-L1529 "skills/mission/lib/mission_persistence/local_uow.py:1516-1529 — stage_generation — STATE_LIMIT 超過を record-too-large で拒否し decode"
+
+[S45]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/mission_kernel/json_codec.py#L75-L82 "skills/mission/lib/mission_kernel/json_codec.py:75-82 — encode_json_value — ensure_ascii=False・sort_keys・区切り固定"
+
+[S46]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/mission_kernel/fresh_review.py#L32-L37 "skills/mission/lib/mission_kernel/fresh_review.py:32-37 — canonical_bytes — result 長の検査に使う encode 設定"
+
+[S47]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/mission_kernel/fresh_review.py#L302-L307 "skills/mission/lib/mission_kernel/fresh_review.py:302-307 — reserve_request — pending→reserved"
+
+[S48]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/mission_kernel/model.py#L453-L458 "skills/mission/lib/mission_kernel/model.py:453-458 — LeaseHistoryEntry の field"
+
+[S49]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/mission_persistence/fenced_commit.py#L4944-L4965 "skills/mission/lib/mission_persistence/fenced_commit.py:4944-4965 — commit 時の CAS と admit_lease の再計算"
+
+[S50]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/mission_persistence/fenced_commit.py#L2743-L2750 "skills/mission/lib/mission_persistence/fenced_commit.py:2743-2750 — FencedCommitRepository.stage"
+
+[S51]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/mission_persistence/legacy_v4.py#L567-L597 "skills/mission/lib/mission_persistence/legacy_v4.py:567-597 — v4 flat の直接 save と _write_state 呼出し"
+
+[S52]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/mission_persistence/legacy_v4.py#L1194-L1215 "skills/mission/lib/mission_persistence/legacy_v4.py:1194-1215 — v5 container の save — admitted transaction へ渡す"
+
+[S53]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/bin/mission-state.py#L7160-L7212 "skills/mission/bin/mission-state.py:7160-7212 — init / reinit の writer（atomic_write_json 注入と v5 初期化）"
+
+[S54]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/bin/mission-state.py#L6624-L6627 "skills/mission/bin/mission-state.py:6624-6627 — write_state 注入箇所の 1 つ。他は同ファイル 7011・7168-7184・7208・8256-8259・14844-14847"
+
+[S55]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/mission_persistence/fenced_commit.py#L3567-L3589 "skills/mission/lib/mission_persistence/fenced_commit.py:3567-3589 — stage を同一 instance の registry へ登録（registry の定義は同ファイル 1618）"
+
+[S56]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/mission_persistence/fenced_commit.py#L4779-L4789 "skills/mission/lib/mission_persistence/fenced_commit.py:4779-4789 — commit — registry の digest 一致を要求"
+
+[S57]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/mission_persistence/fenced_commit.py#L4666-L4689 "skills/mission/lib/mission_persistence/fenced_commit.py:4666-4689 — _current_cas — 元 base の generation と head digest を要求（commit からは同ファイル 4944 で呼ぶ）"
+
+[S58]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/mission_persistence/fenced_commit.py#L2654-L2664 "skills/mission/lib/mission_persistence/fenced_commit.py:2654-2664 — begin — durable prepare の回復を先に行う"
+
+[S59]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/mission_persistence/fenced_commit.py#L4444-L4486 "skills/mission/lib/mission_persistence/fenced_commit.py:4444-4486 — _recover_unlocked — head が base か target かで回復を分ける"
+
+[S60]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/mission_persistence/fenced_commit.py#L4121-L4166 "skills/mission/lib/mission_persistence/fenced_commit.py:4121-4166 — _recover_base_unlocked — rollback し stage を破棄"
+
+[S61]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/mission_persistence/fenced_commit.py#L3946-L3975 "skills/mission/lib/mission_persistence/fenced_commit.py:3946-3975 — _recover_target_unlocked — roll forward で確定"
+
+[S62]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/mission_persistence/fenced_commit.py#L3612-L3645 "skills/mission/lib/mission_persistence/fenced_commit.py:3612-3645 — _recover_orphan_stages_unlocked — prepare の無い stage を破棄"
+
+[S63]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/mission_persistence/fenced_commit.py#L2620-L2632 "skills/mission/lib/mission_persistence/fenced_commit.py:2620-2632 — resolved operation ID の intent 衝突を拒否"
+
+[S64]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/mission_persistence/fenced_commit.py#L2255-L2289 "skills/mission/lib/mission_persistence/fenced_commit.py:2255-2289 — _lookup_operation — 記録済み operation の replay と intent 衝突の拒否"
+
+[S65]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/mission_persistence/fenced_commit.py#L2297-L2300 "skills/mission/lib/mission_persistence/fenced_commit.py:2297-2300 — lookup_operation（公開）"
+
+[S66]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/mission_persistence/fenced_commit.py#L326-L375 "skills/mission/lib/mission_persistence/fenced_commit.py:326-375 — CAS code と retry 可否 — precondition のみ retry 可能"
+
+[S67]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/mission_persistence/fenced_commit.py#L4949-L4951 "skills/mission/lib/mission_persistence/fenced_commit.py:4949-4951 — base lease 変化を lease-precondition-changed で拒否"
+
+[R01]: https://github.com/tackeyy/mission/blob/9c948878d878bbadbfb98a1d62a43d67fcc700c7/skills/mission/lib/mission_kernel/fresh_review_receipts.py#L197-L204 "skills/mission/lib/mission_kernel/fresh_review_receipts.py:197-204 — CompletedFreshReview.findings（件数上限なし。検査は同ファイル 315-319 で重複のみ）"
+
+### 決定（orchestrator / owner, 2026-10-04。設計再レビュー round 1 の後）
+
+- §9 の 4（E0 の起票と順序）: E0 を #880 の新しい子として起票し、D2 本体（#896）の merge 後・D3a（#913）の前に置く。D2c・D2d の writer は E0 の容量検査の対象に含め、D3 の writer は最初から検査を通る。E0 を E1 に含めると 1,400 行を超えるため含めない。
+- §9 の 5（lease takeover が S_sys を使い切った後の回復、owner 決定）: 初版は停止を許容する。使い切った時点で takeover を理由付きで拒否し、mission を halt する。黙って進めない。履歴の圧縮・新 session への移行は、必要になった時点で別 Issue とする。
