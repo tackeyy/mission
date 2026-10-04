@@ -87,12 +87,15 @@
 | `commit_margin_sec` | int、初期値 10 | 終端と精算の commit のために残す時間（lock の 5 秒待ち [S30] 2 回分） |
 | `closeout_margin_sec` | int、初期値 30 | final の dispatch の後、`mark-passes` を commit するために残す時間 |
 | `min_dispatch_sec` | int、初期値 1 | これ未満の実効締切では起動しない |
+| `system_recovery_sec` | int、初期値 60。`adapter_call_sec + cleanup_sec(recover) + commit_margin_sec`（初期値 43）未満なら拒否 | 回復専用の固定枠（§3.6）。final 枠から init 時に切り出し、補充しない |
 | `no_progress_limit` | int、初期値 2 | §3.4 |
 | `provenance` | `experimental-initial` 固定 | 初期値が実証済みではないことを保存面に残す |
 
 `budget_minutes` は float で保存され、`repr` は往復できる最短の 10 進表記を返すので、`Decimal(repr(...))` は利用者が渡した 10 進値と一致する（例: 1.1 分 → 66 秒、0.01 分 → 0 秒で拒否）。2 進の誤差で 65 秒へ落ちることはない。
 
 **配分（計画 10 / 実装 40 / 検証 20 / 修復 20 / 最終 10 %）と上表の他の初期値は実験用の初期値であり、効果が実証された既定値ではない。** status にも `provenance` をそのまま出す。値の妥当性は I（[Issue 884](https://github.com/tackeyy/mission/issues/884)）の計測で判断する。
+
+**final 枠の切り出し**: `final_reserve = ⌊total_sec × final の basis points / 10000⌋` から `system_recovery_sec` を init 時に差し引き、残りを final 分類が使える枠 `final_reserve_effective` とする。`final_reserve_effective < min_final_run_sec`（§5）なら `budget-final-reserve-too-small` で policy を拒否する（初期値では `0.1 × total_sec − 60 < 27`、つまり total が 870 秒（14.5 分）未満だと拒否される。小さな総枠では final の配分を上げる）。
 
 決定（強制する範囲）: 保護枠として強制するのは repair と final だけとする。planning・implementation・verification は「非保護の共有枠」として合算で強制し、個別の配分は status の目標値として表示する（判断事項 1）。
 
@@ -108,7 +111,7 @@
 | `PhaseCharge` | 予算分類ごとの精算済み dispatch 秒の合計、予約回数、開いている予約数 |
 | `Settlement` | `reservation_id`、`outcome`（`settled`/`charged-full-unknown`/`kill-unconfirmed`）、`charged_sec`、`late_settlement_sec`、`observed`、`telemetry`（上限長の閉じた形） |
 | `ProgressSignature` | `(entry, target)` ごとの最後の `candidate_digest`・結果 digest・連続回数 |
-| `StopSlots` | 事前確保した固定長の slot: 拒否の計数と直近の理由、`FinalLatch`（時刻と理由）、`Exhaustion`（時刻と原因）、`BudgetStop`（§5）。policy の受付時に確保し、以後は上書きだけ（増分 0） |
+| `StopSlots` | 事前確保した固定長の slot: 拒否の計数と直近の理由、`FinalLatch`（時刻と理由）、`Exhaustion`（時刻と原因）、`BudgetStop`（§5）、`SystemRecovery`（回復専用枠の使用秒・回数・開いている回復予約 0〜1 件。§3.6）、`FinalRun`（final latch 後に完了として精算された final 分類の dispatch の最新の `reservation_id` と時刻。§5）。policy の受付時に確保し、以後は上書きだけ（増分 0） |
 
 - state に置くのは上限付きの要約だけとする。開いている予約は `max_concurrent_dispatches` 件以下、精算済みは分類ごとの合計と直近 32 件だけ。`ProgressSignature` の件数は予約回数の上限（分類 5 × `max_dispatches_per_phase`）で抑えられる。dispatch の詳細な事実は、各入口が既に公開している receipt に残る。[S16][D02]
 - キー欠落だけが「予算 policy なし」。null・未知 schema・未知 field・重複 ID・開いている予約の上限超過・時刻の逆転は理由コード付きで拒否し、空の ledger と読み替えない。
@@ -126,10 +129,11 @@
 
 kernel の純粋関数 `admit(policy, ledger, state, at, request) -> Admission | Refusal` が次を計算する。
 
-- `final_unspent = final_reserve − (final の精算済み + 開いている final 予約)`、`repair_unspent` も同様（0 未満は 0）
-- 非保護枠の締切 = `overall_deadline − closeout_margin_sec − repair_unspent − final_unspent`
-- repair の締切 = `overall_deadline − closeout_margin_sec − final_unspent`
-- final の締切 = `overall_deadline − closeout_margin_sec`
+- `final_unspent = final_reserve_effective − (final の精算済み + 開いている final 予約)`、`repair_unspent` も同様（0 未満は 0。`final_reserve_effective` は §2.3）
+- `final_close = overall_deadline − closeout_margin_sec − system_recovery_sec`（回復専用枠は final の締切の後ろに置き、どの分類も使えない。§3.6）
+- 非保護枠の締切 = `final_close − repair_unspent − final_unspent`
+- repair の締切 = `final_close − final_unspent`
+- final の締切 = `final_close`
 - 子の締切 `child_deadline_at = min(at + policy_timeout, 分類の締切 − cleanup_sec(entry) − commit_margin_sec)`（`cleanup_sec` は §4.1 の入口ごとの定数）
 - 精算期限 `settle_by = child_deadline_at + cleanup_sec(entry) + commit_margin_sec`、予約秒 `reserved_sec = settle_by − at`。したがって `settle_by ≤ 分類の締切` が常に成り立つ
 - `child_deadline_at − at < min_dispatch_sec`、同時予約数が上限、分類の予約回数が上限、§3.4 の無進捗、exhaustion 成立（§5）、容量不足（§4.3）のいずれかなら `Refusal`
@@ -166,7 +170,7 @@ final latch は `budget enter-final`（明示）か `at ≥ repair の締切`（
 | 6 | 同上、呼出し `mission-state.py:10445` ← 14123 ← `review.py:523` [S41] | `mark-passes --force` | 予約する | 表 §3.1 | 予算 guard（§5）を通った後、pass の transaction の前に予約 commit | pass の commit。pass が拒否された場合は拒否の後に精算だけを commit |
 | 7 | adapter の `launch/collect/cancel` [S14] | `fresh-review run`（[D2c #912](https://github.com/tackeyy/mission/issues/912)、未 merge）[D02] | 予約する | 表 §3.1 | dispatch intent と同じ commit で予約。全 adapter 呼出しを締切付きの子で行う（§4.2） | terminal（D2b の variant）の commit |
 | 8 | 同上 | `repair disposition run`（[E3 #907](https://github.com/tackeyy/mission/issues/907)、未 merge）[D04] | 予約する | repair | D と同じ規律 | terminal の commit |
-| 9 | adapter の `recover` [S14] | `fresh-review reconcile`、`repair reconcile`、`repair disposition reconcile`（未 merge） | 回復の mutation。時間の予約はしないが、呼出しは `adapter_call_sec` の締切付き子で行う | — | exhaustion 後も許す（開いた予約を閉じる唯一の手段のため） | 開いている予約を精算 |
+| 9 | adapter の `recover` [S14] | `fresh-review reconcile`、`repair reconcile`、`repair disposition reconcile`（未 merge） | 予約する（entry `recover`。round 2 で「予約しない」を撤回） | 回復する dispatch の予約の分類。分類の締切で起動できなければ回復専用枠（§3.6） | 回復の予約 commit の後に `recover` を締切付きの呼出し子で行う（§3.6・§4.2） | 回復の予約と、回復した dispatch の予約を同じ commit で精算 |
 | 10 | — | `repair begin`（E2）[D04] | process を起動しない。分類の予約回数として数え、`repair の締切 − at` が B の最小実行（`min_dispatch_sec + cleanup_sec(B) + commit_margin_sec`）に満たなければ拒否 | repair | E の容量予約（[D05] の「受付時に全段を確保」）と同じ commit | — |
 | 11 | — | `specialists reconcile-invocation` [S31] | spawn しない。回復の mutation | — | — | 開いている予約を精算 |
 | 12 | `integration_gate.py:67,79,171` [S32] | `gate-and-merge` | 対象外（mission repository 自身の merge 工程で、session の dispatch ではない。判断事項 6） | — | — | — |
@@ -199,6 +203,18 @@ final latch は `budget enter-final`（明示）か `at ≥ repair の締切`（
 - 段階との対応（§7）: F1・F2a・F2b の間は `init --budget-policy` の parser 自体を公開しない。F2a は既存入口を `covered`、D/E 入口を `pending` として表に入れる。F2c は `pending` を 0 にし、同じ PR で `init --budget-policy` を公開する。**policy を持つ session が存在しうる時点では、全入口が covered である。**
 - 旧版の窓（F1 で import を公開、F2a 後も D/E 入口が F2b まで未対応）はこれで閉じる。
 
+### 3.6 回復の予約と回復専用枠（設計レビュー round 2 の High 1）
+
+決定: adapter の `recover` 呼出し（§3.2 #9）は、他の spawn と同じく起動前に予約を取る。旧版は「予約せず exhaustion 後も許す」としていたため、回復の呼出し子が final の時間や、exhaustion 後の時間を予約なしで使えた。
+
+- **通常の回復**: entry `recover` として予約する。分類は、回復する dispatch の予約が持つ `budget_class`（D/E の入口は予約 commit で intent に `reservation_id` と分類を一緒に書く。§3.2 #7・#8・#2）で、caller は選べない。`child_deadline_at = min(at + adapter_call_sec, その分類の締切 − cleanup_sec(recover) − commit_margin_sec)` で、§3.1 と同じく `settle_by ≤ 分類の締切` が成り立つ。同時予約数と分類の予約回数にも数える。
+- **回復専用枠**: 通常の回復が時間の理由（分類の締切を過ぎた、final latch 後の repair、exhaustion）で拒否される場合に限り、`system_recovery_sec`（§2.3。final 枠から init 時に切り出した固定枠）を使う entry `system-recover` として予約できる。条件は、回復の対象が終端の無い dispatch（開いている予約、`kill-unconfirmed`、または `charged-full-unknown` で精算されたが D/E の terminal が無いもの）であること。
+  - `child_deadline_at = min(at + adapter_call_sec, overall_deadline − cleanup_sec(recover) − commit_margin_sec, at + 枠の残り − cleanup_sec(recover) − commit_margin_sec)`。`reserved_sec` は枠の残りを越えない。
+  - 精算は `SystemRecovery` slot の使用秒に計上する（不明なら予約秒の全額）。枠は補充しない。開いている回復専用の予約は同時に 1 件までで、`max_concurrent_dispatches` とは別に数える（`kill-unconfirmed` で上限が埋まっていても回復できるようにするため）。
+  - 枠の残りが `cleanup_sec(recover) + commit_margin_sec + min_dispatch_sec` に満たない、または `at ≥ overall_deadline` なら `budget-recovery-allowance-exhausted` で拒否する。その場合 reconcile は adapter を呼ばず、ledger だけの精算（`charged-full-unknown` の計上、`kill-unconfirmed` の維持）を行う。終端は記録されず、pass には到達しない（§5）。
+- **上限**: 回復専用枠で使える時間は session 全体で `system_recovery_sec` 以下、かつ `overall_deadline` を越えない。時間の上限が無い回復は残らない。
+- `specialists reconcile-invocation`（#11）は process を起動しないので予約しない。
+
 ## 4. Timeout、bounded kill、終端の容量
 
 ### 4.1 入口ごとの締切後の待ち（`cleanup_sec`）
@@ -207,20 +223,27 @@ final latch は `budget enter-final`（明示）か `at ≥ repair の締切`（
 
 | 入口 | 締切後の順序付きの待ち | `cleanup_sec(entry)` |
 |---|---|---|
-| B の verifier（#1・#2） | 監督 process の中で: SIGKILL→0.2 秒の wait→再送 [S16]（1 秒に切り上げ）→候補と報告の読取り（`post_run_sec` 以内）。監督 process が超過したら親が: 監督と verifier の両 process group へ SIGTERM→`term_grace_sec`→SIGKILL→`kill_wait_sec` | `1 + post_run_sec + term_grace_sec + kill_wait_sec` |
+| B の verifier（#1・#2） | 監督 process の中で: verifier へ SIGKILL→0.2 秒の wait→再送 [S16]（1 秒に切り上げ）→候補と報告の読取り（`post_run_sec` 以内）。監督 process が超過したら親が: 監督が率いる process group G（§4.2）へ SIGTERM→`term_grace_sec`→SIGKILL→`kill_wait_sec` | `1 + post_run_sec + term_grace_sec + kill_wait_sec` |
 | command provider（#3） | process group へ SIGTERM→`term_grace_sec`→SIGKILL→`kill_wait_sec`→pipe の回収（`collect_sec` 以内） | `term_grace_sec + kill_wait_sec + collect_sec` |
 | adapter（#7・#8） | 実行中の呼出し子へ SIGTERM→`term_grace_sec`→SIGKILL→`kill_wait_sec`→`cancel` 呼出し（`cancel_call_sec` 以内）→その超過時の SIGTERM→`term_grace_sec`→SIGKILL→`kill_wait_sec` | `2 × (term_grace_sec + kill_wait_sec) + cancel_call_sec` |
 | 承認 verifier（#5・#6） | 締切を渡さない。5 秒の join と最大 4 回の 0.2 秒待ち [S22] | 固定。`reserved_sec = 6 + commit_margin_sec` として扱う |
+| 回復（#9 の `recover` / `system-recover`） | `recover` の呼出し子へ SIGTERM→`term_grace_sec`→SIGKILL→`kill_wait_sec` | `term_grace_sec + kill_wait_sec` |
 
-初期値では B 14 秒、provider 5 秒、adapter 16 秒、承認 verifier 6 秒。これに `commit_margin_sec` を足した時間が、分類の締切の手前に確保される。
+初期値では B 14 秒、provider 5 秒、adapter 16 秒、承認 verifier 6 秒、回復 3 秒。これに `commit_margin_sec` を足した時間が、分類の締切の手前に確保される。
 
 **親の待ちに無期限のものを残さない。** 現状の無期限の待ち（provider の `communicate()` [S20]、失敗経路の `wait(timeout=5)` の後に残る child [S39]）は、上の順序へ置き換える。SIGKILL の後 `kill_wait_sec` で終了を確認できない場合は、それ以上待たずに `kill-unconfirmed` を記録する（§3.3）。
 
 ### 4.2 締切付きの呼出し境界（設計レビュー round 1 の High 3）
 
-- **B の verifier**: `run_contract_verifier` 全体（候補の採取、Popen、候補と報告の読取り）を fork した監督 process で実行する。承認 verifier と同じ仕組み（`multiprocessing.get_context("fork")`、pipe、process group の回収）を使う。[S22] 監督 process は verifier の pgid を起動直後に pipe で親へ送り、親は超過時に両方の group へ送信する。verifier の締切は、予約時に観測した wall 時刻と monotonic 時刻の組から `child_deadline_at` を monotonic へ換算して渡す（現状の runner は Popen の後に締切を決める [S42] ので、前段の時間を締切に含めるため）。凍結 `timeout_sec` は変えず、`min(凍結 timeout, 換算した締切)` で打ち切る。F の締切で打ち切った場合は status を `blocked`、`block_reason` を `budget-deadline` とし、`timeout`（policy の判定）と区別する。B の receipt の閉じた `block_reason` 集合へ 1 値を足す。fork が使えない host では予算付き session の `verification run` を `budget-deadline-unenforceable` で拒否する。
+- **B の verifier**: `run_contract_verifier` 全体（候補の採取、Popen、候補と報告の読取り）を fork した監督 process で実行する。承認 verifier と同じ仕組み（`multiprocessing.get_context("fork")`、pipe、process group の回収）を使う。[S22]
+  - **process group は verifier が存在する前に決まる**（設計レビュー round 2 の High 2）。監督 process は最初の文で `os.setsid()` を呼び、自分を leader とする group G（pgid = 監督の pid）を作る。承認 verifier の child が既に同じ形をとっている（mission-state.py:10335-10338 [S22]）。G の id は fork の戻り値として親が最初から知っており、pipe での受け渡しは無い。
+  - 監督は verifier を **新しい session を作らずに** 起動する。現状の runner は `start_new_session=True` で verifier を別 session にする（verification_runner.py:329-331 [S16]）ので、予算付き session の監督下では runner がこれを指定しない引数を受け取る。verifier とその子孫は G を継承する。`git ls-files` [S42] も監督の中で走るので G に入る。
+  - runner の凍結 `timeout_sec` による打ち切りは、監督下では `killpg(child.pid)`（verification_runner.py:363 と 386 の 2 箇所）ではなく verifier の pid への SIGKILL にする（verifier は group leader ではないため。G へ送ると監督自身も止まる）。打ち切り後に pipe を閉じて抜ける既存の動き（同 366-368）は変えないので、子孫が pipe を持ち続けても監督の読取りは止まらない。残った子孫は親の G への送信で掃く。
+  - 親は、監督から結果を受け取った後、または監督の締切を過ぎた時点で、**監督を reap する前に** `killpg(G, SIGKILL)` を送り、G に残る子孫を掃く。監督が未 reap（生存中か zombie）の間は pid が再利用されないので、G が別の group を指すことは無い。fork から `setsid` までの間は子孫が存在しないので、その間の `killpg` が ESRCH になった場合は監督の pid へ直接送れば足りる（承認 verifier の `_stop_approval_verifier_child` と同じ fallback）。
+  - 旧版の「監督が verifier の pgid を起動直後に pipe で送る」方式は撤回する。受け渡しの前に監督が止まると、verifier の group へ親が届かない窓が残るためである。
+  - verifier の締切は、予約時に観測した wall 時刻と monotonic 時刻の組から `child_deadline_at` を monotonic へ換算して渡す（現状の runner は Popen の後に締切を決める [S42] ので、前段の時間を締切に含めるため）。凍結 `timeout_sec` は変えず、`min(凍結 timeout, 換算した締切)` で打ち切る。F の締切で打ち切った場合は status を `blocked`、`block_reason` を `budget-deadline` とし、`timeout`（policy の判定）と区別する。B の receipt の閉じた `block_reason` 集合へ 1 値を足す。fork が使えない host では予算付き session の `verification run` を `budget-deadline-unenforceable` で拒否する。
 - **command provider**: `start_new_session=True` で起動し、締切を予約時刻からの絶対時刻にする（起動後の記録 commit の lock 待ちも締切に含める）。`communicate()` の timeout は「締切 − 現在」で毎回計算する。締切後は §4.1 の順序で回収する。
-- **adapter（D2c・E3）**: `observe_parent/launch/collect/cancel/recover` の各呼出しを、fork した呼出し子の中で行う。呼出し子の締切は `min(adapter_call_sec, child_deadline_at − 現在)`（`cancel` は `cancel_call_sec`）。戻り値は `max_output_bytes` と閉じた observation の上限で pipe 越しに受け取り、親は締切付きで読む。締切で `collect` の呼出し子を回収した後、`cancel` を呼び、その結果を D の `blocked`/`failed` terminal の `cancel_result` に記録する。[D02] `cancel` の呼出しが超過した場合や、adapter が起動した reviewer の終了を観測できない場合は `kill-unconfirmed` とし、reconcile の `recover` が終了を観測するまで同時予約数を解放しない。D2c は全ての adapter 呼出しを 1 つの application の seam から行うこと（判断事項 3）。
+- **adapter（D2c・E3）**: `observe_parent/launch/collect/cancel/recover` の各呼出しを、fork した呼出し子の中で行う。呼出し子も B の監督と同じく最初の文で `os.setsid()` を呼び、親は fork の戻り値の pid を group として扱う（受け渡しの窓を作らない）。`recover` の呼出し子は §3.6 の予約の締切に従う。呼出し子の締切は `min(adapter_call_sec, child_deadline_at − 現在)`（`cancel` は `cancel_call_sec`）。戻り値は `max_output_bytes` と閉じた observation の上限で pipe 越しに受け取り、親は締切付きで読む。締切で `collect` の呼出し子を回収した後、`cancel` を呼び、その結果を D の `blocked`/`failed` terminal の `cancel_result` に記録する。[D02] `cancel` の呼出しが超過した場合や、adapter が起動した reviewer の終了を観測できない場合は `kill-unconfirmed` とし、reconcile の `recover` が終了を観測するまで同時予約数を解放しない。D2c は全ての adapter 呼出しを 1 つの application の seam から行うこと（判断事項 3）。
 - **承認 verifier**: 既存の固定上限をそのまま使う。
 
 **前提（保証の外）**: 上の上限は、親 process が締切後の待ちを定数どおりに進められることを前提とする。親の停止・OS の stall・lock の 5 秒待ちが `commit_margin_sec` を越えて続く場合、精算は `settle_by` より遅れうる。そのときも子は回収済み（または `kill-unconfirmed`）で、遅れは `late_settlement_sec` として記録し、計上は予約秒を下回らない。
@@ -228,7 +251,7 @@ final latch は `budget enter-final`（明示）か `at ≥ repair の締切`（
 **限界（成功として扱わないもの）**:
 
 - 親 process が crash した後の orphan は、mission から回収できない。予約は `settle_by` 後に全額計上され、結果は記録されない。B の runner は一時ディレクトリの複製で実行するので候補を書き換えないが、一時ディレクトリが残るかは実装で確かめる（**UNKNOWN**）。
-- `start_new_session` を自ら抜ける孫 process（再度 setsid するもの）は process group の送信から漏れうる。OS の権限境界の代替を主張しない。
+- 監督・呼出し子の group G（provider では起動した child の group）を自ら抜ける孫 process（再度 `setsid` や `setpgid` で別の group へ移るもの）は process group の送信から漏れうる。group の確保を verifier の起動前へ移したことで閉じるのは「受け渡し前に監督が止まる」窓だけで、この漏れは残る。OS の権限境界の代替を主張しない。
 - adapter が host 側で起動した reviewer の停止は adapter の `cancel` に依存する。F は `cancel` の呼出しを有限にするだけで、その効果は観測結果として記録するにとどまる。
 
 ### 4.3 終端と精算の state 容量（設計レビュー round 1 の High 4）
@@ -237,7 +260,7 @@ final latch は `budget enter-final`（明示）か `at ≥ repair の締切`（
 
 - **開いている予約を E0 の「終端していない item」として扱う。** 予約 1 件の残り予約 = `Δ_settle + Δ_terminal(entry)`。
   - `Δ_settle`: F の精算行（`Settlement`・`PhaseCharge` の更新・`ProgressSignature` の新規行を含む最大形）
-  - `Δ_terminal(entry)`: B の verification receipt（#1）、provider の terminal 更新（#3）、承認 verifier の receipt / force の `force_approval`（#5・#6）は F が新しく予約する。D/E の入口（#2・#7・#8）は E0 が既に D request・repair attempt・disposition の段として予約しているので 0 とし、二重に予約しない
+  - `Δ_terminal(entry)`: B の verification receipt（#1）、provider の terminal 更新（#3）、承認 verifier の receipt / force の `force_approval`（#5・#6）は F が新しく予約する。D/E の入口（#2・#7・#8）と回復（#9 の `recover`・`system-recover`。書く terminal は回復する D/E の dispatch のもの）は E0 が既に D request・repair attempt・disposition の段として予約しているので 0 とし、二重に予約しない
 - **予約 commit が容量の検査点になる。** 予約行自身の Δ と上の残り予約を足して `state_capacity_verdict` が通らなければ、`state-capacity-exhausted` で拒否し、起動しない。4 MiB [S28] の近くで予約が通った場合も、終端と精算の bytes は既に確保されているので、終端の commit は検査を通る（通らなければ Δ の定数の欠陥で、E0 の `state-capacity-invariant-broken`）。
 - **予約を持たない B receipt の扱いを変える**: E の改訂設計は B receipt を予約された終端として扱わず、公開時に超えたら拒否する。[D05] F の policy を持つ session ではこれを置き換え、B receipt は予約に含まれる終端となる。policy の無い session では E の規則のまま。
 - **停止系の書込み**: `StopSlots`（拒否の計数、final latch、exhaustion、`BudgetStop`）は policy の受付時に確保する固定長 slot で、以後は上書きだけ（増分 0）。`budget stop` の書込みは「halt の field と F の slot の上書きだけ」になるので、E0 が S_sys を使える停止系と判定する対象に含めてもらう（E0 への要求）。拒否の記録が容量で失敗した場合も起動しない。
@@ -253,15 +276,24 @@ final latch は `budget enter-final`（明示）か `at ≥ repair の締切`（
 - `at ≥ repair の締切` で final latch が導出され、repair 系の入口と `repair begin` は `budget-final-latched` で拒否される（§3.1）。`next` の助言に依存しない。
 - `repair begin` は、B の最小実行が repair 枠に収まらない時点では拒否する（§3.2 #10）。時間の予約はしない（attempt 自体は process を起動しないため）。
 
-強制の外にあるもの: repair の締切の後も host が inline で修正を続けた時間。これは final 枠を実質的に削る（overall_deadline までの残りが減る）。F はこの量を `reserve_erosion_sec`（final latch の後、または非保護枠の締切の後に、final 系の予約が開いていない稼働時間の合計）として status と停止記録に出す。final verification は残りが `min_dispatch_sec + cleanup_sec + commit_margin_sec` に満たなければ拒否され、session は exhaustion から partial-done で終わる。成功は作らない。
+強制の外にあるもの: repair の締切の後も host が inline で修正を続けた時間。これは final 枠を実質的に削る（overall_deadline までの残りが減る）。F はこの量を `reserve_erosion_sec`（final latch の後、または非保護枠の締切の後に、final 系の予約が開いていない稼働時間の合計）として status と停止記録に出す。final verification は final の締切までの残りが `min_final_run_sec` に満たなければ拒否され、その時点で `final_infeasible` が成立して exhaustion になり（§5）、session は partial-done で終わる。成功は作らない。
 
 受入条件もこれに合わせて書く（§6.3）: 「repair の dispatch は final 予約の時間帯に実行されない」「inline の侵食は `reserve_erosion_sec` に現れ、その結果 final が実行できない場合は pass にならない」。旧版の「repair 枠が残ること」を inline 作業まで含めて保証する書き方はしない。
 
 ## 5. Exhaustion、停止、完了 gate（設計レビュー round 1 の High 5）
 
-- **exhaustion は kernel が導出する一方向の状態とする。** `exhausted(ledger, at) = at ≥ overall_deadline − closeout_margin_sec かつ final 系の予約が開いていない、または at ≥ overall_deadline`。予算に触れる mutation（予約・精算・拒否の記録・`budget stop`・`mark-passes`・Reactivate）は、`at` で exhaustion が成立していれば `Exhaustion` slot に時刻と原因を書く。一度書いた slot は戻らない。slot が未記録でも、guard は `at` から同じ判定をするので、記録の有無で結論が変わらない。
-- **exhaustion 後に許すもの**: 開いた予約の精算と reconcile（§3.2 #9・#11）、`budget stop`、`mark-halt`（任意の category）、read-only の query。**拒否するもの**: 新しい予約（全入口）、`repair begin`、`budget enter-final`、Reactivate、`mark-passes`（force を含む）。
-- **完了 guard を全ての予算付き session に適用する。** kernel の `_mark_pass` に、`_acceptance_completion_ready`（contract が無いと何もせず戻る [S36]）とは別の guard `_budget_completion_ready` を足し、ledger を持つ全 session で評価する。条件は (1) 開いている予約がある → `budget-dispatch-unsettled`、(2) exhaustion が成立 → `budget-exhausted`。評価の位置は `_mark_pass` の先頭、force の分岐（transitions.py:1075）より前とする。[S36] application の preflight でも、contract の有無の分岐（review.py:516）の外で、force の承認 verifier の spawn（review.py:523）より前に同じ純関数を呼ぶ。[S35] これで、予算切れの session は force でも pass に到達せず、承認 verifier も起動しない。`passes` を書くのは `_mark_pass` だけなので [S46]、他の経路は無い。
+- **final が実行できなくなった時点を kernel が導出する**（設計レビュー round 2 の High 3）。旧版は admission が final の dispatch を時間不足で拒否した後も、`overall_deadline − closeout_margin_sec` までは exhaustion が成立せず、その間に pass（force を含む）が通りえた。
+  - `min_final_run_sec = min_dispatch_sec + max(final 系の入口の cleanup_sec) + commit_margin_sec`（初期値 1 + 16 + 10 = 27 秒。final 系の入口は §3.1 の表で final に分類されうる入口で、最大は adapter）。必要な final がどの入口かを kernel は知らないので、最も長いものを使う（pass を拒否する側へ倒す）。
+  - `final_infeasible(ledger, at) = final の締切（§3.1）− at < min_final_run_sec`。admission が final 分類の最小の dispatch を時間不足で拒否する条件と同じ関数から導出し、両者がずれないようにする。final の締切は稼働時計上の固定点なので、`at` が進むほど残りは減り、一度成立すれば戻らない。
+  - `final_recorded(ledger) = FinalRun slot が記録済み`。final latch の後に、final 分類の予約が `settled` で精算され、かつその入口の結果が完了（B は `blocked` でない receipt、provider は terminal、D は `blocked`/`failed` でない terminal、承認 verifier は受理）だったとき、精算と同じ commit で slot を上書きする。`charged-full-unknown`・`kill-unconfirmed`・`budget-deadline` の打ち切りは記録しない。F は「final が 1 回完了した」ことだけを記録し、その結果で pass してよいかは既存の gate（acceptance contract・force の承認）が判定する。
+- **exhaustion は kernel が導出する一方向の状態とする。** `exhausted(ledger, at)` は次のいずれかで成立する。
+  1. `at ≥ overall_deadline − closeout_margin_sec` かつ final 分類の予約が開いていない
+  2. `at ≥ overall_deadline`
+  3. `final_infeasible(ledger, at)` かつ `final_recorded` でない かつ final 分類の予約が開いていない（開いている final の dispatch が完了すれば `final_recorded` になりうるので、その精算を待つ）
+
+  3 は contract の有無を見ない。contract の無い予算付き session でも、final が 1 回も完了しないまま final の時間が尽きれば exhaustion になる。final の時間が残っている間は、final を実行せずに pass することを F は止めない（既存の gate に従う）。予算に触れる mutation（予約・精算・拒否の記録・`budget stop`・`mark-passes`・Reactivate）は、`at` で exhaustion が成立していれば `Exhaustion` slot に時刻と原因を書く。一度書いた slot は戻らない。slot が未記録でも、guard は `at` から同じ判定をするので、記録の有無で結論が変わらない。
+- **exhaustion 後に許すもの**: adapter を呼ばない ledger だけの精算と reconcile（§3.2 #11、`budget reconcile`）、回復専用枠の範囲での `system-recover`（§3.6。枠と `overall_deadline` で上限がある）、`budget stop`、`mark-halt`（任意の category）、read-only の query。**拒否するもの**: 回復専用枠以外の新しい予約（全入口。通常の `recover` を含む）、`repair begin`、`budget enter-final`、Reactivate、`mark-passes`（force を含む）。
+- **完了 guard を全ての予算付き session に適用する。** kernel の `_mark_pass` に、`_acceptance_completion_ready`（contract が無いと何もせず戻る [S36]）とは別の guard `_budget_completion_ready` を足し、ledger を持つ全 session で評価する。条件は (1) 開いている予約がある（回復専用の予約を含む）→ `budget-dispatch-unsettled`、(2) exhaustion が成立 → `budget-exhausted`（原因が上の 3 なら停止記録の原因に `final-infeasible` を残す）。(2) は slot の記録ではなく `at` からの導出で評価するので、final の時間が尽きた直後の pass も、slot が書かれる前に拒否される。評価の位置は `_mark_pass` の先頭、force の分岐（transitions.py:1075）より前とする。[S36] application の preflight でも、contract の有無の分岐（review.py:516）の外で、force の承認 verifier の spawn（review.py:523）より前に同じ純関数を呼ぶ。[S35] これで、予算切れの session は force でも pass に到達せず、承認 verifier も起動しない。`passes` を書くのは `_mark_pass` だけなので [S46]、他の経路は無い。
 - **予算停止**: `budget stop` は、exhaustion が成立しているか、kernel が ledger から「必要な次の dispatch がどれも予約できない」ことを導出できる場合だけ受け付け、同じ transition で `MarkHalt(category=partial-done)` と `BudgetStop{scope, reason_code, at, ledger_digest, open_reservations, reserve_erosion_sec}` を保存する。[S26][S27] 予算が残っているのに使うことは `budget-not-exhausted` で拒否する。既存の `mark-halt --category partial-done` はそのまま使えるが `BudgetStop` は残さない（I が「予算による停止」と「他の理由の partial-done」を区別できるようにするため）。新しい HaltCategory は足さない。
 - **`next` は助言のまま**: 非保護枠の締切を過ぎたら spawn 系の action を「final へ移る」助言へ、exhaustion なら `budget stop` の助言へ変える。terminal・await-user・安価な確定手を差し替えない既存の規則は保つ。[S03][T01] 強制は上の guard と admission が持ち、`next` を読まない host でも結論は同じになる。
 - **予算は完了を許可しない。** 既存の gate は一切緩めない。理由コードの優先順は、D の既定の後ろに `budget-dispatch-unsettled`、`budget-exhausted` の順で置く。
@@ -272,12 +304,12 @@ final latch は `budget enter-final`（明示）か `at ≥ repair の締切`（
 
 | 層 | 追加・変更 |
 |---|---|
-| kernel | 新 module（policy/ledger の型・decoder・`admit`・`budget_class`・`cleanup_sec` の表・exhaustion の導出・reducer・`BUDGET_SPAWN_ENTRIES`）。commands union と transition registry に `ReserveDispatchBudget`・`SettleDispatchBudget`・`EnterFinalPhase`・`BudgetStop`。lifecycle の reducer（MarkHalt・MarkPass・Reactivate・ResumeStale）に ledger がある場合だけ時計の区間の開閉と exhaustion の拒否。`_mark_pass` の予算 guard。generic set の保護集合の拡張 [S07]。E0 の種別表への F の Δ |
+| kernel | 新 module（policy/ledger の型・decoder・`admit`・`budget_class`・`cleanup_sec` の表・回復と回復専用枠の admission（§3.6）・`final_infeasible` と exhaustion の導出・reducer・`BUDGET_SPAWN_ENTRIES`）。commands union と transition registry に `ReserveDispatchBudget`・`SettleDispatchBudget`・`EnterFinalPhase`・`BudgetStop`。lifecycle の reducer（MarkHalt・MarkPass・Reactivate・ResumeStale）に ledger がある場合だけ時計の区間の開閉と exhaustion の拒否。`_mark_pass` の予算 guard。generic set の保護集合の拡張 [S07]。E0 の種別表への F の Δ |
 | codec | v4 の `budget_ledger` と v5 の `extensions.budget_ledger` の閉じた復元と、保存面との一致検査 |
-| application | `init --budget-policy` の受付（coverage の検査付き）、`budget status/enter-final/stop/reconcile` の use case。§3.2 の各入口での予約・精算。監督 process（B）、adapter の呼出し子、provider の process group 回収と有限の待ち。mark-pass の preflight の予算 guard |
+| application | `init --budget-policy` の受付（coverage の検査付き）、`budget status/enter-final/stop/reconcile` の use case。§3.2 の各入口での予約・精算（回復の予約を含む）。監督 process（B。最初に `setsid` し、verifier を新しい session なしで起動する runner の引数を含む。§4.2）、adapter の呼出し子、provider の process group 回収と有限の待ち。mark-pass の preflight の予算 guard |
 | CLI | parser と 1 use case 呼出しだけ。thin-adapter の baseline を増やさない |
 | inventory | `command_owners.py` に mutation を A1.lifecycle（`budget stop`・`budget enter-final`）と A3.evidence（`budget reconcile`）へ、`budget status` を R1.query へ登録する [S29]。spawn 箇所の inventory test（§3.5）。guidance parity の入力に `$.budget_ledger` [S06]。配布 mirror の同期 |
-| 他の設計への要求 | D2c: envelope に `deadline_at`、全 adapter 呼出しを 1 つの seam から（判断事項 3）。E0: F の書込み種別を Δ の表へ、F の slot の上書きを停止系の判定へ（§4.3）。I/G: Mission arm へ policy と `external_deadline_at` を渡す（判断事項 10） |
+| 他の設計への要求 | D2c: envelope に `deadline_at`、全 adapter 呼出しを 1 つの seam から（判断事項 3）。D2c・E2・E3: dispatch の intent に予約の `reservation_id` と分類を同じ commit で書く（回復の分類の入力。§3.6）。E0: F の書込み種別を Δ の表へ、F の slot の上書きを停止系の判定へ（§4.3）。I/G: Mission arm へ policy と `external_deadline_at` を渡す（判断事項 10） |
 
 ### 6.2 保持する保証（緩めない）
 
@@ -294,10 +326,10 @@ final latch は `budget enter-final`（明示）か `at ≥ repair の締切`（
 
 ### 6.3 検証方針
 
-- TDD で、現実的な故障を先に Red にする: 初回の dispatch が repair・final の予約を食い尽くす、retry の二重計上と欠落、crash 後の予約の 0 計上、halt 中の時間の計上、時計の後退、並行予約の二重配賦、締切後も child が残る（孫 process を含む）、provider の回収が終わらない、adapter の `collect` と `cancel` が戻らない、B の監督 process の読取りが戻らない、4 MiB の近くで予約した dispatch の終端が書けない、`budget stop` が予算の残る session で通る、開いている予約がある状態での mark-passes（**契約の無い session を含む**）、exhaustion 後の force pass、`--phase` を偽った provider が final へ計上される、`pending` の入口が残る状態での `init --budget-policy`、表に無い spawn 箇所の追加。
-- 受入（§4.4 の狭めた保証に合わせる）: 制御された時計の fixture で、(a) mission の spawn 入口から起動した repair 系の dispatch は final の予約の時間帯に実行されず、`settle_by ≤ repair の締切` であること、(b) inline の時間を模した稼働時間が `reserve_erosion_sec` に現れ、final が実行できない場合は exhaustion から partial-done になり pass にならないこと、(c) 外部締切が稼働時計より早い場合に外部締切で exhaustion になること。
-- 変異（検出できることを確かめる対象）: 保護枠の差し引きを外す、`<` と `≤` の取り違え、repair の締切から `final_unspent` を外す、開いている予約を unspent から外す、`cleanup_sec` の項を 1 つ落とす、`charged-full-unknown` を 0 にする、精算を 2 回適用する、子の締切を `policy_timeout` だけにする、並行 dispatch を稼働時計へ足す、kill を直下の child だけにする、provider の締切を起動後の相対時間に戻す、時計の後退を受け付ける、no-progress の候補比較を外す、予算 guard を contract 付き session だけにする、`budget_class` に `--phase` を使う、`Δ_terminal` を 0 にする、`total_sec` を切り上げる。各変異で少なくとも 1 件のテストが落ちること、正常系が通ることの両方を固定する。
-- 抜け穴探索: `admit`・`budget_class`・exhaustion の導出・policy decoder・ledger decoder に対し、正常 / 拒否を合わせて 50 入力以上を独立に作って通す（境界の秒、bool を int として渡す、配分の合計が 9999/10001、未知 field、null、重複 ID、上限超過の開いた予約、逆順の時刻、締切ちょうど、`min_dispatch_sec` ちょうど、latch 後の repair、同時上限ちょうど、候補だけ違う無進捗、`budget_minutes` が 0.01/1.1/大きな値、外部締切が過去・null・稼働時計より後）。件数と発見数を PR 本文に書く。本設計では実施していない。
+- TDD で、現実的な故障を先に Red にする: 初回の dispatch が repair・final の予約を食い尽くす、retry の二重計上と欠落、crash 後の予約の 0 計上、halt 中の時間の計上、時計の後退、並行予約の二重配賦、締切後も child が残る（孫 process を含む）、provider の回収が終わらない、adapter の `collect` と `cancel` が戻らない、B の監督 process の読取りが戻らない、4 MiB の近くで予約した dispatch の終端が書けない、exhaustion 後や final の時間帯に予約なしの `recover` が走る、回復専用枠を越えて回復が続く、監督が verifier の起動直後（pgid の受け渡し前）に止まり verifier と子孫が残る、final の dispatch が時間不足で拒否された直後に pass（force・**契約の無い session** を含む）が通る、final の dispatch が開いている間に `final_infeasible` で exhaustion になり完了した final を捨てる、`budget stop` が予算の残る session で通る、開いている予約がある状態での mark-passes（**契約の無い session を含む**）、exhaustion 後の force pass、`--phase` を偽った provider が final へ計上される、`pending` の入口が残る状態での `init --budget-policy`、表に無い spawn 箇所の追加。
+- 受入（§4.4 の狭めた保証に合わせる）: 制御された時計の fixture で、(a) mission の spawn 入口から起動した repair 系の dispatch は final の予約の時間帯に実行されず、`settle_by ≤ repair の締切` であること、(b) inline の時間を模した稼働時間が `reserve_erosion_sec` に現れ、final が実行できない場合は exhaustion から partial-done になり pass にならないこと、(c) 外部締切が稼働時計より早い場合に外部締切で exhaustion になること、(d) final の dispatch が時間不足で拒否された時点から、final が完了として記録されていない限り pass（force を含む、契約の無い session を含む）が拒否されること、(e) 回復の呼出しが final の時間帯・exhaustion 後に予約なしで走らず、回復専用枠と `overall_deadline` を越えないこと。
+- 変異（検出できることを確かめる対象）: 保護枠の差し引きを外す、`<` と `≤` の取り違え、repair の締切から `final_unspent` を外す、開いている予約を unspent から外す、`cleanup_sec` の項を 1 つ落とす、`charged-full-unknown` を 0 にする、精算を 2 回適用する、子の締切を `policy_timeout` だけにする、並行 dispatch を稼働時計へ足す、kill を直下の child だけにする、provider の締切を起動後の相対時間に戻す、時計の後退を受け付ける、no-progress の候補比較を外す、予算 guard を contract 付き session だけにする、`budget_class` に `--phase` を使う、`Δ_terminal` を 0 にする、`total_sec` を切り上げる、`recover` の予約を外す、回復の分類を caller の引数にする、回復専用枠を補充する、`final_close` から `system_recovery_sec` を外す、監督を `start_new_session` で verifier を起動する旧方式に戻す、親の `killpg(G)` を監督の reap の後に移す、exhaustion から 3 を外す、`final_infeasible` と admission の判定を別の式にする、`final_recorded` に `charged-full-unknown` を数える。各変異で少なくとも 1 件のテストが落ちること、正常系が通ることの両方を固定する。
+- 抜け穴探索: `admit`・`budget_class`・exhaustion の導出・policy decoder・ledger decoder に対し、正常 / 拒否を合わせて 50 入力以上を独立に作って通す（境界の秒、bool を int として渡す、配分の合計が 9999/10001、未知 field、null、重複 ID、上限超過の開いた予約、逆順の時刻、締切ちょうど、`min_dispatch_sec` ちょうど、latch 後の repair、同時上限ちょうど、候補だけ違う無進捗、`budget_minutes` が 0.01/1.1/大きな値、外部締切が過去・null・稼働時計より後、`final の締切 − at` が `min_final_run_sec` の前後 1 秒、開いた final 予約の有無、回復専用枠の残りちょうど、`system_recovery_sec` が 42/43、total が 869/870 秒）。件数と発見数を PR 本文に書く。本設計では実施していない。
 - 公開 CLI の end-to-end（fixture の verifier・provider・adapter）: 予約→実行→精算、締切での回収、crash 後の精算、予算停止、legacy の不変。
 - 新規テストの費用は **UNKNOWN**。実装後に対象実行で計測する。CI は shard 経由で tracked tests を選ぶ既存経路を使う。
 
@@ -307,12 +339,12 @@ final latch は `budget enter-final`（明示）か `at ≥ repair の締切`（
 
 | PR | 範囲 | 依存 | 素の見積 | ×1.6 |
 |---|---|---|---:|---:|
-| F1: 予算の kernel | policy/ledger の型・decoder・codec、generic set 保護、時計の区間と外部締切、`admit`・`budget_class`・`cleanup_sec` の表・exhaustion の導出、全 reducer、`_mark_pass` の予算 guard（純関数）、`StopSlots`、F の Δ 定数と最大形 test（E0 の拡張点）、`BUDGET_SPAWN_ENTRIES`（全て `pending`）、`budget status`。policy を作る経路が無いので inert | E0 | 650〜800 | 1,040〜1,280 |
-| F2a: 既存入口の admission と bounded kill | #1・#3・#4・#5・#6 の予約と精算、B の監督 process、provider の絶対締切・process group・有限の待ち、strict の拒否、crash 後の精算と `budget reconcile`、mark-pass の preflight、no-progress、spawn 箇所の inventory test（既存入口を `covered`、D/E を `pending`） | F1 | 600〜750 | 960〜1,200 |
-| F2b: D/E 入口の admission | #2・#7〜#10 の予約と精算、adapter の呼出し子と `cancel` の順序、`repair begin` の検査、表の D/E を `covered` | F2a、D2c・E2・E3 が main にあること | 450〜600 | 720〜960 |
+| F1: 予算の kernel | policy/ledger の型・decoder・codec、generic set 保護、時計の区間と外部締切、`admit`・`budget_class`・`cleanup_sec` の表・回復と回復専用枠の admission・`final_infeasible` と exhaustion の導出、全 reducer、`_mark_pass` の予算 guard（純関数）、`StopSlots`、F の Δ 定数と最大形 test（E0 の拡張点）、`BUDGET_SPAWN_ENTRIES`（全て `pending`）、`budget status`。policy を作る経路が無いので inert | E0 | 700〜850 | 1,120〜1,360 |
+| F2a: 既存入口の admission と bounded kill | #1・#3・#4・#5・#6 の予約と精算、B の監督 process（group の先行確保と runner の引数）、provider の絶対締切・process group・有限の待ち、strict の拒否、crash 後の精算と `budget reconcile`、mark-pass の preflight、no-progress、spawn 箇所の inventory test（既存入口を `covered`、D/E を `pending`） | F1 | 620〜770 | 992〜1,232 |
+| F2b: D/E 入口の admission | #2・#7〜#10 の予約と精算（#9 の回復の予約と回復専用枠の配線を含む）、adapter の呼出し子と `cancel` の順序、`repair begin` の検査、表の D/E を `covered` | F2a、D2c・E2・E3 が main にあること | 500〜650 | 800〜1,040 |
 | F2c: 有効化と停止（Closes #881） | `init --budget-policy`（coverage の検査付き、`pending` 0 を要求）、`budget enter-final`・`budget stop`、exhaustion 後の Reactivate 拒否、`next` の差し替え、end-to-end と受入 fixture | F2b | 450〜600 | 720〜960 |
 
-合計 2,150〜2,750 行（×1.6 で 3,440〜4,400 行）。旧版は 1,650〜2,000 行。各 PR は 600 行を越えうるので、PR 本文に分割しない理由（F1 は型・decoder・reducer・codec を同時に成立させないと保存面の検査が空回りする、F2a は予約と回収を同じ入口で同時に入れないと予約だけの中間状態ができる）を書く。行数は実 diff を `scripts/pr_size.py` で再計測する。**有効化は F2c だけに置くので、F1〜F2b の中間状態はどれも policy を持つ session を作れない**（§3.5）。
+合計 2,270〜2,870 行（×1.6 で 3,632〜4,592 行）。round 2 の改訂（回復の予約と回復専用枠、`final_infeasible`、監督の group の先行確保）で round 1 版の 2,150〜2,750 行から増やした。初版は 1,650〜2,000 行。各 PR は 600 行を越えうるので、PR 本文に分割しない理由（F1 は型・decoder・reducer・codec を同時に成立させないと保存面の検査が空回りする、F2a は予約と回収を同じ入口で同時に入れないと予約だけの中間状態ができる）を書く。行数は実 diff を `scripts/pr_size.py` で再計測する。**有効化は F2c だけに置くので、F1〜F2b の中間状態はどれも policy を持つ session を作れない**（§3.5）。
 
 ## 8. 判断が必要な事項と対象外
 
@@ -330,6 +362,10 @@ final latch は `budget enter-final`（明示）か `at ≥ repair の締切`（
 10. **（新規）I/G への要求**。Mission arm の harness が `init --budget-policy` と `external_deadline_at = 起動時刻 + T − 後処理の余白` を渡すこと、余白の値、Mission arm が halt 後に reactivate するか。I の事前登録の凍結項目に含めるかは I で決める。
 11. **（新規）承認 verifier を予約の対象にすること**。推奨は対象にする（§3.2 #5・#6）。予約のために verify-approval の lock 区間の前へ短い transaction を 1 つ足す。
 12. **（新規）保証を狭めること**。§4.4 の「mission の spawn 入口から起動した作業だけが final 予約を使えない。host の inline 作業と host が起動する subagent は強制の外で、侵食量を記録する」を、#881 の受入条件の読み方として採るか。Issue 本文は「reserveはguidanceだけでなくrunner/provider/retryの全dispatch入口で強制する」「初回phaseが修復/最終検証の予約枠を消費し切らない」と書いている。前者は mission の spawn 入口として満たせるが、後者の「初回phase」の主な消費者である host の planner・executor の subagent（§3.2 #16）は mission から止められない。採る場合は、Issue 本文の完了条件を「mission が起動する dispatch は予約枠を消費し切らない。host 側の消費は `reserve_erosion_sec` で可視化し、final が実行できなければ pass にならない」へ更新する必要がある（Issue の更新は orchestrator が行う）。
+
+13. **（round 2）回復の予約**。推奨は、`recover` を他の spawn と同じく予約し、分類は回復する dispatch の分類、締切はその分類の締切まで。分類の時間が尽きた後と exhaustion 後は、final 枠から init 時に切り出した固定の回復専用枠 `system_recovery_sec`（初期値 60 秒、補充しない）だけを使う（§3.6）。
+14. **（round 2）B の監督の process group**。推奨は、監督が最初に `setsid` して group を作り、verifier を新しい session なしで起動して group を継承させる（§4.2）。親は fork の戻り値で group を知るので、受け渡しの窓が無い。
+15. **（round 2）final が実行できなくなった時点の扱い**。推奨は、`final_infeasible` を admission と同じ式で導出し、final の完了記録が無く final の予約も開いていなければ exhaustion に含める（§5）。contract の無い予算付き session も対象。
 
 ### 対象外
 
@@ -369,7 +405,7 @@ final latch は `budget enter-final`（明示）か `at ≥ repair の締切`（
 [S19]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/bin/mission-state.py#L10224-L10247 "mission-state.py:10224-10247 — _run_strict_provider_backend（in-process、締切なし、10233 dispatch_prepared_packet）; command_provider.py:446-456 から呼ぶ"
 [S20]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/mission_application/command_provider.py#L518-L574 "mission_application/command_provider.py:520 Popen（新 session なし）、527-562 起動後の記録 commit、566-570 communicate(timeout) と kill() 後の timeout の無い communicate()"
 [S21]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/provider_preflight.py#L192-L236 "provider_preflight.py:192-236 — strict_spawn / dispatch_prepared_packet"
-[S22]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/bin/mission-state.py#L10390-L10433 "mission-state.py:10390-10403 _stop_approval_verifier_child（SIGTERM/SIGKILL と各 0.2 秒）、10406-10433 _run_approval_verifier（fork、5 秒 join、finally の再回収）; 10089-10090 定数"
+[S22]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/bin/mission-state.py#L10333-L10433 "mission-state.py:10335-10338 _approval_verifier_child の最初の setsid、10390-10403 _stop_approval_verifier_child（SIGTERM/SIGKILL と各 0.2 秒）、10406-10433 _run_approval_verifier（fork、5 秒 join、finally の再回収）; 10089-10090 定数"
 [S23]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/mission_application/next_action.py#L179-L185 "mission_application/next_action.py:179-185 — stagnation の助言; mission-state.py:13808-13821 更新、guidance.py:683-687"
 [S24]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/bin/mission-state.py#L11057-L11061 "mission-state.py:11057-11061 — max_iter は早期停止の報告に使う"
 [S25]: https://github.com/tackeyy/mission/blob/d25a66c6abed33a4c0fbd1036e22bdf49da3c606/skills/mission/lib/planning_provider_metrics.py#L8-L17 "planning_provider_metrics.py:8-17 — 件数と率だけの KPI"
@@ -434,3 +470,9 @@ final latch は `budget enter-final`（明示）か `at ≥ repair の締切`（
 - 11（承認 verifier の予約、orchestrator 決定）: 予約の対象にする。
 - 12（保証の範囲、owner 決定）: 保証を「予算 policy を持つ session で、mission の spawn 入口から起動した作業は final の予約を使えない」に狭める。host が起動する subagent と host の inline 作業の時間は強制の外とし、`reserve_erosion_sec` として記録し、exhaustion 後は force を含めて pass に到達させない。Issue #881 の完了条件をこの範囲に合わせて更新する。
 - 決定 7 の置き換え: F は F1 → F2a → F2b → F2c の 4 PR とする（各 PR は較正済み見積りで 1,400 行未満）。
+
+### 決定（owner 指示により推奨案を採用, 2026-10-04。設計レビュー round 2 の後）
+
+- 13（回復の予約）: 推奨案を採る。`recover` は回復する dispatch の分類で予約し、締切はその分類の締切まで。分類の時間が尽きた後と exhaustion 後は、final 枠から切り出した固定の回復専用枠だけを使う（§3.6）。
+- 14（B の監督の process group）: 推奨案を採る。監督が最初に `setsid` し、verifier はその group を継承する（§4.2）。pgid を pipe で渡す旧方式は撤回。
+- 15（final が実行できなくなった時点）: 推奨案を採る。`final_infeasible` を exhaustion の原因 3 として加え、contract の有無に関係なく pass（force を含む）を拒否する（§5）。
