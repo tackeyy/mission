@@ -15,6 +15,7 @@ from types import MappingProxyType
 
 from .fresh_review import (
     FreshReviewError, ToolCapability, _closed, _digest, _identifier,
+    _json_builtins, _field_codes, _ID_JSON_CODES, _DIGEST_JSON_CODES,
     _unique_strings, validate_budgets, canonical_digest, FRESH_REVIEW_FINDINGS_LIMIT,
     FRESH_REVIEW_INT_MAX, FRESH_REVIEW_EVIDENCE_MAX_BYTES, FRESH_REVIEW_ID_MAX_CHARS,
 )
@@ -71,7 +72,7 @@ class FreshReviewLaunchReceipt:
 
 def _choice(value, enum, code):
     try:
-        if not isinstance(value, str):
+        if type(value) is not str:
             raise ValueError('not a string')
         return enum(value)
     except (TypeError, ValueError) as exc:
@@ -86,7 +87,7 @@ def _integer(value, code):
 
 def _timestamp(value):
     try:
-        if not isinstance(value, str) or not _TIMESTAMP.fullmatch(value):
+        if type(value) is not str or not _TIMESTAMP.fullmatch(value):
             raise ValueError('not a canonical timestamp')
         parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
         if parsed.utcoffset() is None:
@@ -96,7 +97,49 @@ def _timestamp(value):
     return parsed
 
 
+_LAUNCH_JSON_CODES = {
+    **_ID_JSON_CODES, **_DIGEST_JSON_CODES,
+    **_field_codes('launch-schema-invalid', 'schema'),
+    **_field_codes('fence-invalid', 'fencing_epoch'),
+    **_field_codes('timestamp-invalid', 'started_at'),
+    **_field_codes('context-invalid', 'context_mode'),
+    **_field_codes('tools-invalid', 'enforced_tools'),
+    **_field_codes('budget-invalid', 'enforced_budget'),
+}
+_REFERENCE_JSON_CODES = _field_codes('evidence-ref-invalid', 'kind relative_path size')
+_REFERENCE_JSON_CODES.update(_field_codes('digest-invalid', 'digest'))
+_TERMINAL_JSON_CODES = {
+    **_ID_JSON_CODES, **_DIGEST_JSON_CODES,
+    **_field_codes('terminal-schema-invalid', 'schema'),
+    **_field_codes('outcome-invalid', 'outcome'),
+    **_field_codes('reason-invalid', 'reason'),
+    **_field_codes('fence-invalid', 'dispatch_fencing_epoch commit_fencing_epoch'),
+    **_field_codes('budget-used-invalid', 'budget_used'),
+    **_field_codes('timestamp-invalid', 'ended_at'),
+    **_field_codes('independent-invalid', 'independent'),
+    **_field_codes('launch-attempted-invalid', 'launch_attempted'),
+    **_field_codes('cancel-invalid', 'cancel_result'),
+    'launch_receipt': ('launch-shape-invalid', _LAUNCH_JSON_CODES),
+    'output_ref': ('evidence-ref-invalid', _REFERENCE_JSON_CODES),
+    'coverage_receipt': ('coverage-invalid', {
+        'evidence_ref': ('evidence-ref-invalid', _REFERENCE_JSON_CODES)}),
+    'findings': ('findings-invalid', {None: ('evidence-ref-invalid', _REFERENCE_JSON_CODES)}),
+}
+_DISPATCH_JSON_CODES = {
+    **_ID_JSON_CODES, **_DIGEST_JSON_CODES,
+    **_field_codes('fence-invalid', 'fencing_epoch'),
+    **_field_codes('timestamp-invalid', 'deadline_at'),
+    **_field_codes('budget-class-invalid', 'budget_class'),
+}
+_RUNNING_JSON_CODES = {
+    **_field_codes('digest-invalid', 'launch_digest'),
+    'dispatch': ('dispatch-invalid', _DISPATCH_JSON_CODES),
+    'launch_receipt': ('launch-shape-invalid', _LAUNCH_JSON_CODES),
+}
+
+
 def decode_launch_receipt(value):
+    _json_builtins(value, 'launch-shape-invalid', _LAUNCH_JSON_CODES)
     fields = dict(_closed(value, FreshReviewLaunchReceipt.__dataclass_fields__,
                           'fresh-review-launch-shape-invalid'))
     if fields['schema'] != LAUNCH_SCHEMA:
@@ -253,7 +296,8 @@ def _reference(value, kind, *, minimum_size=1):
 
 
 def decode_terminal_receipt(value):
-    if not isinstance(value, dict):
+    _json_builtins(value, 'terminal-shape-invalid', _TERMINAL_JSON_CODES)
+    if type(value) is not dict:
         raise FreshReviewError('fresh-review-terminal-shape-invalid')
     outcome = _choice(value.get('outcome'), TerminalOutcome, 'fresh-review-outcome-invalid')
     variant = _VARIANTS[outcome]
@@ -327,7 +371,7 @@ def decode_terminal_receipt(value):
             raise FreshReviewError('fresh-review-coverage-invalid')
         fields['coverage_receipt'] = FreshReviewCoverageReceipt(status,
             _reference(coverage['evidence_ref'], 'fresh-review-coverage'))
-        if not isinstance(fields['findings'], list):
+        if type(fields['findings']) is not list:
             raise FreshReviewError('fresh-review-findings-invalid')
         if len(fields['findings']) > FRESH_REVIEW_FINDINGS_LIMIT:
             raise FreshReviewError('fresh-review-findings-over-limit')
@@ -387,6 +431,7 @@ FRESH_REVIEW_BUDGET_CLASS_MAX_CHARS = FRESH_REVIEW_ID_MAX_CHARS
 
 def validate_dispatch_intent(value):
     """Pure field bounds for the future writer; no dispatch or budget authority."""
+    _json_builtins(value, 'dispatch-invalid', _DISPATCH_JSON_CODES)
     fields = _closed(value, FRESH_REVIEW_DISPATCH_SHAPE, 'fresh-review-dispatch-invalid')
     for key, bound in FRESH_REVIEW_DISPATCH_SHAPE.items():
         item = fields[key]
@@ -402,16 +447,17 @@ def validate_dispatch_intent(value):
         elif bound == 'ascii':
             # Extension point: no fixed vocabulary or ID grammar. JSON escaping
             # can expand an ASCII control character to six encoded bytes.
-            if (not isinstance(item, str) or not item.isascii()
+            if (type(item) is not str or not item.isascii()
                     or not 1 <= len(item) <= FRESH_REVIEW_BUDGET_CLASS_MAX_CHARS):
                 raise FreshReviewError('fresh-review-budget-class-invalid')
-        elif item != bound or not isinstance(item, str):
+        elif item != bound or type(item) is not str:
             raise FreshReviewError('fresh-review-dispatch-invalid')
     return dict(fields)
 
 
 def validate_running_record(value):
     """Bounded running additions; the dispatch writer owns transition bindings."""
+    _json_builtins(value, 'running-invalid', _RUNNING_JSON_CODES)
     fields = _closed(value, FRESH_REVIEW_RUNNING_SHAPE, 'fresh-review-running-invalid')
     if fields['status'] != 'running' or type(fields['independent']) is not bool:
         raise FreshReviewError('fresh-review-running-invalid')

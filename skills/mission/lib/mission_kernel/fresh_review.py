@@ -47,26 +47,103 @@ def canonical_digest(value):
     return 'sha256:' + hashlib.sha256(canonical_bytes(value)).hexdigest()
 
 
+def _json_builtins(value, code, fields=None, *, allow_float=False):
+    """Check the wire tree before trusting any overridable operation.
+
+    Descriptors retain field reasons through objects and list items (None key).
+    Null keeps existing optional-field rules. Only opaque JSON and the enclosing
+    Mission state allow exact floats; typed D numeric fields require integers.
+    """
+    ancestors = set()
+
+    def visit(item, reason, children, floats):
+        if type(item) not in (dict, list, str, int, bool, type(None)) and not (floats and type(item) is float):
+            raise FreshReviewError('fresh-review-' + reason)
+        if type(item) not in (dict, list):
+            return
+        if id(item) in ancestors:
+            raise FreshReviewError('fresh-review-' + reason)
+        ancestors.add(id(item))
+        try:
+            if type(item) is dict:
+                for key, child in item.items():
+                    if type(key) is not str:
+                        raise FreshReviewError('fresh-review-' + reason)
+                    descriptor = children.get(key, children.get(None, (reason, {})))
+                    visit(child, descriptor[0], descriptor[1],
+                          descriptor[2] if len(descriptor) == 3 else floats)
+            else:
+                child_code, child_fields = children.get(None, (reason, children))
+                for child in item:
+                    visit(child, child_code, child_fields, floats)
+        finally:
+            ancestors.remove(id(item))
+
+    try:
+        visit(value, code, fields or {}, allow_float)
+    except RecursionError as exc:
+        raise FreshReviewError('fresh-review-' + code) from exc
+
+
+def _field_codes(code, names):
+    return {name: (code, {}) for name in names.split()}
+
+
+_ID_JSON_CODES = _field_codes('identity-invalid',
+    'request_id nonce mission_id session_id operation_id prepare_operation_id '
+    'dispatch_operation_id commit_operation_id parent_identity child_identity context_identity '
+    'invocation_id adapter_id reservation_id criterion_id command_id')
+_DIGEST_JSON_CODES = _field_codes('digest-invalid',
+    'requirement_digest contract_digest verifier_policy_digest candidate_digest input_digest '
+    'adapter_registration_digest request_digest received_input_digest launch_digest output_digest '
+    'prepare_intent_digest prepare_payload_digest intent_digest payload_digest '
+    'outbound_packet_digest definition_digest snapshot_digest digest')
+_CANDIDATE_JSON_CODES = {**_ID_JSON_CODES, **_DIGEST_JSON_CODES}
+_REQUEST_JSON_CODES = {
+    **_ID_JSON_CODES, **_DIGEST_JSON_CODES,
+    **_field_codes('budget-invalid', ' '.join(BUDGET_LIMITS)),
+    **_field_codes('control-invalid', 'allowed_tools created_at'),
+    **_field_codes('request-schema-invalid', 'schema'),
+    **_field_codes('iteration-invalid', 'iteration'),
+    **_field_codes('perspective-invalid', 'perspective'),
+    'criterion_ids': ('list-invalid', {None: ('identity-invalid', {})}),
+    'candidate_bindings': ('candidate-invalid', _CANDIDATE_JSON_CODES),
+    'input_ref': ('input-ref-invalid', {}),
+}
+_RECORD_JSON_CODES = {
+    **_ID_JSON_CODES, **_DIGEST_JSON_CODES,
+    'request': ('request-shape-invalid', _REQUEST_JSON_CODES),
+    # D1 result is opaque JSON, not a typed receipt; finite floats already decode.
+    'result': ('result-invalid', {}, True),
+}
+_PROJECTION_JSON_CODES = {
+    'fresh_review': ('projection-shape-invalid', {
+        'schema': ('projection-schema-invalid', {}),
+        'requests': ('projection-shape-invalid', {None: ('record-invalid', _RECORD_JSON_CODES)}),
+    }, False),
+}
+
+
 def _closed(value, fields, code):
-    if not isinstance(value, dict) or set(value) != set(fields):
+    if type(value) is not dict or set(value) != set(fields):
         raise FreshReviewError(code)
     return value
 
 
 def _identifier(value):
-    if not isinstance(value, str) or not _ID.fullmatch(value):
+    if type(value) is not str or not _ID.fullmatch(value):
         raise FreshReviewError('fresh-review-identity-invalid')
     return value
 
 
 def _digest(value):
-    if not isinstance(value, str) or not _DIGEST.fullmatch(value):
+    if type(value) is not str or not _DIGEST.fullmatch(value):
         raise FreshReviewError('fresh-review-digest-invalid')
     return value
 
 
 def _unique_strings(value, validator, *, nonempty=True):
-    if not isinstance(value, list) or nonempty and not value:
+    if type(value) is not list or nonempty and not value:
         raise FreshReviewError('fresh-review-list-invalid')
     items = tuple(validator(item) for item in value)
     if len(set(items)) != len(items):
@@ -75,6 +152,7 @@ def _unique_strings(value, validator, *, nonempty=True):
 
 
 def validate_budgets(values):
+    _json_builtins(values, 'budget-invalid')
     _closed(values, BUDGET_LIMITS, 'fresh-review-budget-invalid')
     if any(type(values[key]) is not int or not 1 <= values[key] <= maximum
            for key, maximum in BUDGET_LIMITS.items()):
@@ -124,6 +202,7 @@ class FreshReviewRequest:
 
 
 def candidate_identity(snapshots):
+    _json_builtins(snapshots, 'candidate-invalid', {None: ('digest-invalid', {})})
     if not isinstance(snapshots, dict) or not snapshots:
         raise FreshReviewError('fresh-review-candidate-invalid')
     validated = {_identifier(key): _digest(value) for key, value in snapshots.items()}
@@ -144,6 +223,7 @@ def request_document(request):
 
 
 def decode_request(value):
+    _json_builtins(value, 'request-shape-invalid', _REQUEST_JSON_CODES)
     _closed(value, FreshReviewRequest.__dataclass_fields__, 'fresh-review-request-shape-invalid')
     if value['schema'] != REQUEST_SCHEMA:
         raise FreshReviewError('fresh-review-request-schema-invalid')
@@ -157,7 +237,7 @@ def decode_request(value):
     if type(fields['iteration']) is not int or fields['iteration'] < 0:
         raise FreshReviewError('fresh-review-iteration-invalid')
     perspective = fields['perspective']
-    if not isinstance(perspective, str) or not perspective or perspective != perspective.strip() or len(perspective) > 128 or '\x00' in perspective:
+    if type(perspective) is not str or not perspective or perspective != perspective.strip() or len(perspective) > 128 or '\x00' in perspective:
         raise FreshReviewError('fresh-review-perspective-invalid')
     canonical_bytes(perspective)
     validate_budgets({key: fields[key] for key in BUDGET_LIMITS})
@@ -169,7 +249,7 @@ def decode_request(value):
     except (ValueError, TypeError, AttributeError) as exc:
         raise FreshReviewError('fresh-review-control-invalid') from exc
     bindings = fields['candidate_bindings']
-    if not isinstance(bindings, list) or not bindings:
+    if type(bindings) is not list or not bindings:
         raise FreshReviewError('fresh-review-candidate-invalid')
     decoded, snapshots, definitions, roles = [], {}, {}, set()
     for item in bindings:
@@ -178,7 +258,7 @@ def decode_request(value):
             _identifier(item[key])
         for key in ('definition_digest', 'snapshot_digest'):
             _digest(item[key])
-        if not isinstance(item['role'], str) or item['role'] not in ('verification', 'replay'):
+        if type(item['role']) is not str or item['role'] not in ('verification', 'replay'):
             raise FreshReviewError('fresh-review-candidate-invalid')
         pair = (item['criterion_id'], item['role'])
         if pair in roles or item['criterion_id'] not in fields['criterion_ids']:
@@ -234,6 +314,8 @@ def projection_document(projection):
 
 
 def decode_projection(document):
+    # The carrier is the whole Mission state, whose scores include JSON floats.
+    _json_builtins(document, 'projection-shape-invalid', _PROJECTION_JSON_CODES, allow_float=True)
     if not isinstance(document, dict):
         raise FreshReviewError('fresh-review-projection-shape-invalid')
     if 'fresh_review' not in document:
@@ -241,7 +323,7 @@ def decode_projection(document):
     value = _closed(document['fresh_review'], ('schema', 'requests'), 'fresh-review-projection-shape-invalid')
     if value['schema'] != PROJECTION_SCHEMA:
         raise FreshReviewError('fresh-review-projection-schema-invalid')
-    if not isinstance(value['requests'], list):
+    if type(value['requests']) is not list:
         raise FreshReviewError('fresh-review-projection-shape-invalid')
     records, ids, nonces, operations = [], set(), set(), set()
     for item in value['requests']:
@@ -265,7 +347,7 @@ def decode_projection(document):
             if fields['status'] == 'reserved' and fields['result'] is not None:
                 raise FreshReviewError('fresh-review-record-invalid')
             if fields['status'] == 'consumed':
-                if not isinstance(fields['result'], dict) or len(canonical_bytes(fields['result'])) > request.max_output_bytes:
+                if type(fields['result']) is not dict or len(canonical_bytes(fields['result'])) > request.max_output_bytes:
                     raise FreshReviewError('fresh-review-result-invalid')
                 fields['result'] = freeze_json_value(fields['result'])
         else:
