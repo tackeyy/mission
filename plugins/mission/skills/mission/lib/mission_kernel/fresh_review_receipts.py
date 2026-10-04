@@ -9,18 +9,30 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from enum import Enum
+import re
 from typing import Union
+from types import MappingProxyType
 
 from .fresh_review import (
     FreshReviewError, ToolCapability, _closed, _digest, _identifier,
-    _unique_strings, validate_budgets, canonical_digest,
+    _unique_strings, validate_budgets, canonical_digest, FRESH_REVIEW_FINDINGS_LIMIT,
+    FRESH_REVIEW_INT_MAX, FRESH_REVIEW_EVIDENCE_MAX_BYTES, FRESH_REVIEW_ID_MAX_CHARS,
 )
 
 from .model import ContentAddressedRef
 
+# Exact maxima of accepted shapes under the canonical state JSON encoder.
+# Completed usage remains bounded by the enforced budget; other outcomes may
+# report usage up to INT_MAX. These are shape bytes, not state mutation deltas.
+FRESH_REVIEW_MAX_ENCODED_BYTES = MappingProxyType({
+    'launch': 1498, 'completed': 17925, 'failed': 3100, 'blocked': 1211,
+    'abandoned-unknown': 2765, 'intent': 1797, 'running': 3455,
+})
+
 LAUNCH_SCHEMA = 'mission-fresh-review-launch/1'
 
 TERMINAL_SCHEMA = 'mission-fresh-review-terminal/1'
+_TIMESTAMP = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z\Z')
 
 
 class ContextMode(str, Enum):
@@ -67,15 +79,15 @@ def _choice(value, enum, code):
 
 
 def _integer(value, code):
-    if type(value) is not int or value < 0:
+    if type(value) is not int or not 0 <= value <= FRESH_REVIEW_INT_MAX:
         raise FreshReviewError(code)
     return value
 
 
 def _timestamp(value):
     try:
-        if not isinstance(value, str):
-            raise ValueError('not a string')
+        if not isinstance(value, str) or not _TIMESTAMP.fullmatch(value):
+            raise ValueError('not a canonical timestamp')
         parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
         if parsed.utcoffset() is None:
             raise ValueError('naive')
@@ -118,6 +130,7 @@ class TerminalReason(str, Enum):
     NONE = 'none'
     CHILD_FAILED = 'child-failed'
     OUTPUT_INVALID = 'output-invalid'
+    OUTPUT_OVER_IMPORT_LIMIT = 'output-over-import-limit'
     BUDGET_EXCEEDED = 'budget-exceeded'
     BINDING_MISMATCH = 'binding-mismatch'
     TIMEOUT = 'timeout'
@@ -137,7 +150,7 @@ REASONS_BY_OUTCOME = {
     TerminalOutcome.COMPLETED: frozenset({TerminalReason.NONE}),
     TerminalOutcome.FAILED: frozenset({TerminalReason.CHILD_FAILED, TerminalReason.OUTPUT_INVALID,
         TerminalReason.BUDGET_EXCEEDED, TerminalReason.BINDING_MISMATCH,
-        TerminalReason.TIMEOUT, TerminalReason.INTERRUPTED}),
+        TerminalReason.TIMEOUT, TerminalReason.INTERRUPTED, TerminalReason.OUTPUT_OVER_IMPORT_LIMIT}),
     TerminalOutcome.BLOCKED: frozenset({TerminalReason.LAUNCH_UNAVAILABLE,
         TerminalReason.INPUT_TOO_LARGE, TerminalReason.REGISTRATION_MISMATCH,
         TerminalReason.IDENTITY_UNOBSERVABLE, TerminalReason.INPUT_UNOBSERVABLE,
@@ -233,7 +246,8 @@ def _reference(value, kind, *, minimum_size=1):
     fields = _closed(value, ContentAddressedRef.__dataclass_fields__, 'fresh-review-evidence-ref-invalid')
     digest = _digest(fields['digest'])
     if (fields['kind'] != kind or fields['relative_path'] != 'evidence/fresh-review/' + digest[7:] + '.json'
-            or type(fields['size']) is not int or fields['size'] < minimum_size):
+            or type(fields['size']) is not int
+            or not minimum_size <= fields['size'] <= FRESH_REVIEW_EVIDENCE_MAX_BYTES):
         raise FreshReviewError('fresh-review-evidence-ref-invalid')
     return ContentAddressedRef(**fields)
 
@@ -252,7 +266,8 @@ def decode_terminal_receipt(value):
     else:
         pair = set()
     required -= pair
-    if pair & value.keys():
+    if (pair & value.keys() or outcome == TerminalOutcome.FAILED
+            and value.get('reason') == TerminalReason.OUTPUT_OVER_IMPORT_LIMIT):
         required |= pair
     fields = dict(_closed(value, required, 'fresh-review-terminal-shape-invalid'))
     if any(item is None for item in fields.values()):
@@ -314,6 +329,8 @@ def decode_terminal_receipt(value):
             _reference(coverage['evidence_ref'], 'fresh-review-coverage'))
         if not isinstance(fields['findings'], list):
             raise FreshReviewError('fresh-review-findings-invalid')
+        if len(fields['findings']) > FRESH_REVIEW_FINDINGS_LIMIT:
+            raise FreshReviewError('fresh-review-findings-over-limit')
         fields['findings'] = tuple(_reference(item, 'fresh-review-finding') for item in fields['findings'])
         if len(set(fields['findings'])) != len(fields['findings']):
             raise FreshReviewError('fresh-review-findings-invalid')
@@ -350,3 +367,55 @@ def receipt_document(receipt):
             if value[key] is None:
                 del value[key]
     return value
+
+
+# Bounded additions to the D1 record, not copies of its variable-length request.
+# D2c must use these closed shapes; new fields require updating the size contract.
+FRESH_REVIEW_DISPATCH_SHAPE = MappingProxyType({
+    'invocation_id': 'id', 'operation_id': 'id', 'outbound_packet_digest': 'digest',
+    'iteration': 'integer', 'fencing_epoch': 'integer',
+    'status': 'dispatch-unknown', 'lifecycle_state': 'dispatch-unknown',
+    'parent_identity': 'id', 'adapter_id': 'id', 'deadline_at': 'timestamp',
+    'reservation_id': 'id', 'budget_class': 'ascii',
+})
+FRESH_REVIEW_RUNNING_SHAPE = MappingProxyType({
+    'status': 'running', 'dispatch': 'dispatch', 'launch_receipt': 'launch',
+    'launch_digest': 'digest', 'independent': 'bool',
+})
+FRESH_REVIEW_BUDGET_CLASS_MAX_CHARS = FRESH_REVIEW_ID_MAX_CHARS
+
+
+def validate_dispatch_intent(value):
+    """Pure field bounds for the future writer; no dispatch or budget authority."""
+    fields = _closed(value, FRESH_REVIEW_DISPATCH_SHAPE, 'fresh-review-dispatch-invalid')
+    for key, bound in FRESH_REVIEW_DISPATCH_SHAPE.items():
+        item = fields[key]
+        if bound == 'id':
+            _identifier(item)
+        elif bound == 'digest':
+            _digest(item)
+        elif bound == 'integer':
+            _integer(item, 'fresh-review-fence-invalid' if key == 'fencing_epoch'
+                     else 'fresh-review-dispatch-invalid')
+        elif bound == 'timestamp':
+            _timestamp(item)
+        elif bound == 'ascii':
+            # Extension point: no fixed vocabulary or ID grammar. JSON escaping
+            # can expand an ASCII control character to six encoded bytes.
+            if (not isinstance(item, str) or not item.isascii()
+                    or not 1 <= len(item) <= FRESH_REVIEW_BUDGET_CLASS_MAX_CHARS):
+                raise FreshReviewError('fresh-review-budget-class-invalid')
+        elif item != bound or not isinstance(item, str):
+            raise FreshReviewError('fresh-review-dispatch-invalid')
+    return dict(fields)
+
+
+def validate_running_record(value):
+    """Bounded running additions; the dispatch writer owns transition bindings."""
+    fields = _closed(value, FRESH_REVIEW_RUNNING_SHAPE, 'fresh-review-running-invalid')
+    if fields['status'] != 'running' or type(fields['independent']) is not bool:
+        raise FreshReviewError('fresh-review-running-invalid')
+    validate_dispatch_intent(fields['dispatch'])
+    decode_launch_receipt(fields['launch_receipt'])
+    _digest(fields['launch_digest'])
+    return dict(fields)

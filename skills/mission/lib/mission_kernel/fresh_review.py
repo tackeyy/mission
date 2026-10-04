@@ -20,6 +20,12 @@ REQUEST_SCHEMA = 'mission-fresh-review-request/1'
 PROJECTION_SCHEMA = 'mission-fresh-review/1'
 BUDGET_LIMITS = {'wall_time_sec': 300, 'max_tool_calls': 64, 'max_replays': 16,
                  'max_output_bytes': 256 * 1024, 'max_packet_bytes': 1024 * 1024}
+FRESH_REVIEW_INT_MAX = 2**63 - 1
+FRESH_REVIEW_ID_MAX_CHARS = 128
+FRESH_REVIEW_DIGEST_CHARS = 71
+FRESH_REVIEW_TIMESTAMP_CHARS = 27
+FRESH_REVIEW_FINDINGS_LIMIT = 61
+FRESH_REVIEW_EVIDENCE_MAX_BYTES = BUDGET_LIMITS['max_output_bytes']
 _ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z')
 _DIGEST = re.compile(r'sha256:[0-9a-f]{64}\Z')
 
