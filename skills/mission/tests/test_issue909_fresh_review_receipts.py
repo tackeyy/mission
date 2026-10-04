@@ -428,3 +428,21 @@ def test_delayed_terminal_publication_does_not_extend_measured_child_wall_time()
     raw['ended_at'] = '2026-01-01T00:10:00+00:00'
     raw['budget_used']['wall_time_sec'] = 300
     assert decode_terminal_receipt(raw).outcome == 'completed'
+
+
+@pytest.mark.parametrize('outcome', ['completed', 'failed', 'abandoned-unknown'])
+@pytest.mark.parametrize('ended,accepted', [
+    ('2026-01-01T00:00:00+00:00', True),
+    ('2025-12-31T19:00:01-05:00', True),
+    ('2026-01-01T09:00:00+09:00', True),
+    ('2026-01-01T01:00:00+02:00', False),
+])
+def test_terminal_timestamps_compare_instants_and_allow_zero_duration(outcome, ended, accepted):
+    from mission_kernel.fresh_review_receipts import decode_terminal_receipt
+    raw = terminal_document(outcome)
+    raw['ended_at'] = ended
+    if accepted:
+        assert decode_terminal_receipt(raw).ended_at == ended
+    else:
+        with pytest.raises(ValueError, match='^fresh-review-timestamp-order-invalid$'):
+            decode_terminal_receipt(raw)

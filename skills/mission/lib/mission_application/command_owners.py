@@ -33,6 +33,8 @@ COMMAND_OWNER_REGISTRY = {
         "review-finalize",
         "review-import",
         "fresh-review prepare",
+        "fresh-review run",
+        "fresh-review reconcile",
         "supersede-reviews",
     ),
     **_owned(

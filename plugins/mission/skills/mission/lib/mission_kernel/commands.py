@@ -287,6 +287,34 @@ class PrepareFreshReview:
 
 
 @dataclass(frozen=True)
+class BeginFreshReviewDispatch:
+    request_id: str
+    operation_id: str
+    fencing_epoch: int
+    intent_digest: str
+    payload_digest: str
+    dispatch: FrozenJsonObject
+    candidate_digest: str
+
+
+@dataclass(frozen=True)
+class RecordFreshReviewLaunch:
+    request_id: str
+    operation_id: str
+    fencing_epoch: int
+    launch: FrozenJsonObject
+    candidate_digest: str
+
+
+@dataclass(frozen=True)
+class CommitFreshReviewResult:
+    request_id: str
+    operation_id: str
+    fencing_epoch: int
+    receipt: FrozenJsonObject
+
+
+@dataclass(frozen=True)
 class CanonicalPlanObservation:
     path: str
     digest: str
@@ -474,6 +502,9 @@ Command = Union[
     RecordVerificationReceipt,
     ImportAcceptanceContract,
     PrepareFreshReview,
+    BeginFreshReviewDispatch,
+    RecordFreshReviewLaunch,
+    CommitFreshReviewResult,
     RecordExecutorStep,
     RecordSpecialistRecommendation,
     RejectExecutorHandoff,
@@ -505,6 +536,9 @@ _COMMAND_TYPES = {
     RecordVerificationReceipt: "record-verification-receipt",
     ImportAcceptanceContract: "acceptance-contract-import",
     PrepareFreshReview: "fresh-review-prepare",
+    BeginFreshReviewDispatch: "fresh-review-run",
+    RecordFreshReviewLaunch: "fresh-review-launch",
+    CommitFreshReviewResult: "fresh-review-result",
     RecordExecutorStep: "executor-handoff-record-step",
     RecordSpecialistRecommendation: "specialists-record-recommendation",
     RejectExecutorHandoff: "executor-handoff-reject-canonical-drift",

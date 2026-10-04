@@ -43,6 +43,9 @@ from .commands import (
     RecordVerificationReceipt,
     ImportAcceptanceContract,
     PrepareFreshReview,
+    BeginFreshReviewDispatch,
+    RecordFreshReviewLaunch,
+    CommitFreshReviewResult,
     RejectExecutorHandoff,
     AbortExecutorHandoff,
     HandoffAbortReason,
@@ -1492,6 +1495,16 @@ def _prepare_fresh_review(state: MissionState, command: object) -> Transition:
     return Transition(next_state, (KernelEvent("fresh-review-prepared"),))
 
 
+def _fresh_review_dispatch(state: MissionState, command: object) -> Transition:
+    from .fresh_review_dispatch import dispatch_state
+    from .fresh_review import FreshReviewError
+    try:
+        next_state = dispatch_state(state, command)
+    except FreshReviewError as rejected:
+        raise _Rejected(rejected.code)
+    return Transition(next_state, (KernelEvent("fresh-review-dispatch-recorded"),))
+
+
 def _generate_claims_ledger(state: MissionState, raw_command: object) -> Transition:
     command = raw_command
     assert isinstance(command, GenerateClaimsLedger)
@@ -2104,6 +2117,15 @@ TRANSITION_TABLE = build_transition_table(
             _prepare_fresh_review,
         ),
         TransitionRule(
+            "fresh-review-run", BeginFreshReviewDispatch, _command_type_guard(BeginFreshReviewDispatch), _fresh_review_dispatch,
+        ),
+        TransitionRule(
+            "fresh-review-launch", RecordFreshReviewLaunch, _command_type_guard(RecordFreshReviewLaunch), _fresh_review_dispatch,
+        ),
+        TransitionRule(
+            "fresh-review-result", CommitFreshReviewResult, _command_type_guard(CommitFreshReviewResult), _fresh_review_dispatch,
+        ),
+        TransitionRule(
             "acceptance-contract-import",
             ImportAcceptanceContract,
             _command_type_guard(ImportAcceptanceContract),
@@ -2295,7 +2317,8 @@ def bind_transition_effects(
         claims = (command.artifact_effect, command.export_effect)
     elif isinstance(command, (UpdateProgress, GenerateContextManifest, GenerateClaimsLedger)):
         claims = (command.effect,)
-    elif isinstance(command, (ClearProgress, RecordVerification, RecordVerificationReceipt, ImportAcceptanceContract)):
+    elif isinstance(command, (ClearProgress, RecordVerification, RecordVerificationReceipt, ImportAcceptanceContract,
+                              BeginFreshReviewDispatch, RecordFreshReviewLaunch, CommitFreshReviewResult)):
         claims = ()
     if claims is not None and (
         len(effects) != len(claims)

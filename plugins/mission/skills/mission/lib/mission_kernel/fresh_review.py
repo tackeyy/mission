@@ -206,11 +206,20 @@ class FreshReviewRecord:
     intent_digest: str | None = None
     payload_digest: str | None = None
     result: FrozenJsonObject | None = None
+    dispatch: FrozenJsonObject | None = None
+    launch: FrozenJsonObject | None = None
+    independent: bool | None = None
 
 
 @dataclass(frozen=True)
 class FreshReviewProjection:
     requests: tuple[FreshReviewRecord, ...] = ()
+
+
+def record_operation_ids(record):
+    commit = (record.result.thaw()['commit_operation_id']
+              if record.status in ('blocked', 'abandoned-unknown') else None)
+    return (record.prepare_operation_id, record.operation_id, commit)
 
 
 def projection_document(projection):
@@ -223,6 +232,8 @@ def projection_document(projection):
         if record.result is not None and not isinstance(record.result, FrozenJsonObject):
             raise FreshReviewError('fresh-review-result-invalid')
         fields['result'] = record.result.thaw() if record.result is not None else None
+        for key in ('dispatch', 'launch'):
+            fields[key] = getattr(record, key).thaw() if getattr(record, key) is not None else None
         records.append(fields)
     return {'schema': PROJECTION_SCHEMA, 'requests': records}
 
@@ -239,8 +250,9 @@ def decode_projection(document):
         raise FreshReviewError('fresh-review-projection-shape-invalid')
     records, ids, nonces, operations = [], set(), set(), set()
     for item in value['requests']:
-        _closed(item, FreshReviewRecord.__dataclass_fields__, 'fresh-review-record-invalid')
-        fields = dict(item)
+        fields = {'dispatch': None, 'launch': None, 'independent': None, **item} if isinstance(item, dict) else item
+        _closed(fields, FreshReviewRecord.__dataclass_fields__, 'fresh-review-record-invalid')
+        fields = dict(fields)
         fields['request'] = request = decode_request(fields['request'])
         _identifier(fields['prepare_operation_id'])
         _digest(fields['prepare_intent_digest']); _digest(fields['prepare_payload_digest'])
@@ -262,7 +274,22 @@ def decode_projection(document):
                 if not isinstance(fields['result'], dict) or len(canonical_bytes(fields['result'])) > request.max_output_bytes:
                     raise FreshReviewError('fresh-review-result-invalid')
                 fields['result'] = freeze_json_value(fields['result'])
+        elif fields['status'] in ('dispatch-unknown', 'running', 'blocked', 'abandoned-unknown'):
+            from .fresh_review_dispatch import decode_dispatch_record
+            fields = decode_dispatch_record(fields)
+            operation = fields['operation_id']
+            if operation in operations:
+                raise FreshReviewError('fresh-review-operation-conflict')
+            operations.add(operation)
         else:
+            raise FreshReviewError('fresh-review-record-invalid')
+        if fields['status'] in ('blocked', 'abandoned-unknown'):
+            commit = fields['result'].thaw()['commit_operation_id']
+            if commit != fields['operation_id']:
+                if commit in operations:
+                    raise FreshReviewError('fresh-review-operation-conflict')
+                operations.add(commit)
+        if fields['status'] in ('pending', 'reserved', 'consumed') and any(fields[key] is not None for key in ('dispatch', 'launch', 'independent')):
             raise FreshReviewError('fresh-review-record-invalid')
         records.append(FreshReviewRecord(**fields))
     return FreshReviewProjection(tuple(records))
@@ -279,7 +306,7 @@ def validate_projection_backing(document, projection):
 def _record(projection, request, operation_id, intent_digest, payload_digest):
     _identifier(operation_id); _digest(intent_digest); _digest(payload_digest)
     for record in projection.requests:
-        if record.prepare_operation_id == operation_id or record.operation_id == operation_id and record.request.nonce != request.nonce:
+        if record.prepare_operation_id == operation_id or operation_id in record_operation_ids(record) and record.request.nonce != request.nonce:
             raise FreshReviewError('fresh-review-operation-conflict')
     matches = [record for record in projection.requests if record.request.nonce == request.nonce]
     if len(matches) != 1:
@@ -328,7 +355,7 @@ def prepare_request_state(state, command):
     request = decode_request(request_document(command.request))
     _identifier(command.operation_id); _digest(command.intent_digest); _digest(command.payload_digest)
     for record in state.fresh_review.requests:
-        if command.operation_id in (record.prepare_operation_id, record.operation_id):
+        if command.operation_id in record_operation_ids(record):
             if (record.prepare_operation_id, record.prepare_intent_digest, record.prepare_payload_digest, record.request) != (command.operation_id, command.intent_digest, command.payload_digest, request):
                 raise FreshReviewError('fresh-review-operation-conflict')
             return state
