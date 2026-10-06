@@ -146,3 +146,72 @@ def test_cyclic_input_is_rejected_with_a_closed_shape_reason(container):
         raw.append(raw)
     with pytest.raises(FreshReviewError, match='^fresh-review-projection-shape-invalid$'):
         decode_projection({'extra': raw})
+
+
+# Plain JSON (what a decoder produces) must keep the reason codes the
+# closed-shape and field checks gave before the builtins walk existed.
+PLAIN_REPLACEMENTS = (0.5, 1e308, -0.0, None, True, False, 0, -1, 2**63, '', 'x',
+                      [], {}, [0.5], {'a': 0.5}, {'operation_id': 0.5})
+PLAIN_EXTRA_FIELDS = (('operation_id', 0.5), ('operation_id', 'x'), ('zzz', 0.5),
+                      ('status', 0.5), ('schema', 1.5), ('nonce', [0.5]))
+
+
+def _outcome(decoder, raw):
+    try:
+        decoder(raw)
+    except FreshReviewError as exc:
+        return str(exc)
+    except ValueError as exc:
+        return 'value-error:' + str(exc)
+    return 'accepted'
+
+
+def plain_mutations(raw):
+    for path, item in nodes(raw):
+        for replacement in PLAIN_REPLACEMENTS:
+            yield path, 'replace', replacement, replaced(raw, path, deepcopy(replacement))
+        if type(item) is dict:
+            for key, value in PLAIN_EXTRA_FIELDS:
+                if key not in item:
+                    yield path, 'extra', key, replaced(raw, path, dict(item, **{key: value}))
+
+
+@pytest.mark.parametrize('name,decoder,raw', entry_documents(), ids=lambda x: x if type(x) is str else None)
+def test_plain_json_reason_codes_do_not_depend_on_the_builtins_walk(name, decoder, raw, monkeypatch):
+    import mission_kernel.fresh_review as fresh_review
+    import mission_kernel.fresh_review_receipts as receipts
+    cases = list(plain_mutations(raw))
+    with_walk = [_outcome(decoder, case[-1]) for case in cases]
+    monkeypatch.setattr(fresh_review, '_json_builtins', lambda *args, **kwargs: None)
+    monkeypatch.setattr(receipts, '_json_builtins', lambda *args, **kwargs: None)
+    without_walk = [_outcome(decoder, case[-1]) for case in cases]
+    differing = [(case[:3], walked, plain) for case, walked, plain
+                 in zip(cases, with_walk, without_walk) if walked != plain]
+    assert len(cases) > 30
+    assert not differing, differing[:5]
+
+
+@pytest.mark.parametrize('name,decoder,raw', entry_documents(), ids=lambda x: x if type(x) is str else None)
+def test_plain_floats_never_reach_a_typed_field(name, decoder, raw):
+    accepted = [path for path, item in nodes(raw) if path and type(item) is not dict
+                for value in (0.5, 1.0, 1e308)
+                if _outcome(decoder, replaced(raw, path, value)) == 'accepted']
+    assert accepted == []
+
+
+def _deep(depth):
+    root = current = []
+    for _ in range(depth):
+        child = []
+        current.append(child)
+        current = child
+    return root
+
+
+@pytest.mark.parametrize('name,decoder,raw', entry_documents(), ids=lambda x: x if type(x) is str else None)
+def test_nesting_too_deep_to_walk_is_rejected_with_the_entry_reason(name, decoder, raw):
+    import sys
+    deep = dict(raw, zzz=_deep(sys.getrecursionlimit() * 2))
+    with pytest.raises(FreshReviewError) as caught:
+        decoder(deep)
+    assert type(caught.value.__cause__) is RecursionError

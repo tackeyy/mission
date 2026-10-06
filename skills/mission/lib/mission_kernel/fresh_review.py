@@ -47,17 +47,20 @@ def canonical_digest(value):
     return 'sha256:' + hashlib.sha256(canonical_bytes(value)).hexdigest()
 
 
-def _json_builtins(value, code, fields=None, *, allow_float=False):
+def _json_builtins(value, code, fields=None):
     """Check the wire tree before trusting any overridable operation.
 
-    Descriptors retain field reasons through objects and list items (None key).
-    Null keeps existing optional-field rules. Only opaque JSON and the enclosing
-    Mission state allow exact floats; typed D numeric fields require integers.
+    Only what a JSON decoder cannot produce is rejected here: subclasses and
+    foreign types, non-str keys, cycles and nesting too deep to walk. Every
+    exact JSON value passes, so plain JSON keeps the reason codes of the
+    closed-shape and field checks that follow (typed fields reject floats
+    there). Descriptors retain field reasons through objects and list items
+    (None key) for the values this walk does reject.
     """
     ancestors = set()
 
-    def visit(item, reason, children, floats):
-        if type(item) not in (dict, list, str, int, bool, type(None)) and not (floats and type(item) is float):
+    def visit(item, reason, children):
+        if type(item) not in (dict, list, str, int, float, bool, type(None)):
             raise FreshReviewError('fresh-review-' + reason)
         if type(item) not in (dict, list):
             return
@@ -70,17 +73,16 @@ def _json_builtins(value, code, fields=None, *, allow_float=False):
                     if type(key) is not str:
                         raise FreshReviewError('fresh-review-' + reason)
                     descriptor = children.get(key, children.get(None, (reason, {})))
-                    visit(child, descriptor[0], descriptor[1],
-                          descriptor[2] if len(descriptor) == 3 else floats)
+                    visit(child, descriptor[0], descriptor[1])
             else:
                 child_code, child_fields = children.get(None, (reason, children))
                 for child in item:
-                    visit(child, child_code, child_fields, floats)
+                    visit(child, child_code, child_fields)
         finally:
             ancestors.remove(id(item))
 
     try:
-        visit(value, code, fields or {}, allow_float)
+        visit(value, code, fields or {})
     except RecursionError as exc:
         raise FreshReviewError('fresh-review-' + code) from exc
 
@@ -113,14 +115,13 @@ _REQUEST_JSON_CODES = {
 _RECORD_JSON_CODES = {
     **_ID_JSON_CODES, **_DIGEST_JSON_CODES,
     'request': ('request-shape-invalid', _REQUEST_JSON_CODES),
-    # D1 result is opaque JSON, not a typed receipt; finite floats already decode.
-    'result': ('result-invalid', {}, True),
+    'result': ('result-invalid', {}),
 }
 _PROJECTION_JSON_CODES = {
     'fresh_review': ('projection-shape-invalid', {
         'schema': ('projection-schema-invalid', {}),
         'requests': ('projection-shape-invalid', {None: ('record-invalid', _RECORD_JSON_CODES)}),
-    }, False),
+    }),
 }
 
 
@@ -314,8 +315,7 @@ def projection_document(projection):
 
 
 def decode_projection(document):
-    # The carrier is the whole Mission state, whose scores include JSON floats.
-    _json_builtins(document, 'projection-shape-invalid', _PROJECTION_JSON_CODES, allow_float=True)
+    _json_builtins(document, 'projection-shape-invalid', _PROJECTION_JSON_CODES)
     if not isinstance(document, dict):
         raise FreshReviewError('fresh-review-projection-shape-invalid')
     if 'fresh_review' not in document:
