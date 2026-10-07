@@ -741,7 +741,7 @@ def _probe_table():
         base, encoding = _base(layout)
         base = _push_over_capacity(base, encoding)
         renewed = _apply_control(base, layout, halt_reason="x", phase="halted", loop_active=False)
-        (renewed if layout == "v4" else renewed["lease"])["lease_expires_at"] = "9999-12-31T23:59:59Z"
+        (renewed if layout == "v4" else renewed["lease"])["lease_expires_at"] = "9999-12-31T23:59:58Z"
         cases.append(_case(f"halt+lease_renewal_{layout}", base, renewed, encoding, accept=True, write_kind="stop-halt"))
         swapped = _set_lease(renewed, layout, lease_id="other-lease")
         cases.append(_case(f"halt+lease_swap_{layout}", base, swapped, encoding,
