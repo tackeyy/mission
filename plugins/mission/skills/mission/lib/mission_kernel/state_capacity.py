@@ -12,13 +12,14 @@ The *verdict* half -- ``write_kind`` derivation, legacy-full detection, and
 imports this one. No writer lives here (that is D2c/#918).
 
 Pure function only: no ``os``/``pathlib``/clock/random imports. The only
-kernel dependencies are :mod:`mission_kernel.json_codec`,
-:mod:`mission_kernel.fresh_review` and
-:mod:`mission_kernel.fresh_review_receipts` (the last is imported only for
-its shape constants, not called directly -- the D terminal shapes below are
+kernel dependency this module itself imports is :mod:`mission_kernel.json_codec`
+and :mod:`mission_kernel.fresh_review`. It deliberately does *not* import
+:mod:`mission_kernel.fresh_review_receipts`: the D terminal shapes below are
 duplicated as closed literals so this module stays import-light and so the
 Delta constants stay pinned to *this* module's own measurement, independent
-of any future change to the receipts module's shapes).
+of any future change to the receipts module's shapes. (Only the test suite
+imports ``fresh_review_receipts``, to cross-check those literals against its
+``FRESH_REVIEW_MAX_ENCODED_BYTES``.)
 """
 from __future__ import annotations
 
@@ -36,7 +37,7 @@ from .fresh_review import (
 
 
 # ---------------------------------------------------------------------------
-# Shared state encoding (also used by the verdict half, #937).
+# Shared state encoding (also used by the verdict half, #933).
 # ---------------------------------------------------------------------------
 
 
@@ -54,24 +55,87 @@ class StateEncoding(str, Enum):
 #: while D request reservations consume the rest of the budget.
 STATE_CAPACITY_SYSTEM_SHARE = STATE_LIMIT // 16
 
+#: Kernel-level upper bound for a halt's ``reason``/``halt_reason`` value.
+#: ``transitions.py``'s ``_reason`` validator already enforces this for v5
+#: ``MarkHalt`` (``len(value) > 2048`` is rejected), so this name documents
+#: an existing invariant rather than a new one. Writer-side enforcement for
+#: every *other* field this module bounds (``goal_dispatch_*``, lease
+#: tokens) is #918's job -- see the module docstring.
+HALT_REASON_MAX_CHARS = 2048
+
+#: Conservative upper bound for each ``goal_dispatch_*`` string a
+#: ``routed-goal`` halt may add (``goal_dispatch_effective`` /
+#: ``goal_dispatch_host`` / ``goal_dispatch_fallback_reason``, written by
+#: ``bin/mission-state.py``'s ``_goal_dispatch_route_fields``). No writer
+#: enforces this today; #918 must add it before this bound is load-bearing.
+GOAL_DISPATCH_REASON_MAX_CHARS = 128
+
+#: Conservative upper bound for a lease's ``owner_session_id``/``lease_id``
+#: and a ``lease_history`` entry's ``reason``. v5's fenced-commit admission
+#: already enforces this for *new* tokens via ``Token128``/``_session_id``
+#: (mission_persistence/fenced_commit.py), but neither v4's
+#: ``acquire_or_verify_lease`` nor either schema's *decoder* enforce it for
+#: already-persisted state, so a takeover that copies an oversized current
+#: lease into history can exceed what ``STATE_CAPACITY_TAKEOVER_DELTA``
+#: assumed -- see ``next_takeover_cost``. Writer-side enforcement of new
+#: tokens for every caller is #918's job.
+LEASE_TOKEN_MAX_CHARS = 128
+
+#: 0 <= fencing_epoch <= this. v5's decoder only checks ``positive`` (see
+#: codec_v5.py's ``_decode_lease``), so a pre-existing state's epoch is not
+#: upper-bounded at decode time either; see ``next_takeover_cost``.
+LEASE_EPOCH_MAX = 2 ** 63 - 1
+
 #: Maximum encode-length increase of a single halt / mark-halt write.
-#: Measured (see test_issue933_state_capacity_kernel.py::test_halt_delta_pins_*)
-#: from the "field absent" and "field empty" base variants, across both the
-#: v5 (``control`` + mirrored ``extensions``) and v4 flat layouts, and both
-#: the canonical and legacy-pretty encodings. The maximal single write bundles
-#: every field a halt can touch across any ``HaltCategory`` branch (the
-#: ``routed-goal`` ``goal_dispatch_*`` fields *and* an ``awaiting-approval``
-#: activity-segment close + rollup-key growth) even though a single real
-#: call only ever takes one category's branch -- summing every branch is a
-#: deliberate, documented over-provisioning, not a measurement of one call.
-STATE_CAPACITY_HALT_DELTA = 13779
+#: Measured (see test_issue936_state_capacity_reservation.py::
+#: test_halt_delta_is_bounded_by_the_real_production_writers) by driving the
+#: *real* production writers -- v4's ``activity_segments.*`` helpers plus
+#: the flat-document ``mutate()`` shape used by
+#: ``mission_application.lifecycle.mark_halt``, and v5's
+#: ``mission_kernel.transitions.decide`` with a ``MarkHalt`` command whose
+#: ``compatibility`` payload carries the same activity-close fields -- from
+#: a base state with an already-open, maximum-shape activity segment to a
+#: halted state, across every ``HaltCategory`` branch.
+#:
+#: v5 dominates v4 here and is the reason this constant roughly doubled
+#: from the v4-only measurement this module shipped with originally:
+#: ``_mark_halt`` (transitions.py) writes ``legacy_reason`` into
+#: ``control.halt_reason`` *and* ``_apply_compatibility``'s
+#: ``dedicated_upserts`` (transitions.py L597-605) mirrors the same value
+#: into ``extensions.halt_reason``, so a v5 halt pays for
+#: ``HALT_REASON_MAX_CHARS`` *twice* (once per storage location) where v4's
+#: single flat document pays for it once. The dominant branch is
+#: ``routed-goal`` (one activity-segment close from the unconditional
+#: terminal-phase close in ``_transition_phase``/``close_activity_for_terminal``,
+#: *plus* the three ``goal_dispatch_*`` fields); ``awaiting-approval``'s
+#: extra activity-segment close (``record_activity_event`` opens and
+#: immediately re-closes a bare segment) is smaller because that second
+#: segment carries no ``detail``.
+#:
+#: Measured maxima: v5 canonical 26,156 bytes, v4 legacy-pretty 13,120
+#: bytes. The literal below adds a documented 500-byte slack for fields
+#: this measurement may not have bundled (e.g. any future ``HaltCategory``
+#: branch or compatibility field).
+STATE_CAPACITY_HALT_DELTA = 26656
 
 #: Maximum encode-length increase of a single lease takeover: one
-#: ``lease_history`` entry at its maximum field lengths, plus the increase
-#: from the smallest possible current-lease fields to the largest possible
-#: ones. Measured from the smallest ("single ASCII character ids") base
-#: lease to the largest ("128-character ids, max epoch, max-length history
-#: entry") proposed lease.
+#: ``lease_history`` entry at its maximum field lengths, from a *current*
+#: lease that is already at its maximum field lengths (``owner_session_id``/
+#: ``lease_id`` at ``LEASE_TOKEN_MAX_CHARS``, ``fencing_epoch`` at
+#: ``LEASE_EPOCH_MAX``) to a *new* lease also at maximum field lengths.
+#: Measured by driving the real production functions -- v4's
+#: ``bin/mission-state.py``'s ``acquire_or_verify_lease`` and v5's
+#: ``mission_persistence.fenced_commit.admit_lease`` (same field names/
+#: values; only the v5 ``"lease"`` wrapper key differs, which does not
+#: change the delta since that key already exists in both the base and
+#: proposed document) -- on an expired base lease with a foreign presented
+#: token. Measured maxima: 550 bytes (legacy-pretty) / 497 bytes
+#: (canonical); this constant keeps the pre-existing 822-byte literal,
+#: which already safely bounds the measured maxima with headroom for the
+#: ``lease_history``'s ``reason`` field assuming the conservative
+#: ``LEASE_TOKEN_MAX_CHARS``-length bound rather than the single short
+#: constant (``"lease-expired-takeover"``) every current real caller
+#: actually passes.
 STATE_CAPACITY_TAKEOVER_DELTA = 822
 
 #: Largest integer N_L such that
@@ -126,22 +190,54 @@ FRESH_REVIEW_TERMINAL_STAGE_DELTA = (
     17925 + _FRESH_REVIEW_KEY_SLACK + _FRESH_REVIEW_ENVELOPE_ALLOWANCE
 )
 
-#: lineage introduction: E1's FindingLineage type does not exist yet. This
-#: pins a closed placeholder shape (lineage_id/finding_digest/
-#: origin_request_id/disposition, each at ASCII-128 or digest-71 bound),
-#: *excluding* E2/E3's own disposition/duplicate-of cost (stubbed to zero
-#: below; must not be folded into this constant without revisiting it).
-#: Measured standalone (not inside an array) at its maximum field lengths;
-#: the ``+16`` is a per-array-element separator/indentation allowance
-#: (the same "+separator" pattern the design doc applies to the finding
-#: ref shape: "最大形で 238 bytes。区切りを含め 239 bytes") sized from the
-#: measured gap between 61 standalone records (549 bytes each) and one
-#: 61-element legacy-pretty array of them (34,345 bytes; gap ~14/record).
-FRESH_REVIEW_FINDING_LINEAGE_FIXED_MAX_BYTES = 549 + 16
+#: lineage introduction: E1's ``FindingLineage`` type does not exist yet
+#: (docs/design/880-repair-lineage.md §2's type table, "FindingLineage"
+#: row). This pins a closed placeholder shape with one representative field
+#: per *named* sub-type the design table lists -- ``lineage_id``
+#: (digest-shaped, 71 chars), ``criterion_id`` (_ID, 128 chars),
+#: ``severity``/``lifecycle`` (closed enums), a ``FreshFindingRef``
+#: (mission/session/original-request/local-finding ids plus
+#: terminal/output digests), an original terminal receipt ref and an
+#: original replay evidence ref (each a ``ContentAddressedRef``, or that
+#: ref's theoretical-absent variant if larger -- see §2's "original replay
+#: ... 理由付き absent variant"), a ``ReproBinding`` (command id plus four
+#: digests), a ``CandidateBinding`` (four digests plus an iteration int),
+#: and empty ``observations``/``attempts`` lists (E0 introduces lineage
+#: with zero of either -- §9's E1 row: "導入時に置く件数...書かれていなければ
+#: 0件"). ``requirement_ids``/``prohibited_side_effect_ids`` and the
+#: command->snapshot map are the *variable* part (``lineage_variable_part``)
+#: and are excluded here. E2/E3's own disposition/duplicate-of cost is
+#: also excluded (stubbed to zero below; must not be folded into this
+#: constant without revisiting it).
+#:
+#: The design table does not fix exact field names for the nested
+#: sub-types yet (that is E1's job); this shape is this module's own
+#: conservative over-approximation, not a contract E1 must match
+#: byte-for-byte. Because it over-approximates (more fields, at longer
+#: bounds, than the eventual real type is likely to need), the resulting
+#: constant is safe to be *larger* than the real type's eventual fixed
+#: part, never smaller. Measured standalone (not inside an array) at its
+#: maximum field lengths (see test_issue936_state_capacity_reservation.py::
+#: test_lineage_fixed_part_matches_the_design_table_shape); the ``+16`` is
+#: a per-array-element separator/indentation allowance (the same
+#: "+separator" pattern the design doc applies to the finding ref shape:
+#: "最大形で 238 bytes。区切りを含め 239 bytes").
+FRESH_REVIEW_FINDING_LINEAGE_FIXED_MAX_BYTES = 2890 + 16
 
 #: Single "unimported-findings" lineage record's maximum encode length
-#: (standalone; it is never placed in a per-finding array).
-FRESH_REVIEW_UNIMPORTED_LINEAGE_MAX_BYTES = 442
+#: (standalone; it is never placed in a per-finding array). The design
+#: doc does not give this variant its own field table (§2 "D 終端の
+#: findings 上限" only names its state, "open | deferred | rejected" --
+#: §3 "取込み上限超過の終端の disposition"); this conservatively reuses
+#: ``FRESH_REVIEW_FINDING_LINEAGE_FIXED_MAX_BYTES``'s own shape as an
+#: upper bound rather than inventing a second, narrower one, since
+#: ``lineage_stage_delta`` takes ``max(F_MAX * per_finding, this)`` and
+#: ``F_MAX * per_finding`` already dominates by roughly 61x -- this value
+#: is not the binding term in practice, so under-measuring it here would
+#: not be noticed by that formula. A real single-finding record (without
+#: F_MAX replication) is very unlikely to exceed one lineage record's own
+#: fixed part, so reusing it is a safe, if generous, bound.
+FRESH_REVIEW_UNIMPORTED_LINEAGE_MAX_BYTES = 2890 + 16
 
 #: F_MAX: the D terminal findings-count limit (also K, the lineage count
 #: limit; see docs/design/880-repair-lineage.md "D 終端の findings 上限").
@@ -203,10 +299,18 @@ def _contract_document(document: Mapping) -> Optional[Mapping]:
 
 
 def _encode_len_safe(value: object) -> int:
+    """Encode-length of ``value``, or the fail-closed sentinel on error.
+
+    Returning 0 on error would silently *under*-reserve (the caller sums
+    this into a variable-part estimate it then trusts as an upper bound).
+    Returning ``STATE_LIMIT`` instead means an encode failure can only ever
+    push ``satisfies_capacity`` toward rejecting, never toward admitting a
+    mutation this function could not actually measure.
+    """
     try:
         return len(encode_json_value(freeze_json_value(value)))
     except Exception:
-        return 0
+        return STATE_LIMIT
 
 
 def lineage_variable_part(document: Mapping, request) -> int:
@@ -333,18 +437,38 @@ def lease_history_length(document: Mapping) -> int:
     return len(history) if isinstance(history, list) else 0
 
 
+def _lease_token_excess(value: object) -> int:
+    # Clamped per-field: a short lease_id must not cancel out a long
+    # owner_session_id when the two are summed below.
+    return max(0, len(value) - LEASE_TOKEN_MAX_CHARS) if isinstance(value, str) else 0
+
+
 def next_takeover_cost(document: Mapping) -> int:
     """Upper bound of the next single takeover's encode-length increase.
 
-    ``STATE_CAPACITY_TAKEOVER_DELTA`` was already measured as the maximum
-    increase across every possible current-lease field length, so no state
-    can make a real takeover cost more than this constant. This hook is
-    kept distinct from the constant (per the design doc's
-    ``next_takeover_cost`` naming) so a future change that lets the current
-    lease carry longer legacy fields can override it without touching the
-    exhaustion arithmetic.
+    ``STATE_CAPACITY_TAKEOVER_DELTA`` was measured assuming the *current*
+    lease's ``owner_session_id``/``lease_id`` are at most
+    ``LEASE_TOKEN_MAX_CHARS`` long and its ``fencing_epoch`` is at most
+    ``LEASE_EPOCH_MAX``. v5's decoder only checks that ``fencing_epoch`` is
+    positive (codec_v5.py's ``_decode_lease``), and neither it nor v4's flat
+    decode caps ``owner_session_id``/``lease_id`` length, so a state
+    persisted before those caps are writer-enforced (#918) can already hold
+    a current lease that exceeds them. A takeover copies the *current*
+    lease's fields into a new ``lease_history`` entry, so such a state's
+    next real takeover costs more than the constant. This conservatively
+    adds the measured excess (1 byte per excess ASCII character; non-ASCII
+    excess could cost more per character due to JSON escaping, which this
+    approximation does not model) so capacity admission still fails closed
+    rather than silently under-reserving.
     """
-    return STATE_CAPACITY_TAKEOVER_DELTA
+    lease = _lease_mapping(document)
+    excess = _lease_token_excess(lease.get("owner_session_id")) + _lease_token_excess(
+        lease.get("lease_id")
+    )
+    epoch = lease.get("fencing_epoch")
+    if isinstance(epoch, int) and not isinstance(epoch, bool) and epoch > LEASE_EPOCH_MAX:
+        excess += len(str(epoch)) - len(str(LEASE_EPOCH_MAX))
+    return STATE_CAPACITY_TAKEOVER_DELTA + max(0, excess)
 
 
 def remaining_takeovers(document: Mapping) -> int:
@@ -400,19 +524,27 @@ def residual_reservation(
     """``Σ残り予約``: sum of every outstanding item's remaining-stage Δ.
 
     Under ``StateEncoding.LEGACY_PRETTY`` (a v4 flat on-disk document), D
-    requests never advance past ``pending`` -- there is no v4 writer for
-    dispatch/consume/terminal -- so they reserve nothing at all (design doc
-    "v4 の D item の予約は 0"). The caller's physical encode length already
-    includes the pending request's own bytes ("受付の段の Δ...受付時に確定
-    している request の実際の encode 長とする").
+    requests reserve nothing at all. This is *not* because the design doc's
+    general reservation formula says so -- it is #918's own decision (issue
+    body, "決めたこと" / "分割" sections,
+    https://github.com/tackeyy/mission/issues/918): v4 is saved as
+    indent=2-formatted JSON and a consume write's increase has no fixed
+    upper bound there, so #918 rejects every D-stage advance (dispatch
+    onward) for v4 and therefore its D items never reserve past the
+    pending request's own already-counted bytes ("v4 の D item の予約は
+    0"). The caller's physical encode length already includes the pending
+    request's own bytes ("受付の段の Δ...受付時に確定している request の
+    実際の encode 長とする").
     """
     if encoding is StateEncoding.LEGACY_PRETTY:
         return 0
     projection = fresh_review_projection(document)
     if projection is None:
-        # An undecodable embedded projection cannot be reasoned about; charge
-        # the maximum so capacity admission fails closed rather than open.
-        return FRESH_REVIEW_PENDING_RESERVE
+        # An undecodable embedded projection cannot be reasoned about at
+        # all (not even "how many pending requests"), so charge the full
+        # physical limit -- not one pending request's reserve -- so
+        # capacity admission fails closed rather than under-reserving.
+        return STATE_LIMIT
     total = 0
     for record in projection.requests:
         if isinstance(record, WithdrawnFreshReviewRecord):
