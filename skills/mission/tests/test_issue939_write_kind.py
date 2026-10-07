@@ -339,6 +339,8 @@ def _rows():
                                 ("offset_earlier", "2026-01-01T02:00:00+02:00", N), ("offset_later", "2026-01-01T03:00:00+02:00", T_)):
             rows.append((f"takeover_expiry_{name}_{L}", *_takeover(L, base=b30, cur={"expires_at": exp}), kind, {}))
             rows.append((f"extension_expiry_{name}_{L}", *_extension(L, lease_expires_at="2026-01-01T00:30:00Z", new_expires_at=exp), kind, {}))
+        no_exp = _set_lease(_base(L, lease_history=[]), L, expires_at="")
+        rows.append((f"takeover_expiry_missing_{L}", *_takeover(L, base=no_exp), N, {}))
         rows.append((f"initial_expiry_invalid_{L}", _no_lease_base(L), _set_lease(_no_lease_base(L), L, owner="o", lease_id="l",
                                                                                    epoch=1, expires_at="no-date"), N, {}))
         rows.append((f"extension_shortens_expiry_{L}",

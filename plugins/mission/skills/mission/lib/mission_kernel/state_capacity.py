@@ -995,7 +995,8 @@ def _takeover_case(base: Mapping, proposed: Mapping) -> Optional[str]:
         return None  # cannot take over a lease whose identity is not fully present
     if not _takeover_entry_matches_prior_lease(before_lease, after_history[-1]):
         return None
-    if not _lease_expiry_not_shortened(before_lease, after_lease):
+    if not _lease_expiry_not_shortened(before_lease, after_lease) or (
+            _parse_lease_expiry(after_lease.get("lease_expires_at")) is None):
         return None
     try:
         expected_epoch = int(before_lease["fencing_epoch"])
