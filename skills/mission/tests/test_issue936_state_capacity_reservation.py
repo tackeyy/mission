@@ -287,6 +287,13 @@ _NEXT_TAKEOVER_COST_CASES = [
     # closed, rather than merely omitting that term.
     ({"owner_session_id": "a", "lease_id": "b", "fencing_epoch": "not-a-number"}, sc.STATE_LIMIT),
     ({"owner_session_id": "a", "lease_id": "b", "fencing_epoch": {"not": "a-number"}}, sc.STATE_LIMIT),
+    ({"owner_session_id": "a", "lease_id": "b", "fencing_epoch": float("inf")}, sc.STATE_LIMIT),
+    # A negative epoch is copied into history too, sign included.
+    ({"owner_session_id": "a", "lease_id": "b", "fencing_epoch": -_EPOCH_OVER},
+     sc.STATE_CAPACITY_TAKEOVER_DELTA + len(str(-_EPOCH_OVER)) - len(str(sc.LEASE_EPOCH_MAX))),
+    ({"owner_session_id": "a", "lease_id": "b", "fencing_epoch": str(-_EPOCH_OVER)},
+     sc.STATE_CAPACITY_TAKEOVER_DELTA + len(str(-_EPOCH_OVER)) - len(str(sc.LEASE_EPOCH_MAX))),
+    ({"owner_session_id": "a", "lease_id": "b", "fencing_epoch": -1}, sc.STATE_CAPACITY_TAKEOVER_DELTA),
     # A never-acquired lease (absent/empty epoch, every freshly init'ed
     # session) is epoch 0, not malformed -- must not fail closed.
     ({"owner_session_id": "a", "lease_id": "b", "fencing_epoch": None}, sc.STATE_CAPACITY_TAKEOVER_DELTA),

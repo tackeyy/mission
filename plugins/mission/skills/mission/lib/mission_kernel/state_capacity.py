@@ -531,7 +531,7 @@ def _normalized_fencing_epoch(value: object) -> int:
         return _FENCING_EPOCH_UNPARSEABLE
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return _FENCING_EPOCH_UNPARSEABLE
 
 
@@ -558,8 +558,8 @@ def next_takeover_cost(document: Mapping) -> int:
     excess = _lease_token_excess(lease.get("owner_session_id")) + _lease_token_excess(
         lease.get("lease_id")
     )
-    if epoch > LEASE_EPOCH_MAX:
-        excess += len(str(epoch)) - len(str(LEASE_EPOCH_MAX))
+    # Sign included: a large negative epoch is copied into history as well.
+    excess += max(0, len(str(epoch)) - len(str(LEASE_EPOCH_MAX)))
     return STATE_CAPACITY_TAKEOVER_DELTA + max(0, excess)
 
 
