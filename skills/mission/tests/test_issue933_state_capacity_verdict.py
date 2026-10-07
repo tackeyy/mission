@@ -735,6 +735,19 @@ def _probe_table():
                         base_v5_to_bound, proposed_v5_to_bound, sc.StateEncoding.CANONICAL,
                         accept=False, code="state-capacity-exhausted", write_kind="normal"))
 
+    # A halt carries the command's lease renewal (expiry only) and stays a halt on an
+    # over-capacity base; a lease identity change with it does not. An empty diff is no stop.
+    for layout in ("v4", "v5"):
+        base, encoding = _base(layout)
+        base = _push_over_capacity(base, encoding)
+        renewed = _apply_control(base, layout, halt_reason="x", phase="halted", loop_active=False)
+        (renewed if layout == "v4" else renewed["lease"])["lease_expires_at"] = "9999-12-31T23:59:59Z"
+        cases.append(_case(f"halt+lease_renewal_{layout}", base, renewed, encoding, accept=True, write_kind="stop-halt"))
+        swapped = _set_lease(renewed, layout, lease_id="other-lease")
+        cases.append(_case(f"halt+lease_swap_{layout}", base, swapped, encoding,
+                            accept=False, code="state-capacity-exhausted", write_kind="normal"))
+        cases.append(_case(f"empty_diff_{layout}", base, copy.deepcopy(base), encoding,
+                            accept=False, code="state-capacity-exhausted", write_kind="normal"))
     return cases
 
 PROBE_TABLE = _probe_table()

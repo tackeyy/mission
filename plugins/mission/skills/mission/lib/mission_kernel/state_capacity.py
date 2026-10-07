@@ -791,8 +791,12 @@ def _is_stop_halt_diff(base: Mapping, proposed: Mapping) -> bool:
     """
     if halt_slot_written(base) or not halt_slot_written(proposed):
         return False
+    # Every mutating command renews the lease, so a halt may carry a renewal
+    # (expiry only); a takeover or any other lease change is not a halt.
+    if not _is_lease_renewal_only(base, proposed):
+        return False
     if _is_v5(base):
-        top_allowed = frozenset({"control", "extensions"})
+        top_allowed = frozenset({"control", "extensions", "lease"})
         if not (_diff_keys(base, proposed) <= top_allowed):
             return False
         control_diff = _mapping_diff_keys(base.get("control"), proposed.get("control"))
@@ -802,13 +806,20 @@ def _is_stop_halt_diff(base: Mapping, proposed: Mapping) -> bool:
         if not (extensions_diff <= (_HALT_FIELD_NAMES | HALT_AUX_KEYS)):
             return False
     else:
-        allowed = _HALT_FIELD_NAMES | HALT_AUX_KEYS
+        allowed = _HALT_FIELD_NAMES | HALT_AUX_KEYS | frozenset({"lease_expires_at"})
         diff_keys = _diff_keys(base, proposed)
         if not (diff_keys & _HALT_FIELD_NAMES):
             return False
         if not (diff_keys <= allowed):
             return False
     return _halt_value_bounds_ok(proposed)
+
+
+def _is_lease_renewal_only(base: Mapping, proposed: Mapping) -> bool:
+    """The lease differs at most in ``lease_expires_at`` (a renewal)."""
+    before, after = _lease_mapping(base), _lease_mapping(proposed)
+    keys = set(before) | set(after) if _is_v5(base) else _lease_slot_keys(base)
+    return all(_values_equal(before.get(k), after.get(k)) for k in keys if k != "lease_expires_at")
 
 
 def _lease_history_growth_kind(base: Mapping, proposed: Mapping) -> Optional[str]:
@@ -916,7 +927,8 @@ def classify_write_kind(base: Optional[Mapping], proposed: Mapping) -> WriteKind
     if _is_stop_takeover_diff(base, proposed):
         return WriteKind.STOP_TAKEOVER
 
-    if _diff_is_subset_of(base, proposed, STOP_SLOT_KEYS):
+    slot_diff = _diff_keys(base, proposed)
+    if slot_diff and slot_diff <= STOP_SLOT_KEYS:
         return WriteKind.STOP_SLOT
 
     return WriteKind.NORMAL
