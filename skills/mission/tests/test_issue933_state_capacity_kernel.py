@@ -154,7 +154,16 @@ def test_stage_deltas_embed_e0a_shapes(stage, encoding_name):
 
 
 def test_lineage_and_disposition_shapes_pin_deltas():
-    assert sc.FRESH_REVIEW_LINEAGE_STAGE_DELTA == 34345
+    assert sc.FRESH_REVIEW_FINDING_LINEAGE_FIXED_MAX_BYTES == 549 + 16
+    assert sc.FRESH_REVIEW_UNIMPORTED_LINEAGE_MAX_BYTES == 442
+    assert sc.FRESH_REVIEW_FINDINGS_LINEAGE_LIMIT == 61
+    assert sc.FRESH_REVIEW_LINEAGE_STAGE_DELTA == max(
+        61 * (549 + 16), 442
+    )
+    # The zero-variable-part formula value must stay >= the real measured
+    # 61-element legacy-pretty array encode length (34,345 bytes); the
+    # "+16" separator allowance exists precisely to keep this true.
+    assert sc.FRESH_REVIEW_LINEAGE_STAGE_DELTA >= 34345
     assert sc.repair_attempt_reserve({}) == 0
     assert sc.disposition_reserve({}) == 0
     assert (sc.FRESH_REVIEW_PENDING_RESERVE
@@ -163,11 +172,89 @@ def test_lineage_and_disposition_shapes_pin_deltas():
     assert sc.FRESH_REVIEW_WITHDRAWN_RESERVE == 0
 
 
+def test_contract_absent_charges_the_fail_closed_sentinel():
+    pending = _pending_record()
+    assert sc.lineage_variable_part({}, pending.request) == sc.STATE_LIMIT
+    assert sc.lineage_variable_part({"schema_version": 5, "control": {}, "extensions": {}}, pending.request) == sc.STATE_LIMIT
+
+
+def test_long_requirement_ids_and_prohibited_side_effects_increase_the_variable_part_and_reserve():
+    pending = _pending_record()
+    short_doc = _flat_doc(contract=_minimal_contract())
+    long_doc = _flat_doc(contract=_minimal_contract(
+        requirement_ids=["r" * 128] * 20, prohibited_side_effects=["p" * 64] * 20))
+    short_variable = sc.lineage_variable_part(short_doc, pending.request)
+    long_variable = sc.lineage_variable_part(long_doc, pending.request)
+    assert long_variable > short_variable
+    assert sc.lineage_stage_delta(long_doc, pending.request) > sc.lineage_stage_delta(short_doc, pending.request)
+    # Growth must be exactly F_MAX times the per-criterion variable-part growth.
+    assert (sc.lineage_stage_delta(long_doc, pending.request)
+            - sc.lineage_stage_delta(short_doc, pending.request)
+            == sc.FRESH_REVIEW_FINDINGS_LINEAGE_LIMIT * (long_variable - short_variable))
+
+
+def test_criterion_absent_from_contract_falls_back_to_the_largest_criterion():
+    pending = _pending_record()
+    # pending.request.criterion_ids == ('AC1',), absent from this contract.
+    contract = _minimal_contract(criterion_ids=("OTHER",), requirement_ids=["r" * 128])
+    doc = _flat_doc(contract=contract)
+    variable = sc.lineage_variable_part(doc, pending.request)
+    assert variable > 0
+
+
+def test_lineage_reserve_is_enforced_exactly_at_the_boundary_for_a_long_criterion():
+    pending = _pending_record()
+    long_contract = _minimal_contract(
+        requirement_ids=["r" * 128] * 10, prohibited_side_effects=["p" * 64] * 10)
+    rec = projection_document(FreshReviewProjection((pending,)))["requests"][0]
+    doc = _pad_document(status_records=[rec], contract=long_contract)
+    base = sc.CapacityBase(document=doc, encoded_len=canonical(doc))
+    # Confirm this fixture actually carries a bigger-than-baseline lineage
+    # reserve, i.e. the long criterion's variable part is really exercised.
+    assert sc.lineage_stage_delta(doc, pending.request) > sc.FRESH_REVIEW_LINEAGE_STAGE_DELTA
+
+    projection = FreshReviewProjection((pending,))
+    reserved = reserve_request(
+        projection, pending.request, operation_id="dispatch-1",
+        intent_digest=ADAPTER, payload_digest=ADAPTER,
+    )
+    proposed = dict(doc)
+    proposed["fresh_review"] = projection_document(reserved)
+    proposed_len = canonical(proposed)
+    verdict = sc.state_capacity_verdict(base, proposed, proposed_len, encoding=sc.StateEncoding.CANONICAL)
+    assert verdict.accepted, verdict
+
+    over = dict(proposed)
+    over["padding"] = over["padding"] + "q" * (sc.FRESH_REVIEW_DISPATCH_STAGE_DELTA + 1)
+    over_len = canonical(over)
+    verdict = sc.state_capacity_verdict(base, over, over_len, encoding=sc.StateEncoding.CANONICAL)
+    assert not verdict.accepted
+    assert verdict.code == "state-capacity-invariant-broken"
+
+
 # --------------------------------------------------------------------- #
 # Document builders for verdict tests.
 # --------------------------------------------------------------------- #
 
-def _flat_doc(*, requests=(), halt_reason="", lease_history=(), extra=None):
+def _minimal_contract(*, criterion_ids=("AC1",), requirement_ids=(), prohibited_side_effects=()):
+    """A contract document with just enough for ``lineage_variable_part`` to
+    resolve each criterion_id without falling back to the fail-closed
+    sentinel. The kernel never validates digests/schema shape -- it only
+    reads ``criteria``/``requirement_ids``/``prohibited_side_effects`` -- so
+    this fixture omits everything acceptance_contract.py's own validator
+    would otherwise require.
+    """
+    return {
+        "schema": "mission-acceptance-contract/2",
+        "criteria": [
+            {"id": cid, "requirement_ids": list(requirement_ids),
+             "prohibited_side_effects": list(prohibited_side_effects)}
+            for cid in criterion_ids
+        ],
+    }
+
+
+def _flat_doc(*, requests=(), halt_reason="", lease_history=(), extra=None, contract=None):
     doc = {
         "schema_version": 4, "phase": "executing", "loop_active": True,
         "halt_reason": halt_reason,
@@ -175,17 +262,18 @@ def _flat_doc(*, requests=(), halt_reason="", lease_history=(), extra=None):
         "lease_expires_at": "9999-12-31T23:59:59Z", "lease_history": list(lease_history),
         "updated_at": TS27, "last_activity_at": TS27,
         "fresh_review": {"schema": "mission-fresh-review/1", "requests": list(requests)},
+        "acceptance_contract": contract if contract is not None else _minimal_contract(),
     }
     if extra:
         doc.update(extra)
     return doc
 
 
-def _pad_document(*, status_records=(), padding_key="padding"):
+def _pad_document(*, status_records=(), padding_key="padding", contract=None):
     """A flat document with ``status_records`` requests, padded so its
     canonical headroom is exactly zero under ``satisfies_capacity``.
     """
-    doc = _flat_doc(requests=status_records)
+    doc = _flat_doc(requests=status_records, contract=contract)
     deficit = sc.STATE_LIMIT - sc.system_remaining(doc) - sc.residual_reservation(doc) - canonical(doc)
     assert deficit >= 1, deficit
     doc[padding_key] = "p" * (deficit - len(('"' + padding_key + '":"","",').encode()))
@@ -650,7 +738,98 @@ def test_encoded_len_over_physical_limit_is_always_exhausted(excess_bytes):
         None, doc, sc.STATE_LIMIT + 1 + excess_bytes, encoding=sc.StateEncoding.CANONICAL)
     assert not verdict.accepted
     assert verdict.code == "state-capacity-exhausted"
-    assert verdict.mode == "excess"
+
+
+# --------------------------------------------------------------------- #
+# 判定の順序 8 (LEGACY_PRETTY): v4 flat D requests never advance; v4 D
+# items reserve nothing; halt / takeover / prepare still go through.
+# --------------------------------------------------------------------- #
+
+def test_legacy_pretty_rejects_pending_to_reserved_dispatch():
+    pending = _pending_record()
+    rec = projection_document(FreshReviewProjection((pending,)))["requests"][0]
+    doc = _flat_doc(requests=[rec])
+    base = sc.CapacityBase(document=doc, encoded_len=legacy(doc))
+
+    projection = FreshReviewProjection((pending,))
+    reserved = reserve_request(
+        projection, pending.request, operation_id="dispatch-1",
+        intent_digest=ADAPTER, payload_digest=ADAPTER,
+    )
+    proposed = dict(doc)
+    proposed["fresh_review"] = projection_document(reserved)
+    verdict = sc.state_capacity_verdict(
+        base, proposed, legacy(proposed), encoding=sc.StateEncoding.LEGACY_PRETTY)
+    assert not verdict.accepted
+    assert verdict.code == "state-capacity-exhausted"
+
+
+def test_legacy_pretty_rejects_reserved_to_consumed():
+    pending = _pending_record()
+    projection = FreshReviewProjection((pending,))
+    reserved = reserve_request(
+        projection, pending.request, operation_id="dispatch-1",
+        intent_digest=ADAPTER, payload_digest=ADAPTER,
+    )
+    reserved_rec = projection_document(reserved)["requests"][0]
+    doc = _flat_doc(requests=[reserved_rec])
+    base = sc.CapacityBase(document=doc, encoded_len=legacy(doc))
+
+    consumed = consume_request(
+        reserved, pending.request, result={"status": "ok"},
+        operation_id="dispatch-1", intent_digest=ADAPTER, payload_digest=ADAPTER,
+    )
+    proposed = dict(doc)
+    proposed["fresh_review"] = projection_document(consumed)
+    verdict = sc.state_capacity_verdict(
+        base, proposed, legacy(proposed), encoding=sc.StateEncoding.LEGACY_PRETTY)
+    assert not verdict.accepted
+    assert verdict.code == "state-capacity-exhausted"
+
+
+def test_legacy_pretty_still_allows_halt_takeover_and_prepare():
+    doc = _flat_doc()
+    base = sc.CapacityBase(document=doc, encoded_len=legacy(doc))
+
+    halted = dict(doc)
+    halted["halt_reason"] = "stagnation"
+    halted["phase"] = "halted"
+    verdict = sc.state_capacity_verdict(
+        base, halted, legacy(halted), encoding=sc.StateEncoding.LEGACY_PRETTY)
+    assert verdict.accepted, verdict
+    assert verdict.write_kind == "stop-halt"
+
+    takeover = dict(doc)
+    takeover["lease_history"] = list(doc["lease_history"]) + [
+        {"owner_session_id": "owner-1", "lease_id": "lease-1", "fencing_epoch": 1,
+         "reason": "lease-expired-takeover", "at": "9999-12-31T23:59:59Z"}
+    ]
+    takeover["owner_session_id"] = "owner-2"
+    takeover["lease_id"] = "lease-2"
+    takeover["fencing_epoch"] = 2
+    verdict = sc.state_capacity_verdict(
+        base, takeover, legacy(takeover), encoding=sc.StateEncoding.LEGACY_PRETTY)
+    assert verdict.accepted, verdict
+    assert verdict.write_kind == "stop-takeover"
+
+    pending = _pending_record()
+    prepared = dict(doc)
+    prepared["fresh_review"] = {
+        "schema": "mission-fresh-review/1",
+        "requests": [projection_document(FreshReviewProjection((pending,)))["requests"][0]],
+    }
+    verdict = sc.state_capacity_verdict(
+        base, prepared, legacy(prepared), encoding=sc.StateEncoding.LEGACY_PRETTY)
+    assert verdict.accepted, verdict
+    assert verdict.metrics.reserved == 0
+
+
+def test_legacy_pretty_d_item_reserves_nothing():
+    pending = _pending_record()
+    rec = projection_document(FreshReviewProjection((pending,)))["requests"][0]
+    doc = _flat_doc(requests=[rec])
+    assert sc.residual_reservation(doc, encoding=sc.StateEncoding.LEGACY_PRETTY) == 0
+    assert sc.residual_reservation(doc, encoding=sc.StateEncoding.CANONICAL) > 0
 
 
 # --------------------------------------------------------------------- #

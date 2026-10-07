@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Mapping, Optional
 
-from .json_codec import STATE_LIMIT
+from .json_codec import STATE_LIMIT, encode_json_value, freeze_json_value
 from . import fresh_review as _fresh_review
 from .fresh_review import (
     FreshReviewError,
@@ -119,36 +119,136 @@ FRESH_REVIEW_TERMINAL_STAGE_DELTA = (
 
 #: lineage introduction: E1's FindingLineage type does not exist yet. This
 #: pins a closed placeholder shape (lineage_id/finding_digest/
-#: origin_request_id/disposition, each at ASCII-128 or digest-71 bound) for
-#: F_MAX (61) findings, versus the single "unimported-findings" lineage
-#: shape -- and takes the larger. E2/E3's own disposition/duplicate-of cost
-#: is explicitly out of scope here (stubbed to zero below) and must not be
-#: folded into this constant without revisiting it.
-FRESH_REVIEW_LINEAGE_STAGE_DELTA = 34345
+#: origin_request_id/disposition, each at ASCII-128 or digest-71 bound),
+#: *excluding* E2/E3's own disposition/duplicate-of cost (stubbed to zero
+#: below; must not be folded into this constant without revisiting it).
+#: Measured standalone (not inside an array) at its maximum field lengths;
+#: the ``+16`` is a per-array-element separator/indentation allowance
+#: (the same "+separator" pattern the design doc applies to the finding
+#: ref shape: "最大形で 238 bytes。区切りを含め 239 bytes") sized from the
+#: measured gap between 61 standalone records (549 bytes each) and one
+#: 61-element legacy-pretty array of them (34,345 bytes; gap ~14/record).
+FRESH_REVIEW_FINDING_LINEAGE_FIXED_MAX_BYTES = 549 + 16
 
-#: Residual reservation by D request projection status (design doc
-#: "残りの予約"). ``withdrawn`` reserves nothing.
+#: Single "unimported-findings" lineage record's maximum encode length
+#: (standalone; it is never placed in a per-finding array).
+FRESH_REVIEW_UNIMPORTED_LINEAGE_MAX_BYTES = 442
+
+#: F_MAX: the D terminal findings-count limit (also K, the lineage count
+#: limit; see docs/design/880-repair-lineage.md "D 終端の findings 上限").
+FRESH_REVIEW_FINDINGS_LINEAGE_LIMIT = _fresh_review.FRESH_REVIEW_FINDINGS_LIMIT
+
+#: lineage Δ with a zero-length criterion variable part (no contract
+#: consulted). Kept for callers that only need a document-independent
+#: baseline; real residual-reservation computation calls
+#: ``lineage_stage_delta`` with the actual document and record instead,
+#: since the variable part depends on that request's own criteria.
+FRESH_REVIEW_LINEAGE_STAGE_DELTA = max(
+    FRESH_REVIEW_FINDINGS_LINEAGE_LIMIT * FRESH_REVIEW_FINDING_LINEAGE_FIXED_MAX_BYTES,
+    FRESH_REVIEW_UNIMPORTED_LINEAGE_MAX_BYTES,
+)
+
+#: Fail-closed sentinel used when the lineage variable part cannot be
+#: bounded at all (no contract document reachable; see
+#: ``lineage_variable_part``). Charging the full physical limit as the
+#: reserve forces ``satisfies_capacity`` to reject rather than silently
+#: under-reserve.
+_LINEAGE_VARIABLE_PART_UNBOUNDED = STATE_LIMIT
+
+#: Residual reservation by D request projection status *excluding*
+#: lineage (design doc "残りの予約"). The lineage addend is computed per
+#: record by ``lineage_stage_delta`` because its variable part depends on
+#: that request's own criteria. ``withdrawn`` reserves nothing at all.
+_FRESH_REVIEW_FIXED_RESERVE_BY_STATUS = {
+    "pending": FRESH_REVIEW_DISPATCH_STAGE_DELTA + FRESH_REVIEW_CONSUME_STAGE_DELTA
+    + FRESH_REVIEW_TERMINAL_STAGE_DELTA,
+    "reserved": FRESH_REVIEW_CONSUME_STAGE_DELTA + FRESH_REVIEW_TERMINAL_STAGE_DELTA,
+    "consumed": FRESH_REVIEW_TERMINAL_STAGE_DELTA,
+}
+
+#: Baselines kept for backward-compatible direct comparison in tests; a
+#: real record's residual also adds its own ``lineage_stage_delta``.
 FRESH_REVIEW_PENDING_RESERVE = (
-    FRESH_REVIEW_DISPATCH_STAGE_DELTA
-    + FRESH_REVIEW_CONSUME_STAGE_DELTA
-    + FRESH_REVIEW_TERMINAL_STAGE_DELTA
-    + FRESH_REVIEW_LINEAGE_STAGE_DELTA
+    _FRESH_REVIEW_FIXED_RESERVE_BY_STATUS["pending"] + FRESH_REVIEW_LINEAGE_STAGE_DELTA
 )
 FRESH_REVIEW_RESERVED_RESERVE = (
-    FRESH_REVIEW_CONSUME_STAGE_DELTA
-    + FRESH_REVIEW_TERMINAL_STAGE_DELTA
-    + FRESH_REVIEW_LINEAGE_STAGE_DELTA
+    _FRESH_REVIEW_FIXED_RESERVE_BY_STATUS["reserved"] + FRESH_REVIEW_LINEAGE_STAGE_DELTA
 )
 FRESH_REVIEW_CONSUMED_RESERVE = (
-    FRESH_REVIEW_TERMINAL_STAGE_DELTA + FRESH_REVIEW_LINEAGE_STAGE_DELTA
+    _FRESH_REVIEW_FIXED_RESERVE_BY_STATUS["consumed"] + FRESH_REVIEW_LINEAGE_STAGE_DELTA
 )
 FRESH_REVIEW_WITHDRAWN_RESERVE = 0
 
-_RESIDUAL_RESERVE_BY_STATUS = {
-    "pending": FRESH_REVIEW_PENDING_RESERVE,
-    "reserved": FRESH_REVIEW_RESERVED_RESERVE,
-    "consumed": FRESH_REVIEW_CONSUMED_RESERVE,
-}
+
+def _command_snapshot_map(request) -> dict:
+    return {binding.command_id: binding.snapshot_digest for binding in request.candidate_bindings}
+
+
+def _contract_document(document: Mapping) -> Optional[Mapping]:
+    if _is_v5(document):
+        extensions = document.get("extensions")
+        contract = extensions.get("acceptance_contract") if isinstance(extensions, Mapping) else None
+    else:
+        contract = document.get("acceptance_contract")
+    return contract if isinstance(contract, Mapping) else None
+
+
+def _encode_len_safe(value: object) -> int:
+    try:
+        return len(encode_json_value(freeze_json_value(value)))
+    except Exception:
+        return 0
+
+
+def lineage_variable_part(document: Mapping, request) -> int:
+    """The per-criterion variable addend to the lineage Δ for ``request``.
+
+    ``requirement_ids``/``prohibited_side_effects`` of the request's own
+    criteria, plus the request's command->snapshot map (built from
+    ``candidate_bindings``), maximised across the request's criteria.
+    Falls back to the contract's own largest criterion if none of the
+    request's ``criterion_ids`` resolve, and to the fail-closed sentinel
+    if no contract document can be found at all (the contract is not
+    this module's responsibility to validate -- it is only read for a
+    conservative upper bound).
+    """
+    contract = _contract_document(document)
+    if contract is None:
+        return _LINEAGE_VARIABLE_PART_UNBOUNDED
+    criteria = contract.get("criteria")
+    if not isinstance(criteria, list):
+        return _LINEAGE_VARIABLE_PART_UNBOUNDED
+    command_map_bytes = _encode_len_safe(_command_snapshot_map(request))
+    by_id = {
+        item.get("id"): item
+        for item in criteria
+        if isinstance(item, Mapping) and isinstance(item.get("id"), str)
+    }
+    matched = [by_id[cid] for cid in getattr(request, "criterion_ids", ()) if cid in by_id]
+    candidates = matched or [item for item in criteria if isinstance(item, Mapping)]
+    if not candidates:
+        return command_map_bytes
+    best = 0
+    for criterion in candidates:
+        requirement_ids = criterion.get("requirement_ids")
+        prohibited = criterion.get("prohibited_side_effects")
+        payload = {
+            "requirement_ids": requirement_ids if isinstance(requirement_ids, list) else [],
+            "prohibited_side_effects": prohibited if isinstance(prohibited, list) else [],
+        }
+        size = _encode_len_safe(payload) + command_map_bytes
+        best = max(best, size)
+    return best
+
+
+def lineage_stage_delta(document: Mapping, request) -> int:
+    """``max(F_MAX * (FIXED_MAX + variable), UNIMPORTED_MAX)`` for one request."""
+    variable = lineage_variable_part(document, request)
+    per_finding = FRESH_REVIEW_FINDING_LINEAGE_FIXED_MAX_BYTES + variable
+    return max(
+        FRESH_REVIEW_FINDINGS_LINEAGE_LIMIT * per_finding,
+        FRESH_REVIEW_UNIMPORTED_LINEAGE_MAX_BYTES,
+    )
 
 
 def repair_attempt_reserve(_document: Mapping) -> int:
@@ -285,8 +385,20 @@ def fresh_review_projection(document: Mapping) -> Optional[FreshReviewProjection
         return None
 
 
-def residual_reservation(document: Mapping) -> int:
-    """``Σ残り予約``: sum of every outstanding item's remaining-stage Δ."""
+def residual_reservation(
+    document: Mapping, *, encoding: "StateEncoding" = None
+) -> int:
+    """``Σ残り予約``: sum of every outstanding item's remaining-stage Δ.
+
+    Under ``StateEncoding.LEGACY_PRETTY`` (a v4 flat on-disk document), D
+    requests never advance past ``pending`` -- there is no v4 writer for
+    dispatch/consume/terminal -- so they reserve nothing at all (design doc
+    "v4 の D item の予約は 0"). The caller's physical encode length already
+    includes the pending request's own bytes ("受付の段の Δ...受付時に確定
+    している request の実際の encode 長とする").
+    """
+    if encoding is StateEncoding.LEGACY_PRETTY:
+        return 0
     projection = fresh_review_projection(document)
     if projection is None:
         # An undecodable embedded projection cannot be reasoned about; charge
@@ -296,7 +408,10 @@ def residual_reservation(document: Mapping) -> int:
     for record in projection.requests:
         if isinstance(record, WithdrawnFreshReviewRecord):
             continue
-        total += _RESIDUAL_RESERVE_BY_STATUS.get(record.status, FRESH_REVIEW_PENDING_RESERVE)
+        fixed = _FRESH_REVIEW_FIXED_RESERVE_BY_STATUS.get(
+            record.status, _FRESH_REVIEW_FIXED_RESERVE_BY_STATUS["pending"]
+        )
+        total += fixed + lineage_stage_delta(document, record.request)
     total += repair_attempt_reserve(document) + disposition_reserve(document)
     return total
 
@@ -312,13 +427,20 @@ def pending_withdraw_candidates(document: Mapping) -> tuple[str, ...]:
     )
 
 
-def satisfies_capacity(document: Mapping, encoded_len: int) -> bool:
+def satisfies_capacity(
+    document: Mapping, encoded_len: int, *, encoding: "StateEncoding" = None
+) -> bool:
     """``len(encoded) + Σ残り予約 <= STATE_LIMIT - S_sys_remaining``."""
-    return encoded_len + residual_reservation(document) <= STATE_LIMIT - system_remaining(document)
+    return (
+        encoded_len + residual_reservation(document, encoding=encoding)
+        <= STATE_LIMIT - system_remaining(document)
+    )
 
 
-def is_over_capacity(document: Mapping, encoded_len: int) -> bool:
-    return not satisfies_capacity(document, encoded_len)
+def is_over_capacity(
+    document: Mapping, encoded_len: int, *, encoding: "StateEncoding" = None
+) -> bool:
+    return not satisfies_capacity(document, encoded_len, encoding=encoding)
 
 
 # ---------------------------------------------------------------------------
@@ -411,14 +533,19 @@ def classify_write_kind(base: Optional[Mapping], proposed: Mapping) -> WriteKind
         if other_slots <= _lease_slot_keys(base) | _ENVELOPE_KEYS:
             return WriteKind.WITHDRAW
 
-    halt_allowed = _HALT_FIELD_NAMES | HALT_AUX_KEYS | _lease_slot_keys(base)
+    diff_keys = _diff_keys(base, proposed)
+    halt_core = frozenset({"control"}) if _is_v5(base) else _HALT_FIELD_NAMES
+    halt_allowed = _HALT_FIELD_NAMES | HALT_AUX_KEYS
     if _is_v5(base):
-        halt_allowed = frozenset({"control", "extensions"}) | _lease_slot_keys(base)
-    if _diff_is_subset_of(base, proposed, halt_allowed):
+        halt_allowed = frozenset({"control", "extensions"})
+    # A pure lease-only diff must not satisfy this check just because the
+    # halt allowance happens to be a large closed set; the diff must
+    # actually touch a halt-core field, not merely be contained in one.
+    if diff_keys & halt_core and _diff_is_subset_of(base, proposed, halt_allowed):
         return WriteKind.STOP_HALT
 
     takeover_allowed = _lease_slot_keys(base) | _ENVELOPE_KEYS
-    if _diff_is_subset_of(base, proposed, takeover_allowed):
+    if diff_keys and _diff_is_subset_of(base, proposed, takeover_allowed):
         return WriteKind.STOP_TAKEOVER
 
     if _diff_is_subset_of(base, proposed, STOP_SLOT_KEYS):
@@ -529,8 +656,10 @@ class CapacityVerdict:
     metrics: CapacityMetrics
 
 
-def _metrics(document: Mapping, encoded_len: int) -> CapacityMetrics:
-    reserved = residual_reservation(document)
+def _metrics(
+    document: Mapping, encoded_len: int, *, encoding: "StateEncoding" = None
+) -> CapacityMetrics:
+    reserved = residual_reservation(document, encoding=encoding)
     remaining = system_remaining(document)
     limit = STATE_LIMIT
     budget = limit - remaining
@@ -547,17 +676,23 @@ def _metrics(document: Mapping, encoded_len: int) -> CapacityMetrics:
     )
 
 
-def _rejected(document: Mapping, encoded_len: int, *, code: str, mode: str, write_kind: WriteKind) -> CapacityVerdict:
+def _rejected(
+    document: Mapping, encoded_len: int, *, code: str, mode: str, write_kind: WriteKind,
+    encoding: "StateEncoding" = None,
+) -> CapacityVerdict:
     return CapacityVerdict(
         accepted=False, code=code, mode=mode, write_kind=write_kind.value,
-        metrics=_metrics(document, encoded_len),
+        metrics=_metrics(document, encoded_len, encoding=encoding),
     )
 
 
-def _accepted(document: Mapping, encoded_len: int, *, mode: str, write_kind: WriteKind) -> CapacityVerdict:
+def _accepted(
+    document: Mapping, encoded_len: int, *, mode: str, write_kind: WriteKind,
+    encoding: "StateEncoding" = None,
+) -> CapacityVerdict:
     return CapacityVerdict(
         accepted=True, code=None, mode=mode, write_kind=write_kind.value,
-        metrics=_metrics(document, encoded_len),
+        metrics=_metrics(document, encoded_len, encoding=encoding),
     )
 
 
@@ -579,19 +714,22 @@ def state_capacity_verdict(
         write_kind = classify_write_kind(base.document if base is not None else None, proposed)
         return _rejected(
             proposed, encoded_len, code="state-capacity-exhausted",
-            mode="excess", write_kind=write_kind,
+            mode="excess", write_kind=write_kind, encoding=encoding,
         )
 
     if base is None:
-        if satisfies_capacity(proposed, encoded_len):
-            return _accepted(proposed, encoded_len, mode="normal", write_kind=WriteKind.GENESIS)
+        if satisfies_capacity(proposed, encoded_len, encoding=encoding):
+            return _accepted(
+                proposed, encoded_len, mode="normal", write_kind=WriteKind.GENESIS,
+                encoding=encoding,
+            )
         return _rejected(
             proposed, encoded_len, code="state-capacity-exhausted",
-            mode="normal", write_kind=WriteKind.GENESIS,
+            mode="normal", write_kind=WriteKind.GENESIS, encoding=encoding,
         )
 
     base_document = base.document
-    base_over_capacity = is_over_capacity(base_document, base.encoded_len)
+    base_over_capacity = is_over_capacity(base_document, base.encoded_len, encoding=encoding)
 
     def encode_for(document: Mapping) -> int:
         from .json_codec import encode_json_value, freeze_json_value
@@ -607,7 +745,7 @@ def state_capacity_verdict(
             write_kind = classify_write_kind(base_document, proposed)
             return _rejected(
                 proposed, encoded_len, code="state-capacity-legacy-full",
-                mode="legacy-full", write_kind=write_kind,
+                mode="legacy-full", write_kind=write_kind, encoding=encoding,
             )
 
     proposed_history_len = lease_history_length(proposed)
@@ -616,7 +754,7 @@ def state_capacity_verdict(
         write_kind = classify_write_kind(base_document, proposed)
         return _rejected(
             proposed, encoded_len, code="state-capacity-exhausted",
-            mode="normal", write_kind=write_kind,
+            mode="normal", write_kind=write_kind, encoding=encoding,
         )
 
     write_kind = classify_write_kind(base_document, proposed)
@@ -625,14 +763,15 @@ def state_capacity_verdict(
         if not base_over_capacity:
             return _rejected(
                 proposed, encoded_len, code="state-capacity-withdraw-not-needed",
-                mode="normal", write_kind=write_kind,
+                mode="normal", write_kind=write_kind, encoding=encoding,
             )
         if encoded_len >= base.encoded_len:
             return _rejected(
                 proposed, encoded_len, code="state-capacity-invariant-broken",
                 mode="excess" if base_over_capacity else "normal", write_kind=write_kind,
+                encoding=encoding,
             )
-        return _accepted(proposed, encoded_len, mode="excess", write_kind=write_kind)
+        return _accepted(proposed, encoded_len, mode="excess", write_kind=write_kind, encoding=encoding)
 
     if base_over_capacity:
         threshold = (
@@ -641,49 +780,67 @@ def state_capacity_verdict(
         )
         if write_kind in (WriteKind.STOP_HALT, WriteKind.STOP_TAKEOVER, WriteKind.STOP_SLOT):
             if encoded_len <= threshold:
-                return _accepted(proposed, encoded_len, mode="excess", write_kind=write_kind)
+                return _accepted(
+                    proposed, encoded_len, mode="excess", write_kind=write_kind, encoding=encoding,
+                )
             return _rejected(
                 proposed, encoded_len, code="state-capacity-exhausted",
-                mode="excess", write_kind=write_kind,
+                mode="excess", write_kind=write_kind, encoding=encoding,
             )
         return _rejected(
             proposed, encoded_len, code="state-capacity-exhausted",
-            mode="excess", write_kind=write_kind,
+            mode="excess", write_kind=write_kind, encoding=encoding,
         )
 
+    # 判定の順序 8 (LEGACY_PRETTY): a v4 flat document's D requests never
+    # advance past pending (there is no v4 writer for dispatch/consume/
+    # terminal). Any attempted advance is rejected unconditionally, and
+    # v4 D items reserve nothing at all (see ``residual_reservation``).
     if encoding is StateEncoding.LEGACY_PRETTY and _advances_a_d_stage(base_document, proposed):
         return _rejected(
             proposed, encoded_len, code="state-capacity-exhausted",
-            mode="legacy-full", write_kind=write_kind,
+            mode="normal", write_kind=write_kind, encoding=encoding,
         )
 
-    if satisfies_capacity(proposed, encoded_len):
-        return _accepted(proposed, encoded_len, mode="normal", write_kind=write_kind)
+    if satisfies_capacity(proposed, encoded_len, encoding=encoding):
+        return _accepted(proposed, encoded_len, mode="normal", write_kind=write_kind, encoding=encoding)
 
     if _diff_is_record_status_advance(base_document, proposed):
         return _rejected(
             proposed, encoded_len, code="state-capacity-invariant-broken",
-            mode="normal", write_kind=write_kind,
+            mode="normal", write_kind=write_kind, encoding=encoding,
         )
     return _rejected(
         proposed, encoded_len, code="state-capacity-exhausted",
-        mode="normal", write_kind=write_kind,
+        mode="normal", write_kind=write_kind, encoding=encoding,
     )
 
 
 def _advances_a_d_stage(base_document: Mapping, proposed: Mapping) -> bool:
+    """True when an *existing* D request moved past ``pending``.
+
+    A brand-new ``pending`` request appended at the end (prepare / 受付)
+    is not an advance -- it never existed before, so nothing "advanced".
+    Only a status change on a record that was already present, or a newly
+    appended record that is *not* ``pending``, counts.
+    """
     base_projection = fresh_review_projection(base_document)
     proposed_projection = fresh_review_projection(proposed)
     if base_projection is None or proposed_projection is None:
         return False
-    if len(base_projection.requests) > len(proposed_projection.requests):
+    base_requests = base_projection.requests
+    proposed_requests = proposed_projection.requests
+    if len(proposed_requests) < len(base_requests):
         return False
-    if len(proposed_projection.requests) > len(base_projection.requests):
-        return True
-    for before, after in zip(base_projection.requests, proposed_projection.requests):
+    for before, after in zip(base_requests, proposed_requests):
         if isinstance(before, FreshReviewRecord) and isinstance(after, FreshReviewRecord):
-            if before.status == "pending" and after.status != "pending":
+            if before.status != after.status:
                 return True
+        elif before != after:
+            return True
+    for appended in proposed_requests[len(base_requests):]:
+        if not (isinstance(appended, FreshReviewRecord) and appended.status == "pending"):
+            return True
     return False
 
 
