@@ -828,10 +828,7 @@ def _parse_lease_expiry(value: object) -> Optional[datetime]:
     return parsed if parsed.tzinfo is not None else None
 
 def _lease_expiry_not_shortened(before_lease: Mapping, after_lease: Mapping) -> bool:
-    """A genuine renewal/takeover always moves ``lease_expires_at`` forward,
-    never backward (independent review's "許しすぎ" finding). Compares by
-    parsed instant and fails closed if either side cannot parse.
-    """
+    """Expiry never moves backward; compared as parsed instants, unparseable fails closed."""
     before_exp = before_lease.get("lease_expires_at")
     after_dt = _parse_lease_expiry(after_lease.get("lease_expires_at"))
     if before_exp in (None, ""):
@@ -982,13 +979,7 @@ def _takeover_case(base: Mapping, proposed: Mapping) -> Optional[str]:
             {key: before_lease.get(key) for key in _LEASE_FIELD_NAMES},
             {key: after_lease.get(key) for key in _LEASE_FIELD_NAMES},
         ):
-            # Nothing about the lease itself changed at all (v4's
-            # ``_lease_mapping`` is the *whole* flat document, so comparing
-            # it wholesale would wrongly see an unrelated top-level change,
-            # e.g. ``loop_active`` alone, as a lease diff): an unrelated
-            # mutation, or a second fresh_review record advancing while the
-            # lease is untouched, must not be misread as a zero-growth
-            # "renewal" just because the lease fields trivially match.
+            # Lease untouched: an unrelated change must not read as a zero-growth renewal.
             return None
         if _lease_identity_absent(before_lease) and not before_history:
             return "initial" if _parse_lease_expiry(after_lease.get("lease_expires_at")) is not None else None
