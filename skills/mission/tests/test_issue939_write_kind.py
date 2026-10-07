@@ -184,6 +184,15 @@ def test_v4_real_halt_writer_is_stop_halt(category):
     before, after = _flat_halt_before_after(category)
     assert sc.classify_write_kind(before, after, encoding=sc.StateEncoding.LEGACY_PRETTY) == H_
 
+def _timed_v4_halt(category, t0="2026-01-01T00:00:00Z", t1="2026-01-01T01:00:00Z"):
+    """The real v4 halt writer (`_transition_phase`) with the clock advanced, so timing fields change."""
+    before = {"schema_version": 4, "phase": "executing", "loop_active": True, "halt_reason": "",
+              "phase_started_at": t0, "updated_at": t0}
+    after = copy.deepcopy(before)
+    _mission_state_module()._transition_phase(after, "halted", t1, terminal_trusted_boundary=(category == "stale"))
+    after.update(halt_reason="why", halt_category=category, loop_active=False, updated_at=t1)
+    return before, after
+
 def _v5_halt_before_after(category, *, reason="\x01" * sc.HALT_REASON_MAX_CHARS):
     from mission_application.compatibility import compatibility_delta
     from mission_kernel import decode_snapshot, encode_v5_snapshot
@@ -195,7 +204,9 @@ def _v5_halt_before_after(category, *, reason="\x01" * sc.HALT_REASON_MAX_CHARS)
     payload["control"].update(halt_reason="", loop_active=True, phase="executing", terminal_outcome=None)
     snap = decode_snapshot(canonical_json_bytes(payload))
     before_doc = json.loads(encode_v5_snapshot(snap))
-    compat = compatibility_delta(payload, payload, exclude=set())
+    # The compatibility delta of a real, time-advancing halt carries the timing fields.
+    compat = compatibility_delta(*_timed_v4_halt(category), exclude={
+        "phase", "loop_active", "halt_reason", "halt_category", "terminal_outcome", "updated_at"})
     command = MarkHalt(HaltCategory(category), reason, legacy_reason=reason, compatibility=compat,
                         at="2026-01-01T00:00:00Z")
     decision = decide(snap.state, command)
@@ -769,6 +780,9 @@ def test_encoding_choice_changes_the_verdict_for_the_same_diff():
 
 def test_v4_real_halt_writer_fields_are_inside_the_allow_list():
     for category in [c.value for c in HaltCategory]:
+        before, after = _timed_v4_halt(category)
+        assert sc._diff_keys(before, after) - sc._HALT_FIELD_NAMES - sc._ENVELOPE_KEYS, category
+        assert sc.classify_write_kind(before, after, encoding=sc.StateEncoding.LEGACY_PRETTY) == H_
         before, after = _flat_halt_before_after(category)
         touched = sc._diff_keys(before, after) - sc._HALT_FIELD_NAMES - sc._ENVELOPE_KEYS
         assert touched <= sc._HALT_RIDE_ALONG_FIELDS, (category, touched - sc._HALT_RIDE_ALONG_FIELDS)
