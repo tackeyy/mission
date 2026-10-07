@@ -283,15 +283,13 @@ _NEXT_TAKEOVER_COST_CASES = [
      sc.STATE_CAPACITY_TAKEOVER_DELTA + 5 * sc.LEASE_TOKEN_MAX_CHARS),
     ({"owner_session_id": "\u3042" * sc.LEASE_TOKEN_MAX_CHARS, "lease_id": "b", "fencing_epoch": 1},
      sc.STATE_CAPACITY_TAKEOVER_DELTA + 2 * sc.LEASE_TOKEN_MAX_CHARS),
-    # A field present but unparseable/unencodable fails the whole result
-    # closed, rather than merely omitting that term.
+    # A field present but unparseable/unencodable fails the whole result closed.
     ({"owner_session_id": "a", "lease_id": "b", "fencing_epoch": "not-a-number"}, sc.STATE_LIMIT),
     ({"owner_session_id": "a", "lease_id": "b", "fencing_epoch": {"not": "a-number"}}, sc.STATE_LIMIT),
     ({"owner_session_id": "a", "lease_id": "b", "fencing_epoch": float("inf")}, sc.STATE_LIMIT),
     *[({"owner_session_id": "a", "lease_id": "b", "fencing_epoch": e}, sc.STATE_CAPACITY_TAKEOVER_DELTA + n)  # sign counts
       for e, n in ((-_EPOCH_OVER, 4), (str(-_EPOCH_OVER), 4), (-1, 0))],
-    # A never-acquired lease (absent/empty epoch, every freshly init'ed
-    # session) is epoch 0, not malformed -- must not fail closed.
+    # A never-acquired lease (absent/empty epoch: a fresh session) is epoch 0.
     ({"owner_session_id": "a", "lease_id": "b", "fencing_epoch": None}, sc.STATE_CAPACITY_TAKEOVER_DELTA),
     ({"owner_session_id": "a", "lease_id": "b", "fencing_epoch": ""}, sc.STATE_CAPACITY_TAKEOVER_DELTA),
 ]
