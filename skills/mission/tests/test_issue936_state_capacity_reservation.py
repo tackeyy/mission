@@ -258,66 +258,83 @@ def test_takeover_delta_is_bounded_by_the_real_production_writers():
     assert non_conformant_max > sc.STATE_CAPACITY_TAKEOVER_DELTA
 
 
-_EPOCH_OVER = sc.LEASE_EPOCH_MAX * 1000
-_EPOCH_EXCESS_DIGITS = len(str(_EPOCH_OVER)) - len(str(sc.LEASE_EPOCH_MAX))
+#: Old-lease field values (owner/lease_id/epoch, normalized by the real
+#: writer's own ``str()``/``str()``/``int()`` and copied into history --
+#: an oversized epoch costs bytes *twice*: history entry and new current
+#: field). All accepted by the real "taken-over" branch under the shared
+#: setup below.
+_TAKEOVER_SWEEP = [
+    ("a" * 128, "b" * 128, sc.LEASE_EPOCH_MAX),  # pattern-max identifiers
+    ("\x01" * 128, "b", 1),                      # control characters
+    ("\u3042" * 128, "b", 1),                    # multi-byte
+    ([" " * 128], "b", 1),                       # list -- Codex repro #2
+    ("a", {"x": 1}, 1),                          # dict
+    ("a", "b", 1e300),                           # huge float -- Codex repro #1
+    ("a", "b", -1e300),                          # huge negative float
+    ("a", "b", 1.5),                             # fractional float
+    ("a", "b", "123456"),                        # numeric string
+    ("a", "b", -(10 ** 20)),                      # negative big int
+    ("a", "b", 10 ** 20 - 1),                     # growing-digit int
+    ("a", "b", True),                            # bool (writer does not special-case it)
+    ("a" * 300, "b", 1),                         # over-pattern-length owner
+    ("a", "b" * 300, 1),                         # over-pattern-length lease_id
+    (0, "b", 1),                                 # non-string owner
+    ("a", 0, 1),                                 # non-string lease_id
+]
 
-#: (extra fields, expected ``next_takeover_cost``) for each isolated
-#: excess case. Each case touches exactly one term, so a mutation that
-#: drops any single term (owner, lease_id, epoch digits, encoded-byte
-#: measurement, or the fail-closed-on-unencodable/unparseable paths)
-#: cannot hide behind a combined assertion.
-_NEXT_TAKEOVER_COST_CASES = [
-    ({"owner_session_id": "a" * sc.LEASE_TOKEN_MAX_CHARS, "lease_id": "b" * sc.LEASE_TOKEN_MAX_CHARS,
-      "fencing_epoch": sc.LEASE_EPOCH_MAX}, sc.STATE_CAPACITY_TAKEOVER_DELTA),
-    ({"owner_session_id": "a" * (sc.LEASE_TOKEN_MAX_CHARS + 37), "lease_id": "b", "fencing_epoch": 1},
-     sc.STATE_CAPACITY_TAKEOVER_DELTA + 37),
-    ({"owner_session_id": "a", "lease_id": "b" * (sc.LEASE_TOKEN_MAX_CHARS + 41), "fencing_epoch": 1},
-     sc.STATE_CAPACITY_TAKEOVER_DELTA + 41),
-    ({"owner_session_id": "a", "lease_id": "b", "fencing_epoch": _EPOCH_OVER},
-     sc.STATE_CAPACITY_TAKEOVER_DELTA + _EPOCH_EXCESS_DIGITS),
-    ({"owner_session_id": "a", "lease_id": "b", "fencing_epoch": str(_EPOCH_OVER)},
-     sc.STATE_CAPACITY_TAKEOVER_DELTA + _EPOCH_EXCESS_DIGITS),  # writer-style int(str) normalization
-    # Encoded bytes, not characters: a control char costs 6 bytes, a
-    # 3-byte UTF-8 char 3, even within the character cap.
-    ({"owner_session_id": "\x01" * sc.LEASE_TOKEN_MAX_CHARS, "lease_id": "b", "fencing_epoch": 1},
-     sc.STATE_CAPACITY_TAKEOVER_DELTA + 5 * sc.LEASE_TOKEN_MAX_CHARS),
-    ({"owner_session_id": "\u3042" * sc.LEASE_TOKEN_MAX_CHARS, "lease_id": "b", "fencing_epoch": 1},
-     sc.STATE_CAPACITY_TAKEOVER_DELTA + 2 * sc.LEASE_TOKEN_MAX_CHARS),
-    # A field present but unparseable/unencodable fails the whole result closed.
-    ({"owner_session_id": "a", "lease_id": "b", "fencing_epoch": "not-a-number"}, sc.STATE_LIMIT),
-    ({"owner_session_id": "a", "lease_id": "b", "fencing_epoch": {"not": "a-number"}}, sc.STATE_LIMIT),
-    ({"owner_session_id": "a", "lease_id": "b", "fencing_epoch": float("inf")}, sc.STATE_LIMIT),
-    *[({"owner_session_id": "a", "lease_id": "b", "fencing_epoch": e}, sc.STATE_CAPACITY_TAKEOVER_DELTA + n)  # sign counts
-      for e, n in ((-_EPOCH_OVER, 4), (str(-_EPOCH_OVER), 4), (-1, 0))],
-    # A never-acquired lease (absent/empty epoch: a fresh session) is epoch 0.
-    ({"owner_session_id": "a", "lease_id": "b", "fencing_epoch": None}, sc.STATE_CAPACITY_TAKEOVER_DELTA),
-    ({"owner_session_id": "a", "lease_id": "b", "fencing_epoch": ""}, sc.STATE_CAPACITY_TAKEOVER_DELTA),
+#: (owner, lease_id, epoch, expected ``next_takeover_cost``) for inputs
+#: the real writer *rejects* -- there is no real increase to bound, so
+#: these assert the fail-closed/never-acquired value directly instead.
+_TAKEOVER_SWEEP_REJECTED = [
+    ("a", "b", "not-a-number", sc.STATE_LIMIT),       # ValueError in int()
+    ("a", "b", {"not": "a-number"}, sc.STATE_LIMIT),  # TypeError in int()
+    ("a", "b", float("inf"), sc.STATE_LIMIT),         # OverflowError in int()
+    ("a", "b", float("-inf"), sc.STATE_LIMIT),
+    ("a", "b", float("nan"), sc.STATE_LIMIT),         # ValueError in int()
+    ("a", "b", None, sc.STATE_CAPACITY_TAKEOVER_DELTA),   # never-acquired, not malformed
+    ("a", "b", "", sc.STATE_CAPACITY_TAKEOVER_DELTA),
 ]
 
 
-@pytest.mark.parametrize("extra,expected", _NEXT_TAKEOVER_COST_CASES)
-def test_next_takeover_cost_charges_each_isolated_excess(extra, expected):
-    doc = _flat_doc(lease_history=[], extra=extra)
-    assert sc.next_takeover_cost(doc) == expected
+def _old_lease(owner, lease_id, epoch):
+    return {"owner_session_id": owner, "lease_id": lease_id, "fencing_epoch": epoch,
+            "lease_expires_at": "2000-01-01T00:00:00Z", "lease_history": []}
 
 
-def test_next_takeover_cost_charges_the_whole_limit_for_a_non_string_or_unencodable_token():
-    # A non-string token is still copied into history; one that is not
-    # JSON cannot be bounded and charges the whole limit.
-    listed = _flat_doc(lease_history=[], extra={
-        "owner_session_id": ["x"] * 200, "lease_id": "b", "fencing_epoch": 1})
-    assert sc.next_takeover_cost(listed) > sc.STATE_CAPACITY_TAKEOVER_DELTA
-    unbounded = _flat_doc(lease_history=[], extra={
-        "owner_session_id": float("nan"), "lease_id": "b", "fencing_epoch": 1})
-    assert sc.next_takeover_cost(unbounded) >= sc.STATE_LIMIT
+@pytest.mark.parametrize("owner,lease_id,epoch", _TAKEOVER_SWEEP)
+def test_next_takeover_cost_bounds_the_real_writer(owner, lease_id, epoch):
+    """``next_takeover_cost`` must bound the real writer's increase,
+    measured not approximated: the replaced per-field approximation
+    fails the huge-float-epoch rows (882 < 1,127 bytes, the Codex repro)
+    since an oversized epoch costs bytes both in the new current field
+    and the history entry, counted there only once."""
+    import copy
+
+    old_lease = _old_lease(owner, lease_id, epoch)
+    doc = _flat_doc(lease_history=[], extra=old_lease)
+    before_bytes = legacy(doc)
+    after = copy.deepcopy(old_lease)
+    _mission_state_module().acquire_or_verify_lease(after, "9" * 128, lease_id="9" * 128, reason="9" * 128)
+    real_increase = legacy(dict(doc, **after)) - before_bytes
+    assert sc.next_takeover_cost(doc) >= real_increase
 
 
-def test_next_takeover_cost_treats_an_absent_fencing_epoch_key_as_zero():
-    """Same as the ``None``/``""`` cases above, but with the key missing
-    entirely -- the actual shape of a freshly ``init``ed session."""
-    doc = _flat_doc(lease_history=[], extra={"owner_session_id": "a", "lease_id": "b"})
-    del doc["fencing_epoch"]
-    assert sc.next_takeover_cost(doc) == sc.STATE_CAPACITY_TAKEOVER_DELTA
+@pytest.mark.parametrize("owner,lease_id,epoch,expected", _TAKEOVER_SWEEP_REJECTED)
+def test_next_takeover_cost_when_the_real_writer_would_reject(owner, lease_id, epoch, expected):
+    old_lease = _old_lease(owner, lease_id, epoch)
+    with pytest.raises(Exception):
+        _mission_state_module().acquire_or_verify_lease(
+            dict(old_lease), "9" * 128, lease_id="9" * 128, reason="9" * 128)
+    assert sc.next_takeover_cost(_flat_doc(lease_history=[], extra=old_lease)) == expected
+
+
+def test_next_takeover_cost_fails_closed_for_a_current_value_that_cannot_encode():
+    """``float('nan')`` is accepted by the real writer's own ``str()``
+    normalization (not rejected), but a document containing it could not
+    itself be valid JSON -- this still fails closed rather than silently
+    measuring a smaller, wrong delta."""
+    doc = _flat_doc(lease_history=[], extra=_old_lease(float("nan"), "b", 1))
+    assert sc.next_takeover_cost(doc) == sc.STATE_LIMIT
 
 
 def test_takeover_reserve_uses_next_takeover_cost_not_the_bare_constant():
@@ -325,10 +342,7 @@ def test_takeover_reserve_uses_next_takeover_cost_not_the_bare_constant():
     ``STATE_CAPACITY_TAKEOVER_DELTA`` directly instead of calling
     ``next_takeover_cost`` would under-reserve for an oversized current
     lease; this fixes that gap and would itself fail if it crept back."""
-    oversized = _flat_doc(lease_history=[], extra={
-        "owner_session_id": "a" * (sc.LEASE_TOKEN_MAX_CHARS + 50), "lease_id": "b",
-        "fencing_epoch": 1,
-    })
+    oversized = _flat_doc(lease_history=[], extra=_old_lease("a", "b", 1e300))
     remaining = sc.remaining_takeovers(oversized)
     assert remaining >= 1
     expected = sc.next_takeover_cost(oversized) + (remaining - 1) * sc.STATE_CAPACITY_TAKEOVER_DELTA

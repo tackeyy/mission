@@ -492,75 +492,60 @@ def lease_history_length(document: Mapping) -> int:
     return len(history) if isinstance(history, list) else 0
 
 
-def _lease_token_excess(value: object) -> int:
-    # Pattern-conformant values (the bound #918 must enforce for *new*
-    # tokens -- LEASE_TOKEN_PATTERN's own docstring) never exceed what
-    # STATE_CAPACITY_TAKEOVER_DELTA already assumed, so they charge nothing.
-    # A non-conformant value (wrong charset, too long, or not even a
-    # string) is measured in encoded bytes, not characters: a takeover
-    # copies the value into history, and a non-ASCII or control character
-    # costs up to 6 bytes where a pattern character costs 1. A value that
-    # does not encode as JSON at all cannot be bounded, so it charges the
-    # whole physical limit.
-    if isinstance(value, str) and LEASE_TOKEN_PATTERN.fullmatch(value):
-        return 0
-    if value is None:
-        return 0
-    try:
-        encoded = len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8"))
-    except (TypeError, ValueError):
-        return STATE_LIMIT
-    return max(0, encoded - (LEASE_TOKEN_MAX_CHARS + 2))
-
-
-_FENCING_EPOCH_UNPARSEABLE = object()
-
-
-def _normalized_fencing_epoch(value: object) -> int:
-    """Mirror ``bin/mission-state.py``'s normalization (L1287's
-    ``epoch = int(state["fencing_epoch"])``). A field that is absent or
-    empty -- every freshly ``init``ed session, before its first
-    lease-acquiring write, per ``_lease_fields_present`` -- is epoch 0,
-    the normal shape of a new document, not malformed. Returns
-    ``_FENCING_EPOCH_UNPARSEABLE`` only when the field is *present* but
-    the real writer's own ``int(value)`` would itself raise.
-    """
-    if value in (None, ""):
-        return 0
-    if isinstance(value, bool):
-        return _FENCING_EPOCH_UNPARSEABLE
-    try:
-        return int(value)
-    except (TypeError, ValueError, OverflowError):
-        return _FENCING_EPOCH_UNPARSEABLE
+#: New owner/lease_id a simulated takeover assigns: the pattern's own
+#: maximum length (the bound #918 must enforce for *new* tokens -- see
+#: ``LEASE_TOKEN_PATTERN``).
+_TAKEOVER_SIM_TOKEN = "9" * LEASE_TOKEN_MAX_CHARS
+_TAKEOVER_SIM_AT = "9999-12-31T23:59:59Z"
 
 
 def next_takeover_cost(document: Mapping) -> int:
     """Upper bound of the next single takeover's encode-length increase.
 
-    ``STATE_CAPACITY_TAKEOVER_DELTA`` assumes the *current* lease's
-    identifier fields conform to ``LEASE_TOKEN_PATTERN`` and its
-    ``fencing_epoch`` is an ``int`` at most ``LEASE_EPOCH_MAX``. Neither
-    is decoder-enforced for already-persisted state (#918's job), and a
-    takeover copies the *current* lease's fields into history, so a
-    non-conformant current lease costs more than the constant. This adds
-    the excess of each non-conformant field's encoded length over a
-    maximal pattern-conformant token.
+    Simulates ``bin/mission-state.py``'s ``acquire_or_verify_lease``
+    "taken-over" branch itself (``str(owner)``/``str(lease_id)``/
+    ``int(epoch)`` normalized into a new ``lease_history`` entry; new
+    current fields at maximal pattern-conformant identifiers and
+    ``epoch + 1``) and measures the real encode-length increase, rather
+    than approximating per field: a per-field approximation undercounts
+    an oversized epoch, which costs bytes *both* in the new current field
+    and in the history entry the old value is copied into (see
+    test_issue936_state_capacity_reservation.py::
+    test_next_takeover_cost_bounds_the_real_writer, which reproduces the
+    Codex-found undercounts).
 
-    If ``fencing_epoch`` cannot be normalized the way the real v4 writer
-    does (``int(value)``; see ``_normalized_fencing_epoch``), the whole
-    result fails closed to ``STATE_LIMIT`` rather than omitting that term.
+    A lease that was never acquired (``fencing_epoch`` absent/empty, the
+    normal shape of a freshly ``init``ed session) has no takeover to
+    simulate, so this returns the bare constant. A present but
+    unparseable epoch, or any value this cannot encode at all, fails the
+    whole result closed to ``STATE_LIMIT`` -- matching the real writer's
+    own rejection of that write.
     """
     lease = _lease_mapping(document)
-    epoch = _normalized_fencing_epoch(lease.get("fencing_epoch"))
-    if epoch is _FENCING_EPOCH_UNPARSEABLE:
+    before = {
+        "owner_session_id": lease.get("owner_session_id"), "lease_id": lease.get("lease_id"),
+        "fencing_epoch": lease.get("fencing_epoch"), "lease_expires_at": lease.get("lease_expires_at"),
+        "lease_history": lease.get("lease_history") if isinstance(lease.get("lease_history"), list) else [],
+    }
+    if before["fencing_epoch"] in (None, ""):
+        return STATE_CAPACITY_TAKEOVER_DELTA
+    try:
+        owner, lease_id = str(before["owner_session_id"]), str(before["lease_id"])
+        epoch = int(before["fencing_epoch"])
+        before_c = encode_json_value(freeze_json_value(before))
+        before_l = json.dumps(before, indent=2, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        after = dict(before, owner_session_id=_TAKEOVER_SIM_TOKEN, lease_id=_TAKEOVER_SIM_TOKEN,
+                     fencing_epoch=epoch + 1)
+        after["lease_history"] = before["lease_history"] + [{
+            "owner_session_id": owner, "lease_id": lease_id, "fencing_epoch": epoch,
+            "reason": _TAKEOVER_SIM_TOKEN, "at": _TAKEOVER_SIM_AT,
+        }]
+        after_c = encode_json_value(freeze_json_value(after))
+        after_l = json.dumps(after, indent=2, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    except Exception:
         return STATE_LIMIT
-    excess = _lease_token_excess(lease.get("owner_session_id")) + _lease_token_excess(
-        lease.get("lease_id")
-    )
-    # Sign included: a large negative epoch is copied into history as well.
-    excess += max(0, len(str(epoch)) - len(str(LEASE_EPOCH_MAX)))
-    return STATE_CAPACITY_TAKEOVER_DELTA + max(0, excess)
+    increase = max(len(after_c) - len(before_c), len(after_l) - len(before_l))
+    return max(STATE_CAPACITY_TAKEOVER_DELTA, increase)
 
 
 def remaining_takeovers(document: Mapping) -> int:
