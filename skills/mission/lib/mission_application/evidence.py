@@ -226,10 +226,10 @@ def execute_evidence_operation(repository: object, prepare) -> dict:
     if not isinstance(source, dict):
         raise EvidenceFailure("evidence-replay-document-invalid")
     if isinstance(command, PrepareFreshReview):
-        from mission_kernel.fresh_review import decode_projection, request_document
+        from mission_kernel.fresh_review import WithdrawnFreshReviewRecord, decode_projection, request_document
         matches = [item for item in decode_projection(source).requests
                    if item.prepare_operation_id == command.operation_id]
-        if len(matches) != 1 or matches[0].request != command.request:
+        if len(matches) != 1 or isinstance(matches[0], WithdrawnFreshReviewRecord) or matches[0].request != command.request:
             raise EvidenceFailure("fresh-review-projection-mismatch")
         payload = {"request": request_document(matches[0].request)}
     elif isinstance(command, UpdateProgress):
