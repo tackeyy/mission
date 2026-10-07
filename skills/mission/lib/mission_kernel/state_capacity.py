@@ -27,6 +27,7 @@ from enum import Enum
 import json
 from typing import Mapping, Optional
 
+from .identifiers import TOKEN128_RE
 from .json_codec import STATE_LIMIT, encode_json_value, freeze_json_value
 from . import fresh_review as _fresh_review
 from .fresh_review import (
@@ -48,6 +49,41 @@ class StateEncoding(str, Enum):
 
 
 # ---------------------------------------------------------------------------
+# #918 obligations (writer-side enforcement this module assumes but does
+# not itself perform -- this module only derives Delta constants under
+# these assumptions; #918 must make every writer enforce them before the
+# reservation this module computes is actually safe against adversarial
+# input). Each bound below has its own constant and a fuller docstring at
+# its definition; this is the one place that lists all of them together.
+#
+# 1. The *raw, stored* halt reason (v5's ``legacy_reason``, mirrored into
+#    both ``control.halt_reason`` and ``extensions.halt_reason``; v4's flat
+#    ``halt_reason``) must be <= ``HALT_REASON_MAX_CHARS`` (2048)
+#    characters. Today only the *semantic*, stripped ``reason`` is capped
+#    (transitions.py's ``_reason``); the raw value can be padded past that
+#    cap with leading/trailing characters Python's ``str.strip()``
+#    classifies as whitespace (including the C0 control characters
+#    U+001C-U+001F) while still passing the ``legacy_reason.strip() ==
+#    reason`` check.
+# 2. Each of the three ``goal_dispatch_*`` fields (``goal_dispatch_effective``
+#    / ``goal_dispatch_host`` / ``goal_dispatch_fallback_reason``) must be
+#    <= ``GOAL_DISPATCH_REASON_MAX_CHARS`` (128) characters. Unenforced
+#    today.
+# 3. A lease's ``owner_session_id``, ``lease_id``, and a ``lease_history``
+#    entry's ``reason`` must match ``LEASE_TOKEN_PATTERN`` (ASCII
+#    identifiers, <= ``LEASE_TOKEN_MAX_CHARS`` (128) characters). v5's
+#    fenced-commit admission already enforces this for *new* tokens
+#    (mission_persistence/fenced_commit.py); v4's ``acquire_or_verify_lease``
+#    and both schemas' *decoders* (for already-persisted state) do not.
+# 4. A lease's ``fencing_epoch`` must be an ``int`` with
+#    ``0 <= fencing_epoch <= LEASE_EPOCH_MAX`` (``2**63 - 1``). v5's
+#    decoder only checks ``positive``; v4's writer normalizes via
+#    ``int(value)`` (bin/mission-state.py's ``acquire_or_verify_lease``,
+#    around L1287) but does not cap the result, and a value that cannot
+#    be normalized that way is currently not handled consistently.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
 # System share: halt + lease-takeover reservation (design doc "検査式").
 # ---------------------------------------------------------------------------
 
@@ -56,30 +92,69 @@ class StateEncoding(str, Enum):
 #: while D request reservations consume the rest of the budget.
 STATE_CAPACITY_SYSTEM_SHARE = STATE_LIMIT // 16
 
-#: Kernel-level upper bound for a halt's ``reason``/``halt_reason`` value.
-#: ``transitions.py``'s ``_reason`` validator already enforces this for v5
-#: ``MarkHalt`` (``len(value) > 2048`` is rejected), so this name documents
-#: an existing invariant rather than a new one. Writer-side enforcement for
-#: every *other* field this module bounds (``goal_dispatch_*``, lease
-#: tokens) is #918's job -- see the module docstring.
+#: Kernel-level upper bound for the *raw, stored* halt reason: v5's
+#: ``legacy_reason`` (mirrored into both ``control.halt_reason`` *and*
+#: ``extensions.halt_reason``, see ``STATE_CAPACITY_HALT_DELTA``) and v4's
+#: flat ``halt_reason``.
+#:
+#: This is *not* already enforced, despite an earlier version of this
+#: docstring claiming so. ``transitions.py``'s ``_reason`` validator caps
+#: only the *semantic* ``reason`` (``command.reason``, after
+#: ``.strip()``) at 2048 characters; ``_mark_halt`` additionally requires
+#: ``legacy_reason.strip() == reason``, but ``.strip()`` only removes
+#: *leading/trailing* whitespace-classified characters -- and Python
+#: classifies the C0 control characters U+001C-U+001F ("file/group/
+#: record/unit separator") as whitespace. So
+#: ``legacy_reason = "\x1c" * 20000 + reason`` satisfies that check (it
+#: strips down to exactly ``reason``) while being 20000 characters longer,
+#: and is accepted and stored verbatim as both ``control.halt_reason`` and
+#: ``extensions.halt_reason``. Measured: ``decide(MarkHalt(HaltCategory
+#: ("other"), "\x01"*2048, legacy_reason="\x1c"*20000+"\x01"*2048))`` is
+#: accepted and grows the encoded v5 state by 264,635 bytes -- about 10x
+#: ``STATE_CAPACITY_HALT_DELTA`` below. ``STATE_CAPACITY_HALT_DELTA`` is
+#: measured *assuming* a future writer caps the raw stored reason at this
+#: many characters (worst-cased with control characters, since nothing
+#: restricts the charset either); enforcing that cap for every caller
+#: (CLI ``--reason``, ``legacy_reason``, v4's stored ``reason``) is #918's
+#: job -- see the "#918 obligations" block below. Until #918 ships, a
+#: caller that can reach ``MarkHalt``/``mark-halt --reason`` can exceed
+#: this reservation.
 HALT_REASON_MAX_CHARS = 2048
 
 #: Conservative upper bound for each ``goal_dispatch_*`` string a
 #: ``routed-goal`` halt may add (``goal_dispatch_effective`` /
 #: ``goal_dispatch_host`` / ``goal_dispatch_fallback_reason``, written by
-#: ``bin/mission-state.py``'s ``_goal_dispatch_route_fields``). No writer
-#: enforces this today; #918 must add it before this bound is load-bearing.
+#: ``bin/mission-state.py``'s ``_goal_dispatch_route_fields``). Like
+#: ``HALT_REASON_MAX_CHARS``, nothing enforces this length or restricts
+#: its charset today (these are free-form strings, not identifiers), so
+#: ``STATE_CAPACITY_HALT_DELTA`` worst-cases each field with control
+#: characters up to this many characters. #918 must enforce both the
+#: length and (if the design narrows the charset later) before this bound
+#: is load-bearing.
 GOAL_DISPATCH_REASON_MAX_CHARS = 128
 
-#: Conservative upper bound for a lease's ``owner_session_id``/``lease_id``
-#: and a ``lease_history`` entry's ``reason``. v5's fenced-commit admission
-#: already enforces this for *new* tokens via ``Token128``/``_session_id``
-#: (mission_persistence/fenced_commit.py), but neither v4's
-#: ``acquire_or_verify_lease`` nor either schema's *decoder* enforce it for
-#: already-persisted state, so a takeover that copies an oversized current
-#: lease into history can exceed what ``STATE_CAPACITY_TAKEOVER_DELTA``
-#: assumed -- see ``next_takeover_cost``. Writer-side enforcement of new
-#: tokens for every caller is #918's job.
+#: ``[A-Za-z0-9][A-Za-z0-9._:-]{0,127}`` -- the same pattern as
+#: :mod:`mission_kernel.identifiers`'s ``TOKEN128_RE`` (shared with v5's
+#: fenced-commit admission, mission_persistence/fenced_commit.py's
+#: ``_token``/``_session_id``) and :mod:`mission_kernel.fresh_review`'s
+#: ``_ID``. The *identifier* fields a lease takeover touches --
+#: ``owner_session_id``, ``lease_id``, and a ``lease_history`` entry's
+#: ``reason`` -- are bound by this ASCII pattern, not merely by a
+#: character count: a length-only bound is unsafe here, because v4's
+#: ``acquire_or_verify_lease`` does not restrict the charset of a new
+#: owner/lease ID at all, and 128 *control* characters (each a 6-byte
+#: ``\uXXXX`` escape) encode far larger than 128 pattern-conformant ASCII
+#: characters (each 1 byte) -- measured: a takeover with a 128-control-
+#: character new owner and lease ID grows the v4 flat document by 1,830
+#: bytes, versus 550 bytes for the pattern-conformant worst case
+#: ``STATE_CAPACITY_TAKEOVER_DELTA`` is measured from. Enforcing this
+#: pattern for every new token is #918's job -- see ``next_takeover_cost``
+#: for how an already-persisted lease that does not conform is handled in
+#: the meantime.
+LEASE_TOKEN_PATTERN = TOKEN128_RE
+
+#: The pattern's own maximum length (``1 + 127``), kept as a separate name
+#: for callers that only need the length component of ``LEASE_TOKEN_PATTERN``.
 LEASE_TOKEN_MAX_CHARS = 128
 
 #: 0 <= fencing_epoch <= this. v5's decoder only checks ``positive`` (see
@@ -89,55 +164,78 @@ LEASE_EPOCH_MAX = 2 ** 63 - 1
 
 #: Maximum encode-length increase of a single halt / mark-halt write.
 #: Measured (see test_issue936_state_capacity_reservation.py::
-#: test_halt_delta_is_bounded_by_the_real_production_writers) by driving the
-#: *real* production writers -- v4's ``activity_segments.*`` helpers plus
-#: the flat-document ``mutate()`` shape used by
-#: ``mission_application.lifecycle.mark_halt``, and v5's
-#: ``mission_kernel.transitions.decide`` with a ``MarkHalt`` command whose
-#: ``compatibility`` payload carries the same activity-close fields -- from
-#: a base state with an already-open, maximum-shape activity segment to a
-#: halted state, across every ``HaltCategory`` branch.
+#: test_halt_delta_is_bounded_by_the_real_production_writers) by driving
+#: the *real* production functions across *every* ``HaltCategory`` value,
+#: taking the max:
 #:
-#: v5 dominates v4 here and is the reason this constant roughly doubled
-#: from the v4-only measurement this module shipped with originally:
-#: ``_mark_halt`` (transitions.py) writes ``legacy_reason`` into
-#: ``control.halt_reason`` *and* ``_apply_compatibility``'s
-#: ``dedicated_upserts`` (transitions.py L597-605) mirrors the same value
-#: into ``extensions.halt_reason``, so a v5 halt pays for
-#: ``HALT_REASON_MAX_CHARS`` *twice* (once per storage location) where v4's
-#: single flat document pays for it once. The dominant branch is
-#: ``routed-goal`` (one activity-segment close from the unconditional
-#: terminal-phase close in ``_transition_phase``/``close_activity_for_terminal``,
-#: *plus* the three ``goal_dispatch_*`` fields); ``awaiting-approval``'s
-#: extra activity-segment close (``record_activity_event`` opens and
-#: immediately re-closes a bare segment) is smaller because that second
-#: segment carries no ``detail``.
+#: - v4: ``bin/mission-state.py``'s real ``_transition_phase`` (closes the
+#:   open activity segment, accrues ``phase_durations_sec``, and -- for
+#:   ``stale`` -- sets ``resume_target_phase``) plus, for
+#:   ``awaiting-approval``, ``activity_segments.record_activity_event``
+#:   (which opens and immediately lets the terminal close re-close a bare
+#:   second segment).
+#: - v5: the exact same before/after v4 flat documents, fed through the
+#:   real ``mission_application.compatibility.compatibility_delta`` (which
+#:   is what ``mission_application.lifecycle.mark_halt`` itself uses) to
+#:   derive the ``compatibility`` payload, then
+#:   ``mission_kernel.transitions.decide`` with a real ``MarkHalt`` command
+#:   (``legacy_reason``/``at`` set, matching production), encoded end-to-end
+#:   with ``encode_v5_snapshot``.
 #:
-#: Measured maxima: v5 canonical 26,156 bytes, v4 legacy-pretty 13,120
-#: bytes. The literal below adds a documented 500-byte slack for fields
-#: this measurement may not have bundled (e.g. any future ``HaltCategory``
-#: branch or compatibility field).
-STATE_CAPACITY_HALT_DELTA = 26656
+#: Both ``legacy_reason`` (-> ``halt_reason``) and each ``goal_dispatch_*``
+#: field are worst-cased at their *character* bound
+#: (``HALT_REASON_MAX_CHARS`` / ``GOAL_DISPATCH_REASON_MAX_CHARS``) filled
+#: with the control character ``"\x01"``, since nothing bounds either
+#: field's *byte* cost today (see those constants' docstrings) -- a
+#: control character costs 6 bytes (``\u0001``) under both the canonical
+#: and legacy-pretty encoders, where an ASCII character costs 1.
+#:
+#: v5 dominates v4 (``_mark_halt`` mirrors ``legacy_reason`` into both
+#: ``control.halt_reason`` *and*, via ``_apply_compatibility``'s
+#: ``dedicated_upserts``, ``extensions.halt_reason`` -- transitions.py
+#: L597-605 -- so a v5 halt pays for ``HALT_REASON_MAX_CHARS`` worth of
+#: control characters *twice*). ``routed-goal`` dominates every other
+#: category (one activity-segment close *plus* the three
+#: ``goal_dispatch_*`` fields, also control-character-worst-cased).
+#:
+#: Measured maxima across all 9 categories: v5 canonical 28,118 bytes
+#: (``routed-goal``), v4 legacy-pretty 15,049 bytes (``routed-goal``). The
+#: literal below adds a documented 500-byte slack for fields this
+#: measurement may not have bundled (e.g. a future ``HaltCategory``
+#: branch or compatibility field; #918's own writer-side enforcement work
+#: may also add validation-rejection paths that touch other fields).
+STATE_CAPACITY_HALT_DELTA = 28618
 
 #: Maximum encode-length increase of a single lease takeover: one
 #: ``lease_history`` entry at its maximum field lengths, from a *current*
 #: lease that is already at its maximum field lengths (``owner_session_id``/
-#: ``lease_id`` at ``LEASE_TOKEN_MAX_CHARS``, ``fencing_epoch`` at
-#: ``LEASE_EPOCH_MAX``) to a *new* lease also at maximum field lengths.
+#: ``lease_id``/history ``reason`` conformant with ``LEASE_TOKEN_PATTERN``
+#: at ``LEASE_TOKEN_MAX_CHARS``, ``fencing_epoch`` at ``LEASE_EPOCH_MAX``)
+#: to a *new* lease also at maximum, pattern-conformant field lengths.
 #: Measured by driving the real production functions -- v4's
-#: ``bin/mission-state.py``'s ``acquire_or_verify_lease`` and v5's
-#: ``mission_persistence.fenced_commit.admit_lease`` (same field names/
-#: values; only the v5 ``"lease"`` wrapper key differs, which does not
-#: change the delta since that key already exists in both the base and
-#: proposed document) -- on an expired base lease with a foreign presented
-#: token. Measured maxima: 550 bytes (legacy-pretty) / 497 bytes
-#: (canonical); this constant keeps the pre-existing 822-byte literal,
-#: which already safely bounds the measured maxima with headroom for the
-#: ``lease_history``'s ``reason`` field assuming the conservative
-#: ``LEASE_TOKEN_MAX_CHARS``-length bound rather than the single short
-#: constant (``"lease-expired-takeover"``) every current real caller
-#: actually passes.
-STATE_CAPACITY_TAKEOVER_DELTA = 822
+#: ``bin/mission-state.py``'s ``acquire_or_verify_lease`` and v5's field
+#: values reshaped under the ``"lease"`` wrapper key (``admit_lease``'s
+#: "taken-over" branch writes the identical field names/values; only that
+#: wrapper key differs, which does not change the delta since the key
+#: already exists in both the base and proposed document) -- on an
+#: expired base lease with a foreign presented token.
+#:
+#: Pattern conformance matters here, not just length: every character in
+#: ``LEASE_TOKEN_PATTERN`` is single-byte ASCII, so the pattern-conformant
+#: worst case costs the same whether measured in canonical or
+#: legacy-pretty encoding (550 bytes legacy-pretty / 497 bytes canonical).
+#: A *non*-conformant new token (e.g. 128 control characters, which
+#: nothing stops ``acquire_or_verify_lease`` from accepting today) costs
+#: far more -- measured 1,830 bytes -- which is why the pattern, not a
+#: bare character count, is the bound #918 must enforce (see
+#: ``LEASE_TOKEN_PATTERN``'s docstring and ``next_takeover_cost`` below
+#: for how an already-non-conformant persisted lease is handled until
+#: then).
+#:
+#: The literal below adds a documented 50-byte slack (measured 550 +
+#: slack) for ``lease_history`` entry fields this measurement may not
+#: have bundled (the entry's schema is not fixed by any design table).
+STATE_CAPACITY_TAKEOVER_DELTA = 600
 
 #: Largest integer N_L such that
 #: ``STATE_CAPACITY_HALT_DELTA + N_L * STATE_CAPACITY_TAKEOVER_DELTA <=
@@ -439,11 +537,17 @@ def lease_history_length(document: Mapping) -> int:
 
 
 def _lease_token_excess(value: object) -> int:
-    # Measured in encoded bytes, not characters: a takeover copies the value
-    # into history, and a non-ASCII or control character costs up to 6 bytes.
-    # Clamped per-field: a short lease_id must not cancel out a long
-    # owner_session_id when the two are summed below. A value that does not
-    # encode as JSON cannot be bounded, so it charges the whole limit.
+    # Pattern-conformant values (the bound #918 must enforce for *new*
+    # tokens -- LEASE_TOKEN_PATTERN's own docstring) never exceed what
+    # STATE_CAPACITY_TAKEOVER_DELTA already assumed, so they charge nothing.
+    # A non-conformant value (wrong charset, too long, or not even a
+    # string) is measured in encoded bytes, not characters: a takeover
+    # copies the value into history, and a non-ASCII or control character
+    # costs up to 6 bytes where a pattern character costs 1. A value that
+    # does not encode as JSON at all cannot be bounded, so it charges the
+    # whole physical limit.
+    if isinstance(value, str) and LEASE_TOKEN_PATTERN.fullmatch(value):
+        return 0
     if value is None:
         return 0
     try:
@@ -453,29 +557,65 @@ def _lease_token_excess(value: object) -> int:
     return max(0, encoded - (LEASE_TOKEN_MAX_CHARS + 2))
 
 
+_FENCING_EPOCH_UNPARSEABLE = object()
+
+
+def _normalized_fencing_epoch(value: object) -> int:
+    """Mirror ``bin/mission-state.py``'s own normalization (L1287's
+    ``epoch = int(state["fencing_epoch"])``) for a lease that already
+    exists, while treating a lease that has never been acquired yet (the
+    field absent or empty -- every freshly ``init``ed session, before its
+    first lease-acquiring write, per ``_lease_fields_present``) as epoch
+    0, not as malformed: that is the normal, expected shape of a brand
+    new document and must not be charged the fail-closed sentinel.
+
+    Returns ``_FENCING_EPOCH_UNPARSEABLE`` only when the field is
+    *present* but the real writer's own ``int(value)`` call would itself
+    raise -- that state is genuinely anomalous (not merely "no lease
+    yet"), and this module cannot bound its next takeover cost at all.
+    """
+    if value in (None, ""):
+        return 0
+    if isinstance(value, bool):
+        return _FENCING_EPOCH_UNPARSEABLE
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return _FENCING_EPOCH_UNPARSEABLE
+
+
 def next_takeover_cost(document: Mapping) -> int:
     """Upper bound of the next single takeover's encode-length increase.
 
     ``STATE_CAPACITY_TAKEOVER_DELTA`` was measured assuming the *current*
-    lease's ``owner_session_id``/``lease_id`` are at most
-    ``LEASE_TOKEN_MAX_CHARS`` long and its ``fencing_epoch`` is at most
-    ``LEASE_EPOCH_MAX``. v5's decoder only checks that ``fencing_epoch`` is
-    positive (codec_v5.py's ``_decode_lease``), and neither it nor v4's flat
-    decode caps ``owner_session_id``/``lease_id`` length, so a state
-    persisted before those caps are writer-enforced (#918) can already hold
-    a current lease that exceeds them. A takeover copies the *current*
-    lease's fields into a new ``lease_history`` entry, so such a state's
-    next real takeover costs more than the constant. This conservatively
-    adds the excess of each field's encoded length over that of a maximal
-    ASCII token, so capacity admission still fails closed rather than
-    silently under-reserving.
+    lease's ``owner_session_id``/``lease_id``/history ``reason`` conform
+    to ``LEASE_TOKEN_PATTERN`` and its ``fencing_epoch`` is an ``int`` at
+    most ``LEASE_EPOCH_MAX``. v5's decoder only checks that
+    ``fencing_epoch`` is positive (codec_v5.py's ``_decode_lease``), and
+    neither it nor v4's flat decode constrain ``owner_session_id``/
+    ``lease_id`` to the pattern, so a state persisted before those bounds
+    are writer-enforced (#918) can already hold a current lease that
+    exceeds them. A takeover copies the *current* lease's fields into a
+    new ``lease_history`` entry, so such a state's next real takeover
+    costs more than the constant. This conservatively adds the excess of
+    each non-conformant field's encoded length over that of a maximal
+    pattern-conformant token, so capacity admission still fails closed
+    rather than silently under-reserving.
+
+    If ``fencing_epoch`` cannot be normalized the same way the real v4
+    writer normalizes it (``int(value)``; see ``_normalized_fencing_epoch``),
+    this module cannot reason about the document at all, so the whole
+    result is the fail-closed sentinel ``STATE_LIMIT`` rather than just
+    omitting the epoch term.
     """
     lease = _lease_mapping(document)
+    epoch = _normalized_fencing_epoch(lease.get("fencing_epoch"))
+    if epoch is _FENCING_EPOCH_UNPARSEABLE:
+        return STATE_LIMIT
     excess = _lease_token_excess(lease.get("owner_session_id")) + _lease_token_excess(
         lease.get("lease_id")
     )
-    epoch = lease.get("fencing_epoch")
-    if isinstance(epoch, int) and not isinstance(epoch, bool) and epoch > LEASE_EPOCH_MAX:
+    if epoch > LEASE_EPOCH_MAX:
         excess += len(str(epoch)) - len(str(LEASE_EPOCH_MAX))
     return STATE_CAPACITY_TAKEOVER_DELTA + max(0, excess)
 

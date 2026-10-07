@@ -80,19 +80,6 @@ def _flat_halt_after(base):
     doc["activity_rollup"] = rollup
     return doc
 
-def _lease_min(lease_history):
-    return {"owner_session_id": "a", "lease_id": "b", "fencing_epoch": 1,
-            "lease_expires_at": "9999-12-31T23:59:59Z", "lease_history": lease_history}
-
-def _lease_max_after(base):
-    doc = dict(base)
-    entry = {"owner_session_id": ID128, "lease_id": ID128, "fencing_epoch": 2 ** 63 - 2,
-              "reason": "r" * 128, "at": "9999-12-31T23:59:59Z"}
-    doc["lease_history"] = list(base["lease_history"]) + [entry]
-    doc["owner_session_id"] = ID128
-    doc["lease_id"] = ID128
-    doc["fencing_epoch"] = 2 ** 63 - 1
-    return doc
 
 def _minimal_contract(*, criterion_ids=("AC1",), requirement_ids=(), prohibited_side_effects=()):
     """A contract document with just enough for ``lineage_variable_part`` to
@@ -167,90 +154,95 @@ def test_halt_delta_pins_maximum_from_absent_and_empty_slot(halt_reason_absent, 
     assert delta <= sc.STATE_CAPACITY_HALT_DELTA
 
 
-def test_halt_delta_is_bounded_by_the_real_production_writers():
-    """Δ_halt must bound the real v4 and v5 halt writers, not a hand builder.
+#: Worst-byte-per-character value for the *free text* fields
+#: ``HALT_REASON_MAX_CHARS``/``GOAL_DISPATCH_REASON_MAX_CHARS`` bound by
+#: character count only: a C0 control character, 6 bytes as ``\u00XX``
+#: under both the canonical and legacy-pretty encoders.
+_HALT_REASON_WORST = "\x01" * sc.HALT_REASON_MAX_CHARS
+_GOAL_DISPATCH_WORST = "\x01" * sc.GOAL_DISPATCH_REASON_MAX_CHARS
 
-    v4: drives ``activity_segments.record_activity_event`` /
-    ``close_activity_for_terminal`` -- the same functions
-    ``mission_application.lifecycle.mark_halt``'s real ``mutate()`` closure
-    calls -- directly on a flat document, across both the ``routed-goal``
-    (goal_dispatch_* fields) and ``awaiting-approval`` (extra activity
-    close) branches.
+#: Declared slack folded into ``STATE_CAPACITY_HALT_DELTA`` on top of the
+#: measured real-writer maximum (see ``test_halt_delta_is_bounded_by_the_
+#: real_production_writers``), for fields this measurement may not bundle.
+_HALT_DELTA_SLACK = 500
 
-    v5: drives ``mission_kernel.transitions.decide`` with a real
-    ``MarkHalt`` command end-to-end, encoding the result with the real
-    ``encode_v5_snapshot``. Its ``compatibility`` upserts model exactly
-    what ``mission_application.compatibility.compatibility_delta`` would
-    compute from the same before/after flat-document shapes (transitions.py
-    mirrors ``halt_reason`` into both ``control`` *and* ``extensions``,
-    which is why v5 dominates -- see the Δ_halt docstring).
+
+def _flat_halt_before_after(category):
+    """Build before/after v4 flat documents by driving the *real*
+    ``_transition_phase`` (phase close, activity close, ``resume_target_phase``
+    for ``stale``) and, for ``awaiting-approval``, the real
+    ``record_activity_event`` -- the same functions
+    ``mission_application.lifecycle.mark_halt``'s ``mutate()`` closure
+    calls. ``legacy_reason``/``goal_dispatch_*`` are worst-cased with
+    control characters (see module docstring on why that is the correct
+    assumption, not an exact reproduction of any single real caller).
     """
-    import copy
-    import dataclasses
     import importlib.util
 
-    from activity_segments import (
-        close_activity_for_terminal,
-        record_activity_event,
-        start_activity_segment,
+    from activity_segments import record_activity_event, start_activity_segment
+
+    mission_state_py = str(_HERE.parent / "bin" / "mission-state.py")
+    spec = importlib.util.spec_from_file_location(
+        "mission_state_issue936_halt_" + category.replace("-", "_"), mission_state_py
     )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    before = {
+        "schema_version": 4, "phase": "executing", "loop_active": True,
+        "halt_reason": "", "phase_started_at": TS27, "updated_at": TS27,
+    }
+    start_activity_segment(before, CLOSED_SEGMENT["kind"], CLOSED_SEGMENT["reason"], TS27,
+                            detail=CLOSED_SEGMENT["detail"])
+    import copy
+    after = copy.deepcopy(before)
+    if category == "awaiting-approval":
+        record_activity_event(after, "awaiting-approval", TS27)
+    mod._transition_phase(after, "halted", TS27, terminal_trusted_boundary=(category == "stale"))
+    after["halt_reason"] = _HALT_REASON_WORST
+    after["halt_category"] = category
+    after["loop_active"] = False
+    after["updated_at"] = TS27
+    if category == "routed-goal":
+        after["goal_dispatch_effective"] = _GOAL_DISPATCH_WORST
+        after["goal_dispatch_host"] = _GOAL_DISPATCH_WORST
+        after["goal_dispatch_fallback_reason"] = _GOAL_DISPATCH_WORST
+    return before, after
+
+
+def test_halt_delta_is_bounded_by_the_real_production_writers():
+    """Δ_halt must equal the measured real-writer maximum plus the
+    declared slack, across *every* ``HaltCategory`` value -- not merely
+    bound it, and not merely the two branches a hand-picked pair of
+    categories happens to touch.
+
+    v4: the real ``_transition_phase``/``record_activity_event`` pipeline
+    (``_flat_halt_before_after``).
+
+    v5: the exact same before/after v4 documents, fed through the real
+    ``mission_application.compatibility.compatibility_delta`` (what
+    ``mission_application.lifecycle.mark_halt`` itself uses to derive the
+    kernel's ``compatibility`` payload) and then
+    ``mission_kernel.transitions.decide`` with a real ``MarkHalt`` command
+    (``legacy_reason``/``at`` set, matching production), encoded end-to-end
+    with ``encode_v5_snapshot``.
+    """
+    import dataclasses
+
+    from mission_application.compatibility import compatibility_delta
     from mission_kernel import decode_snapshot, encode_v5_snapshot
-    from mission_kernel.commands import CompatibilityPayload, MarkHalt
-    from mission_kernel.json_codec import freeze_json_value
+    from mission_kernel.commands import MarkHalt
     from mission_kernel.model import HaltCategory
     from mission_kernel.transitions import decide
 
     from .mission_state_fixture_corpus import canonical_json_bytes, current_v5_open_state
 
-    goal_dispatch_upserts = {
-        "goal_dispatch_effective": GOAL_FIELD_MAX,
-        "goal_dispatch_host": GOAL_FIELD_MAX,
-        "goal_dispatch_fallback_reason": GOAL_FIELD_MAX,
-    }
-    activity_close_upserts = {
-        "activity_segments": [dict(CLOSED_SEGMENT)],
-        "activity_rollup": {
-            "observed_total_sec": CLOSED_SEGMENT["duration_sec"],
-            "closed_segment_count": 1,
-            "activity_duration_totals_sec": {CLOSED_SEGMENT["kind"]: CLOSED_SEGMENT["duration_sec"]},
-            "phase_activity_duration_totals_sec": {
-                CLOSED_SEGMENT["phase"]: {CLOSED_SEGMENT["kind"]: CLOSED_SEGMENT["duration_sec"]}
-            },
-            "wait_reason_totals_sec": {CLOSED_SEGMENT["kind"]: {CLOSED_SEGMENT["reason"]: CLOSED_SEGMENT["duration_sec"]}},
-        },
-    }
+    v4_max = 0
+    v5_max = 0
+    for category in [c.value for c in HaltCategory]:
+        before, after = _flat_halt_before_after(category)
+        v4_max = max(v4_max, legacy(after) - legacy(before), canonical(after) - canonical(before))
 
-    # --- v4: real activity_segments writer, both halt-category branches ---
-    def v4_delta(category, extra_upserts):
-        base = {
-            "schema_version": 4, "phase": "executing", "loop_active": True,
-            "iteration": 5, "updated_at": TS27, "last_activity_at": TS27,
-            "halt_reason": "",
-        }
-        start_activity_segment(
-            base, CLOSED_SEGMENT["kind"], CLOSED_SEGMENT["reason"], TS27,
-            detail=CLOSED_SEGMENT["detail"],
-        )
-        after = copy.deepcopy(base)
-        if category == "awaiting-approval":
-            record_activity_event(after, "awaiting-approval", TS27)
-        close_activity_for_terminal(after, TS27, trusted_boundary=False)
-        after["halt_reason"] = HALT_REASON_MAX
-        after["halt_category"] = category
-        after["loop_active"] = False
-        after["phase"] = "halted"
-        after["updated_at"] = TS27
-        after["last_activity_at"] = TS27
-        after.update(extra_upserts)
-        return legacy(after) - legacy(base), canonical(after) - canonical(base)
-
-    v4_routed = v4_delta("routed-goal", goal_dispatch_upserts)
-    v4_awaiting = v4_delta("awaiting-approval", {})
-    v4_max = max(v4_routed + v4_awaiting)
-    assert v4_max <= sc.STATE_CAPACITY_HALT_DELTA
-
-    # --- v5: real kernel decide()/MarkHalt, both dominant branches ---
-    def v5_delta(category, compat_upserts):
         payload = current_v5_open_state()
         payload["control"]["halt_reason"] = ""
         payload["control"]["loop_active"] = True
@@ -258,43 +250,46 @@ def test_halt_delta_is_bounded_by_the_real_production_writers():
         payload["control"]["terminal_outcome"] = None
         snap = decode_snapshot(canonical_json_bytes(payload))
         base_bytes = encode_v5_snapshot(snap)
-        command = MarkHalt(
-            HaltCategory(category),
-            HALT_REASON_MAX,
-            compatibility=CompatibilityPayload(upserts=freeze_json_value(compat_upserts)),
-        )
+        compat = compatibility_delta(before, after, exclude={
+            "phase", "loop_active", "halt_reason", "halt_category", "terminal_outcome", "updated_at",
+        })
+        command = MarkHalt(HaltCategory(category), _HALT_REASON_WORST,
+                            legacy_reason=_HALT_REASON_WORST, compatibility=compat, at=TS27)
         decision = decide(snap.state, command)
-        assert decision.accepted, decision.rejection
-        new_state = dataclasses.replace(
-            decision.transition.new_state, snapshot_provenance=snap.provenance
-        )
+        assert decision.accepted, (category, decision.rejection)
+        new_state = dataclasses.replace(decision.transition.new_state, snapshot_provenance=snap.provenance)
         object.__setattr__(new_state, "_snapshot_binding", snap.guidance._snapshot_binding)
         new_snap = dataclasses.replace(snap, state=new_state)
         after_bytes = encode_v5_snapshot(new_snap)
-        return len(after_bytes) - len(base_bytes)
+        v5_max = max(v5_max, len(after_bytes) - len(base_bytes))
 
-    both_upserts = dict(goal_dispatch_upserts)
-    both_upserts.update(activity_close_upserts)
-    v5_routed_with_close = v5_delta("routed-goal", both_upserts)
-    v5_awaiting_with_close = v5_delta("awaiting-approval", activity_close_upserts)
-    v5_max = max(v5_routed_with_close, v5_awaiting_with_close)
-    assert v5_max <= sc.STATE_CAPACITY_HALT_DELTA
-    # v5 is the dominant encoding (halt_reason is mirrored into both
-    # control and extensions); this would fail if a future change made v4
-    # dominate without the constant being revisited.
+    measured_max = max(v4_max, v5_max)
+    assert measured_max + _HALT_DELTA_SLACK == sc.STATE_CAPACITY_HALT_DELTA
+    # v5 (double-storage of the raw reason) must stay the dominant branch;
+    # this would fail if a future change made v4 dominate without the
+    # constant's own derivation being revisited.
     assert v5_max > v4_max
 
-@pytest.mark.parametrize("encoding_fn", [canonical, legacy], ids=["canonical", "legacy"])
-def test_takeover_delta_pins_min_to_max_lease_replacement(encoding_fn):
-    base = _lease_min([])
-    after = _lease_max_after(base)
-    delta = encoding_fn(after) - encoding_fn(base)
-    assert delta <= sc.STATE_CAPACITY_TAKEOVER_DELTA
-    if encoding_fn is legacy:
-        assert delta == sc.STATE_CAPACITY_TAKEOVER_DELTA
+#: Declared slack folded into ``STATE_CAPACITY_TAKEOVER_DELTA`` on top of
+#: the measured real-writer maximum, for ``lease_history`` entry fields
+#: this measurement may not bundle (its schema is not fixed anywhere).
+_TAKEOVER_DELTA_SLACK = 50
+
+
+def _mission_state_module():
+    import importlib.util
+
+    mission_state_py = str(_HERE.parent / "bin" / "mission-state.py")
+    spec = importlib.util.spec_from_file_location("mission_state_issue936_takeover", mission_state_py)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
 
 def test_takeover_delta_is_bounded_by_the_real_production_writers():
-    """Δ_takeover must bound the real v4 and v5 takeover writers.
+    """Δ_takeover must equal the measured real-writer maximum plus the
+    declared slack, for the *pattern-conformant* worst case (the bound
+    #918 must enforce -- see ``LEASE_TOKEN_PATTERN``).
 
     v4: drives ``bin/mission-state.py``'s real ``acquire_or_verify_lease``.
     v5: ``mission_persistence.fenced_commit.admit_lease``'s "taken-over"
@@ -306,14 +301,8 @@ def test_takeover_delta_is_bounded_by_the_real_production_writers():
     ``ExecutionRequest`` is out of scope for this module's own test.
     """
     import copy
-    import importlib.util
 
-    mission_state_py = str(_HERE.parent / "bin" / "mission-state.py")
-    spec = importlib.util.spec_from_file_location(
-        "mission_state_issue936_takeover", mission_state_py
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    mod = _mission_state_module()
 
     old_lease = {
         "owner_session_id": ID128, "lease_id": "b" * 128, "fencing_epoch": 2 ** 63 - 2,
@@ -322,15 +311,43 @@ def test_takeover_delta_is_bounded_by_the_real_production_writers():
     before = copy.deepcopy(old_lease)
     after = copy.deepcopy(old_lease)
     mod.acquire_or_verify_lease(after, "c" * 128, lease_id="c" * 128, reason="r" * 128)
+    assert sc.LEASE_TOKEN_PATTERN.fullmatch(after["owner_session_id"])
+    assert sc.LEASE_TOKEN_PATTERN.fullmatch(after["lease_id"])
 
     d_legacy = legacy(after) - legacy(before)
     d_canonical = canonical(after) - canonical(before)
-    assert max(d_legacy, d_canonical) <= sc.STATE_CAPACITY_TAKEOVER_DELTA
 
     v5_before = {"lease": {"kind": "fenced", **old_lease}}
     v5_after = {"lease": {"kind": "fenced", **after}}
     d_v5_canonical = canonical(v5_after) - canonical(v5_before)
-    assert d_v5_canonical <= sc.STATE_CAPACITY_TAKEOVER_DELTA
+
+    measured_max = max(d_legacy, d_canonical, d_v5_canonical)
+    assert measured_max + _TAKEOVER_DELTA_SLACK == sc.STATE_CAPACITY_TAKEOVER_DELTA
+
+
+def test_a_non_conformant_new_token_exceeds_the_takeover_delta():
+    """Documents the #918 gap the ``LEASE_TOKEN_PATTERN`` docstring cites:
+    nothing stops ``acquire_or_verify_lease`` from accepting a new owner/
+    lease ID made of control characters today, and doing so exceeds
+    ``STATE_CAPACITY_TAKEOVER_DELTA`` (which is only measured assuming
+    future pattern enforcement). This is an accepted, documented gap, not
+    a regression this module can close on its own -- see "#918
+    obligations" in state_capacity.py.
+    """
+    import copy
+
+    mod = _mission_state_module()
+    old_lease = {
+        "owner_session_id": ID128, "lease_id": "b" * 128, "fencing_epoch": 2 ** 63 - 2,
+        "lease_expires_at": "2000-01-01T00:00:00Z", "lease_history": [],
+    }
+    before = copy.deepcopy(old_lease)
+    after = copy.deepcopy(old_lease)
+    control_token = "\x01" * 128
+    mod.acquire_or_verify_lease(after, control_token, lease_id=control_token, reason="r" * 128)
+    assert not sc.LEASE_TOKEN_PATTERN.fullmatch(after["owner_session_id"])
+    measured = max(legacy(after) - legacy(before), canonical(after) - canonical(before))
+    assert measured > sc.STATE_CAPACITY_TAKEOVER_DELTA
 
 
 def test_next_takeover_cost_charges_the_excess_of_an_oversized_current_lease():
@@ -373,6 +390,72 @@ def test_next_takeover_cost_charges_the_excess_of_an_oversized_current_lease():
     assert sc.next_takeover_cost(unbounded) >= sc.STATE_LIMIT
 
 
+def test_next_takeover_cost_charges_lease_id_excess_independently_of_owner():
+    """Isolates ``lease_id`` from ``owner_session_id``, so a mutation that
+    drops the ``lease_id`` term from ``next_takeover_cost`` (while still
+    charging the owner's excess) cannot hide behind a combined assertion."""
+    oversized_lease_id = _flat_doc(lease_history=[], extra={
+        "owner_session_id": "a", "lease_id": "b" * (sc.LEASE_TOKEN_MAX_CHARS + 41),
+        "fencing_epoch": 1,
+    })
+    assert sc.next_takeover_cost(oversized_lease_id) == sc.STATE_CAPACITY_TAKEOVER_DELTA + 41
+
+
+def test_takeover_reserve_uses_next_takeover_cost_not_the_bare_constant():
+    """A mutation that makes ``takeover_reserve`` use
+    ``STATE_CAPACITY_TAKEOVER_DELTA`` directly instead of calling
+    ``next_takeover_cost`` would under-reserve for an oversized current
+    lease; this fixes that gap and would itself fail if it crept back."""
+    oversized = _flat_doc(lease_history=[], extra={
+        "owner_session_id": "a" * (sc.LEASE_TOKEN_MAX_CHARS + 50), "lease_id": "b",
+        "fencing_epoch": 1,
+    })
+    remaining = sc.remaining_takeovers(oversized)
+    assert remaining >= 1
+    expected = sc.next_takeover_cost(oversized) + (remaining - 1) * sc.STATE_CAPACITY_TAKEOVER_DELTA
+    assert sc.takeover_reserve(oversized) == expected
+    assert sc.takeover_reserve(oversized) > remaining * sc.STATE_CAPACITY_TAKEOVER_DELTA
+
+
+def test_next_takeover_cost_normalizes_the_epoch_like_the_real_writer():
+    """``bin/mission-state.py``'s ``acquire_or_verify_lease`` (around
+    L1287) normalizes ``fencing_epoch`` via ``int(value)`` before using
+    it; ``next_takeover_cost`` must mirror that, not merely check
+    ``isinstance(epoch, int)``."""
+    numeric_string_epoch = _flat_doc(lease_history=[], extra={
+        "owner_session_id": "a", "lease_id": "b",
+        "fencing_epoch": str(sc.LEASE_EPOCH_MAX * 1000),
+    })
+    excess_digits = len(str(sc.LEASE_EPOCH_MAX * 1000)) - len(str(sc.LEASE_EPOCH_MAX))
+    assert sc.next_takeover_cost(numeric_string_epoch) == sc.STATE_CAPACITY_TAKEOVER_DELTA + excess_digits
+
+    unparseable_epoch = _flat_doc(lease_history=[], extra={
+        "owner_session_id": "a", "lease_id": "b", "fencing_epoch": "not-a-number",
+    })
+    assert sc.next_takeover_cost(unparseable_epoch) == sc.STATE_LIMIT
+
+    non_scalar_epoch = _flat_doc(lease_history=[], extra={
+        "owner_session_id": "a", "lease_id": "b", "fencing_epoch": {"not": "a-number"},
+    })
+    assert sc.next_takeover_cost(non_scalar_epoch) == sc.STATE_LIMIT
+
+
+@pytest.mark.parametrize("missing_epoch_value", ["absent", None, ""])
+def test_next_takeover_cost_treats_a_never_acquired_lease_as_epoch_zero(missing_epoch_value):
+    """A freshly ``init``ed session (before its first lease-acquiring
+    write) has no ``fencing_epoch`` at all -- this is the normal shape of
+    a brand new document, not a malformed one, and must not be charged
+    the fail-closed sentinel (a regression this exact wording guards:
+    treating "absent" the same as "present but unparseable" would make
+    every fresh session's capacity check fail closed forever)."""
+    doc = _flat_doc(lease_history=[], extra={"owner_session_id": "a", "lease_id": "b"})
+    if missing_epoch_value == "absent":
+        del doc["fencing_epoch"]
+    else:
+        doc["fencing_epoch"] = missing_epoch_value
+    assert sc.next_takeover_cost(doc) == sc.STATE_CAPACITY_TAKEOVER_DELTA
+
+
 def test_takeover_limit_is_largest_integer_within_system_share():
     assert sc.STATE_CAPACITY_SYSTEM_SHARE == sc.STATE_LIMIT // 16 if hasattr(sc, "STATE_LIMIT") else True
     n_l = sc.STATE_CAPACITY_TAKEOVER_LIMIT
@@ -382,68 +465,83 @@ def test_takeover_limit_is_largest_integer_within_system_share():
     assert (sc.STATE_CAPACITY_HALT_DELTA + (n_l + 1) * sc.STATE_CAPACITY_TAKEOVER_DELTA
             > sc.STATE_CAPACITY_SYSTEM_SHARE)
 
-@pytest.mark.parametrize("stage", ["dispatch", "consume", "terminal"])
-@pytest.mark.parametrize("encoding_name", ["canonical", "legacy"])
-def test_stage_deltas_embed_e0a_shapes(stage, encoding_name):
-    """Each stage Δ must bound a real record's encode-length growth from a
-    minimal (record-just-accepted) state to the E0a-pinned maximum shape
-    for that stage, measured under the ``encoding_name`` encoding -- not
-    merely be larger than the shapes' own standalone bytes (``>`` against a
-    literal does not confirm the constant accounts for the record's
-    *reserved-slot key* and envelope growth, which is why this was flagged;
-    see the docstring on ``_FRESH_REVIEW_KEY_SLACK``).
+#: Per-stage slack folded into the stage Delta constants on top of the
+#: measured real-shape growth below, for the record's *reserved-slot key*
+#: names (not yet fixed by any design table; D2c's job) and any other
+#: field this measurement does not bundle. Declared here, by name, so the
+#: exact-match assertions below document what is measured versus what is
+#: slack, instead of asserting a bare ``<=``.
+_DISPATCH_STAGE_SLACK = 243
+_CONSUME_STAGE_SLACK = 66
+_TERMINAL_STAGE_SLACK = 164
 
-    ``legacy`` (v4 flat) is informational only for dispatch/consume/
-    terminal: ``residual_reservation`` already returns 0 for *every* D item
-    under ``StateEncoding.LEGACY_PRETTY`` (#918's "v4 の D item の予約は0"
-    decision -- v4 is rejected before any D request can advance past
-    ``pending``, so these stage Deltas are never actually consulted under
-    legacy encoding). Asserting the bound there anyway would force this
-    constant to grow for a code path ``residual_reservation`` never
-    reaches, so legacy failures are reported, not asserted.
-    """
-    import warnings
 
-    from .test_issue917_fresh_review_bounds import maximum_intent, maximum_running, maximum_terminal
+def _fresh_review_record_doc(**fields):
+    # Top-level reserved-slot keys (``operation_id``/``intent_digest``/
+    # ``payload_digest``/``dispatch``/``running``/``terminal_receipt``/
+    # ``result``/``status``), matching ``_FRESH_REVIEW_KEY_SLACK``'s own
+    # naming, rather than an extra nesting level -- an extra level would
+    # inflate legacy-pretty indentation beyond what the real embedding
+    # (inside one array element of the D request projection) costs.
+    base = {
+        "operation_id": None, "intent_digest": None, "payload_digest": None,
+        "dispatch": None, "running": None, "terminal_receipt": None,
+        "result": None, "status": "pending",
+    }
+    base.update(fields)
+    return _flat_doc(contract=_minimal_contract(), extra=base)
 
-    encode = canonical if encoding_name == "canonical" else legacy
 
-    def record_doc(dispatch=None, running=None, terminal_receipt=None, result=None):
-        # Top-level reserved-slot keys (``dispatch`` / ``running`` /
-        # ``terminal_receipt``), matching ``_FRESH_REVIEW_KEY_SLACK``'s own
-        # naming, rather than an extra nesting level this test invented --
-        # an extra level would inflate legacy-pretty indentation beyond
-        # what the real embedding (inside one array element of the D
-        # request projection) actually costs.
-        return _flat_doc(contract=_minimal_contract(), extra={
-            "dispatch": dispatch, "running": running,
-            "terminal_receipt": terminal_receipt, "result": result,
-        })
+def test_dispatch_stage_delta_matches_the_measured_breakdown():
+    """``FRESH_REVIEW_DISPATCH_STAGE_DELTA`` must equal the real growth
+    from an accepted-but-undispatched record to a dispatched one --
+    ``operation_id``/``intent_digest``/``payload_digest`` going from null
+    to their maximum identifiers, ``status`` advancing to its longest
+    value, and the E0a-pinned maximum ``dispatch``/``running`` shapes --
+    plus the declared slack, exactly (not merely ``<=``, so a mutation
+    that lowers the constant is caught by remeasuring, not by comparing
+    two literals)."""
+    from .test_issue917_fresh_review_bounds import maximum_intent, maximum_running
 
-    minimal = record_doc()
-    if stage == "dispatch":
-        after = record_doc(dispatch=maximum_intent(), running=maximum_running())
-        delta_const = sc.FRESH_REVIEW_DISPATCH_STAGE_DELTA
-    elif stage == "consume":
-        after = record_doc(result="r" * 262144)
-        delta_const = sc.FRESH_REVIEW_CONSUME_STAGE_DELTA
-    else:
-        largest_terminal = max(
-            (maximum_terminal(outcome) for outcome in ("completed", "failed", "blocked", "abandoned-unknown")),
-            key=lambda shape: encode(record_doc(terminal_receipt=shape)),
-        )
-        after = record_doc(terminal_receipt=largest_terminal)
-        delta_const = sc.FRESH_REVIEW_TERMINAL_STAGE_DELTA
+    minimal = _fresh_review_record_doc()
+    maximal = _fresh_review_record_doc(
+        operation_id="o" * 128, intent_digest="sha256:" + "0" * 64,
+        payload_digest="sha256:" + "0" * 64, status="dispatch-unknown",
+        dispatch=maximum_intent(), running=maximum_running(),
+    )
+    measured = canonical(maximal) - canonical(minimal)
+    assert measured + _DISPATCH_STAGE_SLACK == sc.FRESH_REVIEW_DISPATCH_STAGE_DELTA
 
-    measured = encode(after) - encode(minimal)
-    if encoding_name == "legacy":
-        if measured > delta_const:
-            warnings.warn(
-                f"{stage} legacy-pretty delta {measured} exceeds {delta_const}; "
-                "informational only, see test docstring"
-            )
-        return
-    assert measured <= delta_const, (stage, encoding_name, measured, delta_const)
+
+def test_consume_stage_delta_matches_the_measured_breakdown():
+    minimal = _fresh_review_record_doc(status="reserved")
+    maximal = _fresh_review_record_doc(status="consumed", result="r" * 262144)
+    measured = canonical(maximal) - canonical(minimal)
+    assert measured + _CONSUME_STAGE_SLACK == sc.FRESH_REVIEW_CONSUME_STAGE_DELTA
+
+
+def test_terminal_stage_delta_matches_the_measured_breakdown():
+    from .test_issue917_fresh_review_bounds import maximum_terminal
+
+    minimal = _fresh_review_record_doc()
+    largest_terminal = max(
+        (maximum_terminal(outcome) for outcome in ("completed", "failed", "blocked", "abandoned-unknown")),
+        key=lambda shape: canonical(_fresh_review_record_doc(terminal_receipt=shape)),
+    )
+    maximal = _fresh_review_record_doc(terminal_receipt=largest_terminal)
+    measured = canonical(maximal) - canonical(minimal)
+    assert measured + _TERMINAL_STAGE_SLACK == sc.FRESH_REVIEW_TERMINAL_STAGE_DELTA
+
+
+def test_stage_deltas_are_not_consulted_under_legacy_pretty():
+    """v4 flat (``StateEncoding.LEGACY_PRETTY``) never advances a D request
+    past ``pending`` (#918's "v4 の D item の予約は0" decision --
+    ``residual_reservation`` returns 0 for every D item under that
+    encoding), so the stage Delta constants are only ever consulted under
+    canonical encoding. This is a regression guard on that routing, not a
+    bound on the stage Deltas themselves."""
+    doc = _flat_doc(contract=_minimal_contract())
+    assert sc.residual_reservation(doc, encoding=sc.StateEncoding.LEGACY_PRETTY) == 0
 
 #: Mirrors ``state_capacity``'s own conservative FindingLineage placeholder
 #: shape (docs/design/880-repair-lineage.md §2's type table). Kept here,
@@ -594,7 +692,39 @@ def test_criterion_absent_from_contract_falls_back_to_the_largest_criterion():
     contract = _minimal_contract(criterion_ids=("OTHER",), requirement_ids=["r" * 128])
     doc = _flat_doc(contract=contract)
     variable = sc.lineage_variable_part(doc, pending.request)
-    assert variable > 0
+    # ``variable > 0`` alone would still pass if the fallback list
+    # comprehension were removed entirely, because ``candidates`` would
+    # then be empty and the function's own ``if not candidates: return
+    # command_map_bytes`` branch already returns a positive value (the
+    # request always has >= 1 candidate binding). Assert the fallback
+    # criterion's own requirement_ids are actually included, by comparing
+    # against the command map alone.
+    command_map_bytes = sc._encode_len_safe(sc._command_snapshot_map(pending.request))
+    assert variable > command_map_bytes
+
+
+def test_encode_len_safe_fails_closed_not_to_zero():
+    class Unencodable:
+        pass
+
+    assert sc._encode_len_safe(Unencodable()) == sc.STATE_LIMIT
+
+
+def test_lineage_variable_part_fails_closed_when_criteria_is_not_a_list():
+    pending = _pending_record()
+    doc = _flat_doc(contract={"schema": "mission-acceptance-contract/2", "criteria": "not-a-list"})
+    assert sc.lineage_variable_part(doc, pending.request) == sc.STATE_LIMIT
+
+
+def test_lineage_variable_part_with_zero_criteria_is_not_zero():
+    """An empty (but well-typed) ``criteria`` list must still charge at
+    least the request's own command->snapshot map, not 0: a mutation that
+    special-cased "0 criteria" to return 0 would under-reserve."""
+    pending = _pending_record()
+    doc = _flat_doc(contract={"schema": "mission-acceptance-contract/2", "criteria": []})
+    command_map_bytes = sc._encode_len_safe(sc._command_snapshot_map(pending.request))
+    assert sc.lineage_variable_part(doc, pending.request) == command_map_bytes
+    assert sc.lineage_variable_part(doc, pending.request) > 0
 
 def test_padding_helper_reaches_exact_headroom_zero():
     doc = _pad_document()
