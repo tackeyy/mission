@@ -215,3 +215,18 @@ def test_nesting_too_deep_to_walk_is_rejected_with_the_entry_reason(name, decode
     with pytest.raises(FreshReviewError) as caught:
         decoder(deep)
     assert type(caught.value.__cause__) is RecursionError
+    assert str(caught.value) == 'fresh-review-' + ENTRY_REASONS[name]
+
+
+# The reason each entry's builtins walk reports for the whole tree.
+ENTRY_REASONS = {
+    'request': 'request-shape-invalid', 'projection': 'projection-shape-invalid',
+    'launch': 'launch-shape-invalid', 'completed': 'terminal-shape-invalid',
+    'failed': 'terminal-shape-invalid', 'blocked': 'terminal-shape-invalid',
+    'abandoned-unknown': 'terminal-shape-invalid', 'intent': 'dispatch-invalid',
+    'running': 'running-invalid', 'budgets': 'budget-invalid', 'candidate': 'candidate-invalid',
+}
+
+
+def test_entry_reasons_cover_every_entry_document():
+    assert set(ENTRY_REASONS) == {name for name, _, _ in entry_documents()}
