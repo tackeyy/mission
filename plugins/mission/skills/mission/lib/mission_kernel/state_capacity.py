@@ -1,15 +1,21 @@
-"""E0b-2a (#936): pure kernel derivation of the state capacity reservation.
+"""E0b-2 (#936/#933): pure kernel derivation and judgement of state capacity.
 
-This module holds the *reservation* half of the capacity scheme decided in
+This module holds both halves of the capacity scheme decided in
 ``docs/design/880-repair-lineage.md`` sections "決定（容量予約の再設計...）"
-through "決定（pending request の取下げ...）": the Delta constants, the
-lineage variable part, the halt-slot and lease-takeover system share, the
-D request projection reader, and the two boolean capacity predicates
-(``satisfies_capacity`` / ``is_over_capacity``).
+through "決定（pending request の取下げ...）":
 
-The *verdict* half -- ``write_kind`` derivation, legacy-full detection, and
-``state_capacity_verdict`` itself -- is a follow-up module (E0b-2b) that
-imports this one. No writer lives here (that is D2c/#918).
+- The *reservation* half (#936): the Delta constants, the lineage variable
+  part, the halt-slot and lease-takeover system share, the D request
+  projection reader, and the two boolean capacity predicates
+  (``satisfies_capacity`` / ``is_over_capacity``).
+- The *verdict* half (#933): ``write_kind`` derivation (never the caller's
+  say-so -- always the base/proposed diff), legacy-full detection, and
+  ``state_capacity_verdict`` itself, the single gate every writer must call.
+
+No writer lives here (that is D2c/#918). This module only answers, given a
+``base`` document (or ``None`` for genesis), a ``proposed`` document and its
+already-encoded length, whether the mutation that produced ``proposed`` may
+be admitted.
 
 Pure function only: no ``os``/``pathlib``/clock/random imports. The only
 kernel dependency this module itself imports is :mod:`mission_kernel.json_codec`
@@ -23,6 +29,7 @@ imports ``fresh_review_receipts``, to cross-check those literals against its
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
 import json
 from typing import Mapping, Optional
@@ -659,4 +666,607 @@ def is_over_capacity(
     document: Mapping, encoded_len: int, *, encoding: "StateEncoding" = None
 ) -> bool:
     return not satisfies_capacity(document, encoded_len, encoding=encoding)
+
+
+# ---------------------------------------------------------------------------
+# write_kind derivation (base/proposed diff, never the caller's say-so).
+# ---------------------------------------------------------------------------
+
+
+class WriteKind(str, Enum):
+    GENESIS = "genesis"
+    WITHDRAW = "withdraw"
+    STOP_HALT = "stop-halt"
+    STOP_TAKEOVER = "stop-takeover"
+    STOP_SLOT = "stop-slot"
+    NORMAL = "normal"
+
+
+def _values_equal(left: object, right: object) -> bool:
+    """``==`` except that NaN is treated as equal to NaN.
+
+    A v4 legacy document can carry historical non-finite floats
+    (design doc: "v4 には NaN など typed に decode できない形が残る"). Plain
+    ``!=`` always reports a field unchanged-but-present NaN as "changed"
+    (IEEE754: ``nan != nan``), which would make *every* diff touch that
+    field forever, permanently blocking stop-halt/stop-takeover/withdraw
+    classification for any session carrying one. NaN has no useful
+    identity for this purpose, so both-NaN is defined as unchanged.
+    """
+    if isinstance(left, float) and isinstance(right, float) and left != left and right != right:
+        return True
+    return left == right
+
+
+def _diff_keys(base: Mapping, proposed: Mapping) -> frozenset:
+    """Top-level keys that changed, were added, or were removed.
+
+    This is intentionally shallow (a changed nested value marks its
+    top-level key as changed, nothing more specific) because the
+    write_kind classification below only needs to know *which top-level
+    slot* moved, not what inside it moved -- stage-advancing record
+    changes always live inside the ``fresh_review``/``extensions`` slot and
+    are judged separately by ``_fresh_review_withdraw_match``.
+    """
+    changed = set()
+    for key in frozenset(base.keys()) | frozenset(proposed.keys()):
+        if not _values_equal(base.get(key), proposed.get(key)):
+            changed.add(key)
+    return frozenset(changed)
+
+
+def _lease_slot_keys(document: Mapping) -> frozenset:
+    return frozenset({"lease"}) if _is_v5(document) else frozenset(
+        {"owner_session_id", "lease_id", "fencing_epoch", "lease_expires_at", "lease_history"}
+    )
+
+
+def _diff_is_subset_of(base: Mapping, proposed: Mapping, allowed: frozenset) -> bool:
+    return _diff_keys(base, proposed) <= allowed
+
+
+def _fresh_review_withdraw_match(base: Mapping, proposed: Mapping) -> bool:
+    """One pending record replaced by its withdrawn tombstone, nothing else."""
+    base_projection = fresh_review_projection(base)
+    proposed_projection = fresh_review_projection(proposed)
+    if base_projection is None or proposed_projection is None:
+        return False
+    if len(base_projection.requests) != len(proposed_projection.requests):
+        return False
+    changed = [
+        (before, after)
+        for before, after in zip(base_projection.requests, proposed_projection.requests)
+        if before != after
+    ]
+    if len(changed) != 1:
+        return False
+    before, after = changed[0]
+    if not (isinstance(before, FreshReviewRecord) and before.status == "pending"):
+        return False
+    if not isinstance(after, WithdrawnFreshReviewRecord):
+        return False
+    if before.request.request_id != after.request_id or before.request.nonce != after.nonce:
+        return False
+    lease = _lease_mapping(proposed)
+    proposed_epoch = lease.get("fencing_epoch")
+    if after.withdraw_fencing_epoch != proposed_epoch:
+        return False
+    return True
+
+
+def _mapping_diff_keys(base_value: object, proposed_value: object) -> frozenset:
+    """Field-level diff of a nested mapping (not a top-level identity check).
+
+    Used for v5's ``control``/``extensions`` slots, which are opaque single
+    keys at the top level but must be inspected field-by-field so an
+    unrelated (or malicious) field change inside them cannot hide behind a
+    coarse "the whole slot changed" classification.
+    """
+    base_map = base_value if isinstance(base_value, Mapping) else {}
+    proposed_map = proposed_value if isinstance(proposed_value, Mapping) else {}
+    changed = set()
+    for key in set(base_map.keys()) | set(proposed_map.keys()):
+        if not _values_equal(base_map.get(key), proposed_map.get(key)):
+            changed.add(key)
+    return frozenset(changed)
+
+
+def _halt_value_bounds_ok(proposed: Mapping) -> bool:
+    """Fail-closed guard for the #918 obligations this module never enforces.
+
+    ``STATE_CAPACITY_HALT_DELTA`` was measured assuming every stored halt
+    reason and ``goal_dispatch_*`` field stays within
+    ``HALT_REASON_MAX_CHARS`` / ``GOAL_DISPATCH_REASON_MAX_CHARS``. This
+    module does not reject a write merely for exceeding those bounds (that
+    enforcement is #918's job) -- but classifying an over-bound halt diff
+    as ``stop-halt`` would grant it the over-capacity "halt admitted up to
+    STATE_LIMIT" allowance on the strength of a Δ guarantee the write
+    itself has already broken. So an over-bound halt diff is judged
+    ``normal`` instead (see ``_is_stop_halt_diff``'s caller).
+    """
+    reason = _halt_reason_value(proposed)
+    candidates = [reason]
+    if _is_v5(proposed):
+        extensions = proposed.get("extensions")
+        aux_source = extensions if isinstance(extensions, Mapping) else {}
+        candidates.append(aux_source.get("halt_reason"))
+    else:
+        aux_source = proposed
+    for value in candidates:
+        if isinstance(value, str) and len(value) > HALT_REASON_MAX_CHARS:
+            return False
+    for key in ("goal_dispatch_effective", "goal_dispatch_host", "goal_dispatch_fallback_reason"):
+        value = aux_source.get(key)
+        if isinstance(value, str) and len(value) > GOAL_DISPATCH_REASON_MAX_CHARS:
+            return False
+    return True
+
+
+def _is_stop_halt_diff(base: Mapping, proposed: Mapping) -> bool:
+    """A pure, first-write halt mutation and nothing else.
+
+    Requires the halt slot to move from unwritten to written -- a repeat
+    halt write (already written -> written again) or a slot clear
+    (reactivate, written -> unwritten) is deliberately excluded; both are
+    judged as ordinary ``normal`` mutations instead (design doc: halt only
+    reserves its share on the *first* write, and clearing the slot is a
+    normal mutation evaluated against the restored headroom).
+    """
+    if halt_slot_written(base) or not halt_slot_written(proposed):
+        return False
+    if _is_v5(base):
+        top_allowed = frozenset({"control", "extensions"})
+        if not (_diff_keys(base, proposed) <= top_allowed):
+            return False
+        control_diff = _mapping_diff_keys(base.get("control"), proposed.get("control"))
+        if not control_diff or not (control_diff <= _HALT_FIELD_NAMES):
+            return False
+        extensions_diff = _mapping_diff_keys(base.get("extensions"), proposed.get("extensions"))
+        if not (extensions_diff <= (_HALT_FIELD_NAMES | HALT_AUX_KEYS)):
+            return False
+    else:
+        allowed = _HALT_FIELD_NAMES | HALT_AUX_KEYS
+        diff_keys = _diff_keys(base, proposed)
+        if not (diff_keys & _HALT_FIELD_NAMES):
+            return False
+        if not (diff_keys <= allowed):
+            return False
+    return _halt_value_bounds_ok(proposed)
+
+
+def _lease_history_growth_kind(base: Mapping, proposed: Mapping) -> Optional[str]:
+    """``"renewal"`` (history unchanged), ``"takeover"`` (strictly appended
+    exactly one entry), or ``None`` (shrink, truncate-and-replace, jump by
+    more than one entry, or either side's history is not a list -- none of
+    these are a legitimate takeover/renewal shape).
+    """
+    base_history = _lease_mapping(base).get("lease_history")
+    proposed_history = _lease_mapping(proposed).get("lease_history")
+    if not isinstance(base_history, list) or not isinstance(proposed_history, list):
+        return None
+    if len(proposed_history) == len(base_history):
+        return "renewal" if proposed_history == base_history else None
+    if len(proposed_history) == len(base_history) + 1:
+        return "takeover" if proposed_history[: len(base_history)] == base_history else None
+    return None
+
+
+def _lease_token_value_ok(value: object) -> bool:
+    return isinstance(value, str) and LEASE_TOKEN_PATTERN.fullmatch(value) is not None
+
+
+def _lease_epoch_value_ok(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= LEASE_EPOCH_MAX
+
+
+def _takeover_value_bounds_ok(proposed: Mapping) -> bool:
+    """Fail-closed guard mirroring ``_halt_value_bounds_ok`` for takeover.
+
+    ``STATE_CAPACITY_TAKEOVER_DELTA`` was measured assuming every lease
+    identifier field (``owner_session_id``/``lease_id``/a history entry's
+    ``reason``) matches ``LEASE_TOKEN_PATTERN`` and every ``fencing_epoch``
+    stays within ``LEASE_EPOCH_MAX``. A takeover diff whose own proposed
+    values already violate one of those bounds is judged ``normal``
+    instead of ``stop-takeover`` (see ``next_takeover_cost``'s own
+    docstring for why an already-non-conformant *persisted* lease is
+    handled separately there -- this guard is about the *new* write).
+    """
+    lease = _lease_mapping(proposed)
+    if not _lease_token_value_ok(lease.get("owner_session_id")):
+        return False
+    if not _lease_token_value_ok(lease.get("lease_id")):
+        return False
+    if not _lease_epoch_value_ok(lease.get("fencing_epoch")):
+        return False
+    history = lease.get("lease_history")
+    if isinstance(history, list) and history:
+        entry = history[-1]
+        if not isinstance(entry, Mapping):
+            return False
+        if not _lease_token_value_ok(entry.get("owner_session_id")):
+            return False
+        if not _lease_token_value_ok(entry.get("lease_id")):
+            return False
+        if not _lease_epoch_value_ok(entry.get("fencing_epoch")):
+            return False
+        reason = entry.get("reason")
+        if not (isinstance(reason, str) and LEASE_TOKEN_PATTERN.fullmatch(reason) is not None):
+            return False
+    return True
+
+
+def _is_stop_takeover_diff(base: Mapping, proposed: Mapping) -> bool:
+    diff_keys = _diff_keys(base, proposed)
+    if not diff_keys:
+        return False
+    takeover_allowed = _lease_slot_keys(base) | _ENVELOPE_KEYS
+    if not (diff_keys <= takeover_allowed):
+        return False
+    if _is_v5(base):
+        # "lease" is a single opaque top-level key for v5; _lease_mapping
+        # already resolves into it, but a diff confined to "lease" could in
+        # principle also smuggle a non-history, non-identity field change
+        # (e.g. an unrecognised extra key under "lease"). Guard against that
+        # the same way control/extensions are guarded for stop-halt.
+        lease_field_diff = _mapping_diff_keys(base.get("lease"), proposed.get("lease"))
+        lease_allowed = frozenset(
+            {"owner_session_id", "lease_id", "fencing_epoch", "lease_expires_at", "lease_history"}
+        )
+        if not (lease_field_diff <= lease_allowed):
+            return False
+    if _lease_history_growth_kind(base, proposed) is None:
+        return False
+    return _takeover_value_bounds_ok(proposed)
+
+
+def classify_write_kind(base: Optional[Mapping], proposed: Mapping) -> WriteKind:
+    """Derive the write_kind from the base/proposed diff (never trusted input)."""
+    if base is None:
+        return WriteKind.GENESIS
+
+    if _fresh_review_withdraw_match(base, proposed):
+        if _is_v5(base):
+            other_slots = _diff_keys(base, proposed) - frozenset({"extensions"})
+            extensions_diff = _mapping_diff_keys(
+                base.get("extensions"), proposed.get("extensions")
+            ) - frozenset({"fresh_review"})
+            if (
+                other_slots <= _lease_slot_keys(base) | _ENVELOPE_KEYS
+                and not extensions_diff
+            ):
+                return WriteKind.WITHDRAW
+        else:
+            other_slots = _diff_keys(base, proposed) - frozenset({"fresh_review"})
+            if other_slots <= _lease_slot_keys(base) | _ENVELOPE_KEYS:
+                return WriteKind.WITHDRAW
+
+    if _is_stop_halt_diff(base, proposed):
+        return WriteKind.STOP_HALT
+
+    if _is_stop_takeover_diff(base, proposed):
+        return WriteKind.STOP_TAKEOVER
+
+    if _diff_is_subset_of(base, proposed, STOP_SLOT_KEYS):
+        return WriteKind.STOP_SLOT
+
+    return WriteKind.NORMAL
+
+
+# ---------------------------------------------------------------------------
+# Legacy-full detection.
+# ---------------------------------------------------------------------------
+
+
+def _withdraw_all_pending_len(document: Mapping, encoded_len: int, *, encode) -> int:
+    """Encode length after replacing every pending record with a tombstone.
+
+    Returns ``encoded_len`` unchanged (a conservative "no savings" estimate)
+    if the embedded projection cannot be decoded or no synthetic withdrawal
+    can be derived without colliding with an existing operation id.
+    """
+    projection = fresh_review_projection(document)
+    if projection is None:
+        return encoded_len
+    pending_ids = [
+        record.request.request_id
+        for record in projection.requests
+        if isinstance(record, FreshReviewRecord) and record.status == "pending"
+    ]
+    if not pending_ids:
+        return encoded_len
+    used_operations = {
+        (record.withdraw_operation_id if isinstance(record, WithdrawnFreshReviewRecord)
+         else record.prepare_operation_id)
+        for record in projection.requests
+    }
+    used_operations |= {
+        record.operation_id
+        for record in projection.requests
+        if isinstance(record, FreshReviewRecord) and record.operation_id is not None
+    }
+    working = projection
+    for index, request_id in enumerate(pending_ids):
+        operation_id = "legacy-full-withdraw-probe-" + format(index, "d")
+        while operation_id in used_operations:
+            index += 1
+            operation_id = "legacy-full-withdraw-probe-" + format(index, "d")
+        used_operations.add(operation_id)
+        try:
+            working = _fresh_review.withdraw_request(
+                working, request_id=request_id, operation_id=operation_id, fencing_epoch=0
+            )
+        except FreshReviewError:
+            return encoded_len
+    rebuilt = dict(document)
+    projected = _fresh_review.projection_document(working)
+    if _is_v5(document):
+        extensions = dict(document.get("extensions") or {})
+        extensions["fresh_review"] = projected
+        rebuilt["extensions"] = extensions
+    else:
+        rebuilt["fresh_review"] = projected
+    return encode(rebuilt)
+
+
+def _is_legacy_full(
+    document: Mapping, encoded_len: int, *, encode
+) -> bool:
+    threshold = STATE_LIMIT - STATE_CAPACITY_HALT_DELTA
+    if encoded_len <= threshold:
+        return False
+    withdrawn_len = _withdraw_all_pending_len(document, encoded_len, encode=encode)
+    return withdrawn_len > threshold
+
+
+# ---------------------------------------------------------------------------
+# Public verdict contract.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CapacityBase:
+    document: Mapping
+    encoded_len: int
+
+
+@dataclass(frozen=True)
+class CapacityMetrics:
+    encoded_len: int
+    reserved: int
+    system_remaining: int
+    limit: int
+    headroom: int
+    excess_bytes: int
+    withdraw_candidates: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CapacityVerdict:
+    accepted: bool
+    code: Optional[str]
+    mode: str
+    write_kind: str
+    metrics: CapacityMetrics
+
+
+def _metrics(
+    document: Mapping, encoded_len: int, *, encoding: "StateEncoding" = None
+) -> CapacityMetrics:
+    reserved = residual_reservation(document, encoding=encoding)
+    remaining = system_remaining(document)
+    limit = STATE_LIMIT
+    budget = limit - remaining
+    headroom = max(0, budget - (encoded_len + reserved))
+    excess = max(0, (encoded_len + reserved) - budget)
+    return CapacityMetrics(
+        encoded_len=encoded_len,
+        reserved=reserved,
+        system_remaining=remaining,
+        limit=limit,
+        headroom=headroom,
+        excess_bytes=excess,
+        withdraw_candidates=pending_withdraw_candidates(document),
+    )
+
+
+def _rejected(
+    document: Mapping, encoded_len: int, *, code: str, mode: str, write_kind: WriteKind,
+    encoding: "StateEncoding" = None,
+) -> CapacityVerdict:
+    return CapacityVerdict(
+        accepted=False, code=code, mode=mode, write_kind=write_kind.value,
+        metrics=_metrics(document, encoded_len, encoding=encoding),
+    )
+
+
+def _accepted(
+    document: Mapping, encoded_len: int, *, mode: str, write_kind: WriteKind,
+    encoding: "StateEncoding" = None,
+) -> CapacityVerdict:
+    return CapacityVerdict(
+        accepted=True, code=None, mode=mode, write_kind=write_kind.value,
+        metrics=_metrics(document, encoded_len, encoding=encoding),
+    )
+
+
+def _encode_for(document: Mapping, *, encoding: "StateEncoding") -> int:
+    # Branch on ``encoding`` *before* computing anything: a v4 legacy
+    # document may contain non-finite floats (NaN/Infinity) that
+    # ``json.dumps`` tolerates (``allow_nan`` defaults to True) but the
+    # canonical codec's strict decoder rejects. Computing the canonical
+    # length unconditionally here used to raise out of the legacy-full
+    # probe even when only the legacy-pretty length was ever needed.
+    if encoding is StateEncoding.CANONICAL:
+        return len(encode_json_value(freeze_json_value(document)))
+    return len(json.dumps(document, indent=2, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+
+
+def state_capacity_verdict(
+    base: Optional[CapacityBase],
+    proposed: Mapping,
+    encoded_len: int,
+    *,
+    encoding: StateEncoding,
+) -> CapacityVerdict:
+    """The single capacity gate every writer must call before persisting.
+
+    ``base`` is ``None`` at genesis. ``proposed`` is the JSON document that
+    will be written; ``encoded_len`` is its already-computed encoded length
+    (canonical or legacy-pretty, per ``encoding`` -- this function does not
+    re-encode ``proposed`` itself).
+    """
+    if encoded_len > STATE_LIMIT:
+        write_kind = classify_write_kind(base.document if base is not None else None, proposed)
+        return _rejected(
+            proposed, encoded_len, code="state-capacity-exhausted",
+            mode="excess", write_kind=write_kind, encoding=encoding,
+        )
+
+    if base is None:
+        if satisfies_capacity(proposed, encoded_len, encoding=encoding):
+            return _accepted(
+                proposed, encoded_len, mode="normal", write_kind=WriteKind.GENESIS,
+                encoding=encoding,
+            )
+        return _rejected(
+            proposed, encoded_len, code="state-capacity-exhausted",
+            mode="normal", write_kind=WriteKind.GENESIS, encoding=encoding,
+        )
+
+    base_document = base.document
+    base_over_capacity = is_over_capacity(base_document, base.encoded_len, encoding=encoding)
+
+    def encode_for(document: Mapping) -> int:
+        return _encode_for(document, encoding=encoding)
+
+    if base_over_capacity:
+        threshold = STATE_LIMIT - STATE_CAPACITY_HALT_DELTA
+        if base.encoded_len > threshold and _is_legacy_full(base_document, base.encoded_len, encode=encode_for):
+            write_kind = classify_write_kind(base_document, proposed)
+            return _rejected(
+                proposed, encoded_len, code="state-capacity-legacy-full",
+                mode="legacy-full", write_kind=write_kind, encoding=encoding,
+            )
+
+    proposed_history_len = lease_history_length(proposed)
+    base_history_len = lease_history_length(base_document)
+    if proposed_history_len > base_history_len and base_history_len >= STATE_CAPACITY_TAKEOVER_LIMIT:
+        write_kind = classify_write_kind(base_document, proposed)
+        return _rejected(
+            proposed, encoded_len, code="state-capacity-exhausted",
+            mode="normal", write_kind=write_kind, encoding=encoding,
+        )
+
+    write_kind = classify_write_kind(base_document, proposed)
+
+    if write_kind is WriteKind.WITHDRAW:
+        if not base_over_capacity:
+            return _rejected(
+                proposed, encoded_len, code="state-capacity-withdraw-not-needed",
+                mode="normal", write_kind=write_kind, encoding=encoding,
+            )
+        if encoded_len >= base.encoded_len:
+            return _rejected(
+                proposed, encoded_len, code="state-capacity-invariant-broken",
+                mode="excess" if base_over_capacity else "normal", write_kind=write_kind,
+                encoding=encoding,
+            )
+        return _accepted(proposed, encoded_len, mode="excess", write_kind=write_kind, encoding=encoding)
+
+    if base_over_capacity:
+        threshold = (
+            STATE_LIMIT if write_kind is WriteKind.STOP_HALT
+            else STATE_LIMIT - STATE_CAPACITY_HALT_DELTA
+        )
+        if write_kind in (WriteKind.STOP_HALT, WriteKind.STOP_TAKEOVER, WriteKind.STOP_SLOT):
+            if encoded_len <= threshold:
+                return _accepted(
+                    proposed, encoded_len, mode="excess", write_kind=write_kind, encoding=encoding,
+                )
+            return _rejected(
+                proposed, encoded_len, code="state-capacity-exhausted",
+                mode="excess", write_kind=write_kind, encoding=encoding,
+            )
+        return _rejected(
+            proposed, encoded_len, code="state-capacity-exhausted",
+            mode="excess", write_kind=write_kind, encoding=encoding,
+        )
+
+    # 判定の順序 8 (LEGACY_PRETTY): a v4 flat document's D requests never
+    # advance past pending (there is no v4 writer for dispatch/consume/
+    # terminal). Any attempted advance is rejected unconditionally, and
+    # v4 D items reserve nothing at all (see ``residual_reservation``).
+    if encoding is StateEncoding.LEGACY_PRETTY and _advances_a_d_stage(base_document, proposed):
+        return _rejected(
+            proposed, encoded_len, code="state-capacity-exhausted",
+            mode="normal", write_kind=write_kind, encoding=encoding,
+        )
+
+    if satisfies_capacity(proposed, encoded_len, encoding=encoding):
+        return _accepted(proposed, encoded_len, mode="normal", write_kind=write_kind, encoding=encoding)
+
+    if _diff_is_record_status_advance(base_document, proposed):
+        return _rejected(
+            proposed, encoded_len, code="state-capacity-invariant-broken",
+            mode="normal", write_kind=write_kind, encoding=encoding,
+        )
+    return _rejected(
+        proposed, encoded_len, code="state-capacity-exhausted",
+        mode="normal", write_kind=write_kind, encoding=encoding,
+    )
+
+
+def _advances_a_d_stage(base_document: Mapping, proposed: Mapping) -> bool:
+    """True when an *existing* D request moved past ``pending``.
+
+    A brand-new ``pending`` request appended at the end (prepare / 受付)
+    is not an advance -- it never existed before, so nothing "advanced".
+    Only a status change on a record that was already present, or a newly
+    appended record that is *not* ``pending``, counts.
+    """
+    base_projection = fresh_review_projection(base_document)
+    proposed_projection = fresh_review_projection(proposed)
+    if base_projection is None or proposed_projection is None:
+        return False
+    base_requests = base_projection.requests
+    proposed_requests = proposed_projection.requests
+    if len(proposed_requests) < len(base_requests):
+        return False
+    for before, after in zip(base_requests, proposed_requests):
+        if isinstance(before, FreshReviewRecord) and isinstance(after, FreshReviewRecord):
+            if before.status != after.status:
+                return True
+        elif before != after:
+            return True
+    for appended in proposed_requests[len(base_requests):]:
+        if not (isinstance(appended, FreshReviewRecord) and appended.status == "pending"):
+            return True
+    return False
+
+
+def _diff_is_record_status_advance(base_document: Mapping, proposed: Mapping) -> bool:
+    """True when the only semantic difference is a record's status moving
+    forward (pending -> reserved -> consumed -> terminal), used to decide
+    whether an over-budget normal mutation is an invariant failure (a
+    pinned Δ turned out too small) rather than an ordinary rejection.
+    """
+    base_projection = fresh_review_projection(base_document)
+    proposed_projection = fresh_review_projection(proposed)
+    if base_projection is None or proposed_projection is None:
+        return False
+    if len(base_projection.requests) != len(proposed_projection.requests):
+        return False
+    _ADVANCE_ORDER = {"pending": 0, "reserved": 1, "consumed": 2}
+    advanced = False
+    for before, after in zip(base_projection.requests, proposed_projection.requests):
+        if before == after:
+            continue
+        if not (isinstance(before, FreshReviewRecord) and isinstance(after, FreshReviewRecord)):
+            return False
+        before_rank = _ADVANCE_ORDER.get(before.status)
+        after_rank = _ADVANCE_ORDER.get(after.status)
+        if before_rank is None or after_rank is None or after_rank <= before_rank:
+            return False
+        advanced = True
+    return advanced
 
