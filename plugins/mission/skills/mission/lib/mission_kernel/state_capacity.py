@@ -522,12 +522,12 @@ def next_takeover_cost(document: Mapping) -> int:
     own rejection of that write.
     """
     lease = _lease_mapping(document)
-    before = {
-        "owner_session_id": lease.get("owner_session_id"), "lease_id": lease.get("lease_id"),
-        "fencing_epoch": lease.get("fencing_epoch"), "lease_expires_at": lease.get("lease_expires_at"),
-        "lease_history": lease.get("lease_history") if isinstance(lease.get("lease_history"), list) else [],
-    }
-    if before["fencing_epoch"] in (None, ""):
+    # Only the keys actually present: the writer creates ``lease_history``
+    # (``setdefault``) and rewrites ``lease_expires_at`` to a 20-char value.
+    before = {key: lease[key] for key in ("owner_session_id", "lease_id", "fencing_epoch",
+                                          "lease_expires_at", "lease_history") if key in lease}
+    history = before.get("lease_history") if isinstance(before.get("lease_history"), list) else []
+    if before.get("fencing_epoch") in (None, ""):
         return STATE_CAPACITY_TAKEOVER_DELTA
     try:
         owner, lease_id = str(before["owner_session_id"]), str(before["lease_id"])
@@ -535,8 +535,8 @@ def next_takeover_cost(document: Mapping) -> int:
         before_c = encode_json_value(freeze_json_value(before))
         before_l = json.dumps(before, indent=2, ensure_ascii=False, sort_keys=True).encode("utf-8")
         after = dict(before, owner_session_id=_TAKEOVER_SIM_TOKEN, lease_id=_TAKEOVER_SIM_TOKEN,
-                     fencing_epoch=epoch + 1)
-        after["lease_history"] = before["lease_history"] + [{
+                     fencing_epoch=epoch + 1, lease_expires_at=_TAKEOVER_SIM_AT)
+        after["lease_history"] = history + [{
             "owner_session_id": owner, "lease_id": lease_id, "fencing_epoch": epoch,
             "reason": _TAKEOVER_SIM_TOKEN, "at": _TAKEOVER_SIM_AT,
         }]

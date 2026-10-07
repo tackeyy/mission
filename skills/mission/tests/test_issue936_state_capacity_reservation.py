@@ -310,13 +310,16 @@ def test_next_takeover_cost_bounds_the_real_writer(owner, lease_id, epoch):
     and the history entry, counted there only once."""
     import copy
 
-    old_lease = _old_lease(owner, lease_id, epoch)
-    doc = _flat_doc(lease_history=[], extra=old_lease)
-    before_bytes = legacy(doc)
-    after = copy.deepcopy(old_lease)
-    _mission_state_module().acquire_or_verify_lease(after, "9" * 128, lease_id="9" * 128, reason="9" * 128)
-    real_increase = legacy(dict(doc, **after)) - before_bytes
-    assert sc.next_takeover_cost(doc) >= real_increase
+    # Also a first takeover (no lease_history key yet) with a short expiry the writer rewrites.
+    for first in (False, True):
+        old_lease = _old_lease(owner, lease_id, epoch)
+        doc = _flat_doc(lease_history=[], extra=old_lease)
+        if first:
+            del doc["lease_history"], old_lease["lease_history"]
+            doc["lease_expires_at"] = old_lease["lease_expires_at"] = "2000-01-01T00Z"
+        after = copy.deepcopy(old_lease)
+        _mission_state_module().acquire_or_verify_lease(after, "9" * 128, lease_id="9" * 128, reason="9" * 128)
+        assert sc.next_takeover_cost(doc) >= legacy(dict(doc, **after)) - legacy(doc), first
 
 
 @pytest.mark.parametrize("owner,lease_id,epoch,expected", _TAKEOVER_SWEEP_REJECTED)
