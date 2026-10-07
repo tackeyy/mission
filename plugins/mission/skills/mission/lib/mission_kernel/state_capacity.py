@@ -833,10 +833,10 @@ def _lease_expiry_not_shortened(before_lease: Mapping, after_lease: Mapping) -> 
     parsed instant and fails closed if either side cannot parse.
     """
     before_exp = before_lease.get("lease_expires_at")
-    if before_exp in (None, ""):
-        return True
-    before_dt = _parse_lease_expiry(before_exp)
     after_dt = _parse_lease_expiry(after_lease.get("lease_expires_at"))
+    if before_exp in (None, ""):
+        return after_lease.get("lease_expires_at") in (None, "") or after_dt is not None
+    before_dt = _parse_lease_expiry(before_exp)
     if before_dt is None or after_dt is None:
         return False
     return after_dt >= before_dt
@@ -991,7 +991,7 @@ def _takeover_case(base: Mapping, proposed: Mapping) -> Optional[str]:
             # "renewal" just because the lease fields trivially match.
             return None
         if _lease_identity_absent(before_lease) and not before_history:
-            return "initial"
+            return "initial" if _parse_lease_expiry(after_lease.get("lease_expires_at")) is not None else None
         if _lease_identity_present(before_lease) and _lease_is_pure_renewal(base, proposed):
             return "extension"
         return None
@@ -1003,6 +1003,8 @@ def _takeover_case(base: Mapping, proposed: Mapping) -> Optional[str]:
     if not _lease_identity_present(before_lease):
         return None  # cannot take over a lease whose identity is not fully present
     if not _takeover_entry_matches_prior_lease(before_lease, after_history[-1]):
+        return None
+    if not _lease_expiry_not_shortened(before_lease, after_lease):
         return None
     try:
         expected_epoch = int(before_lease["fencing_epoch"])

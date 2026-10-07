@@ -146,7 +146,8 @@ def _takeover(layout, *, entry=None, cur=None, base=None):
     c = sc._lease_mapping(b)
     e = dict(_entry(c["owner_session_id"], c["lease_id"], c["fencing_epoch"]), **(entry or {}))
     cu = dict(owner="new-owner", lease_id="new-lease", epoch=c["fencing_epoch"] + 1, **(cur or {}))
-    p = _set_lease(b, layout, history=[e], owner=cu["owner"], lease_id=cu["lease_id"], epoch=cu["epoch"])
+    p = _set_lease(b, layout, history=[e], owner=cu["owner"], lease_id=cu["lease_id"], epoch=cu["epoch"],
+                   expires_at=cu.get("expires_at"))
     return b, p
 
 def _extension(layout, *, lease_history=(), lease_expires_at="2026-01-01T00:00:00Z",
@@ -329,9 +330,17 @@ def _rows():
                       _set_lease(renewed, L, lease_id="other-lease"), N, {}))
         rows.append((f"takeover_pure_{L}", *_takeover(L), T_, {}))
         rows.append((f"takeover_initial_acquisition_{L}",
-                      _no_lease_base(L), _set_lease(_no_lease_base(L), L, owner="first-owner",
-                                                     lease_id="first-lease", epoch=1), T_, {}))
+                      _no_lease_base(L), _set_lease(_no_lease_base(L), L, owner="first-owner", lease_id="first-lease",
+                                                     epoch=1, expires_at="2026-01-01T00:30:00Z"), T_, {}))
         rows.append((f"extension_zero_growth_{L}", *_extension(L), T_, {}))
+        # Expiry is compared as an instant (offsets included) and must parse; takeover never shortens it.
+        b30 = _base(L, lease_history=[], lease_expires_at="2026-01-01T00:30:00Z")
+        for name, exp, kind in (("shortened", "2026-01-01T00:00:00Z", N), ("invalid", "no-date", N),
+                                ("offset_earlier", "2026-01-01T02:00:00+02:00", N), ("offset_later", "2026-01-01T03:00:00+02:00", T_)):
+            rows.append((f"takeover_expiry_{name}_{L}", *_takeover(L, base=b30, cur={"expires_at": exp}), kind, {}))
+            rows.append((f"extension_expiry_{name}_{L}", *_extension(L, lease_expires_at="2026-01-01T00:30:00Z", new_expires_at=exp), kind, {}))
+        rows.append((f"initial_expiry_invalid_{L}", _no_lease_base(L), _set_lease(_no_lease_base(L), L, owner="o", lease_id="l",
+                                                                                   epoch=1, expires_at="no-date"), N, {}))
         rows.append((f"extension_shortens_expiry_{L}",
                       *_extension(L, lease_expires_at="2026-01-01T00:00:01Z",
                                   new_expires_at="2026-01-01T00:00:00Z"), N, {}))
