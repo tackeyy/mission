@@ -355,6 +355,23 @@ def test_next_takeover_cost_charges_the_excess_of_an_oversized_current_lease():
     excess_digits = len(str(sc.LEASE_EPOCH_MAX * 1000)) - len(str(sc.LEASE_EPOCH_MAX))
     assert sc.next_takeover_cost(oversized_epoch) == sc.STATE_CAPACITY_TAKEOVER_DELTA + excess_digits
 
+    # Encoded bytes, not characters: a control character costs 6 bytes and a
+    # 3-byte UTF-8 character 3, even within the character cap.
+    for token, cost in (("\x01" * sc.LEASE_TOKEN_MAX_CHARS, 5 * sc.LEASE_TOKEN_MAX_CHARS),
+                        ("\u3042" * sc.LEASE_TOKEN_MAX_CHARS, 2 * sc.LEASE_TOKEN_MAX_CHARS)):
+        escaped = _flat_doc(lease_history=[], extra={
+            "owner_session_id": token, "lease_id": "b", "fencing_epoch": 1})
+        assert sc.next_takeover_cost(escaped) == sc.STATE_CAPACITY_TAKEOVER_DELTA + cost
+
+    # A non-string token is still copied into history; one that is not JSON
+    # cannot be bounded and charges the whole limit.
+    listed = _flat_doc(lease_history=[], extra={
+        "owner_session_id": ["x"] * 200, "lease_id": "b", "fencing_epoch": 1})
+    assert sc.next_takeover_cost(listed) > sc.STATE_CAPACITY_TAKEOVER_DELTA
+    unbounded = _flat_doc(lease_history=[], extra={
+        "owner_session_id": float("nan"), "lease_id": "b", "fencing_epoch": 1})
+    assert sc.next_takeover_cost(unbounded) >= sc.STATE_LIMIT
+
 
 def test_takeover_limit_is_largest_integer_within_system_share():
     assert sc.STATE_CAPACITY_SYSTEM_SHARE == sc.STATE_LIMIT // 16 if hasattr(sc, "STATE_LIMIT") else True

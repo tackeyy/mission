@@ -24,6 +24,7 @@ imports ``fresh_review_receipts``, to cross-check those literals against its
 from __future__ import annotations
 
 from enum import Enum
+import json
 from typing import Mapping, Optional
 
 from .json_codec import STATE_LIMIT, encode_json_value, freeze_json_value
@@ -438,9 +439,18 @@ def lease_history_length(document: Mapping) -> int:
 
 
 def _lease_token_excess(value: object) -> int:
+    # Measured in encoded bytes, not characters: a takeover copies the value
+    # into history, and a non-ASCII or control character costs up to 6 bytes.
     # Clamped per-field: a short lease_id must not cancel out a long
-    # owner_session_id when the two are summed below.
-    return max(0, len(value) - LEASE_TOKEN_MAX_CHARS) if isinstance(value, str) else 0
+    # owner_session_id when the two are summed below. A value that does not
+    # encode as JSON cannot be bounded, so it charges the whole limit.
+    if value is None:
+        return 0
+    try:
+        encoded = len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8"))
+    except (TypeError, ValueError):
+        return STATE_LIMIT
+    return max(0, encoded - (LEASE_TOKEN_MAX_CHARS + 2))
 
 
 def next_takeover_cost(document: Mapping) -> int:
@@ -456,10 +466,9 @@ def next_takeover_cost(document: Mapping) -> int:
     a current lease that exceeds them. A takeover copies the *current*
     lease's fields into a new ``lease_history`` entry, so such a state's
     next real takeover costs more than the constant. This conservatively
-    adds the measured excess (1 byte per excess ASCII character; non-ASCII
-    excess could cost more per character due to JSON escaping, which this
-    approximation does not model) so capacity admission still fails closed
-    rather than silently under-reserving.
+    adds the excess of each field's encoded length over that of a maximal
+    ASCII token, so capacity admission still fails closed rather than
+    silently under-reserving.
     """
     lease = _lease_mapping(document)
     excess = _lease_token_excess(lease.get("owner_session_id")) + _lease_token_excess(
