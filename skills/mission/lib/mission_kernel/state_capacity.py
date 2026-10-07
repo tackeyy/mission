@@ -1092,10 +1092,7 @@ def _is_withdraw_diff(base: Mapping, proposed: Mapping, encoding: "StateEncoding
         if not (top_diff <= allowed_top):
             return False
         extensions_diff = _mapping_diff_keys(base.get("extensions"), proposed.get("extensions"))
-        # v5 mirrors the envelope (``updated_at``/``last_activity_at``) into
-        # ``extensions`` itself (the same mirror ``_mark_halt`` uses for
-        # ``halt_reason``), rather than as a top-level document key -- so
-        # the envelope allowance must apply inside ``extensions`` too.
+        # v5 mirrors the envelope into ``extensions``, so it is allowed there too.
         if extensions_diff - (frozenset({"fresh_review"}) | _ENVELOPE_KEYS):
             return False
     else:
@@ -1111,9 +1108,7 @@ def _is_stop_halt_diff(base: Mapping, proposed: Mapping, encoding: "StateEncodin
     """
     if halt_slot_written(base) or not halt_slot_written(proposed):
         return False
-    # Every mutating command renews the lease, so a halt may carry a renewal
-    # (expiry only, never shortened); a takeover or any other lease change
-    # is not a halt.
+    # Every command renews the lease: a halt may carry a renewal, never another lease change.
     if not _lease_is_pure_renewal(base, proposed):
         return False
     if not _halt_value_bounds_ok(proposed):
