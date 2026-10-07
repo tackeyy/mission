@@ -461,6 +461,22 @@ def _top_level_keys(document: Mapping) -> frozenset:
     return frozenset(document.keys())
 
 
+def _values_equal(left: object, right: object) -> bool:
+    """``==`` except that NaN is treated as equal to NaN.
+
+    A v4 legacy document can carry historical non-finite floats
+    (design doc: "v4 には NaN など typed に decode できない形が残る"). Plain
+    ``!=`` always reports a field unchanged-but-present NaN as "changed"
+    (IEEE754: ``nan != nan``), which would make *every* diff touch that
+    field forever, permanently blocking stop-halt/stop-takeover/withdraw
+    classification for any session carrying one. NaN has no useful
+    identity for this purpose, so both-NaN is defined as unchanged.
+    """
+    if isinstance(left, float) and isinstance(right, float) and left != left and right != right:
+        return True
+    return left == right
+
+
 def _diff_keys(base: Mapping, proposed: Mapping) -> frozenset:
     """Top-level keys that changed, were added, or were removed.
 
@@ -473,7 +489,7 @@ def _diff_keys(base: Mapping, proposed: Mapping) -> frozenset:
     """
     changed = set()
     for key in _top_level_keys(base) | _top_level_keys(proposed):
-        if base.get(key) != proposed.get(key):
+        if not _values_equal(base.get(key), proposed.get(key)):
             changed.add(key)
     return frozenset(changed)
 
@@ -482,10 +498,6 @@ def _lease_slot_keys(document: Mapping) -> frozenset:
     return frozenset({"lease"}) if _is_v5(document) else frozenset(
         {"owner_session_id", "lease_id", "fencing_epoch", "lease_expires_at", "lease_history"}
     )
-
-
-def _control_slot_keys(document: Mapping) -> frozenset:
-    return frozenset({"control", "extensions"}) if _is_v5(document) else _HALT_FIELD_NAMES | HALT_AUX_KEYS
 
 
 def _diff_is_subset_of(base: Mapping, proposed: Mapping, allowed: frozenset) -> bool:
@@ -521,31 +533,117 @@ def _fresh_review_withdraw_match(base: Mapping, proposed: Mapping) -> bool:
     return True
 
 
+def _mapping_diff_keys(base_value: object, proposed_value: object) -> frozenset:
+    """Field-level diff of a nested mapping (not a top-level identity check).
+
+    Used for v5's ``control``/``extensions`` slots, which are opaque single
+    keys at the top level but must be inspected field-by-field so an
+    unrelated (or malicious) field change inside them cannot hide behind a
+    coarse "the whole slot changed" classification.
+    """
+    base_map = base_value if isinstance(base_value, Mapping) else {}
+    proposed_map = proposed_value if isinstance(proposed_value, Mapping) else {}
+    changed = set()
+    for key in set(base_map.keys()) | set(proposed_map.keys()):
+        if not _values_equal(base_map.get(key), proposed_map.get(key)):
+            changed.add(key)
+    return frozenset(changed)
+
+
+def _is_stop_halt_diff(base: Mapping, proposed: Mapping) -> bool:
+    """A pure, first-write halt mutation and nothing else.
+
+    Requires the halt slot to move from unwritten to written -- a repeat
+    halt write (already written -> written again) or a slot clear
+    (reactivate, written -> unwritten) is deliberately excluded; both are
+    judged as ordinary ``normal`` mutations instead (design doc: halt only
+    reserves its share on the *first* write, and clearing the slot is a
+    normal mutation evaluated against the restored headroom).
+    """
+    if halt_slot_written(base) or not halt_slot_written(proposed):
+        return False
+    if _is_v5(base):
+        top_allowed = frozenset({"control", "extensions"})
+        if not (_diff_keys(base, proposed) <= top_allowed):
+            return False
+        control_diff = _mapping_diff_keys(base.get("control"), proposed.get("control"))
+        if not control_diff or not (control_diff <= _HALT_FIELD_NAMES):
+            return False
+        extensions_diff = _mapping_diff_keys(base.get("extensions"), proposed.get("extensions"))
+        if not (extensions_diff <= (_HALT_FIELD_NAMES | HALT_AUX_KEYS)):
+            return False
+        return True
+    allowed = _HALT_FIELD_NAMES | HALT_AUX_KEYS
+    diff_keys = _diff_keys(base, proposed)
+    if not (diff_keys & _HALT_FIELD_NAMES):
+        return False
+    return diff_keys <= allowed
+
+
+def _lease_history_growth_kind(base: Mapping, proposed: Mapping) -> Optional[str]:
+    """``"renewal"`` (history unchanged), ``"takeover"`` (strictly appended
+    exactly one entry), or ``None`` (shrink, truncate-and-replace, jump by
+    more than one entry, or either side's history is not a list -- none of
+    these are a legitimate takeover/renewal shape).
+    """
+    base_history = _lease_mapping(base).get("lease_history")
+    proposed_history = _lease_mapping(proposed).get("lease_history")
+    if not isinstance(base_history, list) or not isinstance(proposed_history, list):
+        return None
+    if len(proposed_history) == len(base_history):
+        return "renewal" if proposed_history == base_history else None
+    if len(proposed_history) == len(base_history) + 1:
+        return "takeover" if proposed_history[: len(base_history)] == base_history else None
+    return None
+
+
+def _is_stop_takeover_diff(base: Mapping, proposed: Mapping) -> bool:
+    diff_keys = _diff_keys(base, proposed)
+    if not diff_keys:
+        return False
+    takeover_allowed = _lease_slot_keys(base) | _ENVELOPE_KEYS
+    if not (diff_keys <= takeover_allowed):
+        return False
+    if _is_v5(base):
+        # "lease" is a single opaque top-level key for v5; _lease_mapping
+        # already resolves into it, but a diff confined to "lease" could in
+        # principle also smuggle a non-history, non-identity field change
+        # (e.g. an unrecognised extra key under "lease"). Guard against that
+        # the same way control/extensions are guarded for stop-halt.
+        lease_field_diff = _mapping_diff_keys(base.get("lease"), proposed.get("lease"))
+        lease_allowed = frozenset(
+            {"owner_session_id", "lease_id", "fencing_epoch", "lease_expires_at", "lease_history"}
+        )
+        if not (lease_field_diff <= lease_allowed):
+            return False
+    return _lease_history_growth_kind(base, proposed) is not None
+
+
 def classify_write_kind(base: Optional[Mapping], proposed: Mapping) -> WriteKind:
     """Derive the write_kind from the base/proposed diff (never trusted input)."""
     if base is None:
         return WriteKind.GENESIS
 
     if _fresh_review_withdraw_match(base, proposed):
-        other_slots = _diff_keys(base, proposed) - frozenset(
-            {"fresh_review", "extensions"} if _is_v5(base) else {"fresh_review"}
-        )
-        if other_slots <= _lease_slot_keys(base) | _ENVELOPE_KEYS:
-            return WriteKind.WITHDRAW
+        if _is_v5(base):
+            other_slots = _diff_keys(base, proposed) - frozenset({"extensions"})
+            extensions_diff = _mapping_diff_keys(
+                base.get("extensions"), proposed.get("extensions")
+            ) - frozenset({"fresh_review"})
+            if (
+                other_slots <= _lease_slot_keys(base) | _ENVELOPE_KEYS
+                and not extensions_diff
+            ):
+                return WriteKind.WITHDRAW
+        else:
+            other_slots = _diff_keys(base, proposed) - frozenset({"fresh_review"})
+            if other_slots <= _lease_slot_keys(base) | _ENVELOPE_KEYS:
+                return WriteKind.WITHDRAW
 
-    diff_keys = _diff_keys(base, proposed)
-    halt_core = frozenset({"control"}) if _is_v5(base) else _HALT_FIELD_NAMES
-    halt_allowed = _HALT_FIELD_NAMES | HALT_AUX_KEYS
-    if _is_v5(base):
-        halt_allowed = frozenset({"control", "extensions"})
-    # A pure lease-only diff must not satisfy this check just because the
-    # halt allowance happens to be a large closed set; the diff must
-    # actually touch a halt-core field, not merely be contained in one.
-    if diff_keys & halt_core and _diff_is_subset_of(base, proposed, halt_allowed):
+    if _is_stop_halt_diff(base, proposed):
         return WriteKind.STOP_HALT
 
-    takeover_allowed = _lease_slot_keys(base) | _ENVELOPE_KEYS
-    if diff_keys and _diff_is_subset_of(base, proposed, takeover_allowed):
+    if _is_stop_takeover_diff(base, proposed):
         return WriteKind.STOP_TAKEOVER
 
     if _diff_is_subset_of(base, proposed, STOP_SLOT_KEYS):
@@ -732,10 +830,14 @@ def state_capacity_verdict(
     base_over_capacity = is_over_capacity(base_document, base.encoded_len, encoding=encoding)
 
     def encode_for(document: Mapping) -> int:
-        from .json_codec import encode_json_value, freeze_json_value
-        canonical_bytes = len(encode_json_value(freeze_json_value(document)))
+        # Branch on ``encoding`` *before* computing anything: a v4 legacy
+        # document may contain non-finite floats (NaN/Infinity) that
+        # ``json.dumps`` tolerates (``allow_nan`` defaults to True) but the
+        # canonical codec's strict decoder rejects. Computing the canonical
+        # length unconditionally here used to raise out of the legacy-full
+        # probe even when only the legacy-pretty length was ever needed.
         if encoding is StateEncoding.CANONICAL:
-            return canonical_bytes
+            return len(encode_json_value(freeze_json_value(document)))
         import json
         return len(json.dumps(document, indent=2, ensure_ascii=False, sort_keys=True).encode("utf-8"))
 
