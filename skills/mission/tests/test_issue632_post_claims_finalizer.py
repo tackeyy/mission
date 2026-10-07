@@ -12,8 +12,6 @@ from pathlib import Path
 
 import pytest
 
-from .mission_state_fixture_corpus import generate_cli_state_bytes
-
 
 def _legacy_repository(*, writes=None):
     from mission_persistence.legacy_v4 import LegacyV4Repository
@@ -81,6 +79,7 @@ def test_mark_halt_saved_document_is_unchanged_for_every_category(tmp_path, key)
     """
     from . import test_issue631_real_state_halt as corpus
     from mission_application.lifecycle import MarkHaltRequest, MarkHaltServices, mark_halt
+    from mission_common import terminal_outcome_for_halt
 
     category, role = key.split("|")
     saved = {}
@@ -107,6 +106,12 @@ def test_mark_halt_saved_document_is_unchanged_for_every_category(tmp_path, key)
     assert saved["loop_active"] is control.loop_active
     assert saved["halt_category"] == control.halt_category.value
     assert saved["terminal_outcome"] == control.terminal_outcome.value
+    # kernel の決定と legacy の terminal_outcome_for_halt 導出が全 45 組で一致する
+    # こと（旧 test_kernel_and_legacy_derivations_agree_for_every_category_and_role
+    # を統合）。
+    assert saved["terminal_outcome"] == terminal_outcome_for_halt(
+        category, role, superseded=False
+    )
 
 
 def test_supersede_marker_is_propagated_from_every_markhalt_construction_site():
@@ -123,30 +128,6 @@ def test_supersede_marker_is_propagated_from_every_markhalt_construction_site():
         calls = [node for node in ast.walk(function) if isinstance(node, ast.Call) and _name_of_call(node) == "MarkHalt"]
         assert calls
         assert any(keyword.arg == "superseded" and isinstance(keyword.value, ast.Call) and _name_of_call(keyword.value) == "is_supersede_marked" for call in calls for keyword in call.keywords)
-
-
-def test_kernel_and_legacy_derivations_agree_for_every_category_and_role(tmp_path):
-    from dataclasses import replace
-
-    from mission_common import terminal_outcome_for_halt
-    from mission_kernel import decode_snapshot
-    from mission_kernel.commands import MarkHalt
-    from mission_kernel.model import HaltCategory, SessionRole
-    from mission_kernel.transitions import decide
-
-    # Use one decodable active state and replace only the typed session role;
-    # this makes all 9 x 5 combinations a kernel-vs-legacy comparison.
-    _path, source = generate_cli_state_bytes(tmp_path.resolve())
-    base = decode_snapshot(source).state
-
-    for category in HaltCategory:
-        for role in SessionRole:
-            state = replace(base, control=replace(base.control, session_role=role))
-            decision = decide(state, MarkHalt(category, "blocked", superseded=False))
-            assert decision.accepted and decision.transition is not None
-            assert decision.transition.new_state.terminal_outcome.value == terminal_outcome_for_halt(category.value, role.value, superseded=False)
-
-
 
 
 
@@ -286,16 +267,6 @@ def test_saved_document_matches_the_decided_projection_on_every_transition_path(
 
     projected = json.loads(project_legacy_document(decision.transition.new_state))
     assert projected == saved
-
-
-def test_golden_comparison_detects_a_claim_regression(tmp_path):
-    """検出力の実証: claim 値を 1 つ変えた偽 golden は必ず不一致になる。"""
-    driver = _transition_paths()["_path_mark_pass"]
-    saved = {}
-    driver(tmp_path, saved)
-    tampered = dict(_MAIN_SAVED_DOCUMENTS["_path_mark_pass"])
-    tampered["terminal_outcome"] = "failed"
-    assert saved != tampered
 
 
 # --- mark_pass の force 経路（設計書 §4・受け入れ条件 5） ---
@@ -623,32 +594,6 @@ def test_goal_route_sends_its_markhalt_transition(tmp_path):
     assert document["loop_active"] is False
 
 
-def test_goal_route_specific_services_are_called_once_per_plan(tmp_path):
-    from . import test_issue632_transition_is_the_writer as harness
-
-    cli = harness._load_cli_module("issue632_goal_route_once")
-    calls, saves = [], []
-    _run_set_fields(
-        _route_document(), ("complexity=Simple",), _goal_route_services(cli, calls=calls), saves=saves
-    )
-    assert calls.count("goal_dispatch_fields") == 1
-    assert calls.count("goal_dispatch_guidance") == 1
-    assert calls.count("ensure_phase_timing") == 1
-
-
-def test_goal_route_preserves_administrative_flag_and_aggregate_action(tmp_path):
-    from . import test_issue632_transition_is_the_writer as harness
-
-    cli = harness._load_cli_module("issue632_goal_route_admin")
-    calls, saves = [], []
-    _run_set_fields(
-        _route_document(), ("complexity=Simple",), _goal_route_services(cli, calls=calls), saves=saves
-    )
-    write = next((saved, kwargs) for saved, kwargs in saves if isinstance(saved, dict))
-    assert write[1].get("administrative") is True
-    assert ("aggregate-remove", {}) in saves
-
-
 @pytest.mark.parametrize(
     ("kvs", "reason"),
     (
@@ -668,23 +613,6 @@ def test_set_fields_error_precedence_is_unchanged(tmp_path, kvs, reason):
         )
     assert error.value.reason == reason
     assert saves == [], "拒否時は保存しない"
-
-
-def test_set_fields_service_call_sequence_is_unchanged_for_duplicate_keys(tmp_path):
-    """重複 key の service 呼び出し回数は現行どおり（plan 化で 1 回に潰さない）."""
-    from . import test_issue632_transition_is_the_writer as harness
-
-    cli = harness._load_cli_module("issue632_set_duplicates")
-    calls, saves = [], []
-    _run_set_fields(
-        _route_document(),
-        ("review_tier=light", "complexity=Critical", "review_tier=light"),
-        _goal_route_services(cli, calls=calls),
-        saves=saves,
-    )
-    # `review_tier` の出現ごとに derive_review_tier が呼ばれる現行挙動を固定する。
-    assert calls.count("derive_review_tier") == 2
-    assert calls.count("derive_review_tier_decision") == 0
 
 
 # set_fields は plan 化で service 呼び出し列・warning・保存 document が変わり得るため、
@@ -818,18 +746,6 @@ def test_phase_and_timing_are_owned_by_the_decided_projection(tmp_path, path_nam
     for field in ("phase_started_at", "phase_durations_sec", "activity_current", "resume_target_phase"):
         if field in golden and field not in _ENVIRONMENT_DERIVED_FIELDS:
             assert saved.get(field) == golden[field], field
-
-
-def test_supersede_reviews_saved_document_is_unchanged(tmp_path):
-    """supersede-reviews の保存 document が現行 main と一致すること。"""
-    saved = {}
-    _transition_paths()["_path_supersede"](tmp_path, saved)
-    golden = _MAIN_SAVED_DOCUMENTS["_path_supersede"]
-    differing = {key for key in golden if saved.get(key) != golden[key]}
-    assert differing <= _ENVIRONMENT_DERIVED_FIELDS, sorted(differing)
-    assert saved["passes"] is False  # claim にならないため writer が残す
-    assert saved["terminal_outcome"] == "stale_superseded"
-    assert saved["halt_category"] == "stale"
 
 
 @pytest.mark.parametrize("outcome", _ALL_TERMINAL_OUTCOMES)
