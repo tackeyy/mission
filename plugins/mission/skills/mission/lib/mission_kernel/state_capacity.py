@@ -686,7 +686,6 @@ def is_over_capacity(
 # constant instead of hand-copied, so a test (not the list) catches drift.
 # ---------------------------------------------------------------------------
 
-
 class WriteKind(str, Enum):
     GENESIS = "genesis"
     WITHDRAW = "withdraw"
@@ -694,7 +693,6 @@ class WriteKind(str, Enum):
     STOP_TAKEOVER = "stop-takeover"
     STOP_SLOT = "stop-slot"
     NORMAL = "normal"
-
 
 def _strict_equal(left: object, right: object) -> bool:
     """Deep ``==`` except NaN==NaN; ``bool`` never equals a non-bool int/
@@ -718,7 +716,6 @@ def _strict_equal(left: object, right: object) -> bool:
         return all(_strict_equal(a, b) for a, b in zip(left, right))
     return left == right
 
-
 def _diff_keys(base: Mapping, proposed: Mapping) -> frozenset:
     """Top-level keys changed/added/removed (shallow). Presence, not just
     value, is compared: an injected key present-with-``None`` must not look
@@ -730,7 +727,6 @@ def _diff_keys(base: Mapping, proposed: Mapping) -> frozenset:
         if in_base != in_proposed or not _strict_equal(base.get(key), proposed.get(key)):
             changed.add(key)
     return frozenset(changed)
-
 
 def _mapping_diff_keys(base_value: object, proposed_value: object) -> frozenset:
     """Field-level diff of a nested mapping (v5's ``control``/``extensions``
@@ -745,12 +741,10 @@ def _mapping_diff_keys(base_value: object, proposed_value: object) -> frozenset:
             changed.add(key)
     return frozenset(changed)
 
-
 def _lease_slot_keys(document: Mapping) -> frozenset:
     return frozenset({"lease"}) if _is_v5(document) else frozenset(
         {"owner_session_id", "lease_id", "fencing_epoch", "lease_expires_at", "lease_history"}
     )
-
 
 #: v5's own closed lease shape (``codec_v5.py``'s ``_decode_lease``,
 #: ``_exact(raw, required, "$.lease")``), checked here too so a smuggled
@@ -785,7 +779,6 @@ _HALT_RIDE_ALONG_FIELDS = _TIMING_ACTIVITY_FIELDS | frozenset(
     {"goal_dispatch_effective", "goal_dispatch_host", "goal_dispatch_fallback_reason"}
 )
 
-
 def _lease_top_level_keys_closed(base: Mapping, proposed: Mapping) -> bool:
     """v5: ``lease`` sub-document keys, both sides, subset of its closed
     shape. v4 has no nested sub-document to check.
@@ -799,7 +792,6 @@ def _lease_top_level_keys_closed(base: Mapping, proposed: Mapping) -> bool:
             return False
     return True
 
-
 def _lease_identity_absent(lease: Mapping) -> bool:
     """Owner, lease id, *and* epoch all absent/empty (checking all three,
     unlike the reservation-half's epoch-only ``_lease_never_acquired``,
@@ -811,7 +803,6 @@ def _lease_identity_absent(lease: Mapping) -> bool:
         and lease.get("fencing_epoch") in (None, "")
     )
 
-
 def _lease_identity_present(lease: Mapping) -> bool:
     """Complement of :func:`_lease_identity_absent`: all three fields
     present (a partial lease matches neither case).
@@ -821,7 +812,6 @@ def _lease_identity_present(lease: Mapping) -> bool:
         and lease.get("lease_id") not in (None, "")
         and lease.get("fencing_epoch") not in (None, "")
     )
-
 
 def _parse_lease_expiry(value: object) -> Optional[datetime]:
     """Parse ``lease_expires_at`` as an aware instant, or ``None``. String-
@@ -837,7 +827,6 @@ def _parse_lease_expiry(value: object) -> Optional[datetime]:
         return None
     return parsed if parsed.tzinfo is not None else None
 
-
 def _lease_expiry_not_shortened(before_lease: Mapping, after_lease: Mapping) -> bool:
     """A genuine renewal/takeover always moves ``lease_expires_at`` forward,
     never backward (independent review's "許しすぎ" finding). Compares by
@@ -851,7 +840,6 @@ def _lease_expiry_not_shortened(before_lease: Mapping, after_lease: Mapping) -> 
     if before_dt is None or after_dt is None:
         return False
     return after_dt >= before_dt
-
 
 def _lease_is_pure_renewal(base: Mapping, proposed: Mapping) -> bool:
     """Lease differs at most in ``lease_expires_at`` (not shortened); epoch/
@@ -867,7 +855,6 @@ def _lease_is_pure_renewal(base: Mapping, proposed: Mapping) -> bool:
         if not _strict_equal(before.get(key), after.get(key)):
             return False
     return _lease_expiry_not_shortened(before, after)
-
 
 def _lease_is_fence_or_renewal(base: Mapping, proposed: Mapping) -> bool:
     """Lease changes at most in ``fencing_epoch`` (non-decreasing -- the
@@ -891,7 +878,6 @@ def _lease_is_fence_or_renewal(base: Mapping, proposed: Mapping) -> bool:
     elif not _strict_equal(before_epoch, after_epoch):
         return False
     return _lease_expiry_not_shortened(before, after)
-
 
 def _fresh_review_withdraw_match(base: Mapping, proposed: Mapping) -> bool:
     """One pending record replaced by its withdrawn tombstone, nothing else.
@@ -928,7 +914,6 @@ def _fresh_review_withdraw_match(base: Mapping, proposed: Mapping) -> bool:
         return False
     return reconstructed == proposed_projection
 
-
 def _halt_value_bounds_ok(proposed: Mapping) -> bool:
     """Fail-closed guard for #918's unenforced bounds (``HALT_REASON_MAX_
     CHARS``/``GOAL_DISPATCH_REASON_MAX_CHARS``): an over-bound diff already
@@ -951,7 +936,6 @@ def _halt_value_bounds_ok(proposed: Mapping) -> bool:
             return False
     return True
 
-
 def _history_or_empty(value: object) -> Optional[list]:
     """``[]`` for an absent key (design doc: 0 件とみなす), the list itself,
     or ``None`` (fail-closed) for a malformed value.
@@ -959,7 +943,6 @@ def _history_or_empty(value: object) -> Optional[list]:
     if value is None:
         return []
     return value if isinstance(value, list) else None
-
 
 def _takeover_entry_matches_prior_lease(before_lease: Mapping, entry: object) -> bool:
     """The appended entry must be the *writer's own normalization*
@@ -980,7 +963,6 @@ def _takeover_entry_matches_prior_lease(before_lease: Mapping, entry: object) ->
         return False
     entry_epoch = entry.get("fencing_epoch")
     return isinstance(entry_epoch, int) and not isinstance(entry_epoch, bool) and entry_epoch == expected_epoch
-
 
 def _takeover_case(base: Mapping, proposed: Mapping) -> Optional[str]:
     """``"extension"`` (expiry only, zero growth, identity fully present),
@@ -1033,14 +1015,11 @@ def _takeover_case(base: Mapping, proposed: Mapping) -> Optional[str]:
         return None
     return "takeover"
 
-
 def _lease_token_value_ok(value: object) -> bool:
     return isinstance(value, str) and LEASE_TOKEN_PATTERN.fullmatch(value) is not None
 
-
 def _lease_epoch_value_ok(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= LEASE_EPOCH_MAX
-
 
 def _takeover_value_bounds_ok(proposed: Mapping) -> bool:
     """Mirrors ``_halt_value_bounds_ok`` for takeover: owner/lease_id/entry
@@ -1073,7 +1052,6 @@ def _takeover_value_bounds_ok(proposed: Mapping) -> bool:
             return False
     return True
 
-
 def _encode_len_for(document: Mapping, encoding: "StateEncoding") -> Optional[int]:
     """Byte length the real writer would persist ``document`` at, under
     ``encoding``. Returns ``None`` (never a numeric sentinel) on encode
@@ -1088,7 +1066,6 @@ def _encode_len_for(document: Mapping, encoding: "StateEncoding") -> Optional[in
     except Exception:
         return None
 
-
 def _encode_increase_within(
     base: Mapping, proposed: Mapping, encoding: "StateEncoding", limit: int,
 ) -> bool:
@@ -1101,7 +1078,6 @@ def _encode_increase_within(
         return False
     return proposed_len - base_len <= limit
 
-
 def _encode_strictly_smaller(base: Mapping, proposed: Mapping, encoding: "StateEncoding") -> bool:
     """``len(encode(proposed)) < len(encode(base))``; ``False`` if either
     side fails to encode.
@@ -1111,7 +1087,6 @@ def _encode_strictly_smaller(base: Mapping, proposed: Mapping, encoding: "StateE
     if base_len is None or proposed_len is None:
         return False
     return proposed_len < base_len
-
 
 def _is_withdraw_diff(base: Mapping, proposed: Mapping, encoding: "StateEncoding") -> bool:
     if not _fresh_review_withdraw_match(base, proposed):
@@ -1135,7 +1110,6 @@ def _is_withdraw_diff(base: Mapping, proposed: Mapping, encoding: "StateEncoding
         if not (top_diff <= allowed_top):
             return False
     return _encode_strictly_smaller(base, proposed, encoding)
-
 
 def _is_stop_halt_diff(base: Mapping, proposed: Mapping, encoding: "StateEncoding") -> bool:
     """A pure, first-write halt confined to the halt fields, ride-along
@@ -1171,7 +1145,6 @@ def _is_stop_halt_diff(base: Mapping, proposed: Mapping, encoding: "StateEncodin
             return False
     return _encode_increase_within(base, proposed, encoding, STATE_CAPACITY_HALT_DELTA)
 
-
 def _is_stop_takeover_diff(base: Mapping, proposed: Mapping, encoding: "StateEncoding") -> bool:
     """A legitimate takeover/extension/initial-acquisition confined to the
     lease fields and the envelope, within ``next_takeover_cost(base)``.
@@ -1196,7 +1169,6 @@ def _is_stop_takeover_diff(base: Mapping, proposed: Mapping, encoding: "StateEnc
     if not _takeover_value_bounds_ok(proposed):
         return False
     return _encode_increase_within(base, proposed, encoding, next_takeover_cost(base))
-
 
 def classify_write_kind(
     base: Optional[Mapping], proposed: Mapping, *, encoding: "StateEncoding" = StateEncoding.CANONICAL,

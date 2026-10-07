@@ -38,12 +38,7 @@ H_ = sc.WriteKind.STOP_HALT
 T_ = sc.WriteKind.STOP_TAKEOVER
 W_ = sc.WriteKind.WITHDRAW
 
-
-# ---------------------------------------------------------------------------
-# Document builders (both layouts; write_kind needs v5 fixtures the
-# reservation-half tests don't exercise).
-# ---------------------------------------------------------------------------
-
+# Document builders (both layouts; v5 fixtures the reservation-half tests don't exercise).
 
 def _v5_request(request_id="request-1", nonce="nonce-1", criterion_ids=("AC1",)):
     input_digest = canonical_digest({"input": "fixture", "id": request_id})
@@ -64,14 +59,11 @@ def _v5_request(request_id="request-1", nonce="nonce-1", criterion_ids=("AC1",))
                       "digest": input_digest, "size": 19},
     })
 
-
 def _v5_pending_record(request_id="request-1", nonce="nonce-1"):
     return FreshReviewRecord(_v5_request(request_id=request_id, nonce=nonce), "prep-" + request_id, ADAPTER, ADAPTER)
 
-
 def _project(*records):
     return FreshReviewProjection(tuple(records))
-
 
 def _v5_doc(*, requests=(), halt_reason="", halt_absent=False, lease_history=(),
             lease_expires_at="9999-12-31T23:59:59Z", control_extra=None, extensions_extra=None, contract=None):
@@ -95,7 +87,6 @@ def _v5_doc(*, requests=(), halt_reason="", halt_absent=False, lease_history=(),
         "updated_at": TS27, "last_activity_at": TS27, "extensions": extensions,
     }
 
-
 def _base(layout, *, lease_expires_at=None, **kwargs):
     if layout == "v4":
         if lease_expires_at is not None:
@@ -105,14 +96,12 @@ def _base(layout, *, lease_expires_at=None, **kwargs):
         kwargs["lease_expires_at"] = lease_expires_at
     return _v5_doc(**kwargs)
 
-
 def _apply_control(doc, layout, **fields):
     if layout == "v4":
         return {**doc, **fields}
     out = copy.deepcopy(doc)
     out["control"].update(fields)
     return out
-
 
 def _set_lease(doc, layout, *, history=None, owner=None, lease_id=None, epoch=None, expires_at=None):
     out = dict(doc) if layout == "v4" else copy.deepcopy(doc)
@@ -123,14 +112,11 @@ def _set_lease(doc, layout, *, history=None, owner=None, lease_id=None, epoch=No
             target[key] = value
     return out
 
-
 def _entry(owner, lease_id, epoch, reason="lease-expired-takeover", at=TS27):
     return {"owner_session_id": owner, "lease_id": lease_id, "fencing_epoch": epoch, "reason": reason, "at": at}
 
-
 def _history(n):
     return [_entry("a", f"id{i}", i + 1) for i in range(n)]
-
 
 def _no_lease_base(layout):
     """Lease genuinely never acquired: fencing_epoch absent/empty, 0 history."""
@@ -141,7 +127,6 @@ def _no_lease_base(layout):
     base["lease"] = {"owner_session_id": "", "lease_id": "", "fencing_epoch": "", "lease_history": []}
     return base
 
-
 def _set_fresh_review(doc, layout, projection):
     out = dict(doc) if layout == "v4" else copy.deepcopy(doc)
     projected = projection_document(projection)
@@ -151,12 +136,7 @@ def _set_fresh_review(doc, layout, projection):
         out["extensions"]["fresh_review"] = projected
     return out
 
-
-# ---------------------------------------------------------------------------
-# Scenario builders: each returns a structurally *legitimate* (base,
-# proposed) pair for its kind, so a test only needs to say what breaks it.
-# ---------------------------------------------------------------------------
-
+# Scenario builders: each returns a structurally *legitimate* (base, proposed) pair; a test says what breaks it.
 
 def _halt(layout, *, lease_expires_at="2026-01-01T00:00:00Z", base=None, top_extra=None, ext_extra=None,
           **control_fields):
@@ -168,7 +148,6 @@ def _halt(layout, *, lease_expires_at="2026-01-01T00:00:00Z", base=None, top_ext
         p["extensions"].update(ext_extra)
     return b, p
 
-
 def _takeover(layout, *, entry=None, cur=None, base=None):
     b = base if base is not None else _base(layout, lease_history=[])
     c = sc._lease_mapping(b)
@@ -177,13 +156,11 @@ def _takeover(layout, *, entry=None, cur=None, base=None):
     p = _set_lease(b, layout, history=[e], owner=cu["owner"], lease_id=cu["lease_id"], epoch=cu["epoch"])
     return b, p
 
-
 def _extension(layout, *, lease_history=(), lease_expires_at="2026-01-01T00:00:00Z",
                 new_expires_at="2026-01-01T01:00:00Z", epoch=4, base=None):
     b = base if base is not None else _set_lease(
         _base(layout, lease_history=lease_history, lease_expires_at=lease_expires_at), layout, epoch=epoch)
     return b, _set_lease(b, layout, expires_at=new_expires_at)
-
 
 def _withdraw(layout="v5", *, lease=None, base=None, request_id="r1", lease_expires_at="2026-01-01T00:00:00Z"):
     rec = _v5_pending_record(request_id=request_id, nonce="n-" + request_id)
@@ -200,18 +177,12 @@ def _withdraw(layout="v5", *, lease=None, base=None, request_id="r1", lease_expi
         p["lease"].update(lease)
     return b, p
 
-
-# ===========================================================================
-# 1. Real writers (production code, not the builders above): every scenario
-#    a legitimate diff must classify as.
-# ===========================================================================
-
+# 1. Real writers (production code): every legitimate diff must classify as expected.
 
 @pytest.mark.parametrize("category", [c.value for c in HaltCategory])
 def test_v4_real_halt_writer_is_stop_halt(category):
     before, after = _flat_halt_before_after(category)
     assert sc.classify_write_kind(before, after, encoding=sc.StateEncoding.LEGACY_PRETTY) == H_
-
 
 def _v5_halt_before_after(category, *, reason="\x01" * sc.HALT_REASON_MAX_CHARS):
     from mission_application.compatibility import compatibility_delta
@@ -234,18 +205,15 @@ def _v5_halt_before_after(category, *, reason="\x01" * sc.HALT_REASON_MAX_CHARS)
     after_doc = json.loads(encode_v5_snapshot(dataclasses.replace(snap, state=new_state)))
     return before_doc, after_doc
 
-
 @pytest.mark.parametrize("category", [c.value for c in HaltCategory])
 def test_v5_real_halt_writer_is_stop_halt(category):
     before, after = _v5_halt_before_after(category)
     assert sc.classify_write_kind(before, after, encoding=sc.StateEncoding.CANONICAL) == H_
 
-
 def test_v4_real_halt_writer_at_max_dispatch_fields_is_still_stop_halt():
     """``routed-goal`` worst-cased: the shape ``STATE_CAPACITY_HALT_DELTA`` is measured from."""
     before, after = _flat_halt_before_after("routed-goal")
     assert sc.classify_write_kind(before, after, encoding=sc.StateEncoding.LEGACY_PRETTY) == H_
-
 
 @pytest.mark.parametrize("owner,lease_id,extra", [
     ("owner-1", None, {}),
@@ -258,7 +226,6 @@ def test_v4_real_lease_writer_is_stop_takeover(owner, lease_id, extra):
     after = copy.deepcopy(base)
     mod.acquire_or_verify_lease(after, owner, lease_id=lease_id)
     assert sc.classify_write_kind(base, after, encoding=sc.StateEncoding.LEGACY_PRETTY) == T_
-
 
 def test_v4_real_lease_first_and_second_takeover_are_stop_takeover():
     mod = _mission_state_module()
@@ -273,13 +240,11 @@ def test_v4_real_lease_first_and_second_takeover_are_stop_takeover():
     mod.acquire_or_verify_lease(after2, "owner-3", lease_id="lease-3", reason="lease-expired-takeover")
     assert sc.classify_write_kind(after1, after2, encoding=sc.StateEncoding.LEGACY_PRETTY) == T_
 
-
 def _v5_lease_doc(lease_mapping):
     return {"schema_version": 5,
             "control": {"phase": "executing", "loop_active": True, "terminal_outcome": None,
                         "halt_category": None, "halt_reason": None},
             "lease": lease_mapping, "extensions": {}}
-
 
 @pytest.mark.parametrize("base_lease,owner,presented,now", [
     (LegacyAbsentLease(), "owner-1", None, datetime(2026, 1, 1, tzinfo=timezone.utc)),
@@ -296,7 +261,6 @@ def test_v5_real_lease_writer_is_stop_takeover(base_lease, owner, presented, now
     after_doc = _v5_lease_doc(_lease_document(pending.target))
     assert sc.classify_write_kind(base_doc, after_doc, encoding=sc.StateEncoding.CANONICAL) == T_
 
-
 def _withdraw_v5_docs(*, lease_before, lease_after):
     req = _v5_request()
     rec = FreshReviewRecord(req, "prep-1", ADAPTER, ADAPTER)
@@ -311,7 +275,6 @@ def _withdraw_v5_docs(*, lease_before, lease_after):
                  "extensions": {"fresh_review": projection_document(withdrawn)}}
     return base_doc, after_doc
 
-
 @pytest.mark.parametrize("fencing_epoch", [2, 1], ids=["fence_bump", "plain_renewal"])
 def test_withdraw_real_reducer_output_is_withdraw(fencing_epoch):
     lease_before = {"owner_session_id": "a", "lease_id": "b", "fencing_epoch": 1,
@@ -320,11 +283,9 @@ def test_withdraw_real_reducer_output_is_withdraw(fencing_epoch):
     base_doc, after_doc = _withdraw_v5_docs(lease_before=lease_before, lease_after=lease_after)
     assert sc.classify_write_kind(base_doc, after_doc, encoding=sc.StateEncoding.CANONICAL) == W_
 
-
 def test_withdraw_v4_flat_save_encode_length_decreases():
     base, proposed = _withdraw("v4")
     assert sc.classify_write_kind(base, proposed, encoding=sc.StateEncoding.LEGACY_PRETTY) == W_
-
 
 def test_withdraw_real_output_at_many_criteria_is_still_withdraw():
     """10 criterion_ids (large shared field): tombstone is still strictly smaller than the pending record."""
@@ -337,19 +298,11 @@ def test_withdraw_real_output_at_many_criteria_is_still_withdraw():
     proposed = _set_fresh_review(base, "v5", withdrawn)
     assert sc.classify_write_kind(base, proposed, encoding=sc.StateEncoding.CANONICAL) == W_
 
-
 @pytest.mark.parametrize("layout", LAYOUTS)
 def test_genesis(layout):
     assert sc.classify_write_kind(None, _base(layout)) == sc.WriteKind.GENESIS
 
-
-# ===========================================================================
-# 2. Table-driven classification: decoys (NORMAL) and legitimate shapes
-#    (STOP_HALT/STOP_TAKEOVER), all via ``classify_write_kind(base,
-#    proposed, **kw) == expected``. Independent review's and the Checker's
-#    findings are each pinned as one row; see the row id for what it tests.
-# ===========================================================================
-
+# 2. Table-driven: decoys (NORMAL) and legitimate shapes, one row per finding; see row id.
 
 def _rows():
     rows = []
@@ -504,7 +457,6 @@ def _rows():
     # -- per-field appended-entry mismatch (parametrized separately below for ids) --
     return rows
 
-
 def _takeover_partial_identity(layout):
     base = _base(layout, lease_history=[])
     base = _set_lease(base, layout, epoch=5)
@@ -518,14 +470,12 @@ def _takeover_partial_identity(layout):
     proposed = _set_lease(base, layout, history=[entry], owner="new-owner", lease_id="new-lease", epoch=6)
     return base, proposed
 
-
 def _halt_takeover_mixed():
     doc = _flat_doc()
     proposed = {**doc, "halt_reason": "stagnation", "phase": "halted",
                 "lease_history": list(doc["lease_history"]) + [_entry("owner-1", "lease-1", 1)],
                 "owner_session_id": "owner-2", "lease_id": "lease-2", "fencing_epoch": 2}
     return doc, proposed
-
 
 def _epoch_infinity():
     doc = _flat_doc(lease_history=[])
@@ -534,18 +484,15 @@ def _epoch_infinity():
                 "owner_session_id": "owner-2", "lease_id": "lease-2", "fencing_epoch": 1}
     return doc, proposed
 
-
 def _withdraw_control_mixed():
     base, proposed = _withdraw()
     proposed["control"]["loop_active"] = False
     return base, proposed
 
-
 def _withdraw_ext_junk_mixed():
     base, proposed = _withdraw()
     proposed["extensions"]["unrelated_junk"] = "J" * 500
     return base, proposed
-
 
 def _withdraw_tombstone_tampered(field):
     req = _v5_request()
@@ -559,12 +506,10 @@ def _withdraw_tombstone_tampered(field):
     proposed["extensions"]["fresh_review"] = {**proposed["extensions"]["fresh_review"], "requests": tampered_requests}
     return base, proposed
 
-
 def _withdraw_identity_change():
     base, proposed = _withdraw()
     proposed["lease"]["owner_session_id"] = "someone-else"
     return base, proposed
-
 
 def _withdraw_epoch_decreased():
     rec = _v5_pending_record("r1", "n-r1")
@@ -576,7 +521,6 @@ def _withdraw_epoch_decreased():
     proposed["lease"]["fencing_epoch"] = 3
     return base, proposed
 
-
 def _withdraw_other_record_mixed(layout):
     rec_a, rec_b = _v5_pending_record("r1", "n1"), _v5_pending_record("r2", "n2")
     two_proj = _project(rec_a, rec_b)
@@ -587,30 +531,25 @@ def _withdraw_other_record_mixed(layout):
             else _base(layout, requests=[rec_a, rec_b]))
     return base, _set_fresh_review(base, layout, mixed)
 
-
 def _withdraw_v4_top_level_changed():
     base, proposed = _withdraw("v4")
     proposed["phase"] = "reviewing"
     return base, proposed
-
 
 def _halt_v5_top_sibling():
     base, proposed = _halt("v5")
     proposed["score_history"] = [{"s": "x"}]  # top-level sibling, not nested in extensions
     return base, proposed
 
-
 def _halt_v5_ext_reason_over_bound():
     base, proposed = _halt("v5")
     proposed["extensions"]["halt_reason"] = "\x01" * (sc.HALT_REASON_MAX_CHARS + 1)
     return base, proposed
 
-
 def _takeover_v5_bogus_key():
     base, proposed = _takeover("v5")
     proposed["lease"]["bogus_lease_field"] = "x"
     return base, proposed
-
 
 def _takeover_epoch_boundary(layout, epoch):
     base = _set_lease(_base(layout, lease_history=[]), layout, epoch=epoch)
@@ -619,25 +558,20 @@ def _takeover_epoch_boundary(layout, epoch):
     proposed = _set_lease(base, layout, history=[entry], owner="owner-2", lease_id="lease-2", epoch=epoch + 1)
     return base, proposed
 
-
 def _extension_naive(layout):
     """No UTC offset on either side: a naive comparison would see "later" and accept it; must fail closed."""
     base = _set_lease(_base(layout, lease_history=_history(3), lease_expires_at="2026-01-01T00:00:00"),
                        layout, epoch=4)
     return base, _set_lease(base, layout, expires_at="2026-01-01T01:00:00")
 
-
 ROWS = _rows()
-
 
 @pytest.mark.parametrize("case_id,base,proposed,expected,kw", ROWS, ids=[r[0] for r in ROWS])
 def test_classification_table(case_id, base, proposed, expected, kw):
     assert sc.classify_write_kind(base, proposed, **kw) == expected, case_id
 
-
 def test_classification_table_has_at_least_60_rows():
     assert len(ROWS) >= 60, len(ROWS)
-
 
 @pytest.mark.parametrize("field", ["owner_session_id", "lease_id", "fencing_epoch"])
 @pytest.mark.parametrize("layout", LAYOUTS)
@@ -649,7 +583,6 @@ def test_takeover_appended_entry_single_field_mismatch_is_normal(layout, field):
              "fencing_epoch": field != "fencing_epoch" and current["fencing_epoch"] or 999999}
     base, proposed = _takeover(layout, entry=entry)
     assert sc.classify_write_kind(base, proposed) == N
-
 
 def test_withdraw_still_rejects_before_already_withdrawn():
     rec_a, rec_b = _v5_pending_record("ra", "na"), _v5_pending_record("rb", "nb")
@@ -664,18 +597,13 @@ def test_withdraw_still_rejects_before_already_withdrawn():
     proposed["fresh_review"] = {**proposed["fresh_review"], "requests": requests}
     assert sc.classify_write_kind(doc, proposed) != W_
 
-
 def test_classify_write_kind_never_raises_on_a_malformed_proposed_type():
     """``proposed`` not even a mapping must fail closed to normal, not propagate (kills ``catch_all_off``)."""
     base = _flat_doc()
     assert sc.classify_write_kind(base, 12345) == N
     assert sc.classify_write_kind(base, ["not", "a", "mapping"]) == N
 
-
-# ===========================================================================
 # 3. ``_strict_equal``/``_diff_keys``: type-aware comparison (direct unit tests).
-# ===========================================================================
-
 
 def test_strict_equal_distinguishes_bool_from_int():
     assert sc._strict_equal(1, True) is False
@@ -683,22 +611,18 @@ def test_strict_equal_distinguishes_bool_from_int():
     assert sc._strict_equal(0, False) is False
     assert sc._strict_equal(True, True) is True
 
-
 def test_strict_equal_distinguishes_int_from_float():
     assert sc._strict_equal(1, 1.0) is False
     assert sc._strict_equal(1.0, 1) is False
     assert sc._strict_equal(1.5, 1.5) is True
 
-
 def test_strict_equal_nan_equals_nan():
     assert sc._strict_equal(float("nan"), float("nan")) is True
-
 
 def test_strict_equal_recurses_into_nested_structures():
     assert sc._strict_equal({"a": [1, {"b": 1}]}, {"a": [1, {"b": True}]}) is False
     assert sc._strict_equal({"a": [1, {"b": 1}]}, {"a": [1, {"b": 1}]}) is True
     assert sc._strict_equal([1, 2], (1, 2)) is False  # list vs tuple are not interchangeable
-
 
 @pytest.mark.parametrize("base,proposed,expected", [
     ({"a": 1}, {"a": 1, "sneaky": None}, frozenset({"sneaky"})),
@@ -707,7 +631,6 @@ def test_strict_equal_recurses_into_nested_structures():
 ], ids=["appears_with_explicit_none", "disappears_from_explicit_none", "1_vs_true"])
 def test_diff_keys_presence_and_type(base, proposed, expected):
     assert sc._diff_keys(base, proposed) == expected
-
 
 def test_nan_field_does_not_permanently_block_classification():
     """A NaN field (v4 only; canonical v5 rejects it) must not mark the document permanently "changed"."""
@@ -718,30 +641,19 @@ def test_nan_field_does_not_permanently_block_classification():
     assert sc._diff_keys(doc, proposed) == frozenset({"halt_reason", "phase", "loop_active"})
     assert sc.classify_write_kind(doc, proposed, encoding=sc.StateEncoding.LEGACY_PRETTY) == H_
 
-
-# ===========================================================================
 # 4. Zero-effective-change diffs must not be misread as a lease mutation.
-# ===========================================================================
-
 
 @pytest.mark.parametrize("layout", LAYOUTS)
 def test_unrelated_field_alone_with_lease_untouched_is_normal(layout):
     base = _base(layout)
     assert sc.classify_write_kind(base, _apply_control(base, layout, loop_active=False)) == N
 
-
 @pytest.mark.parametrize("layout", LAYOUTS)
 def test_empty_diff_is_normal(layout):
     base = _base(layout)
     assert sc.classify_write_kind(base, copy.deepcopy(base)) == N
 
-
-# ===========================================================================
-# 5. 同乗（riding-along）: structurally-small mutations must not slip through
-#    just because they are smaller than Δ_halt/Δ_takeover (independent
-#    Checker's probe_ride.py/probe_ride2.py).
-# ===========================================================================
-
+# 5. 同乗（riding-along）: small mutations must not slip through just because they're < Δ (probe_ride*.py).
 
 def _riding_along_table():
     rec, rec2 = _v5_pending_record(), _v5_pending_record(request_id="r2", nonce="n2")
@@ -794,24 +706,16 @@ def _riding_along_table():
         cases.append((f"takeover+consume_{layout}", base_reserved, takeover_plus_consume))
     return cases
 
-
 RIDING_ALONG_TABLE = _riding_along_table()
-
 
 @pytest.mark.parametrize("name,base,proposed", RIDING_ALONG_TABLE, ids=[c[0] for c in RIDING_ALONG_TABLE])
 def test_riding_along_combinations_are_normal(name, base, proposed):
     assert sc.classify_write_kind(base, proposed) == N, name
 
-
 def test_riding_along_table_has_at_least_18_cases():
     assert len(RIDING_ALONG_TABLE) >= 18, len(RIDING_ALONG_TABLE)
 
-
-# ===========================================================================
-# 6. Increment cap, isolated: every other condition holds; only the
-#    encode-length comparison, via an *allowed* field, must stop it.
-# ===========================================================================
-
+# 6. Increment cap, isolated: every other condition holds; only the encode-length comparison must stop it.
 
 def test_halt_increment_alone_exceeds_delta_via_allowed_ride_along_field_is_normal():
     for layout, encoding in (("v4", sc.StateEncoding.LEGACY_PRETTY), ("v5", sc.StateEncoding.CANONICAL)):
@@ -820,7 +724,6 @@ def test_halt_increment_alone_exceeds_delta_via_allowed_ride_along_field_is_norm
         (proposed if layout == "v4" else proposed["extensions"])["activity_segments"] = padding
         assert sc.classify_write_kind(base, proposed, encoding=encoding) == N
 
-
 def test_takeover_increment_alone_exceeds_cost_via_envelope_field_is_normal():
     for layout, encoding in (("v4", sc.StateEncoding.LEGACY_PRETTY), ("v5", sc.StateEncoding.CANONICAL)):
         base, proposed = _takeover(layout)
@@ -828,12 +731,10 @@ def test_takeover_increment_alone_exceeds_cost_via_envelope_field_is_normal():
         (proposed if layout == "v4" else proposed["extensions"])["updated_at"] = huge
         assert sc.classify_write_kind(base, proposed, encoding=encoding) == N
 
-
 def test_withdraw_does_not_shrink_via_allowed_envelope_field_is_normal():
     base, proposed = _withdraw()
     proposed["extensions"]["updated_at"] = "U" * 100000  # allowed key, but makes it not shrink
     assert sc.classify_write_kind(base, proposed, encoding=sc.StateEncoding.CANONICAL) == N
-
 
 def test_withdraw_rejects_when_proposed_fails_to_encode():
     """NaN in the allowed envelope field: encode fails on one side only (kills ``encode_smaller_none_check_off``)."""
@@ -842,7 +743,6 @@ def test_withdraw_rejects_when_proposed_fails_to_encode():
     assert sc._encode_len_for(base, sc.StateEncoding.CANONICAL) is not None
     assert sc._encode_len_for(proposed, sc.StateEncoding.CANONICAL) is None
     assert sc.classify_write_kind(base, proposed, encoding=sc.StateEncoding.CANONICAL) == N
-
 
 def test_withdraw_rejects_when_encode_length_is_exactly_equal():
     """Pad an allowed field one char at a time until lengths are exactly equal, not smaller (kills ``wd_shrink_lt_le``)."""
@@ -856,7 +756,6 @@ def test_withdraw_rejects_when_encode_length_is_exactly_equal():
     assert current == base_len, (current, base_len)
     assert sc.classify_write_kind(base, proposed, encoding=sc.StateEncoding.CANONICAL) == N
 
-
 def test_encoding_choice_changes_the_verdict_for_the_same_diff():
     """Same diff: stop-halt under LEGACY_PRETTY (NaN-representable), normal under CANONICAL (kills ``enc_always_canonical``)."""
     doc = _flat_doc()
@@ -866,13 +765,7 @@ def test_encoding_choice_changes_the_verdict_for_the_same_diff():
     assert sc.classify_write_kind(doc, proposed, encoding=sc.StateEncoding.LEGACY_PRETTY) == H_
     assert sc.classify_write_kind(doc, proposed, encoding=sc.StateEncoding.CANONICAL) == N
 
-
-# ===========================================================================
-# 7. Drift detection: bin/mission-state.py's real halt writer stays inside
-#    ``_HALT_RIDE_ALONG_FIELDS`` (``_TIMING_ACTIVITY_FIELDS``, imported from
-#    the kernel, not hand-copied).
-# ===========================================================================
-
+# 7. Drift detection: the real v4 halt writer's fields stay inside ``_HALT_RIDE_ALONG_FIELDS``.
 
 def test_v4_real_halt_writer_fields_are_inside_the_allow_list():
     for category in [c.value for c in HaltCategory]:
