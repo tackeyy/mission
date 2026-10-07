@@ -683,15 +683,9 @@ class WriteKind(str, Enum):
 
 
 def _values_equal(left: object, right: object) -> bool:
-    """``==`` except that NaN is treated as equal to NaN.
-
-    A v4 legacy document can carry historical non-finite floats
-    (design doc: "v4 には NaN など typed に decode できない形が残る"). Plain
-    ``!=`` always reports a field unchanged-but-present NaN as "changed"
-    (IEEE754: ``nan != nan``), which would make *every* diff touch that
-    field forever, permanently blocking stop-halt/stop-takeover/withdraw
-    classification for any session carrying one. NaN has no useful
-    identity for this purpose, so both-NaN is defined as unchanged.
+    """``==`` except NaN == NaN (v4 can carry non-finite floats; plain
+    ``!=`` would mark a NaN field "changed" forever, permanently blocking
+    stop-halt/stop-takeover/withdraw classification for that session).
     """
     if isinstance(left, float) and isinstance(right, float) and left != left and right != right:
         return True
@@ -699,14 +693,8 @@ def _values_equal(left: object, right: object) -> bool:
 
 
 def _diff_keys(base: Mapping, proposed: Mapping) -> frozenset:
-    """Top-level keys that changed, were added, or were removed.
-
-    This is intentionally shallow (a changed nested value marks its
-    top-level key as changed, nothing more specific) because the
-    write_kind classification below only needs to know *which top-level
-    slot* moved, not what inside it moved -- stage-advancing record
-    changes always live inside the ``fresh_review``/``extensions`` slot and
-    are judged separately by ``_fresh_review_withdraw_match``.
+    """Top-level keys that changed, were added, or were removed (shallow --
+    a changed nested value only marks its top-level key, nothing deeper).
     """
     changed = set()
     for key in frozenset(base.keys()) | frozenset(proposed.keys()):
@@ -755,12 +743,9 @@ def _fresh_review_withdraw_match(base: Mapping, proposed: Mapping) -> bool:
 
 
 def _mapping_diff_keys(base_value: object, proposed_value: object) -> frozenset:
-    """Field-level diff of a nested mapping (not a top-level identity check).
-
-    Used for v5's ``control``/``extensions`` slots, which are opaque single
-    keys at the top level but must be inspected field-by-field so an
-    unrelated (or malicious) field change inside them cannot hide behind a
-    coarse "the whole slot changed" classification.
+    """Field-level diff of a nested mapping (v5's ``control``/``extensions``
+    are opaque top-level keys; a malicious field change inside one must not
+    hide behind a coarse "the whole slot changed" classification).
     """
     base_map = base_value if isinstance(base_value, Mapping) else {}
     proposed_map = proposed_value if isinstance(proposed_value, Mapping) else {}
@@ -774,15 +759,12 @@ def _mapping_diff_keys(base_value: object, proposed_value: object) -> frozenset:
 def _halt_value_bounds_ok(proposed: Mapping) -> bool:
     """Fail-closed guard for the #918 obligations this module never enforces.
 
-    ``STATE_CAPACITY_HALT_DELTA`` was measured assuming every stored halt
-    reason and ``goal_dispatch_*`` field stays within
-    ``HALT_REASON_MAX_CHARS`` / ``GOAL_DISPATCH_REASON_MAX_CHARS``. This
-    module does not reject a write merely for exceeding those bounds (that
-    enforcement is #918's job) -- but classifying an over-bound halt diff
-    as ``stop-halt`` would grant it the over-capacity "halt admitted up to
-    STATE_LIMIT" allowance on the strength of a Δ guarantee the write
-    itself has already broken. So an over-bound halt diff is judged
-    ``normal`` instead (see ``_is_stop_halt_diff``'s caller).
+    ``STATE_CAPACITY_HALT_DELTA`` assumes every stored halt reason / each
+    ``goal_dispatch_*`` field stays within ``HALT_REASON_MAX_CHARS`` /
+    ``GOAL_DISPATCH_REASON_MAX_CHARS`` (#918's job to enforce, not rejected
+    here). Classifying an over-bound diff as ``stop-halt`` would grant it
+    the over-capacity "admitted up to STATE_LIMIT" allowance on a Δ
+    guarantee the write already broke, so it is judged ``normal`` instead.
     """
     reason = _halt_reason_value(proposed)
     candidates = [reason]
@@ -803,14 +785,9 @@ def _halt_value_bounds_ok(proposed: Mapping) -> bool:
 
 
 def _is_stop_halt_diff(base: Mapping, proposed: Mapping) -> bool:
-    """A pure, first-write halt mutation and nothing else.
-
-    Requires the halt slot to move from unwritten to written -- a repeat
-    halt write (already written -> written again) or a slot clear
-    (reactivate, written -> unwritten) is deliberately excluded; both are
-    judged as ordinary ``normal`` mutations instead (design doc: halt only
-    reserves its share on the *first* write, and clearing the slot is a
-    normal mutation evaluated against the restored headroom).
+    """A pure, first-write halt mutation and nothing else (a repeat write
+    or a slot clear is judged ``normal`` instead -- halt only reserves its
+    share on the first write).
     """
     if halt_slot_written(base) or not halt_slot_written(proposed):
         return False
@@ -835,11 +812,8 @@ def _is_stop_halt_diff(base: Mapping, proposed: Mapping) -> bool:
 
 
 def _lease_history_growth_kind(base: Mapping, proposed: Mapping) -> Optional[str]:
-    """``"renewal"`` (history unchanged), ``"takeover"`` (strictly appended
-    exactly one entry), or ``None`` (shrink, truncate-and-replace, jump by
-    more than one entry, or either side's history is not a list -- none of
-    these are a legitimate takeover/renewal shape).
-    """
+    """``"renewal"`` (unchanged), ``"takeover"`` (+1 entry), or ``None``
+    (shrink/replace/jump-by->1/non-list -- not a legitimate shape)."""
     base_history = _lease_mapping(base).get("lease_history")
     proposed_history = _lease_mapping(proposed).get("lease_history")
     if not isinstance(base_history, list) or not isinstance(proposed_history, list):
@@ -860,16 +834,12 @@ def _lease_epoch_value_ok(value: object) -> bool:
 
 
 def _takeover_value_bounds_ok(proposed: Mapping) -> bool:
-    """Fail-closed guard mirroring ``_halt_value_bounds_ok`` for takeover.
-
-    ``STATE_CAPACITY_TAKEOVER_DELTA`` was measured assuming every lease
-    identifier field (``owner_session_id``/``lease_id``/a history entry's
-    ``reason``) matches ``LEASE_TOKEN_PATTERN`` and every ``fencing_epoch``
-    stays within ``LEASE_EPOCH_MAX``. A takeover diff whose own proposed
-    values already violate one of those bounds is judged ``normal``
-    instead of ``stop-takeover`` (see ``next_takeover_cost``'s own
-    docstring for why an already-non-conformant *persisted* lease is
-    handled separately there -- this guard is about the *new* write).
+    """Mirrors ``_halt_value_bounds_ok`` for takeover: ``owner_session_id``/
+    ``lease_id``/a history entry's ``reason`` must match
+    ``LEASE_TOKEN_PATTERN`` and every ``fencing_epoch`` must stay within
+    ``LEASE_EPOCH_MAX``, or the diff is judged ``normal`` instead of
+    ``stop-takeover`` (this guard is about the *new* write; an already
+    non-conformant *persisted* lease is handled by ``next_takeover_cost``).
     """
     lease = _lease_mapping(proposed)
     if not _lease_token_value_ok(lease.get("owner_session_id")):
@@ -1192,10 +1162,9 @@ def state_capacity_verdict(
             mode="excess", write_kind=write_kind, encoding=encoding,
         )
 
-    # 判定の順序 8 (LEGACY_PRETTY): a v4 flat document's D requests never
-    # advance past pending (there is no v4 writer for dispatch/consume/
-    # terminal). Any attempted advance is rejected unconditionally, and
-    # v4 D items reserve nothing at all (see ``residual_reservation``).
+    # 判定の順序 8 (LEGACY_PRETTY): v4 has no writer past ``pending``, so any
+    # D-stage advance is rejected outright (v4 D items reserve 0; see
+    # ``residual_reservation``).
     if encoding is StateEncoding.LEGACY_PRETTY and _advances_a_d_stage(base_document, proposed):
         return _rejected(
             proposed, encoded_len, code="state-capacity-exhausted",
@@ -1217,12 +1186,9 @@ def state_capacity_verdict(
 
 
 def _advances_a_d_stage(base_document: Mapping, proposed: Mapping) -> bool:
-    """True when an *existing* D request moved past ``pending``.
-
-    A brand-new ``pending`` request appended at the end (prepare / 受付)
-    is not an advance -- it never existed before, so nothing "advanced".
-    Only a status change on a record that was already present, or a newly
-    appended record that is *not* ``pending``, counts.
+    """True when an *existing* D request moved past ``pending`` (a brand
+    new ``pending`` request appended at the end -- prepare / 受付 -- is not
+    an advance; it never existed before).
     """
     base_projection = fresh_review_projection(base_document)
     proposed_projection = fresh_review_projection(proposed)

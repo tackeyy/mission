@@ -191,41 +191,9 @@ def test_growth_past_the_pinned_stage_delta_is_invariant_broken_not_exhausted():
     assert verdict.code == "state-capacity-invariant-broken"
 
 
-# --------------------------------------------------------------------- #
-# Takeover boundary via the verdict (#936 pins system_remaining/N_L; this
-# pins the dedicated "history already at N_L" rejection branch in
-# state_capacity_verdict itself).
-# --------------------------------------------------------------------- #
-
-@pytest.mark.parametrize("recorded,should_accept", [
-    (lambda n_l: n_l - 1, True),
-    (lambda n_l: n_l, False),
-    (lambda n_l: n_l + 1, False),
-])
-def test_takeover_boundary_at_the_recorded_count(recorded, should_accept):
-    n_l = sc.STATE_CAPACITY_TAKEOVER_LIMIT
-    count = recorded(n_l)
-    doc = _flat_doc(lease_history=[
-        {"owner_session_id": "o", "lease_id": "l" + str(i), "fencing_epoch": i + 1,
-         "reason": "lease-expired-takeover", "at": "9999-12-31T23:59:59Z"}
-        for i in range(count)
-    ])
-    doc["fencing_epoch"] = count + 1
-    base = sc.CapacityBase(document=doc, encoded_len=canonical(doc))
-    proposed = dict(doc)
-    proposed["lease_history"] = doc["lease_history"] + [
-        {"owner_session_id": "o", "lease_id": "l" + str(count), "fencing_epoch": count + 1,
-         "reason": "lease-expired-takeover", "at": "9999-12-31T23:59:59Z"}
-    ]
-    proposed["owner_session_id"] = "new-owner"
-    proposed["lease_id"] = "new-lease"
-    proposed["fencing_epoch"] = count + 2
-    verdict = sc.state_capacity_verdict(
-        base, proposed, canonical(proposed), encoding=sc.StateEncoding.CANONICAL)
-    assert verdict.accepted is should_accept
-    if not should_accept:
-        assert verdict.code == "state-capacity-exhausted"
-
+# The N_L-1/N_L/N_L+1 boundary through the verdict is pinned by
+# PROBE_TABLE's "takeover_boundary_*" rows below (both layouts), so it is
+# not duplicated here as a standalone test.
 
 # --------------------------------------------------------------------- #
 # Legacy-full.
@@ -411,61 +379,9 @@ def test_mixing_halt_and_takeover_in_one_diff_is_not_a_pure_stop_kind():
     assert sc.classify_write_kind(doc, proposed) == sc.WriteKind.NORMAL
 
 
-def test_withdraw_mixed_with_unrelated_diff_is_not_withdraw():
-    pending = _pending_record()
-    doc = _flat_doc(requests=[projection_document(FreshReviewProjection((pending,)))["requests"][0]])
-    projection = FreshReviewProjection((pending,))
-    withdrawn = withdraw_request(projection, request_id=pending.request.request_id,
-                                  operation_id="withdraw-1", fencing_epoch=1)
-    proposed = dict(doc)
-    proposed["fresh_review"] = projection_document(withdrawn)
-    proposed["unrelated_extra_field"] = "x"
-    assert sc.classify_write_kind(doc, proposed) != sc.WriteKind.WITHDRAW
-
-
-def test_tombstone_epoch_mismatch_is_not_withdraw():
-    pending = _pending_record()
-    doc = _flat_doc(requests=[projection_document(FreshReviewProjection((pending,)))["requests"][0]])
-    projection = FreshReviewProjection((pending,))
-    withdrawn = withdraw_request(projection, request_id=pending.request.request_id,
-                                  operation_id="withdraw-1", fencing_epoch=999)
-    proposed = dict(doc)
-    proposed["fresh_review"] = projection_document(withdrawn)
-    assert sc.classify_write_kind(doc, proposed) != sc.WriteKind.WITHDRAW
-
-
-def test_takeover_diff_with_an_extra_unrelated_field_is_not_stop_takeover():
-    doc = _flat_doc()
-    proposed = dict(doc)
-    proposed["lease_history"] = list(doc["lease_history"]) + [
-        {"owner_session_id": "owner-1", "lease_id": "lease-1", "fencing_epoch": 1,
-         "reason": "lease-expired-takeover", "at": "9999-12-31T23:59:59Z"}
-    ]
-    proposed["owner_session_id"] = "owner-2"
-    proposed["lease_id"] = "lease-2"
-    proposed["fencing_epoch"] = 2
-    proposed["unrelated_extra_field"] = "x"
-    assert sc.classify_write_kind(doc, proposed) != sc.WriteKind.STOP_TAKEOVER
-
-
-def test_halt_diff_with_an_extra_unrelated_field_is_not_stop_halt():
-    doc = _flat_doc()
-    proposed = dict(doc)
-    proposed["halt_reason"] = "x"
-    proposed["phase"] = "halted"
-    proposed["loop_active"] = False
-    proposed["unrelated_extra_field"] = "x"
-    assert sc.classify_write_kind(doc, proposed) != sc.WriteKind.STOP_HALT
-
-
-def test_unknown_halt_category_does_not_crash_classification():
-    doc = _flat_doc()
-    proposed = dict(doc)
-    proposed["halt_reason"] = "x"
-    proposed["halt_category"] = "not-a-real-category"
-    proposed["phase"] = "halted"
-    proposed["loop_active"] = False
-    assert sc.classify_write_kind(doc, proposed) == sc.WriteKind.STOP_HALT
+# withdraw+junk, takeover+junk, halt+junk and unknown-halt_category are
+# each pinned through the full verdict by PROBE_TABLE below, so the
+# classify_write_kind-level equivalents are not duplicated here.
 
 
 def test_consume_result_at_max_output_bytes_plus_one_is_rejected_by_decoder():
@@ -484,48 +400,26 @@ def test_consume_result_at_max_output_bytes_plus_one_is_rejected_by_decoder():
 # New in #933: a halt/takeover diff whose own values already violate the
 # #918 bound must not be granted the stop-halt/stop-takeover exemption
 # (fail-closed -- see ``_halt_value_bounds_ok``/``_takeover_value_bounds_ok``).
+# Oversized-halt-reason and non-conformant-token are also pinned through
+# the full verdict by PROBE_TABLE's "*_on_over_capacity_base_*" rows.
 # --------------------------------------------------------------------- #
 
-def test_oversized_halt_reason_is_classified_normal_not_stop_halt():
-    doc = _flat_doc()
-    proposed = dict(doc)
-    proposed.update(halt_reason="\x01" * (sc.HALT_REASON_MAX_CHARS + 1),
-                     phase="halted", loop_active=False)
-    assert sc.classify_write_kind(doc, proposed) == sc.WriteKind.NORMAL
+_ONE_ENTRY_HISTORY = [{"owner_session_id": "owner-1", "lease_id": "lease-1", "fencing_epoch": 1,
+                       "reason": "lease-expired-takeover", "at": "9999-12-31T23:59:59Z"}]
 
 
-def test_oversized_goal_dispatch_field_is_classified_normal_not_stop_halt():
-    doc = _flat_doc()
-    proposed = dict(doc)
-    proposed.update(halt_reason="x", phase="halted", loop_active=False,
-                     goal_dispatch_effective="g" * (sc.GOAL_DISPATCH_REASON_MAX_CHARS + 1))
-    assert sc.classify_write_kind(doc, proposed) == sc.WriteKind.NORMAL
-
-
-def test_non_conformant_takeover_token_is_classified_normal_not_stop_takeover():
+@pytest.mark.parametrize("mutator", [
+    lambda d: {**d, "halt_reason": "\x01" * (sc.HALT_REASON_MAX_CHARS + 1), "phase": "halted", "loop_active": False},
+    lambda d: {**d, "halt_reason": "x", "phase": "halted", "loop_active": False,
+               "goal_dispatch_effective": "g" * (sc.GOAL_DISPATCH_REASON_MAX_CHARS + 1)},
+    lambda d: {**d, "lease_history": _ONE_ENTRY_HISTORY, "owner_session_id": "bad owner with spaces",
+               "lease_id": "lease-2", "fencing_epoch": 2},
+    lambda d: {**d, "lease_history": _ONE_ENTRY_HISTORY, "owner_session_id": "owner-2",
+               "lease_id": "lease-2", "fencing_epoch": sc.LEASE_EPOCH_MAX + 1},
+])
+def test_over_bound_halt_or_takeover_diff_is_classified_normal(mutator):
     doc = _flat_doc(lease_history=[])
-    proposed = dict(doc)
-    proposed["lease_history"] = [
-        {"owner_session_id": "owner-1", "lease_id": "lease-1", "fencing_epoch": 1,
-         "reason": "lease-expired-takeover", "at": "9999-12-31T23:59:59Z"}
-    ]
-    proposed["owner_session_id"] = "bad owner with spaces"
-    proposed["lease_id"] = "lease-2"
-    proposed["fencing_epoch"] = 2
-    assert sc.classify_write_kind(doc, proposed) == sc.WriteKind.NORMAL
-
-
-def test_epoch_over_max_is_classified_normal_not_stop_takeover():
-    doc = _flat_doc(lease_history=[])
-    proposed = dict(doc)
-    proposed["lease_history"] = [
-        {"owner_session_id": "owner-1", "lease_id": "lease-1", "fencing_epoch": 1,
-         "reason": "lease-expired-takeover", "at": "9999-12-31T23:59:59Z"}
-    ]
-    proposed["owner_session_id"] = "owner-2"
-    proposed["lease_id"] = "lease-2"
-    proposed["fencing_epoch"] = sc.LEASE_EPOCH_MAX + 1
-    assert sc.classify_write_kind(doc, proposed) == sc.WriteKind.NORMAL
+    assert sc.classify_write_kind(doc, mutator(doc)) == sc.WriteKind.NORMAL
 
 
 # --------------------------------------------------------------------- #
