@@ -37,6 +37,8 @@ def _historical(state, operation_id, intent_digest, payload_digest):
         if isinstance(item, WithdrawnFreshReviewRecord):
             if operation_id == item.prepare_operation_id:
                 raise FreshReviewError('fresh-review-request-withdrawn')
+            if operation_id == item.withdraw_operation_id:
+                raise FreshReviewError('fresh-review-operation-conflict')
             continue
         if operation_id in (item.prepare_operation_id, item.operation_id):
             if (item.prepare_operation_id, item.prepare_intent_digest, item.prepare_payload_digest) != (operation_id, intent_digest, payload_digest):

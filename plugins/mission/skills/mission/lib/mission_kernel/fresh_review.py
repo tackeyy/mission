@@ -525,6 +525,8 @@ def prepare_request_state(state, command):
         if isinstance(record, WithdrawnFreshReviewRecord):
             if command.operation_id == record.prepare_operation_id:
                 raise FreshReviewError('fresh-review-request-withdrawn')
+            if command.operation_id == record.withdraw_operation_id:
+                raise FreshReviewError('fresh-review-operation-conflict')
             if record.nonce == request.nonce or record.request_id == request.request_id:
                 raise FreshReviewError('fresh-review-nonce-reused')
             continue

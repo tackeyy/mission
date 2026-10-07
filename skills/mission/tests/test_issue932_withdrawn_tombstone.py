@@ -220,6 +220,31 @@ def test_kernel_prepare_rejects_withdrawn_replay_and_nonce_reuse():
     decision = decide(withdrawn_state, reuse_command)
     assert not decision.accepted and decision.rejection.code == 'fresh-review-nonce-reused'
 
+    # Each identity is one-use on its own: a nonce or a request_id alone collides.
+    for changed in ({'request_id': 'fresh-request-id'}, {'nonce': 'fresh-nonce'}):
+        alone = dc_replace(reuse_command, request=dc_replace(request, **changed))
+        decision = decide(withdrawn_state, alone)
+        assert not decision.accepted and decision.rejection.code == 'fresh-review-nonce-reused', changed
+
+    # The withdraw operation is consumed too: it cannot name a new prepare.
+    fresh = dc_replace(request, request_id='fresh-request-id', nonce='fresh-nonce')
+    taken = dc_replace(reuse_command, operation_id='withdraw-1', request=fresh)
+    decision = decide(withdrawn_state, taken)
+    assert not decision.accepted and decision.rejection.code == 'fresh-review-operation-conflict'
+
+
+def test_historical_lookup_treats_the_withdraw_operation_as_consumed():
+    from mission_application.fresh_review import _historical
+    record = _pending_record(1, 8)
+    projection = withdraw_request(FreshReviewProjection((record,)), request_id=record.request.request_id,
+                                  operation_id='withdraw-1', fencing_epoch=1)
+    state = {'fresh_review': projection_document(projection)}
+    with pytest.raises(FreshReviewError, match='^fresh-review-operation-conflict$'):
+        _historical(state, 'withdraw-1', record.prepare_intent_digest, record.prepare_payload_digest)
+    with pytest.raises(FreshReviewError, match='^fresh-review-request-withdrawn$'):
+        _historical(state, record.prepare_operation_id, record.prepare_intent_digest, record.prepare_payload_digest)
+    assert _historical(state, 'unrelated-op', record.prepare_intent_digest, record.prepare_payload_digest) is None
+
 
 def test_decoder_uniqueness_spans_withdrawn_and_pending():
     pending = _pending_record(1, 4, prefix='one-')
