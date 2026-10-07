@@ -548,6 +548,32 @@ def test_tombstone_epoch_mismatch_is_not_withdraw():
     assert kind != sc.WriteKind.WITHDRAW
 
 
+def test_takeover_diff_with_an_extra_unrelated_field_is_not_stop_takeover():
+    doc = _flat_doc()
+    proposed = dict(doc)
+    proposed["lease_history"] = list(doc["lease_history"]) + [
+        {"owner_session_id": "owner-1", "lease_id": "lease-1", "fencing_epoch": 1,
+         "reason": "lease-expired-takeover", "at": "9999-12-31T23:59:59Z"}
+    ]
+    proposed["owner_session_id"] = "owner-2"
+    proposed["lease_id"] = "lease-2"
+    proposed["fencing_epoch"] = 2
+    proposed["unrelated_extra_field"] = "x"
+    kind = sc.classify_write_kind(doc, proposed)
+    assert kind != sc.WriteKind.STOP_TAKEOVER
+
+
+def test_halt_diff_with_an_extra_unrelated_field_is_not_stop_halt():
+    doc = _flat_doc()
+    proposed = dict(doc)
+    proposed["halt_reason"] = "x"
+    proposed["phase"] = "halted"
+    proposed["loop_active"] = False
+    proposed["unrelated_extra_field"] = "x"
+    kind = sc.classify_write_kind(doc, proposed)
+    assert kind != sc.WriteKind.STOP_HALT
+
+
 def test_unknown_halt_category_does_not_crash_classification():
     doc = _flat_doc()
     proposed = dict(doc)
