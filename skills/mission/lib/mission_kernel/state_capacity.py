@@ -29,9 +29,13 @@ itself, the single gate every writer must call -- is a follow-up module
 (E0b-2b-後半/#933) that imports this one. No writer lives here (that is
 D2c/#918).
 
-Pure function only: no ``os``/``pathlib``/clock/random imports. The only
-kernel dependency this module itself imports is :mod:`mission_kernel.json_codec`
-and :mod:`mission_kernel.fresh_review`. It deliberately does *not* import
+Pure function only: no ``os``/``pathlib``/clock/random imports (``datetime.
+fromisoformat`` is used only to *parse* an already-present
+``lease_expires_at`` string for comparison, never to read the current
+time). The kernel dependencies this module imports are
+:mod:`mission_kernel.json_codec`, :mod:`mission_kernel.fresh_review`, and
+(for the write_kind half only) the frozen ``_TIMING_ACTIVITY_FIELDS`` set
+from :mod:`mission_kernel.transitions`. It deliberately does *not* import
 :mod:`mission_kernel.fresh_review_receipts`: the D terminal shapes below are
 duplicated as closed literals so this module stays import-light and so the
 Delta constants stay pinned to *this* module's own measurement, independent
@@ -41,6 +45,7 @@ imports ``fresh_review_receipts``, to cross-check those literals against its
 """
 from __future__ import annotations
 
+from datetime import datetime
 from enum import Enum
 import json
 from typing import Mapping, Optional
@@ -54,6 +59,16 @@ from .fresh_review import (
     FreshReviewRecord,
     WithdrawnFreshReviewRecord,
 )
+#: The real halt writers' own timing/activity compatibility fields
+#: (``MarkHalt``'s entry in ``_COMPATIBILITY_FIELDS``, minus the metadata
+#: fields a halt never actually touches). Imported, not hand-copied, so
+#: this allow-list cannot drift from the kernel's own authoritative set;
+#: ``bin/mission-state.py``'s ``_transition_phase`` writes a v4 subset of
+#: the same three field *names* (``phase_started_at``/
+#: ``phase_durations_sec``/``resume_target_phase`` -- a test pins that a
+#: real v4 halt's written keys stay inside this set, since ``transitions``
+#: cannot be imported from ``bin``).
+from .transitions import _TIMING_ACTIVITY_FIELDS
 
 
 # ---------------------------------------------------------------------------
@@ -662,34 +677,47 @@ def is_over_capacity(
 # ---------------------------------------------------------------------------
 # write_kind derivation (base/proposed diff, never the caller's say-so).
 #
-# #939 replaces PR #938's round-1 design (a per-kind allow-list of *which*
-# other top-level/nested keys may change alongside a halt/takeover) with a
-# *structural signature* (does the diff match the shape a legitimate
-# halt/takeover/withdraw write produces, judged from base/proposed alone)
-# plus an *increment cap* (the real encode-length increase, measured here
-# with the caller's own ``encoding``, never exceeds the Δ the reservation
-# scheme already prices that write at). The round-1 allow-list
-# (``HALT_AUX_KEYS``) tried to enumerate every field a real halt write may
-# also touch (activity segments, goal_dispatch_*, reactivation_history...);
-# independent review found it simultaneously too wide (it does not bound
-# the *value* of anything it admits, only the key name) and too narrow (a
-# real writer can touch a field the list does not name and get rejected as
-# "normal" instead of "stop-halt"). Dropping the list and relying on the
-# byte cap fixes both: anything riding along a halt/takeover is bounded by
-# the same Δ the capacity scheme already reserves for it, and no future
-# writer field can fall outside an allow-list that was never exhaustive.
+# classify_write_kind judges a diff by three requirements together, all of
+# which must hold (design doc docs/design/880-repair-lineage.md's "停止系の
+# 判定": "mutation が停止系かどうかは...変更が halt と lease の field...に
+# 限られる場合だけ停止系"):
 #
-# What *is* still checked by key/shape, not by cap alone:
-#   - the lease sub-document's own key set is closed (v5's decoder already
-#     requires an exact key set, ``codec_v5.py``'s ``_decode_lease``; this
-#     mirrors that closed shape rather than re-opening it as an ad hoc
-#     "aux" list);
-#   - a takeover's appended ``lease_history`` entry is the writer's own
-#     closed 5-field shape (mirrors ``codec_v4.py``'s ``_decode_history``);
-#   - a halt and a takeover cannot be mixed into one diff (stop-halt
-#     requires the lease to be at most a pure renewal; stop-takeover
-#     requires the halt reason to be byte-for-byte unchanged) -- this is a
-#     structural mutual-exclusion, not an enumeration of extra fields.
+#   1. **Allow-list** -- the diff's keys are confined to the fields the
+#      write-kind's own real writer(s) actually touch. For stop-halt that
+#      is the halt fields themselves, the halt writer's own timing/
+#      activity compatibility fields (``_TIMING_ACTIVITY_FIELDS``, imported
+#      from :mod:`mission_kernel.transitions` rather than hand-copied, so
+#      this list cannot silently drift from the kernel's own authoritative
+#      set) and ``goal_dispatch_*``, a lease that is at most a renewal, and
+#      the envelope. For stop-takeover it is the lease fields and the
+#      envelope *only* -- D's fresh_review/acceptance_contract advancing,
+#      or the halt fields changing, in the same diff is never a takeover.
+#      ``reactivation_history`` is deliberately excluded (only ``Reactivate``
+#      writes it).
+#   2. **Structural signature** -- does the diff match the shape a
+#      legitimate halt/takeover/withdraw write produces (halt slot's first
+#      write, lease history growing by exactly one writer-normalized entry,
+#      a lease's first acquisition, the withdraw reducer's own tombstone).
+#   3. **Increment cap** -- the real encode-length increase, measured with
+#      the caller's own ``encoding``, never exceeds the Δ the reservation
+#      scheme already prices that write at (``STATE_CAPACITY_HALT_DELTA`` /
+#      ``next_takeover_cost`` / a strict decrease for withdraw).
+#
+# PR #938's round-1 design enumerated allow-list (1) by hand
+# (``HALT_AUX_KEYS``) and was found both too wide (unbounded per-field
+# *values*, e.g. a padded ``activity_segments`` entry) and too narrow (a
+# real writer touching a field the hand list omitted was misclassified
+# "normal"); #939 round 1 then dropped allow-list (1) entirely and relied
+# on (2)+(3) alone -- but (3) alone does not stop an ordinary mutation
+# (dispatch, consume, a new request's acceptance, acceptance_contract
+# replacement) from riding along a small lease extension or halt, because
+# those writes are themselves often smaller than Δ_halt/Δ_takeover
+# (independent Checker's probe: a lease-extension diff that also advances
+# a D request past dispatch). #939 round 2 restores allow-list (1), this
+# time derived from the kernel's own compatibility-field constant instead
+# of a hand-copied list, so it cannot omit a real writer's field without a
+# test (see ``test_v4_real_halt_writer_fields_are_inside_the_allow_list``)
+# catching the drift.
 # ---------------------------------------------------------------------------
 
 
@@ -792,6 +820,27 @@ _LEASE_FIELD_NAMES = frozenset(
     {"owner_session_id", "lease_id", "fencing_epoch", "lease_expires_at", "lease_history"}
 )
 
+#: The halt fields themselves (``transitions.py``'s ``_mark_halt``/
+#: ``decode``'s own control fields; v4's flat equivalents).
+#: ``reactivation_history`` is NOT here: only ``Reactivate`` writes it.
+_HALT_FIELD_NAMES = frozenset(
+    {"phase", "terminal_outcome", "loop_active", "halt_reason", "halt_category"}
+)
+
+#: v5's ``MarkHalt`` only mirrors these three control fields into
+#: ``extensions`` (its ``dedicated_upserts``, ``transitions.py`` L597-605);
+#: ``halt_category``/``terminal_outcome`` stay in ``control`` only.
+_HALT_EXTENSIONS_DEDICATED_FIELDS = frozenset({"phase", "loop_active", "halt_reason"})
+
+#: Everything else a real halt write may touch beyond the halt fields
+#: themselves: the timing/activity fields every mutating command may carry
+#: (``_TIMING_ACTIVITY_FIELDS``, imported above) plus the three
+#: ``goal_dispatch_*`` fields a ``routed-goal`` halt adds
+#: (``bin/mission-state.py``'s ``_goal_dispatch_route_fields``).
+_HALT_RIDE_ALONG_FIELDS = _TIMING_ACTIVITY_FIELDS | frozenset(
+    {"goal_dispatch_effective", "goal_dispatch_host", "goal_dispatch_fallback_reason"}
+)
+
 
 def _lease_top_level_keys_closed(base: Mapping, proposed: Mapping) -> bool:
     """For v5: the ``lease`` sub-document's own keys, on both sides of the
@@ -838,21 +887,46 @@ def _lease_identity_present(lease: Mapping) -> bool:
     )
 
 
+def _parse_lease_expiry(value: object) -> Optional[datetime]:
+    """Parse ``lease_expires_at`` as an aware instant, or ``None`` if it
+    cannot be interpreted safely.
+
+    A bare string-lexicographic comparison (the round-1 implementation)
+    mis-orders two instants that carry *different* UTC offsets -- e.g.
+    ``"2026-01-01T01:00:00+02:00"`` (= 2026-01-00T23:00:00Z) sorts *after*
+    ``"2026-01-01T00:00:00Z"`` lexicographically despite being the earlier
+    instant -- Codex round-2 High. A naive (offset-less) timestamp is
+    rejected rather than guessed at, since this module reads no clock and
+    has no basis for assuming it is UTC.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
 def _lease_expiry_not_shortened(before_lease: Mapping, after_lease: Mapping) -> bool:
     """A genuine lease renewal/takeover always moves ``lease_expires_at``
     forward (``_lease_expiry``/``_renewed_lease_expiry`` in
     ``bin/mission-state.py`` compute a new expiry from "now"), never
     backward. A diff that is otherwise a pure renewal but *shortens* the
     expiry is not one -- independent review's "許しすぎ" finding on this
-    point.
+    point. Comparison is by parsed instant (:func:`_parse_lease_expiry`),
+    not string order, and fails closed (not "not shortened") when either
+    side cannot be parsed as an aware instant.
     """
     before_exp = before_lease.get("lease_expires_at")
-    after_exp = after_lease.get("lease_expires_at")
     if before_exp in (None, ""):
         return True
-    if not (isinstance(before_exp, str) and isinstance(after_exp, str)):
+    before_dt = _parse_lease_expiry(before_exp)
+    after_dt = _parse_lease_expiry(after_lease.get("lease_expires_at"))
+    if before_dt is None or after_dt is None:
         return False
-    return after_exp >= before_exp
+    return after_dt >= before_dt
 
 
 def _lease_is_pure_renewal(base: Mapping, proposed: Mapping) -> bool:
@@ -1109,21 +1183,46 @@ def _takeover_value_bounds_ok(proposed: Mapping) -> bool:
     return True
 
 
-def _encode_len_for(document: Mapping, encoding: "StateEncoding") -> int:
+def _encode_len_for(document: Mapping, encoding: "StateEncoding") -> Optional[int]:
     """The same byte length the real writer would persist ``document`` at,
     under ``encoding`` -- legacy-pretty (v4's ``indent=2`` on-disk save) or
-    canonical (v5's encoder). Fails closed to ``STATE_LIMIT`` on any
-    encode error, the same sentinel ``_encode_len_safe`` already uses, so an
-    unmeasurable document can only ever push a classification toward
-    ``normal``, never grant it a stop-kind exemption it was never measured
-    to deserve.
+    canonical (v5's encoder). Returns ``None`` (not a numeric sentinel) on
+    any encode error: subtracting two ``STATE_LIMIT`` sentinels (one per
+    side) would silently compute a zero increase and *grant* a stop-kind
+    exemption to a document this function could not actually measure --
+    Codex round-2 High. Every caller below must treat ``None`` as "cannot
+    classify this as a stop-kind", never as a number.
     """
-    if encoding is StateEncoding.LEGACY_PRETTY:
-        try:
+    try:
+        if encoding is StateEncoding.LEGACY_PRETTY:
             return len(json.dumps(document, indent=2, ensure_ascii=False, sort_keys=True).encode("utf-8"))
-        except Exception:
-            return STATE_LIMIT
-    return _encode_len_safe(document)
+        return len(encode_json_value(freeze_json_value(document)))
+    except Exception:
+        return None
+
+
+def _encode_increase_within(
+    base: Mapping, proposed: Mapping, encoding: "StateEncoding", limit: int,
+) -> bool:
+    """``len(encode(proposed)) - len(encode(base)) <= limit``, or ``False``
+    if either side fails to encode (see ``_encode_len_for``).
+    """
+    base_len = _encode_len_for(base, encoding)
+    proposed_len = _encode_len_for(proposed, encoding)
+    if base_len is None or proposed_len is None:
+        return False
+    return proposed_len - base_len <= limit
+
+
+def _encode_strictly_smaller(base: Mapping, proposed: Mapping, encoding: "StateEncoding") -> bool:
+    """``len(encode(proposed)) < len(encode(base))``, or ``False`` if either
+    side fails to encode.
+    """
+    base_len = _encode_len_for(base, encoding)
+    proposed_len = _encode_len_for(proposed, encoding)
+    if base_len is None or proposed_len is None:
+        return False
+    return proposed_len < base_len
 
 
 def _is_withdraw_diff(base: Mapping, proposed: Mapping, encoding: "StateEncoding") -> bool:
@@ -1147,17 +1246,18 @@ def _is_withdraw_diff(base: Mapping, proposed: Mapping, encoding: "StateEncoding
         allowed_top = frozenset({"fresh_review"}) | _lease_slot_keys(base) | _ENVELOPE_KEYS
         if not (top_diff <= allowed_top):
             return False
-    return _encode_len_for(proposed, encoding) < _encode_len_for(base, encoding)
+    return _encode_strictly_smaller(base, proposed, encoding)
 
 
 def _is_stop_halt_diff(base: Mapping, proposed: Mapping, encoding: "StateEncoding") -> bool:
-    """A pure, first-write halt mutation whose total encode-length increase
-    stays inside ``STATE_CAPACITY_HALT_DELTA`` (a repeat write or a slot
-    clear is judged ``normal`` instead -- halt only reserves its share on
-    the first write). Deliberately does *not* enumerate which other keys
-    may change alongside the halt fields themselves (see the module-level
-    comment above ``WriteKind``): anything else riding along is bounded by
-    the same Δ the reservation scheme already prices a halt at.
+    """A pure, first-write halt mutation confined to the halt fields, the
+    real halt writers' own timing/activity/``goal_dispatch_*`` ride-along
+    fields, a lease that is at most a renewal, and the envelope -- whose
+    total encode-length increase stays inside ``STATE_CAPACITY_HALT_DELTA``
+    (a repeat write or a slot clear is judged ``normal`` instead -- halt
+    only reserves its share on the first write). See the module-level
+    comment above ``WriteKind`` for why the allow-list, not the byte cap
+    alone, is required.
     """
     if halt_slot_written(base) or not halt_slot_written(proposed):
         return False
@@ -1168,28 +1268,54 @@ def _is_stop_halt_diff(base: Mapping, proposed: Mapping, encoding: "StateEncodin
         return False
     if not _halt_value_bounds_ok(proposed):
         return False
-    increase = _encode_len_for(proposed, encoding) - _encode_len_for(base, encoding)
-    return increase <= STATE_CAPACITY_HALT_DELTA
+    top_diff = _diff_keys(base, proposed)
+    if _is_v5(base):
+        top_allowed = frozenset({"control", "extensions", "lease"}) | _ENVELOPE_KEYS
+        if not (top_diff <= top_allowed):
+            return False
+        control_diff = _mapping_diff_keys(base.get("control"), proposed.get("control"))
+        if not control_diff or not (control_diff <= _HALT_FIELD_NAMES):
+            return False
+        extensions_diff = _mapping_diff_keys(base.get("extensions"), proposed.get("extensions"))
+        extensions_allowed = _HALT_EXTENSIONS_DEDICATED_FIELDS | _HALT_RIDE_ALONG_FIELDS | _ENVELOPE_KEYS
+        if not (extensions_diff <= extensions_allowed):
+            return False
+    else:
+        allowed = _HALT_FIELD_NAMES | _HALT_RIDE_ALONG_FIELDS | _ENVELOPE_KEYS | frozenset({"lease_expires_at"})
+        if not (top_diff & _HALT_FIELD_NAMES):
+            return False
+        if not (top_diff <= allowed):
+            return False
+    return _encode_increase_within(base, proposed, encoding, STATE_CAPACITY_HALT_DELTA)
 
 
 def _is_stop_takeover_diff(base: Mapping, proposed: Mapping, encoding: "StateEncoding") -> bool:
-    """A legitimate lease takeover/extension/initial-acquisition whose total
-    encode-length increase stays inside ``next_takeover_cost(base)``. The
-    halt reason must be byte-for-byte unchanged (a halt mixed into the same
-    diff is not a takeover, mirroring ``_is_stop_halt_diff``'s own
-    lease-renewal-only requirement) and, for v5, the ``lease`` sub-document's
-    own key set must stay inside its closed decoder shape.
+    """A legitimate lease takeover/extension/initial-acquisition whose diff
+    is confined to the lease fields and the envelope -- D's fresh_review
+    advancing, the acceptance_contract being replaced, or any halt field
+    changing in the same diff is never a takeover -- and whose total
+    encode-length increase stays inside ``next_takeover_cost(base)``.
     """
-    if not _strict_equal(_halt_reason_value(base), _halt_reason_value(proposed)):
+    top_diff = _diff_keys(base, proposed)
+    allowed_top = _lease_slot_keys(base) | _ENVELOPE_KEYS
+    if _is_v5(base):
+        allowed_top = allowed_top | frozenset({"extensions"})
+    if not (top_diff <= allowed_top):
         return False
-    if not _lease_top_level_keys_closed(base, proposed):
-        return False
+    if _is_v5(base):
+        if not _lease_top_level_keys_closed(base, proposed):
+            return False
+        # Only the envelope mirror may move inside ``extensions`` (e.g. no
+        # fresh_review/acceptance_contract/halt-mirror change may ride a
+        # takeover).
+        extensions_diff = _mapping_diff_keys(base.get("extensions"), proposed.get("extensions"))
+        if extensions_diff - _ENVELOPE_KEYS:
+            return False
     if _takeover_case(base, proposed) is None:
         return False
     if not _takeover_value_bounds_ok(proposed):
         return False
-    increase = _encode_len_for(proposed, encoding) - _encode_len_for(base, encoding)
-    return increase <= next_takeover_cost(base)
+    return _encode_increase_within(base, proposed, encoding, next_takeover_cost(base))
 
 
 def classify_write_kind(
