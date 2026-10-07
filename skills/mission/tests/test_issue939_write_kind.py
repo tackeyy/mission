@@ -1,12 +1,5 @@
-"""E0b-2b-前半 (#939/#940): write_kind classification from a base/proposed
-diff. ``classify_write_kind`` requires three things together: allow-list
-(diff keys confined to what the real writer touches), structural signature
-(shape of a legitimate halt/takeover/withdraw write), increment cap (real
-encode-length increase within the Δ the reservation scheme prices it at).
-See the module-level comment above ``WriteKind`` in state_capacity.py for
-the full design and its round-1/round-2 history. This file is table-driven:
-each row id names the scenario; builders (``_halt``/``_takeover``/
-``_withdraw``/``_extension``) construct (base, proposed) in 1-2 lines.
+"""#939: ``classify_write_kind`` needs allow-list + structural signature + increment cap
+(design: comment above ``WriteKind`` in state_capacity.py). Table-driven; row ids name scenarios.
 """
 from __future__ import annotations
 
