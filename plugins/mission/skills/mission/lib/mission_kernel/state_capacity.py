@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import itertools
 import json
 from typing import Mapping, Optional
 
@@ -458,7 +459,6 @@ HALT_AUX_KEYS = frozenset(
         "activity_anomaly_counts",
         "activity_unobserved_gap_sec",
         "activity_unobserved_gap_reasons_sec",
-        "reactivation_history",
     }
 )
 _ENVELOPE_KEYS = frozenset({"updated_at", "last_activity_at"})
@@ -695,10 +695,16 @@ def _values_equal(left: object, right: object) -> bool:
 def _diff_keys(base: Mapping, proposed: Mapping) -> frozenset:
     """Top-level keys that changed, were added, or were removed (shallow --
     a changed nested value only marks its top-level key, nothing deeper).
+
+    Presence is part of the comparison, not just the value: ``.get()``-based
+    comparison would treat a key absent from one side and present with an
+    explicit ``None`` on the other as unchanged, silently hiding an injected
+    key from every allow-list check below.
     """
     changed = set()
     for key in frozenset(base.keys()) | frozenset(proposed.keys()):
-        if not _values_equal(base.get(key), proposed.get(key)):
+        in_base, in_proposed = key in base, key in proposed
+        if in_base != in_proposed or not _values_equal(base.get(key), proposed.get(key)):
             changed.add(key)
     return frozenset(changed)
 
@@ -714,7 +720,19 @@ def _diff_is_subset_of(base: Mapping, proposed: Mapping, allowed: frozenset) -> 
 
 
 def _fresh_review_withdraw_match(base: Mapping, proposed: Mapping) -> bool:
-    """One pending record replaced by its withdrawn tombstone, nothing else."""
+    """One pending record replaced by its withdrawn tombstone, nothing else.
+
+    Reconstructs the expected tombstone by calling the real reducer
+    (:func:`mission_kernel.fresh_review.withdraw_request`) on the base
+    projection with the request id and operation id the proposed tombstone
+    itself claims, and the ``fencing_epoch`` the proposed lease carries, then
+    requires the *whole projection* to match byte-for-byte. The reducer
+    derives ``nonce``/``request_digest``/``criterion_ids`` from the original
+    request, so a forged tombstone (wrong nonce, wrong criterion_ids, an
+    operation id reused from elsewhere, a withdrawal of a record that was
+    never pending) fails this equality rather than needing each field
+    checked by hand here.
+    """
     base_projection = fresh_review_projection(base)
     proposed_projection = fresh_review_projection(proposed)
     if base_projection is None or proposed_projection is None:
@@ -733,13 +751,15 @@ def _fresh_review_withdraw_match(base: Mapping, proposed: Mapping) -> bool:
         return False
     if not isinstance(after, WithdrawnFreshReviewRecord):
         return False
-    if before.request.request_id != after.request_id or before.request.nonce != after.nonce:
+    proposed_epoch = _lease_mapping(proposed).get("fencing_epoch")
+    try:
+        reconstructed = _fresh_review.withdraw_request(
+            base_projection, request_id=before.request.request_id,
+            operation_id=after.withdraw_operation_id, fencing_epoch=proposed_epoch,
+        )
+    except FreshReviewError:
         return False
-    lease = _lease_mapping(proposed)
-    proposed_epoch = lease.get("fencing_epoch")
-    if after.withdraw_fencing_epoch != proposed_epoch:
-        return False
-    return True
+    return reconstructed == proposed_projection
 
 
 def _mapping_diff_keys(base_value: object, proposed_value: object) -> frozenset:
@@ -751,7 +771,8 @@ def _mapping_diff_keys(base_value: object, proposed_value: object) -> frozenset:
     proposed_map = proposed_value if isinstance(proposed_value, Mapping) else {}
     changed = set()
     for key in set(base_map.keys()) | set(proposed_map.keys()):
-        if not _values_equal(base_map.get(key), proposed_map.get(key)):
+        in_base, in_proposed = key in base_map, key in proposed_map
+        if in_base != in_proposed or not _values_equal(base_map.get(key), proposed_map.get(key)):
             changed.add(key)
     return frozenset(changed)
 
@@ -796,7 +817,7 @@ def _is_stop_halt_diff(base: Mapping, proposed: Mapping) -> bool:
     if not _is_lease_renewal_only(base, proposed):
         return False
     if _is_v5(base):
-        top_allowed = frozenset({"control", "extensions", "lease"})
+        top_allowed = frozenset({"control", "extensions", "lease"}) | _ENVELOPE_KEYS
         if not (_diff_keys(base, proposed) <= top_allowed):
             return False
         control_diff = _mapping_diff_keys(base.get("control"), proposed.get("control"))
@@ -822,18 +843,75 @@ def _is_lease_renewal_only(base: Mapping, proposed: Mapping) -> bool:
     return all(_values_equal(before.get(k), after.get(k)) for k in keys if k != "lease_expires_at")
 
 
-def _lease_history_growth_kind(base: Mapping, proposed: Mapping) -> Optional[str]:
-    """``"renewal"`` (unchanged), ``"takeover"`` (+1 entry), or ``None``
-    (shrink/replace/jump-by->1/non-list -- not a legitimate shape)."""
-    base_history = _lease_mapping(base).get("lease_history")
-    proposed_history = _lease_mapping(proposed).get("lease_history")
-    if not isinstance(base_history, list) or not isinstance(proposed_history, list):
+def _lease_never_acquired(lease: Mapping) -> bool:
+    """Mirrors ``next_takeover_cost``'s own sentinel: no real lease to take
+    over or renew yet (the shape of a freshly ``init``ed session)."""
+    return lease.get("fencing_epoch") in (None, "")
+
+
+def _takeover_entry_matches_prior_lease(before_lease: Mapping, entry: object) -> bool:
+    """The appended history entry's identity fields must be the *writer's own
+    normalization* of the lease that was just displaced (``str(owner)``/
+    ``str(lease_id)``/``int(epoch)`` -- see ``next_takeover_cost``), not just
+    any pattern-conformant value. ``reason``/``at`` are the writer's free
+    choice and are not constrained here (only pattern-checked elsewhere).
+    """
+    if not isinstance(entry, Mapping):
+        return False
+    try:
+        expected_epoch = int(before_lease["fencing_epoch"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    expected_owner = str(before_lease.get("owner_session_id"))
+    expected_lease_id = str(before_lease.get("lease_id"))
+    if str(entry.get("owner_session_id")) != expected_owner:
+        return False
+    if str(entry.get("lease_id")) != expected_lease_id:
+        return False
+    entry_epoch = entry.get("fencing_epoch")
+    return isinstance(entry_epoch, int) and not isinstance(entry_epoch, bool) and entry_epoch == expected_epoch
+
+
+def _takeover_case(base: Mapping, proposed: Mapping) -> Optional[str]:
+    """``"extension"`` (lease_expires_at only), ``"takeover"`` (history +1,
+    the new entry mirrors the *displaced* lease, new epoch = old epoch + 1),
+    ``"initial"`` (base never had a lease and still has no history), or
+    ``None`` -- any other lease shape is not a legitimate stop-takeover
+    mutation (shrink, replace, owner/epoch changed without a history entry,
+    jump by more than one entry, or a "takeover" of a lease that never
+    existed).
+    """
+    before_lease, after_lease = _lease_mapping(base), _lease_mapping(proposed)
+    before_history = before_lease.get("lease_history")
+    after_history = after_lease.get("lease_history")
+    if not isinstance(before_history, list) or not isinstance(after_history, list):
         return None
-    if len(proposed_history) == len(base_history):
-        return "renewal" if proposed_history == base_history else None
-    if len(proposed_history) == len(base_history) + 1:
-        return "takeover" if proposed_history[: len(base_history)] == base_history else None
-    return None
+
+    if len(after_history) == len(before_history):
+        if after_history != before_history:
+            return None
+        if _lease_never_acquired(before_lease) and not before_history:
+            return "initial"
+        return "extension" if _is_lease_renewal_only(base, proposed) else None
+
+    if len(after_history) != len(before_history) + 1:
+        return None
+    if after_history[: len(before_history)] != before_history:
+        return None
+    if _lease_never_acquired(before_lease):
+        return None  # cannot take over a lease that was never acquired
+    if not _takeover_entry_matches_prior_lease(before_lease, after_history[-1]):
+        return None
+    try:
+        expected_epoch = int(before_lease["fencing_epoch"])
+        new_epoch = after_lease.get("fencing_epoch")
+        if not (isinstance(new_epoch, int) and not isinstance(new_epoch, bool)):
+            return None
+        if new_epoch != expected_epoch + 1:
+            return None
+    except (KeyError, TypeError, ValueError):
+        return None
+    return "takeover"
 
 
 def _lease_token_value_ok(value: object) -> bool:
@@ -895,7 +973,7 @@ def _is_stop_takeover_diff(base: Mapping, proposed: Mapping) -> bool:
         )
         if not (lease_field_diff <= lease_allowed):
             return False
-    if _lease_history_growth_kind(base, proposed) is None:
+    if _takeover_case(base, proposed) is None:
         return False
     return _takeover_value_bounds_ok(proposed)
 
@@ -905,7 +983,7 @@ def classify_write_kind(base: Optional[Mapping], proposed: Mapping) -> WriteKind
     if base is None:
         return WriteKind.GENESIS
 
-    if _fresh_review_withdraw_match(base, proposed):
+    if _fresh_review_withdraw_match(base, proposed) and _is_lease_renewal_only(base, proposed):
         if _is_v5(base):
             other_slots = _diff_keys(base, proposed) - frozenset({"extensions"})
             extensions_diff = _mapping_diff_keys(
@@ -939,6 +1017,33 @@ def classify_write_kind(base: Optional[Mapping], proposed: Mapping) -> WriteKind
 # ---------------------------------------------------------------------------
 
 
+#: Alphabet for ``_shortest_unused_operation_id``: any single character here
+#: is itself a legal Token128 (``LEASE_TOKEN_PATTERN``'s first-character
+#: class), so a 1-character id is tried before ever falling back to 2.
+_SHORT_ID_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+
+def _shortest_unused_operation_id(used: set) -> str:
+    """The shortest legal operation id not already in ``used``.
+
+    legacy-full asks "even if every pending request were withdrawn right
+    now, would the state still be too large" -- i.e. the *best possible*
+    recovery. The withdrawal tombstone's ``withdraw_operation_id`` is
+    whatever the real writer chooses, and the writer is free to choose the
+    shortest legal id available, so probing with a long placeholder (as a
+    prior version of this function did) overstates the post-withdrawal size
+    and can declare legacy-full for a state a real, minimal-id withdrawal
+    would actually have recovered.
+    """
+    length = 1
+    while True:
+        for chars in itertools.product(_SHORT_ID_ALPHABET, repeat=length):
+            candidate = "".join(chars)
+            if candidate not in used:
+                return candidate
+        length += 1
+
+
 def _withdraw_all_pending_len(document: Mapping, encoded_len: int, *, encode) -> int:
     """Encode length after replacing every pending record with a tombstone.
 
@@ -967,11 +1072,8 @@ def _withdraw_all_pending_len(document: Mapping, encoded_len: int, *, encode) ->
         if isinstance(record, FreshReviewRecord) and record.operation_id is not None
     }
     working = projection
-    for index, request_id in enumerate(pending_ids):
-        operation_id = "legacy-full-withdraw-probe-" + format(index, "d")
-        while operation_id in used_operations:
-            index += 1
-            operation_id = "legacy-full-withdraw-probe-" + format(index, "d")
+    for request_id in pending_ids:
+        operation_id = _shortest_unused_operation_id(used_operations)
         used_operations.add(operation_id)
         try:
             working = _fresh_review.withdraw_request(
@@ -1083,6 +1185,29 @@ def _encode_for(document: Mapping, *, encoding: "StateEncoding") -> int:
     return len(json.dumps(document, indent=2, ensure_ascii=False, sort_keys=True).encode("utf-8"))
 
 
+def _capped_write_kind(
+    base_document: Mapping, encoded_len: int, base_encoded_len: int, write_kind: WriteKind
+) -> WriteKind:
+    """Demote stop-halt/stop-takeover to ``normal`` once the real encode-length
+    increase exceeds the Δ its over-capacity exemption assumes.
+
+    ``classify_write_kind`` only looks at *which* keys moved, not *how far*:
+    a diff confined to the allowed halt/takeover keys can still smuggle an
+    oversized value into one of them (e.g. padding an otherwise-allowed
+    ``activity_segments`` entry). The key-set check alone cannot catch that
+    (it has no access to ``encoded_len``), so this closes the loophole by
+    capping the admitted growth to the same Δ the reservation scheme already
+    prices the write at.
+    """
+    if write_kind is WriteKind.STOP_HALT:
+        if encoded_len - base_encoded_len > STATE_CAPACITY_HALT_DELTA:
+            return WriteKind.NORMAL
+    elif write_kind is WriteKind.STOP_TAKEOVER:
+        if encoded_len - base_encoded_len > next_takeover_cost(base_document):
+            return WriteKind.NORMAL
+    return write_kind
+
+
 def state_capacity_verdict(
     base: Optional[CapacityBase],
     proposed: Mapping,
@@ -1124,7 +1249,9 @@ def state_capacity_verdict(
     if base_over_capacity:
         threshold = STATE_LIMIT - STATE_CAPACITY_HALT_DELTA
         if base.encoded_len > threshold and _is_legacy_full(base_document, base.encoded_len, encode=encode_for):
-            write_kind = classify_write_kind(base_document, proposed)
+            write_kind = _capped_write_kind(
+                base_document, encoded_len, base.encoded_len, classify_write_kind(base_document, proposed)
+            )
             return _rejected(
                 proposed, encoded_len, code="state-capacity-legacy-full",
                 mode="legacy-full", write_kind=write_kind, encoding=encoding,
@@ -1133,13 +1260,17 @@ def state_capacity_verdict(
     proposed_history_len = lease_history_length(proposed)
     base_history_len = lease_history_length(base_document)
     if proposed_history_len > base_history_len and base_history_len >= STATE_CAPACITY_TAKEOVER_LIMIT:
-        write_kind = classify_write_kind(base_document, proposed)
+        write_kind = _capped_write_kind(
+            base_document, encoded_len, base.encoded_len, classify_write_kind(base_document, proposed)
+        )
         return _rejected(
             proposed, encoded_len, code="state-capacity-exhausted",
             mode="normal", write_kind=write_kind, encoding=encoding,
         )
 
-    write_kind = classify_write_kind(base_document, proposed)
+    write_kind = _capped_write_kind(
+        base_document, encoded_len, base.encoded_len, classify_write_kind(base_document, proposed)
+    )
 
     if write_kind is WriteKind.WITHDRAW:
         if not base_over_capacity:
@@ -1201,11 +1332,20 @@ def _advances_a_d_stage(base_document: Mapping, proposed: Mapping) -> bool:
     """True when an *existing* D request moved past ``pending`` (a brand
     new ``pending`` request appended at the end -- prepare / 受付 -- is not
     an advance; it never existed before).
+
+    Fails closed (treats it as an advance, so the caller rejects) when
+    either side's embedded projection cannot be decoded: an undecodable
+    ``base`` means this function has no way to know whether something
+    already present advanced, and returning ``False`` there would let a
+    v4/LEGACY_PRETTY write through 判定の順序 8's unconditional-rejection
+    gate on the strength of a check that could not actually run.
     """
     base_projection = fresh_review_projection(base_document)
+    if base_projection is None:
+        return True
     proposed_projection = fresh_review_projection(proposed)
-    if base_projection is None or proposed_projection is None:
-        return False
+    if proposed_projection is None:
+        return True
     base_requests = base_projection.requests
     proposed_requests = proposed_projection.requests
     if len(proposed_requests) < len(base_requests):

@@ -132,6 +132,17 @@ def _entry(owner, lease_id, epoch, reason="lease-expired-takeover", at=TS27):
     return {"owner_session_id": owner, "lease_id": lease_id, "fencing_epoch": epoch,
             "reason": reason, "at": at}
 
+def _no_lease_base(layout):
+    """A base whose lease was genuinely never acquired (fencing_epoch
+    absent/empty) -- the only shape ``_takeover_case`` admits as "initial"."""
+    base, encoding = _base(layout)
+    if layout == "v4":
+        base = dict(base, owner_session_id="", lease_id="", fencing_epoch="")
+    else:
+        base = copy.deepcopy(base)
+        base["lease"] = {"owner_session_id": "", "lease_id": "", "fencing_epoch": "", "lease_history": []}
+    return base, encoding
+
 def _fencing_epoch(doc, layout):
     return (doc if layout == "v4" else doc["lease"])["fencing_epoch"]
 
@@ -311,8 +322,11 @@ def test_withdraw_invariant_broken_when_proposed_not_smaller():
     doc = _with_pending(_over_capacity_doc(excess=10), pending)
     base = sc.CapacityBase(document=doc, encoded_len=canonical(doc))
     proposed = _withdrawn_proposed(doc, pending)
+    # Grow via lease_expires_at (the only field a withdraw's lease diff is
+    # still allowed to touch -- see _is_lease_renewal_only) so the write
+    # keeps classifying as WITHDRAW while failing to actually shrink.
     growth = max(0, base.encoded_len - canonical(proposed) + 5)
-    proposed["owner_session_id"] = proposed["owner_session_id"] + "q" * growth
+    proposed["lease_expires_at"] = proposed["lease_expires_at"] + "9" * growth
     verdict = sc.state_capacity_verdict(
         base, proposed, canonical(proposed), encoding=sc.StateEncoding.CANONICAL)
     assert not verdict.accepted
@@ -349,6 +363,321 @@ def test_consume_result_at_max_output_bytes_plus_one_is_rejected_by_decoder():
     with pytest.raises(FreshReviewError):
         consume_request(reserved, pending.request, result=oversized,
                          operation_id="d1", intent_digest=ADAPTER, payload_digest=ADAPTER)
+
+
+# PR #938 round-1 review follow-ups: classification must stay inside the
+# "許される遷移だけ" boundary even when the allow-listed key set alone
+# cannot distinguish a legitimate mutation from a piggybacked one.
+
+def test_halt_v5_rejects_bogus_control_field_mixed_in():
+    doc = _v5_doc()
+    proposed = copy.deepcopy(doc)
+    proposed["control"].update(halt_reason="x", phase="halted", loop_active=False)
+    proposed["control"]["bogus_control_field"] = "x"
+    assert sc.classify_write_kind(doc, proposed) == sc.WriteKind.NORMAL
+
+
+def test_halt_v5_rejects_bogus_top_level_field_mixed_in():
+    doc = _v5_doc()
+    proposed = copy.deepcopy(doc)
+    proposed["control"].update(halt_reason="x", phase="halted", loop_active=False)
+    proposed["bogus_top_field"] = "x"
+    assert sc.classify_write_kind(doc, proposed) == sc.WriteKind.NORMAL
+
+
+def test_halt_v5_rejects_oversized_extensions_mirror_even_when_control_is_fine():
+    doc = _v5_doc()
+    proposed = copy.deepcopy(doc)
+    proposed["control"].update(halt_reason="x", phase="halted", loop_active=False)
+    proposed["extensions"]["halt_reason"] = "\x01" * (sc.HALT_REASON_MAX_CHARS + 1)
+    assert sc.classify_write_kind(doc, proposed) == sc.WriteKind.NORMAL
+
+
+def test_halt_reason_at_exactly_the_bound_is_still_stop_halt():
+    doc = _flat_doc()
+    proposed = _apply_control(doc, "v4", halt_reason="\x01" * sc.HALT_REASON_MAX_CHARS,
+                               phase="halted", loop_active=False)
+    assert sc.classify_write_kind(doc, proposed) == sc.WriteKind.STOP_HALT
+
+
+def test_takeover_v5_rejects_bogus_lease_field_mixed_in():
+    doc = _v5_doc(lease_history=[])
+    proposed = copy.deepcopy(doc)
+    proposed["lease"]["lease_history"] = [_entry("a", "b", 1)]
+    proposed["lease"]["owner_session_id"] = "c"
+    proposed["lease"]["lease_id"] = "d"
+    proposed["lease"]["fencing_epoch"] = 2
+    proposed["lease"]["bogus_lease_field"] = "x"
+    assert sc.classify_write_kind(doc, proposed) == sc.WriteKind.NORMAL
+
+
+def test_takeover_rejects_new_current_epoch_over_the_bound():
+    doc = _flat_doc(lease_history=[])
+    doc["fencing_epoch"] = sc.LEASE_EPOCH_MAX
+    proposed = dict(doc)
+    proposed["lease_history"] = [_entry("owner-1", "lease-1", sc.LEASE_EPOCH_MAX)]
+    proposed["owner_session_id"] = "owner-2"
+    proposed["lease_id"] = "lease-2"
+    proposed["fencing_epoch"] = sc.LEASE_EPOCH_MAX + 1
+    assert sc.classify_write_kind(doc, proposed) == sc.WriteKind.NORMAL
+
+
+def test_takeover_rejects_non_conformant_entry_reason():
+    doc = _flat_doc(lease_history=[])
+    doc["fencing_epoch"] = 5
+    proposed = dict(doc)
+    proposed["lease_history"] = [_entry("owner-1", "lease-1", 5, reason="bad reason with spaces")]
+    proposed["owner_session_id"] = "owner-2"
+    proposed["lease_id"] = "lease-2"
+    proposed["fencing_epoch"] = 6
+    assert sc.classify_write_kind(doc, proposed) == sc.WriteKind.NORMAL
+
+
+def test_takeover_rejects_non_conformant_displaced_owner_mirrored_in_entry():
+    doc = _flat_doc(lease_history=[])
+    doc["owner_session_id"] = "bad owner with spaces"
+    doc["fencing_epoch"] = 5
+    proposed = dict(doc)
+    proposed["lease_history"] = [_entry("bad owner with spaces", "lease-1", 5)]
+    proposed["owner_session_id"] = "owner-2"
+    proposed["lease_id"] = "lease-2"
+    proposed["fencing_epoch"] = 6
+    assert sc.classify_write_kind(doc, proposed) == sc.WriteKind.NORMAL
+
+
+def test_takeover_rejects_when_an_earlier_history_entry_was_altered():
+    doc = _flat_doc(lease_history=_history(3))
+    doc["fencing_epoch"] = 4
+    proposed = dict(doc)
+    altered = _history(3)
+    altered[0] = _entry("tampered", "tampered", 1)
+    proposed["lease_history"] = altered + [_entry("owner-1", "lease-1", 4)]
+    proposed["owner_session_id"] = "owner-2"
+    proposed["lease_id"] = "lease-2"
+    proposed["fencing_epoch"] = 5
+    assert sc.classify_write_kind(doc, proposed) == sc.WriteKind.NORMAL
+
+
+def test_takeover_rejects_an_entry_that_does_not_match_the_displaced_lease():
+    doc = _flat_doc(lease_history=[])
+    doc["fencing_epoch"] = 5
+    proposed = dict(doc)
+    # Pattern-conformant, but not the writer's own normalization of the
+    # lease that was just displaced (owner-1/lease-1/epoch 5).
+    proposed["lease_history"] = [_entry("totally-different-owner", "totally-different-id", 999)]
+    proposed["owner_session_id"] = "owner-2"
+    proposed["lease_id"] = "lease-2"
+    proposed["fencing_epoch"] = 6
+    assert sc.classify_write_kind(doc, proposed) == sc.WriteKind.NORMAL
+
+
+def test_takeover_rejects_non_conformant_new_current_lease_id():
+    doc = _flat_doc(lease_history=[])
+    doc["fencing_epoch"] = 5
+    proposed = dict(doc)
+    proposed["lease_history"] = [_entry("owner-1", "lease-1", 5)]
+    proposed["owner_session_id"] = "owner-2"
+    proposed["lease_id"] = "bad new lease id"
+    proposed["fencing_epoch"] = 6
+    assert sc.classify_write_kind(doc, proposed) == sc.WriteKind.NORMAL
+
+
+def test_withdraw_match_does_not_crash_when_before_is_already_withdrawn():
+    rec_a = _v5_pending_record(request_id="ra", nonce="na")
+    rec_b = _v5_pending_record(request_id="rb", nonce="nb")
+    proj = _project(rec_a, rec_b)
+    withdrawn_b = withdraw_request(proj, request_id="rb", operation_id="wd-b", fencing_epoch=1)
+    doc = _flat_doc(requests=list(projection_document(withdrawn_b)["requests"]))
+    proposed = dict(doc)
+    requests = [dict(r) for r in proposed["fresh_review"]["requests"]]
+    for r in requests:
+        if r.get("request_id") == "rb":
+            r["withdraw_fencing_epoch"] = 999
+    proposed["fresh_review"] = {**proposed["fresh_review"], "requests": requests}
+    assert sc.classify_write_kind(doc, proposed) != sc.WriteKind.WITHDRAW
+
+
+def test_takeover_v4_undecodable_base_projection_fails_closed_to_an_advance():
+    doc = _flat_doc()
+    doc["fresh_review"] = "not-a-mapping"
+    proposed = dict(doc)
+    proposed["fresh_review"] = {"schema": "mission-fresh-review/1", "requests": []}
+    assert sc._advances_a_d_stage(doc, proposed) is True
+
+
+def test_legacy_full_is_never_returned_for_a_normal_state_within_capacity():
+    # halt already written + every takeover already recorded => system_remaining
+    # is 0, so a doc padded *past* the halt threshold can still be within
+    # capacity (budget is the full STATE_LIMIT) -- exactly the shape that
+    # distinguishes "guarded by base_over_capacity" from "always probed".
+    doc = _flat_doc(requests=[], halt_reason="stagnation",
+                     lease_history=_history(sc.STATE_CAPACITY_TAKEOVER_LIMIT))
+    doc["fencing_epoch"] = sc.STATE_CAPACITY_TAKEOVER_LIMIT + 1
+    assert sc.system_remaining(doc) == 0
+    threshold = sc.STATE_LIMIT - sc.STATE_CAPACITY_HALT_DELTA
+    doc = _pad_to(doc, threshold + 1, encode_fn=canonical)
+    base = sc.CapacityBase(document=doc, encoded_len=canonical(doc))
+    assert sc.is_over_capacity(doc, base.encoded_len) is False
+    proposed = dict(doc)
+    proposed["last_activity_at"] = "9999-12-31T23:59:58Z"
+    verdict = sc.state_capacity_verdict(
+        base, proposed, canonical(proposed), encoding=sc.StateEncoding.CANONICAL)
+    assert verdict.accepted
+    assert verdict.code != "state-capacity-legacy-full"
+
+
+def test_over_capacity_stop_halt_accepted_at_exactly_state_limit():
+    doc = _flat_doc()
+    threshold = sc.STATE_LIMIT - sc.STATE_CAPACITY_HALT_DELTA
+    base = sc.CapacityBase(document=doc, encoded_len=threshold)
+    assert sc.is_over_capacity(doc, base.encoded_len)
+    halted = _apply_control(doc, "v4", halt_reason="stagnation", phase="halted")
+    verdict = sc.state_capacity_verdict(base, halted, sc.STATE_LIMIT, encoding=sc.StateEncoding.CANONICAL)
+    assert verdict.accepted
+    assert verdict.write_kind == "stop-halt"
+
+
+def test_over_capacity_stop_takeover_accepted_at_exactly_the_halt_threshold():
+    doc = _flat_doc(lease_history=_history(3))
+    doc["fencing_epoch"] = 4
+    threshold = sc.STATE_LIMIT - sc.STATE_CAPACITY_HALT_DELTA
+    base = sc.CapacityBase(document=doc, encoded_len=threshold - 5)
+    assert sc.is_over_capacity(doc, base.encoded_len)
+    proposed = dict(doc)
+    proposed["lease_expires_at"] = proposed["lease_expires_at"] + "9"
+    verdict = sc.state_capacity_verdict(base, proposed, threshold, encoding=sc.StateEncoding.CANONICAL)
+    assert verdict.accepted
+    assert verdict.write_kind == "stop-takeover"
+
+
+def test_withdraw_invariant_broken_when_proposed_is_exactly_the_same_size():
+    pending = _pending_record()
+    doc = _with_pending(_over_capacity_doc(excess=10), pending)
+    base = sc.CapacityBase(document=doc, encoded_len=canonical(doc))
+    proposed = _withdrawn_proposed(doc, pending)
+    verdict = sc.state_capacity_verdict(
+        base, proposed, base.encoded_len, encoding=sc.StateEncoding.CANONICAL)
+    assert not verdict.accepted
+    assert verdict.code == "state-capacity-invariant-broken"
+
+
+def test_legacy_pretty_rejects_a_freshly_appended_non_pending_record():
+    pending = _pending_record()
+    reserved = reserve_request(FreshReviewProjection((pending,)), pending.request, operation_id="d1",
+                                intent_digest=ADAPTER, payload_digest=ADAPTER)
+    rec = projection_document(reserved)["requests"][0]
+    doc = _flat_doc(requests=[])
+    base = sc.CapacityBase(document=doc, encoded_len=legacy(doc))
+    proposed = dict(doc)
+    proposed["fresh_review"] = {"schema": "mission-fresh-review/1", "requests": [rec]}
+    verdict = sc.state_capacity_verdict(
+        base, proposed, legacy(proposed), encoding=sc.StateEncoding.LEGACY_PRETTY)
+    assert not verdict.accepted
+    assert verdict.code == "state-capacity-exhausted"
+
+
+def test_physical_limit_check_does_not_misfire_at_exactly_state_limit():
+    doc = _flat_doc(halt_reason="stagnation", lease_history=_history(sc.STATE_CAPACITY_TAKEOVER_LIMIT))
+    doc["fencing_epoch"] = sc.STATE_CAPACITY_TAKEOVER_LIMIT + 1
+    assert sc.system_remaining(doc) == 0
+    verdict = sc.state_capacity_verdict(None, doc, sc.STATE_LIMIT, encoding=sc.StateEncoding.CANONICAL)
+    assert verdict.accepted
+
+
+def test_legacy_full_recoverable_with_shortest_legal_withdraw_id():
+    pending = _pending_record()
+    rec = projection_document(FreshReviewProjection((pending,)))["requests"][0]
+    doc = _flat_doc(requests=[rec], halt_reason="")
+    threshold = sc.STATE_LIMIT - sc.STATE_CAPACITY_HALT_DELTA
+
+    # Independent oracle: the real reducer, withdrawing with the shortest
+    # legal operation id ("w") -- not routed through _withdraw_all_pending_len
+    # -- so this does not merely re-check the implementation against itself.
+    withdrawn = withdraw_request(FreshReviewProjection((pending,)), request_id=pending.request.request_id,
+                                  operation_id="w", fencing_epoch=0)
+    reference_doc = dict(doc)
+    reference_doc["fresh_review"] = projection_document(withdrawn)
+    savings = legacy(doc) - legacy(reference_doc)
+    assert savings > 0
+
+    padded = _pad_to(doc, threshold + savings, encode_fn=legacy)
+    assert legacy(padded) == threshold + savings
+    assert sc._is_legacy_full(padded, legacy(padded), encode=legacy) is False
+
+
+def test_dispatch_and_consume_still_advance_after_halt_and_full_takeovers():
+    pending = _pending_record()
+    doc = _pad_document(status_records=[projection_document(FreshReviewProjection((pending,)))["requests"][0]])
+    doc["halt_reason"] = "stagnation"
+    doc["lease_history"] = _history(sc.STATE_CAPACITY_TAKEOVER_LIMIT)
+    doc["fencing_epoch"] = sc.STATE_CAPACITY_TAKEOVER_LIMIT + 1
+    doc["lease_id"] = "current"
+    base = sc.CapacityBase(document=doc, encoded_len=canonical(doc))
+    assert sc.system_remaining(doc) == 0
+
+    reserved_proposed = _reserved_proposed(doc, pending)
+    verdict = sc.state_capacity_verdict(
+        base, reserved_proposed, canonical(reserved_proposed), encoding=sc.StateEncoding.CANONICAL)
+    assert verdict.accepted, verdict
+
+    reserved_base = sc.CapacityBase(document=reserved_proposed, encoded_len=canonical(reserved_proposed))
+    projection = FreshReviewProjection((pending,))
+    reserved = reserve_request(projection, pending.request, operation_id="dispatch-1",
+                                intent_digest=ADAPTER, payload_digest=ADAPTER)
+    consumed = consume_request(reserved, pending.request, operation_id="dispatch-1",
+                                intent_digest=ADAPTER, payload_digest=ADAPTER, result={"status": "ok"})
+    consumed_proposed = dict(reserved_proposed)
+    consumed_proposed["fresh_review"] = projection_document(consumed)
+    verdict = sc.state_capacity_verdict(
+        reserved_base, consumed_proposed, canonical(consumed_proposed), encoding=sc.StateEncoding.CANONICAL)
+    assert verdict.accepted, verdict
+    assert verdict.write_kind == "normal"
+
+
+def test_stop_takeover_capped_at_the_halt_threshold_not_the_physical_limit():
+    """ex_other_thr_high: a non-halt stop kind only ever gets STATE_LIMIT -
+    Δ_halt of extra headroom on an over-capacity base, never the full
+    STATE_LIMIT a stop-halt gets."""
+    doc = _flat_doc(lease_history=_history(3))
+    doc["fencing_epoch"] = 4
+    threshold = sc.STATE_LIMIT - sc.STATE_CAPACITY_HALT_DELTA
+    doc = _pad_to(doc, threshold, encode_fn=canonical)
+    assert canonical(doc) == threshold
+    base = sc.CapacityBase(document=doc, encoded_len=canonical(doc))
+    assert sc.is_over_capacity(doc, base.encoded_len)
+    proposed = dict(doc)
+    proposed["lease_expires_at"] = proposed["lease_expires_at"] + "9"
+    verdict = sc.state_capacity_verdict(
+        base, proposed, canonical(proposed), encoding=sc.StateEncoding.CANONICAL)
+    assert not verdict.accepted
+    assert verdict.code == "state-capacity-exhausted"
+
+
+def test_genesis_rejects_a_document_that_does_not_satisfy_capacity():
+    doc = _flat_doc()
+    budget = sc.STATE_LIMIT - sc.system_remaining(doc) - sc.residual_reservation(doc)
+    over = _pad_to(doc, budget + 1, encode_fn=canonical)
+    assert canonical(over) == budget + 1
+    verdict = sc.state_capacity_verdict(
+        None, over, canonical(over), encoding=sc.StateEncoding.CANONICAL)
+    assert not verdict.accepted
+    assert verdict.code == "state-capacity-exhausted"
+
+
+def test_physical_limit_still_rejects_withdraw_that_shrank_but_stays_over_the_limit():
+    """phys_off/phys_ge: the STATE_LIMIT ceiling is an absolute cap, not just
+    a consequence of satisfies_capacity -- a withdraw that genuinely shrank
+    (smaller than an already-impossible base) must still be rejected if the
+    proposed document itself is still physically too large."""
+    pending = _pending_record()
+    doc = _with_pending(_over_capacity_doc(excess=10), pending)
+    base = sc.CapacityBase(document=doc, encoded_len=sc.STATE_LIMIT + 1000)
+    proposed = _withdrawn_proposed(doc, pending)
+    verdict = sc.state_capacity_verdict(
+        base, proposed, sc.STATE_LIMIT + 1, encoding=sc.StateEncoding.CANONICAL)
+    assert not verdict.accepted
+    assert verdict.code == "state-capacity-exhausted"
+
 
 # New in #933: a halt/takeover diff whose own values already violate the
 # #918 bound must not be granted the stop-halt/stop-takeover exemption
@@ -625,13 +954,28 @@ def _probe_table():
             cases.append(_case(f"takeover_boundary_{label}_{layout}", base, proposed, encoding,
                                 accept=expect_accept, code=code))
 
-    # --- 12. lease renewal (zero history growth): accept, stop-takeover -
+    # --- 12. lease extension (lease_expires_at only, zero history growth):
+    #         accept, stop-takeover -----------------------------------------
+    for layout in ("v4", "v5"):
+        base, encoding = _base(layout, lease_history=_history(3))
+        base = _set_lease(base, layout, epoch=4)
+        if layout == "v4":
+            proposed = {**base, "lease_expires_at": "9999-12-31T23:59:58Z"}
+        else:
+            proposed = copy.deepcopy(base)
+            proposed["lease"]["lease_expires_at"] = "9999-12-31T23:59:58Z"
+        cases.append(_case(f"lease_extension_zero_growth_{layout}", base, proposed, encoding,
+                            accept=True, write_kind="stop-takeover"))
+
+    # --- 12b. an owner/epoch change without history growth, when base
+    #          already has a real lease, is NOT a legitimate stop-takeover
+    #          mutation (it is neither an extension nor a takeover). -------
     for layout in ("v4", "v5"):
         base, encoding = _base(layout, lease_history=_history(3))
         base = _set_lease(base, layout, epoch=4)
         proposed = _set_lease(base, layout, owner="renewed-owner")
-        cases.append(_case(f"lease_renewal_zero_growth_{layout}", base, proposed, encoding,
-                            accept=True, write_kind="stop-takeover"))
+        cases.append(_case(f"lease_owner_change_without_history_growth_{layout}", base, proposed, encoding,
+                            accept=True, write_kind="normal"))
 
     # --- 13. lease history SHRINK must not be stop-takeover -------------
     for layout in ("v4", "v5"):
@@ -655,11 +999,12 @@ def _probe_table():
         cases.append(_case(f"lease_history_jump_by_two_{layout}", base, proposed, encoding,
                             accept=True, write_kind="normal"))
 
-    # --- 16. initial lease acquisition (0 history): accept, stop-takeover
+    # --- 16. initial lease acquisition (base genuinely has no lease yet:
+    #         fencing_epoch absent/empty, 0 history): accept, stop-takeover -
     for layout in ("v4", "v5"):
-        base, encoding = _base(layout)
-        proposed = _set_lease(base, layout, owner="first-owner")
-        cases.append(_case(f"lease_field_touch_zero_history_{layout}", base, proposed, encoding,
+        base, encoding = _no_lease_base(layout)
+        proposed = _set_lease(base, layout, owner="first-owner", lease_id="first-lease", epoch=1)
+        cases.append(_case(f"lease_initial_acquisition_{layout}", base, proposed, encoding,
                             accept=True, write_kind="stop-takeover"))
 
     # --- 17. legacy-full: even a stop-halt attempt is rejected -----------
