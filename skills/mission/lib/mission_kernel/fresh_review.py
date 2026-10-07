@@ -378,11 +378,13 @@ def decode_projection(document):
                 raise FreshReviewError('fresh-review-reason-invalid')
             withdraw_operation_id = _identifier(fields['withdraw_operation_id'])
             _integer(fields['withdraw_fencing_epoch'], 'fresh-review-fence-invalid')
-            if (request_id in ids or nonce in nonces or prepare_operation_id in operations
-                    or withdraw_operation_id in operations):
+            if request_id in ids or nonce in nonces or prepare_operation_id in operations:
                 raise FreshReviewError('fresh-review-identity-reused')
-            ids.add(request_id); nonces.add(nonce)
-            operations.add(prepare_operation_id); operations.add(withdraw_operation_id)
+            ids.add(request_id); nonces.add(nonce); operations.add(prepare_operation_id)
+            # Checked after this record's own prepare id, as reserved records do.
+            if withdraw_operation_id in operations:
+                raise FreshReviewError('fresh-review-operation-conflict')
+            operations.add(withdraw_operation_id)
             records.append(WithdrawnFreshReviewRecord(**fields))
             continue
         _closed(item, FreshReviewRecord.__dataclass_fields__, 'fresh-review-record-invalid')
@@ -470,6 +472,8 @@ def withdraw_request(projection, *, request_id, operation_id, fencing_epoch):
     target = matches[0]
     if isinstance(target, WithdrawnFreshReviewRecord):
         if target.withdraw_operation_id == operation_id:
+            if target.withdraw_fencing_epoch != fencing_epoch:
+                raise FreshReviewError('fresh-review-operation-conflict')
             return projection
         raise FreshReviewError('fresh-review-request-withdrawn')
     if target.status != 'pending':

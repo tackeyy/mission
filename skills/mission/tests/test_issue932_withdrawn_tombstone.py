@@ -357,3 +357,29 @@ def test_withdrawn_projection_round_trips_through_encode_and_decode():
     # Direct dataclass construction is not decoding; validate_projection_backing exercises both.
     from mission_kernel.fresh_review import validate_projection_backing
     validate_projection_backing(persisted, withdrawn_projection)
+
+
+def test_decoder_rejects_withdraw_operation_reusing_its_own_or_an_earlier_prepare_id():
+    # The reducer never produces either shape, so the decoder must not admit it.
+    document = _withdrawn_document()
+    document['withdraw_operation_id'] = document['prepare_operation_id']
+    with pytest.raises(FreshReviewError, match='^fresh-review-operation-conflict$'):
+        decode_projection({'fresh_review': {'schema': 'mission-fresh-review/1', 'requests': [document]}})
+
+    earlier = _pending_record(1, 4, prefix='one-')
+    later = _pending_record(1, 4, prefix='two-')
+    projection = withdraw_request(FreshReviewProjection((earlier, later)), request_id=later.request.request_id,
+                                  operation_id='withdraw-1', fencing_epoch=1)
+    tampered = json.loads(json.dumps(projection_document(projection)))
+    tampered['requests'][1]['withdraw_operation_id'] = earlier.prepare_operation_id
+    with pytest.raises(FreshReviewError, match='^fresh-review-operation-conflict$'):
+        decode_projection({'fresh_review': tampered})
+
+
+def test_withdraw_resend_with_a_different_fence_is_a_conflict_not_a_replay():
+    pending = _pending_record(1, 4)
+    projection = withdraw_request(FreshReviewProjection((pending,)), request_id=pending.request.request_id,
+                                  operation_id='withdraw-1', fencing_epoch=7)
+    with pytest.raises(FreshReviewError, match='^fresh-review-operation-conflict$'):
+        withdraw_request(projection, request_id=pending.request.request_id,
+                         operation_id='withdraw-1', fencing_epoch=8)
