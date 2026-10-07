@@ -303,11 +303,8 @@ def _old_lease(owner, lease_id, epoch):
 
 @pytest.mark.parametrize("owner,lease_id,epoch", _TAKEOVER_SWEEP)
 def test_next_takeover_cost_bounds_the_real_writer(owner, lease_id, epoch):
-    """``next_takeover_cost`` must bound the real writer's increase,
-    measured not approximated: the replaced per-field approximation
-    fails the huge-float-epoch rows (882 < 1,127 bytes, the Codex repro)
-    since an oversized epoch costs bytes both in the new current field
-    and the history entry, counted there only once."""
+    """Bounds the real writer's increase; an oversized epoch costs bytes in both the new
+    current field and the history entry (882 < 1,127 bytes under a per-field estimate)."""
     import copy
 
     # Also a first takeover (no lease_history key yet) with a short expiry the writer rewrites.
