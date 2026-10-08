@@ -1,14 +1,17 @@
 """Conservative, non-executing shell inspection for evaluated Mission runs.
 
-This is detection, not an integrity guarantee. Source files and alias expansion
-are deliberately not followed. Unsupported syntax is a detection, never safe.
+This is detection, not an integrity guarantee. Script files, source files and
+alias expansion are not followed; constructed paths inside programs can escape
+literal inspection. Unsupported syntax is a detection, never safe.
 """
 from __future__ import annotations
 
+import fnmatch
 import os
 import re
-import shlex
 from pathlib import PurePosixPath
+
+from shell_syntax import Node, ShellSyntaxError, parse_shell
 
 OUTPUTS = {
     ('manual-score-capture',): '--out', ('aggregate-reviews',): '--out',
@@ -16,182 +19,202 @@ OUTPUTS = {
     ('verification', 'claims'): '--out', ('artifact', 'export'): '--to',
     ('archive-worktree',): '--destination-root',
 }
-STATE_LITERAL = re.compile(r'(?<![\w.-])(?:[^\s\'";()]*\/)?\.mission-state(?:/|(?=$|[\s\'";()]))')
-DYNAMIC = re.compile(r'[$`*?\[~]')
-SHELLS = {'bash', 'sh'}
+SHELLS = {'bash', 'sh', 'zsh', 'dash', 'ksh', 'mksh', 'ash', 'fish'}
+DYNAMIC = re.compile(r'[$`]|__command_substitution__')
+ASSIGNMENT = re.compile(r'^[A-Za-z_][A-Za-z_0-9]*=')
+STATE_LITERAL = re.compile(r'''(?<![\w.-])\.mission-state(?=/|$|[\s'";()<>])''', re.IGNORECASE)
+
+
+def _component(value, depth=0):
+    if depth > 8:
+        return True
+    brace = re.search(r'\{([^{}]*,[^{}]*)\}', value)
+    if brace:
+        return any(_component(value[:brace.start()] + part + value[brace.end():], depth + 1) for part in brace[1].split(','))
+    return fnmatch.fnmatchcase('.mission-state', value.casefold())
+
+
+def _mentions_state(value):
+    key, equal, destination = value.partition('=')
+    if equal and (key.startswith('-') or ASSIGNMENT.match(value)): value = destination
+    return any(_component(part) for part in value.split('/'))
+
+
+def _payload(value):
+    # Interpreter literals are inspected, not evaluated or concatenated.
+    return STATE_LITERAL.search(value) is not None
 
 
 def _state_path(value, cwd):
-    if DYNAMIC.search(value) or '__command_substitution__' in value:
-        return True  # the resolved destination cannot be established
+    if DYNAMIC.search(value) or value.startswith('~'):
+        return True
     if not value.startswith('/') and cwd is None:
         return True
-    path = os.path.normpath(value if value.startswith('/') else os.path.join(cwd, value))
-    return '.mission-state' in PurePosixPath(path).parts
+    return _mentions_state(os.path.normpath(value if value.startswith('/') else os.path.join(cwd, value)))
 
 
-def _command(argv, cwd, script_path, interpreter_path, depth):
-    kinds = []
+def _argv(values):
+    values = list(values)
+    while values and ASSIGNMENT.match(values[0] if isinstance(values[0], str) else values[0].raw): values.pop(0)
+    values = [value if isinstance(value, str) else value.value for value in values]
+    prefix = []
+    while values and PurePosixPath(values[0]).name in {'env', 'sudo', 'timeout', 'command', 'builtin', 'exec', 'nohup', 'time'}:
+        name = PurePosixPath(values.pop(0)).name
+        while values and (values[0].startswith('-') or (name == 'env' and ASSIGNMENT.match(values[0]))):
+            flag = values.pop(0); prefix.append(flag)
+            if flag in {'-u', '-g', '--user', '--group', '--unset', '-k', '--kill-after', '-o'} and values:
+                prefix.append(values.pop(0))
+        if name == 'timeout' and values: prefix.append(values.pop(0))
+    return values, prefix
+
+
+def _trusted(argv, script, interpreter):
+    return 1 if argv and argv[0] == script else 2 if argv[:2] == [interpreter, script] else 0
+
+
+def _command(argv, cwd, script, interpreter, depth, previous=None):
+    argv, prefix = _argv(argv)
+    kinds = ['state_path_command'] if any(_mentions_state(v) for v in prefix) else []
     if not argv:
-        return kinds, cwd
+        return kinds
     name = PurePosixPath(argv[0]).name
-    if name in {'if', 'then', 'else', 'elif', 'fi', 'for', 'while', 'until', 'do', 'done', 'case', 'esac', 'select', '!'}:
-        return ['unparsed_script'], None
-    if name in {'source', '.', 'alias'}:
-        return (['state_path_command'] if any(STATE_LITERAL.search(v) for v in argv[1:]) else []), cwd  # do not load source or expand aliases
-    if DYNAMIC.search(argv[0]) or '__command_substitution__' in argv[0]:
-        return ['unparsed_script'], None
-    if name == 'cd':
-        if len(argv) != 2 or DYNAMIC.search(argv[1]) or '__command_substitution__' in argv[1]:
-            return kinds, None
-        return kinds, os.path.normpath(argv[1]) if argv[1].startswith('/') else os.path.normpath(os.path.join(cwd, argv[1])) if cwd else None
-    if name == 'eval':
-        body = ' '.join(argv[1:])
-        return (_script(body, cwd, script_path, interpreter_path, depth + 1) if body and not DYNAMIC.search(body) and '__command_substitution__' not in body else ['unparsed_script']), cwd
+    if DYNAMIC.search(argv[0]) or (name not in {'[', '[['} and any(c in argv[0] for c in '*?[')):
+        return kinds + ['unparsed_script']
     if name in SHELLS:
         for index, value in enumerate(argv[1:], 1):
-            if value.startswith('-') and 'c' in value[1:]:
-                if index + 1 >= len(argv):
-                    return ['unparsed_script'], cwd
-                return _script(argv[index + 1], cwd, script_path, interpreter_path, depth + 1), cwd
-    if any(arg in {'-c', '-e'} and i + 1 < len(argv) and re.search(r'[$`]', argv[i + 1]) for i, arg in enumerate(argv)):
-        kinds.append('unparsed_script')
-    if name == 'reactivate' or any(PurePosixPath(value).name == 'mission-state.py' and i + 1 < len(argv) and argv[i + 1] == 'reactivate' for i, value in enumerate(argv)):
+            if value.startswith('-') and not value.startswith('--') and 'c' in value[1:]:
+                return kinds + (_script(argv[index + 1], cwd, script, interpreter, depth + 1, previous) if index + 1 < len(argv) else ['unparsed_script'])
+    if name == 'eval':
+        return kinds + (_script(' '.join(argv[1:]), cwd, script, interpreter, depth + 1, previous) if len(argv) > 1 else ['unparsed_script'])
+    invocation = argv[1:] if name == 'mission-state.py' else None
+    if argv[0] == interpreter or re.fullmatch(r'(?:python|pypy)[\d.]*', name):
+        index = next((i for i, value in enumerate(argv[1:], 1) if not value.startswith('-')), len(argv))
+        if index < len(argv) and PurePosixPath(argv[index]).name == 'mission-state.py': invocation = argv[index + 1:]
+    if name == 'reactivate' or (invocation and invocation[0] == 'reactivate'):
         kinds.append('reactivate_command')
-    offset = 1 if argv[0] == script_path else 2 if len(argv) > 1 and argv[:2] == [interpreter_path, script_path] else 0
-    if not offset:
-        if any(STATE_LITERAL.search(value) or (cwd is not None and '.mission-state' in PurePosixPath(cwd).parts and not value.startswith('-') and _state_path(value, cwd)) for value in argv[1:]):
-            kinds.append('state_path_command')
-        return kinds, cwd
-    args = argv[offset:]
-    # Only the frozen command/option pairs write an explicit output path.
-    option = next((opt for command, opt in OUTPUTS.items() if tuple(args[:len(command)]) == command), None)
-    if option:
-        for index, arg in enumerate(args):
-            if arg == '--':
-                break
-            key, equal, value = arg.partition('=')
-            if len(key) >= 3 and key.startswith('--') and option.startswith(key):
-                if not equal:
-                    value = args[index + 1] if index + 1 < len(args) else ''
-                if not value or value.startswith('--'):
-                    kinds.append('unparsed_script')
-                elif option == '--destination-root' or _state_path(value, cwd):
-                    kinds.append('state_output_option')
-    return kinds, cwd
-
-
-def _script(script, cwd, script_path, interpreter_path, depth=0):
-    if depth > 16 or not isinstance(script, str):
-        return ['unparsed_script']
-    kinds = []
-    # Command substitutions execute independently, so their cwd never propagates.
-    # Keep an unknown marker for the output: using it as a command or output path
-    # cannot be resolved without executing the worker.
-    parts, cursor, quote = [], 0, None
-    while cursor < len(script):
-        char = script[cursor]
-        if char == '\\' and cursor + 1 < len(script):
-            parts.append(script[cursor:cursor + 2]); cursor += 2; continue
-        if char in {"'", '"'}:
-            quote = None if quote == char else char if quote is None else quote
-        if script.startswith('$(', cursor) and quote != "'":
-            end, nesting, inner_quote = cursor + 2, 1, None
-            while end < len(script) and nesting:
-                current = script[end]
-                if current == '\\':
-                    end += 2; continue
-                if current in {"'", '"'}:
-                    inner_quote = None if inner_quote == current else current if inner_quote is None else inner_quote
-                elif inner_quote is None:
-                    nesting += (1 if current == '(' else -1 if current == ')' else 0)
-                end += 1
-            if nesting:
-                return kinds + ['unparsed_script']
-            kinds.extend(_script(script[cursor + 2:end - 1], None, script_path, interpreter_path, depth + 1))
-            parts.append('__command_substitution__'); cursor = end; continue
-        parts.append(char); cursor += 1
-    script = ''.join(parts)
-    # Extract here-doc bodies before tokenising: non-shell languages are never
-    # interpreted as shell; all literal state paths in their payload are scanned.
-    lines = script.splitlines(keepends=True)
-    cleaned = []
-    index = 0
-    while index < len(lines):
-        line = lines[index]
-        docs = list(re.finditer(r'<<(-?)\s*(?:\'([^\']+)\'|"([^"]+)"|([\w]+))', line))
-        cleaned.append(re.sub(r'<<-?\s*(?:\'[^\']+\'|"[^"]+"|[\w]+)', '', line))
-        index += 1
-        for doc in docs:
-            delimiter = next(x for x in doc.groups()[1:] if x is not None)
-            body = []
-            while index < len(lines) and (lines[index].lstrip('\t') if doc.group(1) else lines[index]).rstrip('\r\n') != delimiter:
-                body.append(lines[index]); index += 1
-            if index == len(lines):
-                return kinds + ['unparsed_script']
-            index += 1
-            try:
-                header = shlex.split(line[:doc.start()])
-            except ValueError:
-                return kinds + ['unparsed_script']
-            if header and PurePosixPath(header[0]).name in SHELLS:
-                kinds.extend(_script(''.join(body), cwd, script_path, interpreter_path, depth + 1))
-            elif STATE_LITERAL.search(''.join(body)):
-                kinds.append('state_path_interpreter')
-            elif re.search(r'[$`]', ''.join(body)):
-                kinds.append('unparsed_script')
-    try:
-        lexer = shlex.shlex(''.join(cleaned), posix=True, punctuation_chars='();|&<>{}\n')
-        lexer.whitespace = ' \t\r'
-        lexer.whitespace_split = True
-        tokens = []
-        for token in lexer:
-            if token and all(c in '();|&<>{}\n' for c in token):
-                tokens.extend(re.findall(r'<<<|&&|\|\||>>|<<|&>|>&|.', token, re.DOTALL))
-            else:
-                tokens.append(token)
-    except ValueError:
-        return kinds + ['unparsed_script']
-    argv, stack, redirects = [], [], []
-    def flush():
-        nonlocal argv, cwd, redirects
-        trusted = bool(argv and (argv[0] == script_path or argv[:2] == [interpreter_path, script_path]))
-        for operator, destination in redirects:
-            if operator in {'<<', '<<<', '>&'}:
-                kinds.append('unparsed_script')
-            elif not (operator == '<' and trusted) and _state_path(destination, cwd):
-                kinds.append('state_redirection')
-        found, cwd = _command(argv, cwd, script_path, interpreter_path, depth)
-        kinds.extend(found); argv = []; redirects = []
-    i = 0
-    while i < len(tokens):
-        token = tokens[i]
-        if token in {';', '&&', '||', '|', '&'} or token.strip('\n') == '':
-            flush()
-            if token in {'||', '|', '&'}: cwd = None
-        elif token in {'(', '{'}:
-            flush(); stack.append(')' if token == '(' else '}'); cwd = None
-        elif token in {')', '}'}:
-            flush()
-            if not stack or stack.pop() != token:
-                kinds.append('unparsed_script')
-            cwd = None
-        elif token in {'>', '>>', '&>', '<', '<<', '<<<', '>&'}:
-            # shlex may group operators. Unhandled redirections fail closed.
-            if i + 1 >= len(tokens):
-                kinds.append('unparsed_script'); break
-            destination = tokens[i + 1]
-            redirects.append((token, destination))
-            i += 1
-        elif token and all(char in '();|&<>{}' for char in token):
-            kinds.append('unparsed_script')
-        else:
-            argv.append(token)
-        i += 1
-    flush()
-    if stack:
+    offset = _trusted(argv, script, interpreter)
+    if offset:
+        args = argv[offset:]
+        option = next((opt for command, opt in OUTPUTS.items() if tuple(args[:len(command)]) == command), None)
+        if option:
+            for index, arg in enumerate(args):
+                if arg == '--': break
+                key, equal, value = arg.partition('=')
+                if len(key) >= 3 and key.startswith('--') and option.startswith(key):
+                    if not equal: value = args[index + 1] if index + 1 < len(args) else ''
+                    if not value or value.startswith('--'): kinds.append('unparsed_script')
+                    elif option == '--destination-root' or _state_path(value, cwd): kinds.append('state_output_option')
+        return kinds
+    if any(_mentions_state(v) for v in argv[1:]): kinds.append('state_path_command')
+    if any(v in {'-c', '-e'} and i + 1 < len(argv) and _payload(argv[i + 1]) for i, v in enumerate(argv)):
+        kinds.append('state_path_interpreter')
+    if any(v in {'-c', '-e'} and i + 1 < len(argv) and argv[i + 1].startswith(('$', '__command_substitution__')) for i, v in enumerate(argv)):
         kinds.append('unparsed_script')
+    # Unknown expansion at a write destination is not evidence of a safe path.
+    destinations = argv[-1:] if name in {'cp', 'mv', 'rsync', 'install', 'ln'} else argv[1:] if name in {'tee', 'touch', 'mkdir', 'rm', 'truncate'} else [v[3:] for v in argv if v.startswith('of=')] if name == 'dd' else []
+    # Relative copy sources also expose the evaluated state. Arbitrary data
+    # arguments (echo text, program source) are not filesystem operands.
+    operands = argv[1:] if name in {'cp', 'mv', 'rsync', 'install', 'ln'} else destinations
+    if cwd and _mentions_state(cwd) and any(not v.startswith('-') and _state_path(v, cwd) for v in operands):
+        kinds.append('state_path_command')
+    if any(not v.startswith('-') and _state_path(v, cwd) for v in destinations): kinds.append('state_path_command')
     return kinds
+
+
+def _cd(argv, location):
+    cwd, previous = location
+    args = argv[1:]
+    while args and args[0] in {'--', '-P', '-L'}:
+        flag, args = args[0], args[1:]
+        if flag == '--': break
+    if len(args) != 1: return None, cwd
+    value = args[0]
+    if value == '-': return previous, cwd
+    for variable in ('${PWD}', '$PWD'):
+        if value == variable or value.startswith(variable + '/'):
+            value = cwd + value[len(variable):] if cwd else '$UNKNOWN'; break
+    for variable in ('~', '$HOME', '${HOME}'):
+        if value == variable or value.startswith(variable + '/'):
+            value = '/__shell_home__' + value[len(variable):]; break
+    if DYNAMIC.search(value) or any(c in value for c in '*?['): return None, cwd
+    return (os.path.normpath(value if value.startswith('/') else os.path.join(cwd, value)) if cwd or value.startswith('/') else None), cwd
+
+
+def _merge(*locations):
+    result = list(dict.fromkeys(item for group in locations for item in group))
+    return result if len(result) <= 64 else [(None, None)]
+
+
+class Inspection:
+    def __init__(self, script, interpreter, depth):
+        self.script, self.interpreter, self.depth, self.kinds = script, interpreter, depth, []
+
+    def source(self, text, locations):
+        if isinstance(text, Node):
+            if self.depth >= 16:
+                self.kinds.append('unparsed_script'); return
+            inner = Inspection(self.script, self.interpreter, self.depth + 1)
+            inner.visit(text, locations)
+            self.kinds.extend(inner.kinds); return
+        for cwd, previous in locations:
+            self.kinds.extend(_script(text, cwd, self.script, self.interpreter, self.depth + 1, previous))
+
+    def visit(self, node, locations):
+        for word in node.words + [word for _, word in node.redirects]:
+            for body in word.substitutions: self.source(body, locations)
+        argv, _ = _argv(node.words)
+        for operator, word in node.redirects:
+            if operator in {'<<', '<<-', '<<<'}:
+                body = word.value if operator == '<<<' else word.body
+                if body is None: self.kinds.append('unparsed_script')
+                elif argv and PurePosixPath(argv[0]).name in SHELLS: self.source(body, locations)
+                elif _payload(body): self.kinds.append('state_path_interpreter')
+            elif operator in {'>&', '<&'} and re.fullmatch(r'(?:\d+-?|-)', word.value):
+                pass  # descriptor duplication/move/closure has no file target
+            elif not (operator == '<' and _trusted(argv, self.script, self.interpreter)):
+                if any(_state_path(word.value, cwd) for cwd, _ in locations): self.kinds.append('state_redirection')
+        if node.kind == 'command':
+            if argv and PurePosixPath(argv[0]).name == 'cd': return _merge([_cd(argv, loc) for loc in locations])
+            for cwd, previous in locations: self.kinds.extend(_command(node.words, cwd, self.script, self.interpreter, self.depth, previous))
+        elif node.kind in {'subshell', 'function', 'pipeline'}:
+            for child in node.children: self.visit(child, locations)
+            # Literal stdin piped into a shell can be inspected; files cannot.
+            if node.kind == 'pipeline' and len(node.children) == 2:
+                left, right = node.children
+                values, _ = _argv([w.value for w in right.words])
+                if left.kind == 'command' and left.words and left.words[0].value == 'echo' and values and PurePosixPath(values[0]).name in SHELLS:
+                    self.source(' '.join(w.value for w in left.words[1:]), locations)
+        elif node.kind == 'case':
+            exits, fallthrough, retry = locations, [], []
+            for branch in node.children:
+                result = self.visit(branch.children[0], _merge(locations, fallthrough, retry))
+                exits = _merge(exits, result)
+                fallthrough = result if branch.kind == ';&' else []
+                if branch.kind == ';;&': retry = _merge(retry, result)
+            return exits
+        elif node.kind == 'choice':
+            return _merge(*(self.visit(child, locations) for child in node.children))
+        elif node.kind == 'and':
+            return self.visit(node.children[1], self.visit(node.children[0], locations))
+        elif node.kind == 'or':
+            first = self.visit(node.children[0], locations)
+            return _merge(first, self.visit(node.children[1], _merge(locations, first)))
+        elif node.kind == 'loop':
+            header = self.visit(node.children[0], locations)
+            return _merge(locations, header, self.visit(node.children[1], header))
+        elif node.kind == 'sequence':
+            for child in node.children: locations = self.visit(child, locations)
+        return locations
+
+
+def _script(text, cwd, script, interpreter, depth=0, previous=None):
+    if depth > 16: return ['unparsed_script']
+    inspection = Inspection(script, interpreter, depth)
+    try:
+        inspection.visit(parse_shell(text), [(cwd, previous)])
+    except (ShellSyntaxError, RecursionError):
+        inspection.kinds.append('unparsed_script')
+    return inspection.kinds
 
 
 def scan_exec_events(events, mission_state_path, interpreter_path, cwd):
@@ -201,10 +224,10 @@ def scan_exec_events(events, mission_state_path, interpreter_path, cwd):
     detections = []
     for index, event in enumerate(events):
         command = event.get('command') if isinstance(event, dict) else None
-        event_cwd = (event.get('cwd') if event.get('cwd') is not None else cwd) if isinstance(event, dict) else cwd
-        event_cwd = event_cwd if isinstance(event_cwd, str) and event_cwd.startswith('/') else None
-        if isinstance(command, list) and command and all(isinstance(v, str) for v in command):
-            kinds, _ = _command(command, event_cwd, mission_state_path, interpreter_path, 0)
+        event_cwd = event.get('cwd') if isinstance(event, dict) else None
+        event_cwd = cwd if event_cwd is None else event_cwd if isinstance(event_cwd, str) and event_cwd.startswith('/') else None
+        if isinstance(command, list) and all(isinstance(v, str) for v in command):
+            kinds = _command(command, event_cwd, mission_state_path, interpreter_path, 0)
         else:
             kinds = _script(command, event_cwd, mission_state_path, interpreter_path)
         detections.extend({'event_index': index, 'kind': kind} for kind in sorted(set(kinds)))

@@ -71,7 +71,7 @@ def _check_record(record, planned_arms, expected_arm=None):
     A passing check is eligibility only, never a quality success. I1 owns the
     all-assignment classification and accounting of eligible candidates.
     """
-    reasons, unobserved = [], []
+    reasons, unobserved, scan_error = [], [], None
     manifest = record.get('manifest') or {}
     candidates = [name for name, spec in planned_arms.items()
                   if record.get('arm') == ('codex_native_goal' if name == 'native_goal' else 'mission')
@@ -86,6 +86,8 @@ def _check_record(record, planned_arms, expected_arm=None):
             'execution_config_mismatch' if arm == 'native_goal' else 'evaluated_session_unverifiable'])
     mission = arm != 'native_goal'
     verified = arm == 'mission_verified_complex'
+    scan_error = record.get('exec_scan_error')
+    if mission and not verified and scan_error: unobserved.append('exec_event_stream')
     conditions = manifest.get('conditions') or {}
     required = ('host', 'arm', 'model_id', 'effort', 'permissions', 'timeout_seconds', 'max_turns', 'token_budget', 'max_budget_usd')
     observed = record.get('observed_config') or {}
@@ -108,8 +110,10 @@ def _check_record(record, planned_arms, expected_arm=None):
                 scan = scan_exec_events(record['exec_events'], record.get('mission_state_path'), record.get('interpreter_path'), record.get('workspace', '/'))
                 if scan:
                     reasons.append('evaluated_session_tampered')
-            except Exception:
+            except Exception as exc:
+                scan_error = type(exc).__name__
                 if verified: reasons.append('evaluated_session_unverifiable')
+                else: unobserved.append('exec_event_stream')
         elif verified:
             reasons.append('evaluated_session_unverifiable')
         else:
@@ -146,7 +150,9 @@ def _check_record(record, planned_arms, expected_arm=None):
             reasons.append('execution_config_mismatch')
     elif record.get('budget_policy') is not None:
         reasons.append('execution_config_mismatch')
-    return dict(matches=not reasons, planned_arm=arm, classification='non_quality' if reasons else None, reasons=sorted(set(reasons)), unobserved=unobserved)
+    result = dict(matches=not reasons, planned_arm=arm, classification='non_quality' if reasons else None, reasons=sorted(set(reasons)), unobserved=sorted(set(unobserved)))
+    if scan_error: result['exec_scan_error'] = scan_error
+    return result
 
 
 def check_record(record, planned_arms, expected_arm=None):

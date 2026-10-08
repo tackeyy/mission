@@ -42,6 +42,7 @@ SAFE = [
     f'{SCRIPT} status | tee /tmp/out',
     f'{SCRIPT} context-manifest -- --out .mission-state/x',
     f'cd /work/.mission-state; {SCRIPT} context-manifest --out /tmp/out',
+    f'(cd /tmp); {SCRIPT} context-manifest --out x',
     'echo normal', 'bash -lc "printf ok"', 'source ./other.sh', '. ./other.sh',
 ]
 BAD = [
@@ -76,7 +77,6 @@ BAD = [
     f'{SCRIPT} status >.mission-state/x',
     f'cd /work/.mission-state; {SCRIPT} context-manifest --out x',
     f'cd "$DIR"; {SCRIPT} context-manifest --out x',
-    f'(cd /tmp); {SCRIPT} context-manifest --out x',
     f'{SCRIPT} context-manifest --out',
 ]
 
@@ -464,9 +464,25 @@ def test_unexpected_adapter_exception_keeps_post_run_record(tmp_path, monkeypatc
 
 
 @pytest.mark.parametrize('script', ['if true; then echo ok; fi', 'for name in x; do echo "$name"; done'])
-def test_unsupported_control_grammar_fails_closed(script):
+def test_read_only_control_grammar_is_scanned_without_rejection(script):
     from exec_event_scan import scan_exec_events
-    assert scan_exec_events([{'command': ['bash', '-lc', script]}], SCRIPT, PYTHON, '/work')
+    assert not scan_exec_events([{'command': ['bash', '-lc', script]}], SCRIPT, PYTHON, '/work')
+
+
+@pytest.mark.parametrize('damage', ['script', 'interpreter', 'exception', 'recorded'])
+def test_baseline_reports_unavailable_exec_scan(monkeypatch, damage):
+    record, arms = record_and_spec()
+    arms = {'mission_baseline': arms['mission_verified_complex']}
+    record['budget_policy'] = None
+    if damage == 'exception':
+        def fail(*_): raise ValueError('fixture')
+        monkeypatch.setattr(integrity(), 'scan_exec_events', fail)
+    elif damage == 'recorded': record['exec_scan_error'] = 'OSError'
+    else:
+        record['mission_state_path' if damage == 'script' else 'interpreter_path'] = None
+    result = integrity().check_record(record, arms)
+    assert result['matches'] and result['classification'] is None
+    assert 'exec_event_stream' in result['unobserved'] and result['exec_scan_error']
 
 
 @pytest.mark.parametrize('script,tampered', [(s, False) for s in SAFE] + [(s, True) for s in BAD])

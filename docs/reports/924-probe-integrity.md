@@ -2,7 +2,7 @@
 
 Issue: [probe の識別・構成照合 #924](https://github.com/tackeyy/mission/issues/924)
 
-状態: record 永続化の High 指摘を修正し、ローカル対象検証済み。追加修正は未コミット。コミット、PR、正式レビュー、独立 Checker、full suite、CI は親が行う。基点は `2749e1831f263193a7aaf4c31816203288a80554`、追加修正前の head は `a9603f4b6ae86e0bb27dc3e3df8cf22b26f57c03`。設計書は変更していない。
+状態: record 永続化の修正に続き、独立探索で指摘された shell 走査の字句・構文境界と baseline の走査不能の診断を修正し、ローカル対象検証済み。今回の追加修正は未コミット。コミット、PR、正式レビュー、独立 Checker、full suite、CI は親が行う。基点は `2749e1831f263193a7aaf4c31816203288a80554`、追加修正前の head は `654c761a2df301f8e14f5c47c67f678f7e04c05e`。設計書は変更していない。
 
 ## 変更と完了条件
 
@@ -18,7 +18,8 @@ Issue: [probe の識別・構成照合 #924](https://github.com/tackeyy/mission/
 | policy・session の構成照合 | template digest、`reactivate: forbidden`、起点 + T − m_post、init/post の session/mission ID・policy、空の履歴を検査。state 不在・不正・policy なし再初期化・置換は `non_quality` |
 | run ごとの deadline の差を許す | digest は deadline を除く正準 JSON。正しい deadline だけが異なる record 群は全件通過 |
 | exec stream の保存・走査 | modern item と legacy exec event の command/cwd を順序どおり保存。T・例外でも走査し、検出は `evaluated_session_tampered`。verified の stream 不在・走査不能は `evaluated_session_unverifiable` |
-| scanner の除外・再帰・fail-closed | 記録済み絶対 argv だけを除外。閉じた command/output option の組、省略形・`=`・`--`、cwd/CD、連結、subshell、command substitution、here-doc、eval、nested shell、関数を検証。不明な構文は検出 |
+| scanner の除外・再帰・fail-closed | `shell_syntax.py` が quote・語・代入・置換・here-doc の境界を保持し、複合文を単純 command へ分解。記録済み絶対 argv だけを除外。fd 複製/閉鎖は file と区別。8 shell、case の継続、cwd の scope/前の cwd、case-insensitive/glob/brace と未知 write destination を検証。不明な構文は検出 |
+| baseline の走査不能を記録 | identity 欠落・scanner 例外・既存の `exec_scan_error` は診断と `unobserved: exec_event_stream` に保持。verified の non_quality 判定は維持 |
 | home 配下の record 永続化 | `record_paths.write_probe_record` が home/workspace/package/interpreter の prefix を固定の絶対 placeholder に置換。同じ map を path、command、cwd、入れ子と key に適用し、raw と保存予定 bytes の全走査結果を比較。秘匿ガードは変更しない |
 | 保存不能な私有 trace でも record を残す | 未知の私有 path、alias 衝突、走査差は安全に秘匿し、assignment/manifest を保持。Mission は `non_quality / evaluated_session_unverifiable`、Goal は `non_quality / execution_config_mismatch`。消した stream は null にし、baseline/Goal も checker が拒否 |
 
@@ -33,33 +34,35 @@ Issue: [probe の識別・構成照合 #924](https://github.com/tackeyy/mission/
 
 ## 検証とテストの検出価値
 
-- 新規 `test_issue924_probe_integrity.py`: 228 件。既存 probe の 44 件と合わせて 272 件通過（8.37 秒）。fixture/fake とローカル state CLI のみ。実 provider・smoke・pilot は実行していない。
-- 関連ガード 99 件通過（19.52 秒）: wrapper/plugin 同期、artifact hygiene、neutral vocabulary、thin-adapter、persistence/kernel の import 境界。
-- reviewed lines は未追跡の新規ファイルを含めて 1,227 行（1,400 未満）。`pr_size.py --base origin/main` は commit 間の 995 行を表示するため、追加修正は working tree の numstat と未追跡ファイルの行数を加えて実測した（生成物除外 0）。
+- 対象 425 件通過（3.58 秒）: `test_issue924_probe_integrity.py` 232 件、`test_issue924_shell_scan.py` 149 件、既存 probe 44 件。fixture/fake とローカル state CLI のみ。実 provider・smoke・pilot は実行していない。
+- 関連ガード 99 件通過（26.82 秒）: wrapper/plugin 同期、artifact hygiene、neutral vocabulary、thin-adapter、persistence/kernel の import 境界。
+- reviewed area は未追跡の新規ファイルを含めて約 1,710 行（1,400 超）。`git diff origin/main --stat` と working tree の numstat に未追跡ファイルの行数を加えて測定（生成物除外 0）。commit 間だけを数える `pr_size.py --head HEAD` は今回の未コミット修正を含まない。分割案は末尾。
 - thin-adapter ratchet と `git diff --check` は通過。現時点の ratchet 出力は `base=current-only`（CI の PR base 比較ではない）。
-- 独立入力探索: scanner 49 件 + policy/record 7 件を実測。malformed record が例外になる反例を Red にして修正。正式なレビュー accepted の代替にはしていない。
-- 永続化の追加 Red: 固定した匿名 home 配下の interpreter/workspace/package path で main の 3 件が元の record を失うことを再現。正常/拒否の正規化 62 件、未知 trace の保存 20 件、既存 writer の秘匿による走査差 1 件、baseline/Goal の拒否 2 件で保護。独立 writer matrix 61 件も全件通過。未引用の空白 path 等で走査差が出た 10 件は、検出結果を変えて保存せず non_quality に落とすことを確認した。
+- 前回の独立入力探索: scanner 49 件 + policy/record 7 件を実測。malformed record が例外になる反例を Red にして修正。正式なレビュー accepted の代替にはしていない。
+- 前回の永続化の追加 Red: 固定した匿名 home 配下の interpreter/workspace/package path で main の 3 件が元の record を失うことを再現。正常/拒否の正規化 62 件、未知 trace の保存 20 件、既存 writer の秘匿による走査差 1 件、baseline/Goal の拒否 2 件で保護。独立 writer matrix 61 件も全件通過。未引用の空白 path 等で走査差が出た 10 件は、検出結果を変えて保存せず non_quality に落とすことを確認した。
 - 既存 #882 テストは Goal 自体の忠実度・候補保持を守る。今回の追加は「timeout を EOF と混同する」「例外で stream が消える」「worker の再初期化・session 置換を見逃す」「読み取り argv の除外が後続 command の書き込みを隠す」不具合を検出する。重複する Goal テストは追加していない。既存 3 fake の signature だけ新しい hook 引数に合わせた。
+- 今回の shell 修正は最初の Red で 64 件失敗を確認してから実装。fd・quote・複合文・代入・here-doc・shell argv・cwd scope・case/glob/変数を同じ entry point の正常/拒否 table で守る。独立探索 t1〜t4 の 375 入力を最終 source で再実行。旧期待との差 9 件は一般 command の state 読み取り 3 件（設計では検出）、明示的な対象外の script file 4 件と path 結合 1 件、下記の非 shell 相対 literal 1 件。独立確認は正式な accepted の代替にしていない。
 - 多数の拒否入力は同じ scanner entry point の parameter table に集約。実 process を使う追加は v5 reader の 2 ケースのみで、初期状態と reactivate 後の異なる履歴を守る。full suite は実行していない。
 
 ## 残作業・制約
 
 - F2c の `init --budget-policy` は未実装なので、有効化・init の実結線・kernel の強制は加えていない。I3 が policy 生成、init、読み戻し、継続入力文面を結線する。init の環境から優先する session ID 変数を除くことも I3 の責務。app-server の側は本変更で除く。
 - CLI の G の `outcome` / `fidelity` の語彙と判断は維持。新しい record checker を G の勝敗へ結線していない。I1 がこの checker の結果を使う。
-- scanner は shell の完全な interpreter ではない。未対応の制御構文を検出し、source/alias の展開は追わない。難読化・既に起動した process 内部の書き込みという凍結済みの限界も維持。
+- scanner は shell の完全な interpreter ではない。未対応の構文を検出し、script file・source/alias の展開は追わない。難読化・process 内部の操作という凍結済みの限界も維持。具体例: `cd .mission-state && python3 -c "open('a','w')"` は検出しない。非 shell 本文は `.mission-state` を含む path の literal のみを走査するという §2.1 の範囲を保ち、Python 等の内部 cwd・API の解釈は追加していない。
 - 実 host の event の完全性と全文は未確認。これは fixture 検証で保証できないため、承認された後続 smoke の対象。
 - 未知 path を秘匿すると正確な session 操作の再走査を保証できないため、`evaluated_session_unverifiable` を選んだ。package は既に準備済みなので `package_prepare_failed` にはしない。消した stream を空の観測と扱わず、保存失敗の情報を checker が全 arm で拒否する。ディスク自体が書けない場合の record 保存は保証できない。
 - in-flight 照合と代替の open PR 一覧は GitHub 接続エラー（両方非 0）。指定 worktree・branch・基点・clean な開始状態はローカルで確認した。GitHub 書き込みはしていない。
 
-## コミット分割案
+## コミット / PR 分割案
 
-相互に依存する evidence API と照合を 1 論理変更としてコミットする。
+今回の追加修正のコミットは、次の 1 論理単位にする。
 
-- `feat: probe の識別情報と評価 session の構成照合を保持する`
-- 対象: `benchmarks/mission-vs-goal/{run_native_goal_probe,evaluation_integrity,exec_event_scan}.py`、`skills/mission/tests/{test_issue924_probe_integrity,test_issue882_native_goal_benchmark}.py`、この引き継ぎ。
-- I2a の 1 PR とする。scanner と probe を別 PR にすると、新しい import と evidence 契約が未充足になる。600 行を超える説明はこの不可分の契約と対応テストを理由にする。
+- `fix: exec event の shell 構文境界と走査不能の診断を保つ`
+- 対象: `benchmarks/mission-vs-goal/{shell_syntax,exec_event_scan,evaluation_integrity}.py`、`skills/mission/tests/{test_issue924_shell_scan,test_issue924_probe_integrity}.py`、この引き継ぎ。
 
-既存コミットへの追加修正は 1 論理単位にする。
+PR 全体は 1,400 行を超えるため、親 CC に以下の分割を推奨する。凍結した設計の判定規則・値は変更しない。1 子 Issue = 1 PR を維持するため、子 Issue の作業単位を分ける判断と GitHub 操作は親が行う。
 
-- `fix: 私有 path を正規化して probe record の消失を防ぐ`
-- 対象: `benchmarks/mission-vs-goal/{record_paths,native_goal_benchmark,run_native_goal_probe,evaluation_integrity}.py`、`skills/mission/tests/test_issue924_probe_integrity.py`、この引き継ぎ。
+1. 先行: shell lexer/parser、exec scanner と走査の table tests（約 700 行）。既存の `scan_exec_events` 公開 signature を維持し、probe の変更へ依存させない。
+2. 後続: probe evidence、deadline/hooks、state reader、構成照合、record 正規化と関連 tests（約 1,000 行）。先行 scanner を取り込み、既存 entry point の結合 tests を後続に含める。
+
+既存 `test_issue924_probe_integrity.py` 内の scanner 単体 table は先行の test file へ移し、checker/probe の結合 cases は後続へ残す。移動による reviewed area は親の実際の分割後に再計測する。
