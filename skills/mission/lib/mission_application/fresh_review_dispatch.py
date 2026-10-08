@@ -15,7 +15,7 @@ from mission_application.verifier_policy import validate, VerifierPolicyError, S
 from mission_kernel.commands import BeginFreshReviewDispatch, CommitFreshReviewResult, RecordFreshReviewLaunch
 from mission_kernel.fresh_review import (
     FreshReviewError, canonical_digest, decode_projection, candidate_identity, request_document,
-    WithdrawnFreshReviewRecord,
+    WithdrawnFreshReviewRecord, record_operation_ids,
 )
 from mission_kernel.fresh_review_receipts import decode_terminal_receipt, receipt_document, TERMINAL_SCHEMA
 from mission_kernel.fresh_review_dispatch import validate_launch, reservation_id_for_operation, budget_class_for_fresh_review_dispatch
@@ -118,8 +118,11 @@ def run_fresh_review_dispatch_cli(args, services, host):
 
         reader = repo(':read', False)
         with reader.transaction():
-            record = _record(reader.load(), args.request)
+            snapshot = reader.load()
+            record = _record(snapshot, args.request)
         if args.fresh_review_command == 'reconcile':
+            if any(operation in record_operation_ids(item) for item in decode_projection(snapshot).requests if item != record):
+                raise FreshReviewError('fresh-review-operation-conflict')
             return _reconcile(record, args, operation, repo, root, services, host)
         if isinstance(record, WithdrawnFreshReviewRecord):
             raise FreshReviewError('fresh-review-request-withdrawn')
@@ -206,10 +209,12 @@ def run_fresh_review_dispatch_cli(args, services, host):
 def _reconcile(record, args, operation, repo, root, services, host):
     if isinstance(record, WithdrawnFreshReviewRecord):
         raise FreshReviewError('fresh-review-request-withdrawn')
-    if operation == record.operation_id:
+    if operation in (record.prepare_operation_id, record.operation_id):
         raise FreshReviewError('fresh-review-operation-conflict')
     if record.dispatch is None or record.dispatch.thaw()['adapter_id'] != args.adapter:
         raise FreshReviewError('fresh-review-adapter-pin-changed')
+    if record.status == 'running' and record.launch_operation_id == operation:
+        return json.dumps({'ok': True, 'record': _wire(record)})
     if record.status in ('blocked', 'abandoned-unknown'):
         if record.result.thaw()['commit_operation_id'] != operation:
             raise FreshReviewError('fresh-review-operation-conflict')
@@ -257,7 +262,7 @@ def _reconcile(record, args, operation, repo, root, services, host):
                 record_provider_receipt([record.dispatch.thaw()], _saga_intent(record),
                                         {'kind': 'provider', 'identity': launch.child_identity})
                 record = _execute(repo(':running'), lambda state: RecordFreshReviewLaunch(
-                    args.request, record.dispatch.thaw()['operation_id'], state['fencing_epoch'], freeze_json_value(raw),
+                    args.request, operation, state['fencing_epoch'], freeze_json_value(raw),
                     _candidate(state, root, record.request, services)))
             else:
                 reader = repo(':candidate', False)

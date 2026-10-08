@@ -101,8 +101,22 @@ def test_crash_reconcile_after_lease_takeover_never_launches_twice(reviewer, run
     running = invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one', MISSION_LEASE_ID='takeover-lease')
     assert running['status'] == 'running'
     assert running['launch']['fencing_epoch'] == unknown['dispatch']['fencing_epoch']
+    assert running['launch']['operation_id'] == unknown['dispatch']['operation_id']
+    assert running['launch_operation_id'] == 'reconcile-one'
+    assert json.loads(run_cli('get', cwd=root).stdout)['fencing_epoch'] > unknown['dispatch']['fencing_epoch']
     assert json.loads(journal.read_text())['count'] == 1
     assert running['result'] is None  # D2c does not import collected output.
+    # A saved launch stage is replayed even when its child is now unobservable
+    # and the deadline has elapsed; replay cannot consume the request.
+    from .test_issue879_completion_cli import _public_bytes
+    journal.unlink()
+    journal.with_suffix('.recover').unlink()
+    _expire_dispatch(reviewer)
+    running['dispatch']['deadline_at'] = '2000-01-01T00:00:00.000000Z'
+    before = _public_bytes(root)
+    assert invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one',
+                  MISSION_LEASE_ID='takeover-lease') == running
+    assert _public_bytes(root) == before and not journal.with_suffix('.recover').exists()
 
 
 def test_unknown_without_host_output_is_abandoned_with_split_epochs(reviewer, run_cli):
@@ -596,3 +610,25 @@ def test_reconcile_capacity_refuses_before_adapter_recover(reviewer, run_cli):
     _reject_unchanged(run_cli, root, ['fresh-review', 'reconcile', '--request', request['request_id'], '--adapter', 'neutral'],
                       'state-capacity-exhausted', env={**env, 'MISSION_OPERATION_ID': 'reconcile-one'})
     assert not journal.with_suffix('.recover').exists()
+
+
+@pytest.mark.parametrize('status', ['running', 'dispatch-unknown'])
+def test_reconcile_rejects_another_requests_prepare_and_launch_operations(reviewer, run_cli, status):
+    root, request, env, journal = reviewer
+    invoke(run_cli, reviewer, **({'FIXTURE_REVIEW_MODE': 'crash'} if status == 'dispatch-unknown' else {}))
+    original_child = journal.read_text()
+    prepared = run_cli('fresh-review', 'prepare', '--perspective', 'counterexamples',
+        '--adapter-registration-digest', request['adapter_registration_digest'], cwd=root,
+        env_extra={**env, 'MISSION_OPERATION_ID': 'prepare-other'})
+    assert prepared.returncode == 0, prepared.stdout + prepared.stderr
+    other = (root, json.loads(prepared.stdout)['request'], env, journal)
+    invoke(run_cli, other, MISSION_OPERATION_ID='dispatch-other', FIXTURE_REVIEW_MODE='crash')
+    other_running = invoke(run_cli, other, 'reconcile', MISSION_OPERATION_ID='launch-other')
+    assert other_running['launch_operation_id'] == 'launch-other'
+    journal.write_text(original_child)
+    journal.with_suffix('.recover').unlink()
+    for operation in ('prepare-one', 'prepare-other', 'launch-other'):
+        _reject_unchanged(run_cli, root, ['fresh-review', 'reconcile', '--request', request['request_id'],
+                          '--adapter', 'neutral'], 'fresh-review-operation-conflict',
+                          env={**env, 'MISSION_OPERATION_ID': operation})
+        assert not journal.with_suffix('.recover').exists()
