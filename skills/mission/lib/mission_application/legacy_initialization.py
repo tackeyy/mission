@@ -33,6 +33,7 @@ class LegacyV4InitializationRequest:
     new_mission: bool
     new_mission_assumptions_path: object
     lock_state: bool
+    preflight_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -98,6 +99,15 @@ class LegacyV4InitializationServices:
     json_decode_error: object
     fenced_commit_error: object
     permission_halt_rejected: object
+    capacity_writer: object = None
+    admission_writer: object = None
+    preflight_writer: object = None
+    genesis_lock: object = None
+
+    @property
+    def prepare_write(self):
+        # Injected two-argument writers keep their existing callback contract.
+        return self.admission_writer or (self.capacity_writer if self.write_state is self.capacity_writer else None)
 
 
 def initialize_legacy_v4(request, services):
@@ -112,7 +122,8 @@ def initialize_legacy_v4(request, services):
         mission_state_root = services.ensure_regular_directory_path(
             cwd, (".mission-state",)
         )
-        mission_state_root.mkdir(parents=True, exist_ok=True)
+        if services.preflight_writer is None:
+            mission_state_root.mkdir(parents=True, exist_ok=True)
     except (OSError, services.worktree_archive_error):
         services.exit_init_write_failure(cwd)
     planned_files = services.parse_files_arg(request.files)
@@ -319,13 +330,18 @@ def initialize_legacy_v4(request, services):
     )
     session_directory = services.session_dir(cwd)
     state_target = services.session_file(cwd, sid)
+    if services.preflight_writer is not None:
+        services.preflight_writer(state_target, initial)
+    if request.preflight_only:
+        return
     try:
+        mission_state_root.mkdir(parents=True, exist_ok=True)
         services.ensure_regular_directory_path(cwd, (".mission-state", "sessions"))
         session_directory.mkdir(parents=True, exist_ok=True)
     except (OSError, services.worktree_archive_error):
         services.exit_init_write_failure(cwd, state_target)
     aggregate = services.aggregate_file(cwd)
-    init_lock = (
+    init_lock = services.genesis_lock() if services.genesis_lock is not None else (
         services.guarded_init_state_lock(cwd, state_target)
         if request.lock_state
         else services.nullcontext()
@@ -337,6 +353,7 @@ def initialize_legacy_v4(request, services):
                 existing_aggregate = services.read_legacy_json_file(aggregate)
             except services.json_decode_error:
                 existing_aggregate = {}
+        archive_writes = []
         if state_target.exists():
             existing_mission_id = ""
             try:
@@ -368,7 +385,6 @@ def initialize_legacy_v4(request, services):
                         archive_directory = services.ensure_regular_directory_path(
                             cwd, (".mission-state", "archive")
                         )
-                        archive_directory.mkdir(parents=True, exist_ok=True)
                     except (OSError, services.worktree_archive_error) as error:
                         services.printer(
                             f"ERROR: archive destination is unsafe: {error}",
@@ -384,9 +400,7 @@ def initialize_legacy_v4(request, services):
                         f"state-{sid}-{old_mission_id_prefix}.json"
                     )
                     try:
-                        services.atomic_write_bytes(
-                            archive_destination, state_target.read_bytes()
-                        )
+                        archive_writes.append((archive_destination, state_target.read_bytes()))
                     except OSError:
                         services.exit_init_evidence_write_failure("archive")
                     old_assumptions_path = existing_data.get("assumptions_path")
@@ -408,9 +422,7 @@ def initialize_legacy_v4(request, services):
                                 f"state-{sid}-{old_mission_id_prefix}-assumptions.md"
                             )
                             try:
-                                services.atomic_write_bytes(
-                                    assumptions_archive, old_assumptions.read_bytes()
-                                )
+                                archive_writes.append((assumptions_archive, old_assumptions.read_bytes()))
                             except OSError:
                                 services.exit_init_evidence_write_failure("archive")
                     initial["assumptions_path"] = (
@@ -492,18 +504,6 @@ def initialize_legacy_v4(request, services):
                     f"履歴消失の可能性: {error}",
                     file=services.stderr,
                 )
-        assumptions_file = cwd / initial["assumptions_path"]
-        try:
-            if assumptions_file.exists():
-                services.validated_assumptions_probe_path(
-                    cwd, str(initial["assumptions_path"])
-                )
-            else:
-                services.atomic_write_text(
-                    assumptions_file, "# Assumption Registry\n"
-                )
-        except (OSError, ValueError):
-            services.exit_init_evidence_write_failure("assumptions")
         if initial["review_group_id"]:
             prior_generations = []
             for state_path in services.iter_state_files(cwd):
@@ -523,8 +523,33 @@ def initialize_legacy_v4(request, services):
                 ):
                     prior_generations.append(generation)
             initial["review_generation"] = max(prior_generations, default=0) + 1
-        services.backup_state(state_target)
-        services.write_state(state_target, initial)
+        publish = services.prepare_write(
+            state_target, initial, prepare_only=True, replacement=True,
+            before_publish=services.backup_state,
+        ) if services.prepare_write else None
+        for destination, content in archive_writes:
+            try:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                services.atomic_write_bytes(destination, content)
+            except OSError:
+                services.exit_init_evidence_write_failure("archive")
+        assumptions_file = cwd / initial["assumptions_path"]
+        try:
+            if assumptions_file.exists():
+                services.validated_assumptions_probe_path(
+                    cwd, str(initial["assumptions_path"])
+                )
+            else:
+                services.atomic_write_text(
+                    assumptions_file, "# Assumption Registry\n"
+                )
+        except (OSError, ValueError):
+            services.exit_init_evidence_write_failure("assumptions")
+        if publish is not None:
+            publish()
+        else:
+            services.backup_state(state_target)
+            services.write_state(state_target, initial)
         existing_aggregate.setdefault("active_sessions", [])
         if sid not in existing_aggregate["active_sessions"]:
             existing_aggregate["active_sessions"].append(sid)
@@ -561,3 +586,19 @@ def initialize_legacy_v4(request, services):
 
 
 run_initialize_legacy_v4 = initialize_legacy_v4
+
+
+def initialize_v5_session(arguments, cwd, *, state_lock,
+                          state_root, initialize_legacy, initialize_state):
+    initialize_legacy(arguments,
+        write_state=lambda path, state: initialize_state(arguments, path, state),
+        lock_state=False, genesis_lock=lambda: state_lock(state_root / '.init.lock'),
+        preflight_writer=lambda path, state: initialize_state(arguments, path, state, preflight_only=True,
+            capacity_base=getattr(arguments, '_new_mission_capacity_base', None)),
+        admission_writer=lambda path, state, **_options: initialize_state(arguments, path, state, prepare_only=True))
+
+
+def preflight_v5_session(arguments, cwd, base_bytes, *, initialize_legacy, initialize_state):
+    initialize_legacy(arguments, write_state=initialize_state, lock_state=False, preflight_only=True,
+        preflight_writer=lambda path, state: initialize_state(arguments, path, state,
+            preflight_only=True, capacity_base=base_bytes))

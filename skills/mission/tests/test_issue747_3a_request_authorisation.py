@@ -164,9 +164,9 @@ def test_the_repository_passes_its_own_root_name_to_the_validation():
         and node.func.id == "validate_execution_request"
     ]
     assert calls, "the repository stopped validating its requests"
-    # The count too: dropping one of the four call sites leaves the rest
-    # correct, and a rule that only checks the survivors would not notice.
-    assert len(calls) == 4, len(calls)
+    # The fifth site is the side-effect-free initialization preflight.
+    # Dropping any site leaves the survivors correct but that path unguarded.
+    assert len(calls) == 5, len(calls)
     for call in calls:
         names = {
             keyword.arg: ast.unparse(keyword.value) for keyword in call.keywords

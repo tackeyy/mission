@@ -87,11 +87,13 @@ class V5MissionReinitializer:
         root: Path,
         state_path: Path,
         initialize_new_session: Callable[[object, Path], None],
+        preflight_new_session=None,
     ) -> None:
         self.root = Path(root)
         self.state_path = Path(state_path)
         self.session_id = self.state_path.stem
         self._initialize_new_session = initialize_new_session
+        self._preflight_new_session = preflight_new_session
         self._reservation_lock_fd = None
 
     def initialize(self, arguments: object) -> None:
@@ -372,6 +374,17 @@ class V5MissionReinitializer:
         assumptions_relative = reinitialized_assumptions_path(
             self.session_id, current.head_digest
         )
+        if self._preflight_new_session is not None:
+            bindings = {"_new_mission_expected_head_digest": current.head_digest,
+                        "_new_mission_assumptions_path": assumptions_relative}
+            previous = {key: getattr(arguments, key, None) for key in bindings}
+            try:
+                for key, value in bindings.items():
+                    setattr(arguments, key, value)
+                self._preflight_new_session(arguments, self.root, current.snapshot.state_bytes)
+            finally:
+                for key, value in previous.items():
+                    setattr(arguments, key, value)
         assumptions_target, assumptions_identity = self._reserve_new_assumptions(
             assumptions_relative, current.head_digest
         )
@@ -407,6 +420,7 @@ class V5MissionReinitializer:
             )
             coordinator.recover()
             intent = coordinator.prepare("add")
+            setattr(arguments, "_new_mission_capacity_base", current.snapshot.state_bytes)
             setattr(arguments, "_new_mission_expected_head_digest", current.head_digest)
             setattr(
                 arguments,
@@ -442,6 +456,7 @@ class V5MissionReinitializer:
                 delattr(arguments, "_new_mission_authority_committed")
                 delattr(arguments, "_new_mission_assumptions_path")
                 delattr(arguments, "_new_mission_expected_head_digest")
+                delattr(arguments, "_new_mission_capacity_base")
         except BaseException:
             if not new_state_initialized:
                 self._cleanup_reserved_assumptions(

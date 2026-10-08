@@ -115,6 +115,7 @@ def test_legacy_reselection_is_explicit_and_drops_unsafe_raw_records(run_cli, tm
     assert response.returncode == 0
     assert migrated["planning_policy_version"] == 1 and migrated["specialists_candidates"] == []
     assert "auto_use" not in state_file.read_text()
+    assert not state_file.with_suffix(".json.bak").exists()
 
 
 @pytest.mark.parametrize(("required", "expected"), [(False, "run-planner"), (True, "halt-required-planning-provider")])

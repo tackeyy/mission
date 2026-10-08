@@ -68,7 +68,7 @@ def test_advance_artifact_handoff_state_is_atomic_on_write_failure(
     monkeypatch.setattr(MISSION_STATE, "StateLock", lambda _path: contextlib.nullcontext())
     monkeypatch.setattr(MISSION_STATE, "backup_state", lambda _path: None)
 
-    def fail_publish(_path, _data):
+    def fail_publish(_path, _data, **_kwargs):
         raise OSError("simulated atomic publish failure")
 
     monkeypatch.setattr(MISSION_STATE, "atomic_write_json", fail_publish)
