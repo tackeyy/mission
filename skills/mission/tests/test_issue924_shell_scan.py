@@ -252,7 +252,7 @@ RULE_CASES = [
     *[(f'{wrapper} {MS} status --input .mission-state/x', 'state_path_command')
       for wrapper in ('env', 'command', 'timeout 5', 'nice -n 5', 'exec', 'xargs', 'uv run')],
     (f'X=1 {MS} status --input .mission-state/x', None),
-    (f'{MS} "$READ_COMMAND" --input .mission-state/x', None),
+    (f'{MS} "$READ_COMMAND" --input .mission-state/x', 'unparsed_script'),
     (f'{PY} {MS} status --input .mission-state/x', None),
     *[(f'{wrapper} {MS} reactivate', 'reactivate_command') for wrapper in
       ('nice -n 5', 'xargs', 'exec -a foo', 'timeout -s KILL 5', f'{PY} -X dev', f'{PY} -W ignore', 'uv run')],
@@ -463,3 +463,74 @@ def test_unknown_write_destinations_fail_closed_without_rejecting_data(script, k
     command = ['/bin/zsh', '-lc', script] if nested else script
     found = scan_exec_events([{'command': command}], MS, PY, '/work')
     assert [d['kind'] for d in found] == ([] if kind is None else [kind])
+
+
+def assert_kinds(script, kinds):
+    from exec_event_scan import scan_exec_events
+    assert sorted({d['kind'] for d in scan_exec_events([{'command': script}], MS, PY, '/work')}) == sorted(kinds)
+
+
+@pytest.mark.parametrize('script,kind', [
+    ('cp .mission-state/a=b /tmp/a', 'state_path_command'), ('echo hi >.mission-state/a=b', 'state_redirection'),
+    (f'{MS} context-manifest --out .mission-state/a=b', 'state_output_option'),
+    (f'{MS} context-manifest --out=.mission-state/a=b', 'state_output_option'),
+    ('dd of=.mission-state/a=b', 'state_path_command'), ('cp /tmp/a=b /tmp/c', None)])
+def test_equals_in_paths_and_key_values_preserve_both_sides(script, kind):
+    assert_kinds(script, [kind] if kind else [])
+
+
+@pytest.mark.parametrize('operator', [':-', ':=', '-', '=', '+', ':+'])
+def test_parameter_expansion_retains_literal_operand(operator):
+    assert_kinds(f'cp x "${{D{operator}.mission-state}}/a"', ['state_path_command'])
+    assert_kinds(f'cp x "${{D{operator}/tmp}}/a"', [])
+
+
+@pytest.mark.parametrize('script,kind', [
+    *[(f'bash {flag} x -c "cp x .mission-state/a"', 'state_path_command') for flag in ('--rcfile', '--init-file')],
+    ('bash --unknown x -c "echo ok"', 'unparsed_script'),
+    ('ps aux | grep bash', None), ('echo $SHELL | grep zsh', None), ('ls | grep -v sh', None),
+    ('printf hi | env sh', 'unparsed_script'), ('nice -n 5 bash -c "echo ok"', None),
+    ("env -S 'bash -c \"cp x .mission-state/a\"'", 'state_path_command'),
+    (f"env -S '{MS} context-manifest --out .mission-state/x'", 'state_path_command'),
+    (f"env --split-string='{MS} status --input .mission-state/x'", 'state_path_command'),
+    (f"env -S '{MS} status'", None),
+    ('env -S "$X"', 'unparsed_script'), ('env --split-string="$X"', 'unparsed_script'),
+    ('command bash -c "echo ok"', None),
+    ('echo x | grep eval', None), ('env $CMD x', 'unparsed_script')])
+def test_shell_scripts_only_at_execution_positions(script, kind):
+    assert_kinds(script, [kind] if kind else [])
+
+
+@pytest.mark.parametrize('argument', ['"$(echo reactivate)"', '$R', '${R}'])
+def test_unknown_mission_subcommand_is_unparsed(argument):
+    assert_kinds(f'{MS} {argument}', ['unparsed_script'])
+    assert_kinds(f'R=status; {MS} $R', [])
+
+
+@pytest.mark.parametrize('script,kinds', [
+    ('eval "cd .mission-state"; cp x a', ['state_path_command']),
+    ('eval "cd .mission-state"; echo x >a', ['state_path_command', 'state_redirection']),
+    (f'eval "cd .mission-state"; {MS} context-manifest --out a', ['state_output_option']),
+    ('eval "echo ok"; echo x >a', []),
+    (f'f() {{ eval "echo ok"; }}; f; {MS} context-manifest --out a', []),
+    ('source ./other.sh; echo x >a', ['state_redirection']),
+    ('source ./other.sh; cp x a', []),
+    ('cd "$REPO" && make test', []), ('cd $TMPDIR && ls', []),
+    ('tmp=$(mktemp -d); cd $tmp; ls', []), ('cd - && ls', []),
+    ('cd "$REPO"; cat .mission-state/a=b', ['state_path_command']),
+    ('cd "$REPO"; echo x >a', ['state_redirection'])])
+def test_unknown_cwd_only_rejects_relative_write_destinations(script, kinds):
+    assert_kinds(script, kinds)
+
+
+@pytest.mark.parametrize('size,depth', [(64, 4), (10, 6)])
+def test_nested_loop_visit_budget_finishes_within_one_second(size, depth):
+    import json
+    import subprocess
+    script = 'echo ok'
+    for level in range(depth):
+        script = f'for v{level} in {" ".join(map(str, range(size)))}; do {script}; done'
+    # A timeout kills the unbounded implementation instead of consuming the host.
+    code = 'import sys,json; sys.path.insert(0,sys.argv[1]); from exec_event_scan import scan_exec_events; print(json.dumps(scan_exec_events([{ "command": sys.argv[2]}],sys.argv[3],sys.argv[4],"/work")))'
+    result = subprocess.run([sys.executable, '-c', code, str(BENCH), script, MS, PY], capture_output=True, text=True, timeout=1, check=True)
+    assert json.loads(result.stdout) == [{'event_index': 0, 'kind': 'unparsed_script'}]

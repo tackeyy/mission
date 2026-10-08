@@ -8,7 +8,8 @@ These detections count against the hypothesis. Unknown argument expansion is
 inspected by its literal pieces; unknown write destinations fail closed.
 Only definite simple bindings are substituted.
 Literal/glob loop paths are inspected; uncertain control-flow bindings are not inferred. Expanded command names,
-expansion-dependent eval and scripts that cannot be parsed fail closed.
+Unknown Mission subcommands, expansion-dependent eval and unsupported scripts
+fail closed; a shared visit budget bounds recursive inspection.
 """
 from __future__ import annotations
 
@@ -40,8 +41,6 @@ def _component(value, depth=0):
 
 
 def _mentions_state(value):
-    key, equal, destination = value.partition('=')
-    if equal and (key.startswith('-') or ASSIGNMENT.match(value)): value = destination
     return any(_component(part) for part in value.split('/'))
 
 
@@ -64,6 +63,9 @@ def _resolve(word, variables):
         parts.append(word.value[end:start])
         value = variables.get(name) if name is not None else None
         unknown |= value is None
+        if value is None and word.value[start:stop].startswith('${'):
+            rhs = re.sub(r'^[A-Za-z_][A-Za-z_0-9]*:?[-=+?]', '', word.value[start + 2:stop - 1], count=1)
+            value = ''.join(_resolve(t, variables).value for t in lex_shell(rhs))
         parts.append(value if value is not None else '')
         end = stop
     parts.append(word.value[end:])
@@ -72,12 +74,12 @@ def _resolve(word, variables):
 
 def _state_path(word, cwd, *, writing=False):
     word = _word(word)
-    value = word.value.partition('=')[2] if '=' in word.value else word.value
-    # Unknown write destinations fail closed; other words retain literal-only
-    # inspection. A missing expansion could resolve to an absolute path.
-    if word.expanded: return writing or _mentions_state(value)
-    if not value.startswith('/') and cwd is None: return True
-    return _mentions_state(os.path.normpath(value if value.startswith('/') else os.path.join(cwd, value)))
+    values = [word.value]
+    if ASSIGNMENT.match(word.value) or word.value.startswith('-') and '=' in word.value:
+        values.append(word.value.partition('=')[2])
+    if word.expanded: return writing or any(_mentions_state(v) for v in values)
+    if cwd is None: return any(_mentions_state(v) or writing and not v.startswith('/') for v in values)
+    return any(_mentions_state(os.path.normpath(v if v.startswith('/') else os.path.join(cwd, v))) for v in values)
 
 
 def _argv(values):
@@ -103,11 +105,17 @@ def _shell_script(words, piped=False):
         if value in {'-o', '-O', '+o', '+O'}:
             if index + 1 >= len(words): raise ShellSyntaxError('missing_shell_option_value')
             index += 2; continue
+        if value.partition('=')[0] in {'--rcfile', '--init-file'}:
+            index += 1 if '=' in value else 2
+            if index > len(words): raise ShellSyntaxError('missing_shell_option_value')
+            continue
         if value == '--': index += 1; continue
         if re.fullmatch(r'[-+][A-Za-z]+', value):
             seen = seen or (value.startswith('-') and 'c' in value[1:])
             index += 1; continue
         if value.startswith('--'):
+            if value not in {'--login', '--noprofile', '--norc', '--posix', '--restricted', '--verbose', '--help', '--version', '--noediting'} and (seen or any(re.fullmatch(r'-[A-Za-z]*c[A-Za-z]*', w.value) for w in words[index + 1:])):
+                raise ShellSyntaxError('unknown_shell_option')
             index += 1; continue
         if seen: return word
         return None  # A script file, outside literal inspection.
@@ -115,16 +123,45 @@ def _shell_script(words, piped=False):
     return None
 
 
+def _execution(words):
+    """Locate execution behind wrappers; never use this for Mission exclusion."""
+    valued = {'env': {'-u', '--unset', '-C', '--chdir'}, 'nice': {'-n', '--adjustment'},
+              'timeout': {'-s', '--signal', '-k', '--kill-after'}, 'exec': {'-a'},
+              'sudo': {'-u', '-g'}, 'xargs': {'-I', '-n', '-P', '-L'}}
+    while words and PurePosixPath(words[0].value).name in {*valued, 'command', 'uv'}:
+        name = PurePosixPath(words[0].value).name; words = words[1:]
+        while words and (words[0].value.startswith('-') or name == 'env' and ASSIGNMENT.match(words[0].value)):
+            flag = words[0].value
+            if name == 'env' and (flag in {'-S', '--split-string'} or flag.startswith('--split-string=')):
+                body = Word(flag.partition('=')[2], expanded=words[0].expanded) if '=' in flag else words[1] if len(words) > 1 else Word('', expanded=True)
+                if body.expanded: raise ShellSyntaxError('dynamic_wrapper')
+                words = lex_shell(body.value) + words[1 if '=' in flag else 2:]; continue
+            if flag == '--': words = words[1:]; break
+            words = words[2:] if flag in valued.get(name, set()) else words[1:]
+        if name == 'timeout' or name == 'uv' and words and words[0].value == 'run': words = words[1:]
+    return words
+
+
+def _has_cd(node):
+    words = _execution(_argv(node.words)) if node.kind == 'command' else []
+    if words and words[0].value in {'cd', 'source', '.'}: return True
+    if words and words[0].value == 'eval':
+        try: return any(w.expanded for w in words[1:]) or _has_cd(parse_shell(' '.join(w.value for w in words[1:])))
+        except (ShellSyntaxError, RecursionError): return True
+    return any(_has_cd(child) for child in node.children)
+
+
 def _has_expansion(text):
     try: return any(w.expanded or w.body_expanded for w in lex_shell(text))
     except (ShellSyntaxError, RecursionError): return True
 
 
-def _command(words, cwd, script, interpreter, depth, previous=None, piped=False, variables=None, environment=None):
+def _command(words, cwd, script, interpreter, depth, previous=None, piped=False, variables=None, environment=None, budget=None, cwd_changes=None):
     words = _argv(words)
     if not words: return []
     command_expanded = words[0].expanded
     words = [_resolve(w, variables or {}) for w in words]
+    execution = _execution(words)
     environment = variables if environment is None else environment
     argv = [w.value for w in words]; kinds = []
     # Inspect every position, including packed wrapper arguments such as env -S.
@@ -132,6 +169,12 @@ def _command(words, cwd, script, interpreter, depth, previous=None, piped=False,
     if argv[0] == 'reactivate' or any(PurePosixPath(atom).name == 'mission-state.py' and 'reactivate' in atoms[i + 1:] for i, atom in enumerate(atoms)):
         kinds.append('reactivate_command')
     if command_expanded: kinds.append('unparsed_script')
+    candidates = words + execution
+    for argv_words in (words, execution):
+        for i, word in enumerate(argv_words):
+            if PurePosixPath(word.value).name == 'mission-state.py':
+                sub = next((w for w in argv_words[i + 1:] if not w.value.startswith('-')), None)
+                if sub is not None and sub.expanded: kinds.append('unparsed_script')
     offset = 0 if command_expanded else _trusted(words, script, interpreter)
     if offset:
         args = words[offset:]
@@ -149,25 +192,27 @@ def _command(words, cwd, script, interpreter, depth, previous=None, piped=False,
                     if not target.expanded and (not target.value or target.value.startswith('--')): kinds.append('unparsed_script')
                     elif option == '--destination-root' or _state_path(target, cwd, writing=True): kinds.append('state_output_option')
         return kinds
-    if (cwd and _mentions_state(cwd)) or any(_state_path(w, cwd) for w in words): kinds.append('state_path_command')
+    if (cwd and _mentions_state(cwd)) or any(_state_path(w, cwd) for w in candidates): kinds.append('state_path_command')
     name = PurePosixPath(argv[0]).name
     if words[0].expanded or (name not in {'[', '[['} and any(c in argv[0] for c in '*?[')):
         kinds.append('unparsed_script')
-    for index, word in enumerate(words):
-        executable = PurePosixPath(word.value).name
-        if executable in SHELLS:
-            try: body = _shell_script(words[index:], piped)
-            except ShellSyntaxError:
-                kinds.append('unparsed_script'); continue
-            if body is not None:
-                if body.expanded:
-                    kinds.append('unparsed_script')
-                kinds.extend(_script(body.value, cwd, script, interpreter, depth + 1, previous, environment))
-        elif executable == 'eval':
-            body = words[index + 1:]; text = ' '.join(w.value for w in body)
-            if not body or any(w.expanded for w in body) or _has_expansion(text):
-                kinds.append('unparsed_script')
-            kinds.extend(_script(text, cwd, script, interpreter, depth + 1, previous, environment))
+    executable = PurePosixPath(execution[0].value).name if execution else ''
+    if execution and execution[0].expanded: kinds.append('unparsed_script')
+    if executable in SHELLS:
+        try: body = _shell_script(execution, piped)
+        except ShellSyntaxError: kinds.append('unparsed_script'); body = None
+        if body is not None:
+            if body.expanded: kinds.append('unparsed_script')
+            kinds.extend(_script(body.value, cwd, script, interpreter, depth + 1, previous, environment, budget))
+    elif executable == 'eval':
+        body = execution[1:]; text = ' '.join(w.value for w in body); ends = []
+        if not body or any(w.expanded for w in body) or _has_expansion(text): kinds.append('unparsed_script')
+        kinds.extend(_script(text, cwd, script, interpreter, depth + 1, previous, environment, budget, ends))
+        if cwd_changes is not None:
+            try: changes = any(w.expanded for w in body) or _has_cd(parse_shell(text))
+            except ShellSyntaxError: changes = True
+            if changes: cwd_changes.extend(_merge(ends, [(None, None)]))
+    elif executable in {'source', '.'} and cwd_changes is not None: cwd_changes.append((None, None))
     if name not in SHELLS:
         for i, arg in enumerate(words[:-1]):
             if arg.value in {'-c', '-e'}:
@@ -200,25 +245,28 @@ def _common(bindings):
 
 
 class Inspection:
-    def __init__(self, script, interpreter, depth):
+    def __init__(self, script, interpreter, depth, budget=None):
         self.script, self.interpreter, self.depth, self.kinds = script, interpreter, depth, []
         self.functions, self.active = {}, set()
         self.piped = False
         self.variables = {}
+        self.budget = [1024] if budget is None else budget
 
     def source(self, text, locations):
         if isinstance(text, Node):
             if self.depth >= 16:
                 self.kinds.append('unparsed_script'); return
-            inner = Inspection(self.script, self.interpreter, self.depth + 1)
+            inner = Inspection(self.script, self.interpreter, self.depth + 1, self.budget)
             inner.functions = dict(self.functions)
             inner.variables = dict(self.variables)
             inner.visit(text, locations)
             self.kinds.extend(inner.kinds); return
         for cwd, previous in locations:
-            self.kinds.extend(_script(text, cwd, self.script, self.interpreter, self.depth + 1, previous, self.variables))
+            self.kinds.extend(_script(text, cwd, self.script, self.interpreter, self.depth + 1, previous, self.variables, self.budget))
 
     def visit(self, node, locations):
+        self.budget[0] -= 1
+        if self.budget[0] < 0: raise ShellSyntaxError('visit_budget')
         saved = dict(self.variables)
         if node.kind == 'command':
             prefix = []
@@ -268,7 +316,7 @@ class Inspection:
                 else:
                     if operator in {'<<', '<<-'} and not word.quoted:
                         for substitution in heredoc_substitutions(body): self.source(substitution, locations)
-                    if argv and PurePosixPath(argv[0]).name in SHELLS: self.source(body, locations)
+                    if _execution(words) and PurePosixPath(_execution(words)[0].value).name in SHELLS: self.source(body, locations)
                     elif _payload(body): self.kinds.append('state_path_interpreter')
             elif operator in {'>&', '<&'} and not target.expanded and re.fullmatch(r'(?:\d+-?|-)', target.value):
                 pass  # descriptor duplication/move/closure has no file target
@@ -281,7 +329,9 @@ class Inspection:
                 return locations
             if argv and not _argv(node.words)[0].expanded and PurePosixPath(argv[0]).name == 'cd':
                 return _merge([_cd([_resolve(w, {'HOME': '/__shell_home__', **self.variables, 'PWD': cwd}) for w in _argv(node.words)], (cwd, previous)) for cwd, previous in locations])
-            for cwd, previous in locations: self.kinds.extend(_command(node.words, cwd, self.script, self.interpreter, self.depth, previous, self.piped, self.variables, environment))
+            changes = []
+            for cwd, previous in locations: self.kinds.extend(_command(node.words, cwd, self.script, self.interpreter, self.depth, previous, self.piped, self.variables, environment, self.budget, changes))
+            if changes: return _merge(changes)
             if argv and argv[0] in self.functions:
                 if argv[0] in self.active:
                     self.kinds.append('unparsed_script'); return [(None, None)]
@@ -289,9 +339,7 @@ class Inspection:
                 try: result = _merge(*(self.visit(body, locations) for body in bodies))
                 finally: self.active.remove(argv[0])
                 # Calls are opaque to subsequent cwd tracking if any body has cd.
-                def has_cd(node):
-                    return (node.kind == 'command' and any(w.value == 'cd' for w in node.words)) or any(has_cd(child) for child in node.children)
-                return [(None, None)] if any(has_cd(body) for body in bodies) else result
+                return [(None, None)] if any(_has_cd(body) for body in bodies) else result
         elif node.kind == 'function':
             # Keep possible definitions across branches; replacing one would
             # incorrectly choose the last syntactically visited alternative.
@@ -356,12 +404,13 @@ class Inspection:
         return locations
 
 
-def _script(text, cwd, script, interpreter, depth=0, previous=None, variables=None):
+def _script(text, cwd, script, interpreter, depth=0, previous=None, variables=None, budget=None, ends=None):
     if depth > 16: return ['unparsed_script']
-    inspection = Inspection(script, interpreter, depth)
+    inspection = Inspection(script, interpreter, depth, budget)
     inspection.variables = dict(variables or {})
     try:
-        inspection.visit(parse_shell(text), [(cwd, previous)])
+        result = inspection.visit(parse_shell(text), [(cwd, previous)])
+        if ends is not None: ends.extend(result)
     except (ShellSyntaxError, RecursionError):
         inspection.kinds.append('unparsed_script')
     return inspection.kinds
