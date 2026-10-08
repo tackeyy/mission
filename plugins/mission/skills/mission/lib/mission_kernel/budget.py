@@ -26,6 +26,13 @@ BUDGET_SPAWN_ENTRIES = MappingProxyType(dict.fromkeys((
     'verification-run', 'repair-reverify', 'invoke-command', 'invoke-prepared',
     'verify-approval', 'force-approval', 'fresh-review-run',
     'repair-disposition-run', 'recover', 'system-recover', 'repair-begin'), 'pending'))
+REPAIR_ENTRIES = ('repair-reverify', 'repair-disposition-run')
+# Recovery inherits the class of the dispatch it recovers (design 881 §3.6).
+CLASS_INHERITING_ENTRIES = ('recover', 'system-recover')
+# Counts bound the stored rows; seconds bound one dispatch envelope.
+POLICY_COUNT_MAXIMA = MappingProxyType({'max_concurrent_dispatches': 8, 'max_dispatches_per_phase': 64,
+                                        'no_progress_limit': 32})
+POLICY_SECONDS_MAX = 86400
 _ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z')
 _DIGEST = re.compile(r'sha256:[0-9a-f]{64}\Z')
 _TIME = re.compile(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z')
@@ -162,9 +169,15 @@ def policy_document(policy):
     return doc
 
 
-def cleanup_sec(policy, entry):
-    if entry not in BUDGET_SPAWN_ENTRIES:
+def _entry(value):
+    # Membership on a mapping hashes first; reject non-str before it can raise TypeError.
+    if type(value) is not str or value not in BUDGET_SPAWN_ENTRIES:
         _fail('entry-invalid')
+    return value
+
+
+def cleanup_sec(policy, entry):
+    _entry(entry)
     group = policy.term_grace_sec + policy.kill_wait_sec
     if entry in ('verification-run', 'repair-reverify', 'repair-begin'):
         return 1 + policy.post_run_sec + group
@@ -194,7 +207,8 @@ def decode_policy(value, *, budget_minutes=None):
         _fail('phase-invalid')
     if value['provenance'] != 'experimental-initial' or value['reactivate'] not in ('allowed', 'forbidden'):
         _fail('policy-control-invalid')
-    ints = {key: _int(value[key], 1) for key in default_policy_document(1)
+    ints = {key: _int(value[key], 1, POLICY_COUNT_MAXIMA.get(key, POLICY_SECONDS_MAX))
+            for key in default_policy_document(1)
             if key not in ('schema', 'total_sec', 'external_deadline_at', 'reserve_basis_points',
                            'protected_phases', 'provenance', 'reactivate')}
     policy = BudgetPolicy(total, external, basis, **ints, reactivate=value['reactivate'])
@@ -368,9 +382,14 @@ def _reservation(value, policy, last, *, system=False):
     item = _record(value, DispatchReservation)
     for name in ('reservation_id', 'target', 'operation_id'):
         _text(getattr(item, name))
-    if item.entry not in BUDGET_SPAWN_ENTRIES or item.entry == 'repair-begin':
+    if _entry(item.entry) == 'repair-begin':
         _fail('entry-invalid')
-    if (item.entry == 'system-recover') != system or item.budget_class not in PHASES:
+    if (item.entry == 'system-recover') != system or type(item.budget_class) is not str \
+            or item.budget_class not in PHASES:
+        _fail('class-invalid')
+    # design 881 §3.1: the class is derived from the entry; only repair entries use repair.
+    if item.entry not in CLASS_INHERITING_ENTRIES \
+            and (item.entry in REPAIR_ENTRIES) != (item.budget_class == 'repair'):
         _fail('class-invalid')
     _int(item.fencing_epoch, 1)
     _int(item.reserved_sec, 1)
@@ -419,7 +438,10 @@ def decode_ledger(document, *, embedded=False):
            'ledger-shape-invalid')
     if value['schema'] != LEDGER_SCHEMA:
         _fail('ledger-schema-invalid')
-    policy = decode_policy(value['policy'], budget_minutes=raw.get('budget_minutes'))
+    # A ledger binds total_sec to budget_minutes; a missing total cannot be matched.
+    if raw.get('budget_minutes') is None:
+        _fail('total-mismatch')
+    policy = decode_policy(value['policy'], budget_minutes=raw['budget_minutes'])
     if _text(value['policy_digest'], _DIGEST) != policy.digest:
         _fail('policy-digest-mismatch')
     clock = _record(value['clock'], ActiveClock)
@@ -462,8 +484,7 @@ def decode_ledger(document, *, embedded=False):
     _unique(settlements, lambda item: item.reservation_id)
     progress = tuple(_record(row, ProgressSignature) for row in value['progress'])
     for item in progress:
-        if item.entry not in BUDGET_SPAWN_ENTRIES:
-            _fail('entry-invalid')
+        _entry(item.entry)
         _text(item.target)
         _text(item.candidate_digest, _DIGEST)
         _text(item.result_digest, _DIGEST)

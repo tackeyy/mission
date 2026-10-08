@@ -952,7 +952,9 @@ def project_legacy_document(state: MissionState) -> bytes:
         from .budget import ledger_document
         validate_budget_backing(state.extensions.thaw(), state.budget, embedded=True)
         if state.budget.policy is not None:
+            # The ledger is bound to budget_minutes; project both or neither.
             document["budget_ledger"] = ledger_document(state.budget)
+            document["budget_minutes"] = state.extensions.thaw()["budget_minutes"]
     validate_budget_backing(document, state.budget)
     project_v4_a4(document, state.a4, state.handoff)
     input_refs = [reference for reference in state.reviews if isinstance(reference, ReviewInputRef)]

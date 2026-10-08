@@ -292,6 +292,9 @@ def settle(ledger, at, *, reservation_id, outcome, elapsed_sec, candidate_digest
         raise BudgetError('budget-settlement-invalid')
     late = max(0, int((datetime.fromisoformat(at.replace('Z', '+00:00')) -
                        datetime.fromisoformat(row.settle_by.replace('Z', '+00:00'))).total_seconds()))
+    # design 881 §4.2: a late settlement is recorded, but never charged below the reservation.
+    if late > 0:
+        charged = max(charged, row.reserved_sec)
     record = Settlement(row.reservation_id, outcome, charged, late,
                         Observation(at, elapsed_sec), telemetry)
     if outcome == 'kill-unconfirmed':
