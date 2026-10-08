@@ -18,11 +18,11 @@ capacity.
 Pure function only: no ``os``/``pathlib``/clock/random (``datetime.
 fromisoformat`` only *parses* an already-present string, never reads the
 clock). Kernel deps: :mod:`mission_kernel.json_codec`,
-:mod:`mission_kernel.fresh_review`, and (write_kind half only)
-``_TIMING_ACTIVITY_FIELDS`` from :mod:`mission_kernel.transitions`.
-Deliberately does *not* import :mod:`mission_kernel.fresh_review_receipts`
-(D terminal shapes are duplicated as closed literals, import-light, pinned
-independent of that module's shapes; only the test suite cross-checks).
+:mod:`mission_kernel.fresh_review`, the running-shape maximum from
+:mod:`mission_kernel.fresh_review_receipts`, and (write_kind half only)
+``_TIMING_ACTIVITY_FIELDS`` from :mod:`mission_kernel.transitions`. D terminal
+shape maxima remain duplicated as closed literals; only the dispatch residual
+derives its running-shape maximum from the shared receipt contract.
 """
 from __future__ import annotations
 
@@ -41,6 +41,7 @@ from .fresh_review import (
     FreshReviewRecord,
     WithdrawnFreshReviewRecord,
 )
+from .fresh_review_receipts import FRESH_REVIEW_MAX_ENCODED_BYTES
 #: The real halt writers' own timing/activity compatibility fields
 #: (``MarkHalt``'s entry in ``_COMPATIBILITY_FIELDS``, minus the metadata
 #: fields a halt never actually touches). Imported, not hand-copied, so
@@ -339,7 +340,8 @@ _FRESH_REVIEW_FIXED_RESERVE_BY_STATUS = {
     + FRESH_REVIEW_TERMINAL_STAGE_DELTA,
     "reserved": FRESH_REVIEW_CONSUME_STAGE_DELTA + FRESH_REVIEW_TERMINAL_STAGE_DELTA,
     "consumed": FRESH_REVIEW_TERMINAL_STAGE_DELTA,
-    "dispatch-unknown": 3455 + FRESH_REVIEW_CONSUME_STAGE_DELTA + FRESH_REVIEW_TERMINAL_STAGE_DELTA,
+    "dispatch-unknown": (FRESH_REVIEW_MAX_ENCODED_BYTES['running']
+                         + FRESH_REVIEW_CONSUME_STAGE_DELTA + FRESH_REVIEW_TERMINAL_STAGE_DELTA),
     "running": FRESH_REVIEW_CONSUME_STAGE_DELTA + FRESH_REVIEW_TERMINAL_STAGE_DELTA,
     "blocked": 0,
     "abandoned-unknown": 0,
@@ -627,7 +629,9 @@ def residual_reservation(
         fixed = _FRESH_REVIEW_FIXED_RESERVE_BY_STATUS.get(
             record.status, _FRESH_REVIEW_FIXED_RESERVE_BY_STATUS["pending"]
         )
-        total += fixed + lineage_stage_delta(document, record.request)
+        total += fixed
+        if record.status not in ('blocked', 'abandoned-unknown'):
+            total += lineage_stage_delta(document, record.request)
     total += repair_attempt_reserve(document) + disposition_reserve(document)
     return total
 
@@ -1533,4 +1537,3 @@ def _diff_is_record_status_advance(base_document: Mapping, proposed: Mapping) ->
             return False
         advanced = True
     return advanced
-
