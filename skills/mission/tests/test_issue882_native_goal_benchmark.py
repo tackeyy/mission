@@ -735,7 +735,7 @@ def test_cli_main_records_goal_protocol_unavailable_separately_from_runtime_erro
     monkeypatch.setattr(probe, "_task_snapshot", lambda _path: {"observed": "a" * 40, "clean": True}); monkeypatch.setattr(probe, "_codex_version", lambda: "test")
     base = ["probe", "--host", "codex", "--objective", "o", "--task-id", "t", "--assignment-id", "assignment", "--acceptance-criterion", "a", "--starting-commit", "a" * 40, "--mission-source-repo", str(tmp_path), "--mission-source-commit", "a" * 40, "--model-id", "m", "--effort", "low", "--permissions", "p", "--worktree", str(tmp_path), "--worker-allow-path", "fixture"]
     for name, error, outcome in (("unsupported", probe.RpcProtocolError("thread/goal/set", -32601, "Method not found"), "unsupported"), ("runtime", OSError("-32601"), "failed")):
-        monkeypatch.setattr(probe, "probe_codex", lambda *_args, error=error: (_ for _ in ()).throw(error))
+        monkeypatch.setattr(probe, "probe_codex", lambda *_args, error=error, **_kwargs: (_ for _ in ()).throw(error))
         output = tmp_path / f"{name}.json"; monkeypatch.setattr(sys, "argv", [*base, "--output", str(output)])
         assert probe.main() == 0
         assert json.loads(output.read_text())["outcome"] == outcome
@@ -748,7 +748,7 @@ def test_cli_main_keeps_candidate_worker_tree_after_provider_returns(tmp_path, m
         skill = Path(destination) / "plugins" / "mission" / "skills" / "mission"; skill.mkdir(parents=True); (skill / "SKILL.md").write_text("x")
     def worker(_source, _commit, destination, _allow): destination.mkdir(parents=True); (destination / "fixture.txt").write_text("before"); return destination
     digests = iter(["sha256:" + "a" * 64, "sha256:" + "b" * 64])
-    def run_worker(destination, *_args): (destination / "candidate.md").write_text("after"); return {"outcome": "failed", "fidelity": "unverified", "reason": "fixture"}
+    def run_worker(destination, *_args, **_kwargs): (destination / "candidate.md").write_text("after"); return {"outcome": "failed", "fidelity": "unverified", "reason": "fixture"}
     monkeypatch.setattr(probe, "create_immutable_package", package); monkeypatch.setattr(probe.shutil, "unpack_archive", unpack)
     monkeypatch.setattr(probe, "create_worker_export", worker); monkeypatch.setattr(probe, "worker_export_manifest", lambda _root: {"sha256": next(digests)})
     monkeypatch.setattr(probe, "probe_codex", run_worker); monkeypatch.setattr(probe, "_codex_version", lambda: "test")
@@ -769,7 +769,7 @@ def test_cli_main_keeps_invalid_candidate_but_marks_snapshot_stale(tmp_path, mon
     def unpack(_archive, destination, **_kwargs):
         skill = Path(destination) / "plugins" / "mission" / "skills" / "mission"; skill.mkdir(parents=True); (skill / "SKILL.md").write_text("x")
     def worker(_source, _commit, destination, _allow): destination.mkdir(parents=True); (destination / "fixture.txt").write_text("safe"); return destination
-    def run_worker(destination, *_args): (destination / "outside").symlink_to("/etc/hosts"); return {"outcome": "completed", "fidelity": "verified", "reason": None, "config_matches": True}
+    def run_worker(destination, *_args, **_kwargs): (destination / "outside").symlink_to("/etc/hosts"); return {"outcome": "completed", "fidelity": "verified", "reason": None, "config_matches": True}
     monkeypatch.setattr(probe, "create_immutable_package", package); monkeypatch.setattr(probe.shutil, "unpack_archive", unpack)
     monkeypatch.setattr(probe, "create_worker_export", worker); monkeypatch.setattr(probe, "probe_codex", run_worker); monkeypatch.setattr(probe, "_codex_version", lambda: "test")
     monkeypatch.setattr(probe, "_task_snapshot", lambda _path: {"observed": "a" * 40, "clean": True})
