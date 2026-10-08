@@ -239,22 +239,29 @@ ALLOWED_DIRECT_ATOMIC_WRITERS = {
 ALLOWED_STATE_WRITER_INJECTIONS = {
     # 連鎖の根。cmd_init が本物の atomic writer を注入する。
     ("cmd_init", "atomic_write_json"),
+    ("cmd_init", "_initialize_legacy_v4"),
     # 受け取った writer をそのまま下流へ渡すだけの中継。
     ("_initialize_legacy_v4", "write_state"),
     ("_legacy_evidence_repository", "write_state"),
     ("_legacy_lifecycle_repository", "write_state"),
     # v5 / terminal は専用経路を持つ。
-    (
-        "_initialize_new_v5_session",
-        "lambda path, state: _initialize_v5_state(args, path, state)",
-    ),
+    # v5 injection moved into application; retain both adapter bindings and
+    # every preflight/admission/publication writer rather than dropping the path.
+    ("_initialize_new_v5_session", "_initialize_v5_state"),
+    ("_preflight_new_v5_session", "_initialize_v5_state"),
+    ("_initialize_legacy_v4", "admission_writer"),
+    ("_initialize_legacy_v4", "preflight_writer"),
+    ("initialize_v5_session", "lambda path, state: initialize_state(arguments, path, state)"),
+    ("initialize_v5_session", "lambda path, state: initialize_state(arguments, path, state, preflight_only=True, capacity_base=getattr(arguments, '_new_mission_capacity_base', None))"),
+    ("initialize_v5_session", "lambda path, state, **_options: initialize_state(arguments, path, state, prepare_only=True)"),
+    ("preflight_v5_session", "initialize_state"),
+    ("preflight_v5_session", "lambda path, state: initialize_state(arguments, path, state, preflight_only=True, capacity_base=base_bytes)"),
     ("_terminalize_state_file", "write_terminal_state"),
 }
 
 
 def _state_writer_injections() -> set[tuple[str, str]]:
-    """`write_state=<expr>` の束縛を (囲む top-level 関数, 式) で列挙する。"""
-    tree = ast.parse(MISSION_STATE_SOURCE.read_text(encoding="utf-8"))
+    """adapter/application の writer 束縛を (囲む関数, 式) で列挙する。"""
     found: set[tuple[str, str]] = set()
 
     class Visitor(ast.NodeVisitor):
@@ -270,12 +277,14 @@ def _state_writer_injections() -> set[tuple[str, str]]:
 
         def visit_Call(self, node):
             for kw in node.keywords:
-                if kw.arg == "write_state":
+                if kw.arg in {"write_state", "initialize_state", "admission_writer", "preflight_writer"}:
                     where = self.stack[0] if self.stack else "<module>"
                     found.add((where, ast.unparse(kw.value)))
             self.generic_visit(node)
 
-    Visitor().visit(tree)
+    for source in (MISSION_STATE_SOURCE, MISSION_STATE_SOURCE.parent.parent /
+                   "lib/mission_application/legacy_initialization.py"):
+        Visitor().visit(ast.parse(source.read_text(encoding="utf-8")))
     return found
 
 
