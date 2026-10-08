@@ -25,6 +25,8 @@ class Word:
     raw: str = ''
     expanded: bool = False
     body_expanded: bool = False
+    # Offsets in the quote-removed value, with a simple variable name or None.
+    expansions: list = field(default_factory=list)
 
 
 @dataclass
@@ -146,10 +148,18 @@ def _lex_shell(text, index=0):
                 pending = []
             continue
         start, quote, quoted, parts, substitutions, expanded = index, None, False, [], [], False
+        expansions = []
+        def expansion(value, name=None):
+            offset = sum(map(len, parts))
+            expansions.append((offset, offset + len(value), name)); parts.append(value)
         while index < len(text):
             char = text[index]
             if quote is None and (char in ' \t\r\n' or (char in ';|&<>()' and not text.startswith(('<(', '>('), index))):
                 break
+            if quote is None and char == '~' and (not parts or re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]*=', ''.join(parts))):
+                prefix = re.match(r"~[^/\s;'\"|&<>()]*", text[index:])[0]
+                expanded = True; expansion(prefix, 'HOME' if prefix == '~' else None)
+                index += len(prefix); continue
             if quote is None and text.startswith("$'", index):
                 literal, index = _ansi_quote(text, index + 2)
                 quoted = True; parts.append(literal); continue
@@ -170,23 +180,26 @@ def _lex_shell(text, index=0):
                 quoted = True; parts.append(following); index += 2; continue
             if quote != "'" and text.startswith(('$(', '<(', '>('), index):
                 body, index = _substitution(text, index + 2)
-                expanded = True; substitutions.append(body); parts.append('__command_substitution__')
+                expanded = True; substitutions.append(body); expansion('__command_substitution__')
                 continue
             if quote != "'" and text.startswith('${', index):
                 expanded = True
                 body, index = _balanced(text, index + 2, '{', '}')
                 substitutions.extend(body for token in lex_shell(body) for body in token.substitutions)
-                parts.append('${' + body + '}'); continue
+                expansion('${' + body + '}', body if re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]*', body) else None); continue
             if char == '`' and quote != "'":
                 body, index = _backtick(text, index + 1)
-                expanded = True; substitutions.append(body); parts.append('__command_substitution__')
+                expanded = True; substitutions.append(body); expansion('__command_substitution__')
                 continue
             if char == '$' and quote != "'" and index + 1 < len(text) and (text[index + 1].isalnum() or text[index + 1] in '_@*#?$!-'):
                 expanded = True
+                match = re.match(r'\$([A-Za-z_][A-Za-z_0-9]*|[0-9@*#?$!-])', text[index:])
+                if match:
+                    expansion(match[0], match[1]); index += len(match[0]); continue
             parts.append(char); index += 1
         if quote:
             raise ShellSyntaxError('unclosed_quote')
-        word = Word(''.join(parts), quoted=quoted, start=start, end=index, substitutions=substitutions, raw=text[start:index], expanded=expanded)
+        word = Word(''.join(parts), quoted=quoted, start=start, end=index, substitutions=substitutions, raw=text[start:index], expanded=expanded, expansions=expansions)
         if last and last.value in {'<<', '<<-'}:
             pending.append((word, last.value == '<<-'))
         last = word

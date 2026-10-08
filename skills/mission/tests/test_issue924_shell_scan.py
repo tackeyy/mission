@@ -1,7 +1,9 @@
 """Exact Mission exclusions with conservative, non-executing word/cwd checks.
 
 Tables cover bypasses and safe literals/fd operations at the public scanner;
-expanded words and state-like data arguments deliberately permit false positives.
+Known variables resolve as paths; unknown expansions reject write destinations
+but ordinary arguments retain literal-only inspection.
+State-like literal data arguments deliberately permit false positives.
 All cases use strings/argv and run without worker commands or providers.
 """
 from pathlib import Path
@@ -56,21 +58,10 @@ ORDINARY = [
     f'echo "$({{ {MS} status; }})"',
     'case a in a) cd .mission-state;; b) cp x a;; esac',
 ]
-# General word/cwd rules intentionally detect these former data/control cases.
-CONSERVATIVE = [
-    f'x=$({MS} status); echo $x', 'bash <<EOF\necho $HOME\nEOF',
-    'node -e "console.log(`x`)"', 'echo ${HOME}',
-    f'cd .mission-state; (cd ..; {MS} context-manifest --out x)',
-    f'(cd .mission-state); {MS} context-manifest --out x',
-    f'/bin/echo {MS} reactivate', 'cd .mission-state && cd .. && cp x a',
-    f'echo "${{X:-$({MS} status)}}"', '(cd .mission-state; echo ok); cp x a',
-    f'{{ cd .mission-state; echo ok; }}; {MS} status',
-    f'x=$(case a in a) {MS} status;; esac); echo $x',
-    'x=$(cat <<EOF\n)\nEOF\n); echo $x', 'echo "$(date)"', 'echo "$(pwd)/x"',
-    f'echo "$(case a in a) {MS} status;; esac)"',
-    f'echo "$(if true; then {MS} status; fi)"', f'echo "$({{ {MS} status; }})"',
-    'case a in a) cd .mission-state;; b) cp x a;; esac',
-]
+# Literal state data and non-excluded commands in state cwd are intentional detections.
+CONSERVATIVE = [f'/bin/echo {MS} reactivate',
+    '(cd .mission-state; echo ok); cp x a',
+    f'{{ cd .mission-state; echo ok; }}; {MS} status']
 
 BAD = [
     'echo x | xargs -I{} cp {} .mission-state/a',
@@ -96,7 +87,7 @@ BAD = [
     'cd "$PWD/.mission-state"; cp x a', 'cd ${PWD}/.mission-state; cp x a',
     'cd .mission-state; cd /tmp; cd -; cp x a',
     *['cp x ' + path + '/a' for path in ('.Mission-State', '.MISSION-STATE', '.mission-stat?', '.mission-*', '.m[ia]ssion-state', '.m*')],
-    'D=.mission-state; cp x $D/a', 'cp x $D/a', 'echo hi > $D/a',
+    'D=.mission-state; cp x $D/a',
     f'cd $UNKNOWN; {MS} context-manifest --out x',
     'echo hi >&.mission-state/a', 'echo hi &>.mission-state/a',
     'echo hi >|.mission-state/a', 'echo `cp x .mission-state/a`',
@@ -157,11 +148,11 @@ EXEC_SAFE = [
     f'{SCRIPT} context-manifest -- --out .mission-state/x',
 
     f'(cd /tmp); {SCRIPT} context-manifest --out x',
+    f'cd /work/.mission-state; {SCRIPT} context-manifest --out /tmp/out',
     'echo normal', 'bash -lc "printf ok"', 'source ./other.sh', '. ./other.sh',
 ]
 
 EXEC_BAD = [
-    f'cd /work/.mission-state; {SCRIPT} context-manifest --out /tmp/out',
     'cp -r .mission-state /tmp/copy', 'rsync -a .mission-state/ /tmp/copy',
     'mv .mission-state/x /tmp/x', 'printf x > .mission-state/x',
     'echo x >> .mission-state/x', 'echo x 2>.mission-state/x',
@@ -225,7 +216,7 @@ def test_event_cwd_controls_relative_output_resolution():
 @pytest.mark.parametrize('script,tampered', [
     (f'{SCRIPT} status < .mission-state/input', False),
     ('cat < .mission-state/input', True),
-    ('python3 -c "$PROGRAM"', True),
+    ('python3 -c "$PROGRAM"', False),
     ('python3 - <<EOF\nx = []\nEOF', False),
 ])
 def test_interpreter_payload_and_read_only_redirect(script, tampered):
@@ -243,16 +234,16 @@ def test_reactivate_after_any_mission_word_is_detected(script, kind):
 def test_command_substitution_is_recursively_scanned():
     from exec_event_scan import scan_exec_events
     first = scan_exec_events([{'command': ['bash', '-lc', f'echo "$({SCRIPT} status --input .mission-state/x)"']}], SCRIPT, PYTHON, '/work')
-    assert {'event_index': 0, 'kind': 'unparsed_script'} in first
+    assert first == []
     found = scan_exec_events([{'command': ['bash', '-lc', 'echo "$(cp .mission-state/x /tmp/x)"']}], SCRIPT, PYTHON, '/work')
     assert any(item['kind'] == 'state_path_command' for item in found)
 
 
 @pytest.mark.parametrize('script', ['if true; then echo ok; fi', 'for name in x; do echo "$name"; done'])
-def test_control_grammar_with_expansion_fails_closed(script):
+def test_control_grammar_preserves_argument_expansion(script):
     from exec_event_scan import scan_exec_events
     found = scan_exec_events([{'command': ['bash', '-lc', script]}], SCRIPT, PYTHON, '/work')
-    assert {'event_index': 0, 'kind': 'unparsed_script'} in found if '$' in script else found == []
+    assert found == []
 
 
 # Frozen exclusions are exact argv shapes; conservative data-path detections
@@ -279,7 +270,7 @@ RULE_CASES = [
     ('cat .mission-stat?/x', 'state_path_command'),
     *[(f'cd .mission-state; {command}', 'state_path_command') for command in
       ('sed -i 1d a', 'perl -i -pe 1 a', 'chmod 600 a', 'unlink a', 'tar cf a b', 'git checkout -- a', 'cat a', 'ed a', 'pwd')],
-    (f'cd .mission-state; {MS} status 2>&1', 'state_path_command'),
+    (f'cd .mission-state; {MS} status 2>&1', None),
     *[(f'cat <<EOF\n{body}\nEOF', 'reactivate_command') for body in
       (f'$({MS} reactivate)', f'`{MS} reactivate`', f"'$( {MS} reactivate )'")],
     (f"cat <<'EOF'\n$({MS} reactivate)\nEOF", None),
@@ -288,7 +279,7 @@ RULE_CASES = [
     ('eval "echo $COMMAND"', 'unparsed_script'),
     ('bash -c "echo $COMMAND"', 'unparsed_script'),
     ("eval 'echo $COMMAND'", 'unparsed_script'),
-    ("bash -c 'echo $COMMAND'", 'unparsed_script'),
+    ("bash -c 'echo $COMMAND'", None),
     ("eval \"echo '\\$OUT'\"", None),
     ("bash -c \"echo '\\$OUT'\"", None),
     *[(f"bash {flags} '{MS} reactivate'", 'reactivate_command') for flags in
@@ -364,9 +355,111 @@ def test_malformed_nested_script_keeps_known_reactivate_kind(command):
     assert {'event_index': 0, 'kind': 'unparsed_script'} in found
 
 
-@pytest.mark.parametrize('body,kind', [('cat <<EOF\n$HOME\nEOF', 'unparsed_script'),
+@pytest.mark.parametrize('body,kind', [('cat <<EOF\n$HOME\nEOF', None),
     ("cat <<'EOF'\n$HOME\nEOF", None)])
 def test_shell_command_string_includes_heredoc_expansion(body, kind):
     from exec_event_scan import scan_exec_events
     found = scan_exec_events([{'command': ['bash', '-c', body]}], MS, PY, '/work')
     assert ({'event_index': 0, 'kind': kind} in found) if kind else found == []
+
+
+# Test list: literal/known/unknown expansions, cwd scopes and key=value paths.
+@pytest.mark.parametrize('script,kind', [
+    ('cp x $D/a', None), ('echo hi > $D/a', 'state_redirection'), ('echo ${HOME}', None),
+    ('for f in *.py; do wc -l $f; done', None), ('x=$(date); echo $x', None),
+    (f'x=$({MS} status); echo $x', None), (f'echo $({MS} status)', None),
+    ('node -e "console.log(`x`)"', None), ('bash <<EOF\necho $HOME\nEOF', None),
+    (f'cd .mission-state && {MS} aggregate-reviews --out ../x', None),
+    ('cd .mission-state; (cd ..; cp x a)', None),
+    ('bash -c "cd .mission-state"; cp x a', None),
+    ('cd .mission-state; cd -; cp x a', None),
+    ('D=.mission-state; cp x $D/a', 'state_path_command'),
+    ('D=/tmp; D=.mission-state cp x $D/a', None),
+    ('D=.mission-state; D=/tmp cp x $D/a', 'state_path_command'),
+    ('if true; then D=.mission-state; else cp x $D/a; fi', None),
+    ('D=.mission-state; if true; then D=/tmp; else cp x $D/a; fi', 'state_path_command'),
+    ('D=.mission-state; for D in a b; do cp x $D/a; done', None),
+    ('for D in .mission-state; do cat $D/a; done', 'state_path_command'),
+    ('for D in /tmp .mission-state; do cat $D/a; done', 'state_path_command'),
+    ('for D in /tmp /var; do cat $D/a; done', None),
+    ('for D in .mission-*; do cat $D/a; done', 'state_path_command'),
+    ('D=.mission-state; unset D; cp x $D/a', None),
+    ('D=.mission-state; f(){ D=/tmp; }; f; cp x $D/a', None),
+    ('f(){ D=.mission-state; }; f; cp x $D/a', 'state_path_command'),
+    ('D=/tmp; echo ok | export D=.mission-state; cp x $D/a', None),
+    ("D=.mission-state; echo '$D'/$D/a", 'state_path_command'),
+    ("D=.mission-state; echo '$D/a'", None),
+    ('export c=echo; $c hi', 'unparsed_script'),
+    ('export D=.mission-state; cp x ${D}/a', 'state_path_command'),
+    ('D=.mission-state; echo hi > $D/a', 'state_redirection'),
+    ('D=.mission-state; E=$D; cp x $E/a', 'state_path_command'),
+    (f'D=.mission-state; {MS} aggregate-reviews --out=$D/a', 'state_output_option'),
+    ('D=.mission-state; D=$UNKNOWN; cp x $D/a', None),
+    ("D=.mission-state; cp x '$D/a'", None),
+    (r'D=.mission-state; cp x \$D/a', None),
+    ('cp x ${HOME}/.Mission-State/a', 'state_path_command'),
+    ('cp x $UNKNOWN/.mission-stat?/a', 'state_path_command'),
+    ('dd of=.mission-state/f', 'state_path_command'),
+    (r"dd of=$'\x2emission-state/f'", 'state_path_command'),
+    ('$CMD x', 'unparsed_script'),
+    ('c=cp; $c x a', 'unparsed_script'), ('c=$UNKNOWN; $c x a', 'unparsed_script'),
+    ('D=.mission-state; (D=/tmp); cp x $D/a', 'state_path_command'),
+    ('(D=.mission-state); cp x $D/a', None),
+    ("D=.mission-state; bash -c 'D=/tmp'; cp x $D/a", 'state_path_command'),
+])
+def test_argument_expansion_and_cwd_are_not_command_construction(script, kind):
+    from exec_event_scan import scan_exec_events
+    found = scan_exec_events([{'command': script}], MS, PY, '/work')
+    assert [d['kind'] for d in found] == ([] if kind is None else [kind])
+
+
+# Uncertain write destinations must not be silently accepted. Ordinary argv
+# keeps literal-only inspection; fd operations have no file destination.
+WRITE_CASES = [
+    *[(f'{MS} {command} {option} {value}', 'state_output_option')
+      for command, option, value in [
+          ('artifact export', '--to', '"$X"'),
+          ('aggregate-reviews', '--out', '~/x'),
+          ('aggregate-reviews', '--out=~/x', ''),
+          ('aggregate-reviews', '--o=~/x', ''),
+          ('artifact export', '--to=~/x', ''),
+          ('aggregate-reviews', '--out', '$HOME/x'),
+          ('aggregate-reviews', '--out', '"$X"'),
+          ('aggregate-reviews', '--out', '"${X}--suffix"'),
+          ('aggregate-reviews', '--out', '`pwd`/x'),
+          ('aggregate-reviews', '--out', '$(pwd)/x'),
+          ('aggregate-reviews', '--o', '${D}/x'),
+          ('aggregate-reviews', '--ou=$X/x', ''),
+          ('artifact export', '--t=$X/x', ''),
+          ('archive-worktree', '--destination-root', '"$X"'),
+          ('archive-worktree', '--d=$X/x', ''),
+      ]],
+    *[(f'echo a {operator} {value}', 'state_redirection')
+      for operator, value in [('>', '$D/f'), ('>', '${D}/f'), ('>', '"$TMPDIR"'),
+          ('>>', '$HOME/x'), ('&>', '~/x'), ('2>', '$(pwd)/x'),
+          ('>|', '`pwd`/x'), ('>&', '$FD')]],
+    ('echo a > /tmp/x', None), ('echo a > /dev/null', None),
+    ('echo a 2>&1', None), ('echo a >&2', None), ('cat <&-', None),
+    ('echo a >&-', None), ("echo a > '$D/f'", None),
+    (r'echo a > \$D/f', None), ("echo a > '~/x'", None),
+    ('D=/tmp; echo a > "$D/f"', None),
+    (f'D=/tmp; {MS} artifact export --to=$D/x', None),
+    ('HOME=/tmp; echo a > "$HOME/x"', None),
+    ('D=~/x; echo a > "$D/f"', 'state_redirection'),
+    ('echo a > ~/"x"', 'state_redirection'),
+    ("D='~/x'; echo a > $D/f", None),
+    ('FD=2; echo a >&$FD', None),
+    (f'FD=2; cd .mission-state; {MS} status >&$FD', None),
+    (f'HOME=/tmp; {MS} aggregate-reviews --out=~/x', None),
+    (f"D='~/x'; {MS} aggregate-reviews --out=$D/a", None),
+    ('echo $D/f', None), ('cat $HOME/x', None),
+]
+
+
+@pytest.mark.parametrize('script,kind', WRITE_CASES)
+@pytest.mark.parametrize('nested', [False, True])
+def test_unknown_write_destinations_fail_closed_without_rejecting_data(script, kind, nested):
+    from exec_event_scan import scan_exec_events
+    command = ['/bin/zsh', '-lc', script] if nested else script
+    found = scan_exec_events([{'command': command}], MS, PY, '/work')
+    assert [d['kind'] for d in found] == ([] if kind is None else [kind])
