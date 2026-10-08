@@ -29,7 +29,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-import itertools
 import json
 from typing import Mapping, Optional
 
@@ -1186,35 +1185,16 @@ def classify_write_kind(
 # ---------------------------------------------------------------------------
 
 
-#: Alphabet for ``_shortest_unused_operation_id``: any single character here
-#: is itself a legal Token128 (``LEASE_TOKEN_PATTERN``'s first-character
-#: class), so a 1-character id is tried before ever falling back to 2.
-_SHORT_ID_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-
-
-def _shortest_unused_operation_id(used: set) -> str:
-    """The shortest legal operation id not already in ``used``.
-
-    legacy-full asks "even if every pending request were withdrawn right
-    now, would the state still be too large" -- i.e. the *best possible*
-    recovery. The withdrawal tombstone's ``withdraw_operation_id`` is
-    whatever the real writer chooses, and the writer is free to choose the
-    shortest legal id available, so probing with a long placeholder (as a
-    prior version of this function did) overstates the post-withdrawal size
-    and can declare legacy-full for a state a real, minimal-id withdrawal
-    would actually have recovered.
-    """
-    length = 1
-    while True:
-        for chars in itertools.product(_SHORT_ID_ALPHABET, repeat=length):
-            candidate = "".join(chars)
-            if candidate not in used:
-                return candidate
-        length += 1
+def _maximum_unused_operation_id(used: set) -> str:
+    """Reserve the full ID bound; the actual writer's ID is not yet known."""
+    for index in range(len(used) + 1):
+        candidate = str(index).zfill(_fresh_review.FRESH_REVIEW_ID_MAX_CHARS)
+        if candidate not in used:
+            return candidate
 
 
 def _withdraw_all_pending_len(document: Mapping, encoded_len: int, *, encode) -> int:
-    """Encode length after replacing every pending record with a tombstone.
+    """Upper-bound length after withdrawal at the current epoch with maximum IDs.
 
     Returns ``encoded_len`` unchanged (a conservative "no savings" estimate)
     if the embedded projection cannot be decoded or no synthetic withdrawal
@@ -1240,13 +1220,15 @@ def _withdraw_all_pending_len(document: Mapping, encoded_len: int, *, encode) ->
         for record in projection.requests
         if isinstance(record, FreshReviewRecord) and record.operation_id is not None
     }
+    used_operations |= {record.prepare_operation_id for record in projection.requests}
     working = projection
+    epoch = _lease_mapping(document).get("fencing_epoch")
     for request_id in pending_ids:
-        operation_id = _shortest_unused_operation_id(used_operations)
+        operation_id = _maximum_unused_operation_id(used_operations)
         used_operations.add(operation_id)
         try:
             working = _fresh_review.withdraw_request(
-                working, request_id=request_id, operation_id=operation_id, fencing_epoch=0
+                working, request_id=request_id, operation_id=operation_id, fencing_epoch=epoch
             )
         except FreshReviewError:
             return encoded_len
@@ -1492,7 +1474,7 @@ def _advances_a_d_stage(base_document: Mapping, proposed: Mapping) -> bool:
     base_requests = base_projection.requests
     proposed_requests = proposed_projection.requests
     if len(proposed_requests) < len(base_requests):
-        return False
+        return True  # A deletion can hide another record's advance; fail closed.
     for before, after in zip(base_requests, proposed_requests):
         if isinstance(before, FreshReviewRecord) and isinstance(after, FreshReviewRecord):
             if before.status != after.status:

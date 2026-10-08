@@ -447,25 +447,29 @@ def test_physical_limit_check_does_not_misfire_at_exactly_state_limit():
     assert verdict.accepted
 
 
-def test_legacy_full_recoverable_with_shortest_legal_withdraw_id():
-    pending = _pending_record()
-    rec = projection_document(FreshReviewProjection((pending,)))["requests"][0]
-    doc = _flat_doc(requests=[rec], halt_reason="")
+@pytest.mark.parametrize("layout", ["v4", "v5"])
+@pytest.mark.parametrize("excess", [0, 1])
+def test_legacy_full_withdraw_boundary_uses_current_epoch_and_maximum_id(layout, excess):
+    pending = _v5_pending_record()
+    doc, encoding = _base(layout)
+    doc = _set_lease(_set_fresh_review(doc, layout, _project(pending)), layout, epoch=10**17)
+    size = lambda value: encode(value, encoding)
     threshold = sc.STATE_LIMIT - sc.STATE_CAPACITY_HALT_DELTA
-
-    # Independent oracle: the real reducer, withdrawing with the shortest
-    # legal operation id ("w") -- not routed through _withdraw_all_pending_len
-    # -- so this does not merely re-check the implementation against itself.
-    withdrawn = withdraw_request(FreshReviewProjection((pending,)), request_id=pending.request.request_id,
-                                  operation_id="w", fencing_epoch=0)
-    reference_doc = dict(doc)
-    reference_doc["fresh_review"] = projection_document(withdrawn)
-    savings = legacy(doc) - legacy(reference_doc)
+    # Independent oracle: the real reducer, at the current epoch and ID bound.
+    withdrawn = withdraw_request(_project(pending), request_id=pending.request.request_id,
+                                  operation_id="w" * 128, fencing_epoch=_fencing_epoch(doc, layout))
+    reference_doc = _set_fresh_review(doc, layout, withdrawn)
+    savings = size(doc) - size(reference_doc)
     assert savings > 0
-
-    padded = _pad_to(doc, threshold + savings, encode_fn=legacy)
-    assert legacy(padded) == threshold + savings
-    assert sc._is_legacy_full(padded, legacy(padded), encode=legacy) is False
+    padded = _pad_to(doc, threshold + savings + excess, encode_fn=size)
+    proposed = _set_fresh_review(padded, layout, withdrawn)
+    assert size(proposed) == threshold + excess
+    assert sc._withdraw_all_pending_len(padded, size(padded), encode=size) >= size(proposed)
+    assert sc._is_legacy_full(padded, size(padded), encode=size) is bool(excess)
+    verdict = sc.state_capacity_verdict(sc.CapacityBase(padded, size(padded)), proposed,
+                                        size(proposed), encoding=encoding)
+    assert verdict.accepted is (excess == 0), verdict
+    assert verdict.code == ("state-capacity-legacy-full" if excess else None)
 
 
 def test_dispatch_and_consume_still_advance_after_halt_and_full_takeovers():
@@ -751,6 +755,16 @@ def _probe_table():
     rec_a = _v5_pending_record(request_id="r1", nonce="n1")
     rec_b = _v5_pending_record(request_id="r2", nonce="n2")
     two_proj = _project(rec_a, rec_b)
+    base, encoding = _base("v4", requests=projection_document(two_proj)["requests"])
+    for survivor in (rec_a, rec_b):
+        reserved = reserve_request(_project(survivor), survivor.request, operation_id="dispatch",
+                                    intent_digest=ADAPTER, payload_digest=ADAPTER)
+        cases.append(_case(f"v4_shrink_and_reserve_{survivor.request.request_id}", base,
+                            _set_fresh_review(base, "v4", reserved), encoding,
+                            accept=False, code="state-capacity-exhausted", write_kind="normal"))
+    cases.append(_case("v4_two_pending_stop_halt", base,
+                        _apply_control(base, "v4", halt_reason="x", phase="halted"), encoding,
+                        accept=True, write_kind="stop-halt"))
     for layout in ("v4", "v5"):
         if layout == "v4":
             base, encoding = _base(layout, requests=projection_document(two_proj)["requests"])
@@ -929,6 +943,18 @@ def _probe_table():
     cases.append(_case("non_conformant_takeover_token_on_over_capacity_base_v5",
                         base_v5_to_bound, proposed_v5_to_bound, sc.StateEncoding.CANONICAL,
                         accept=False, code="state-capacity-exhausted", write_kind="normal"))
+
+    for layout in ("v4", "v5"):
+        for defect in ("displaced_owner", "new_lease_id"):
+            base, encoding = _base(layout)
+            base = _set_lease(base, layout, owner="bad owner" if defect == "displaced_owner" else "a", lease_id="b")
+            base = _push_over_capacity(base, encoding)
+            old_owner = (base if layout == "v4" else base["lease"])["owner_session_id"]
+            proposed = _set_lease(base, layout, owner="c", epoch=2,
+                                  lease_id="bad lease" if defect == "new_lease_id" else "d",
+                                  history=[_entry(old_owner, "b", 1)])
+            cases.append(_case(f"takeover_non_conformant_{defect}_{layout}", base, proposed, encoding,
+                                accept=False, code="state-capacity-exhausted", write_kind="normal"))
 
     # A halt carries the command's lease renewal (expiry only) and stays a halt on an
     # over-capacity base; a lease identity change with it does not. An empty diff is no stop.
