@@ -79,6 +79,7 @@ COMMAND_OWNER_REGISTRY = {
     ),
     **_owned(
         "R1.query",
+        "budget status",
         "codex-preflight",
         "freshness",
         "fresh-review status",

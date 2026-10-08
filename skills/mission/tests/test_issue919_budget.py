@@ -121,6 +121,48 @@ def test_codec_projection_is_bound_and_generic_budget_writes_are_rejected():
     assert decide(state, SetExtensionFields(freeze_json_value({'budget_minutes': 45}), '2026-01-01T00:00:00Z')).accepted
 
 
+def test_status_and_next_are_read_only_and_policy_intake_stays_closed(legacy_run_cli, tmp_path):
+    import json
+    from datetime import datetime, timedelta, timezone
+    from mission_kernel.budget import decode_policy, default_policy_document, new_ledger, ledger_document
+    run = legacy_run_cli
+    run('init', 'budget fixture', '--budget-minutes', '30', cwd=tmp_path, check=True)
+    result = run('budget', 'status', cwd=tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)['enforcement'] == 'advisory-only'
+    assert 'budget' not in json.loads(run('next', cwd=tmp_path, check=True).stdout)
+    path = tmp_path / '.mission-state' / 'sessions' / 'test.json'
+    doc = json.loads(path.read_bytes())
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    at = (now - timedelta(seconds=60)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    doc['budget_ledger'] = ledger_document(new_ledger(decode_policy(default_policy_document(1800)), at))
+    doc['started_at'] = '2000-01-01T00:00:00Z'
+    path.write_text(json.dumps(doc))
+    before = path.read_bytes()
+    status = json.loads(run('budget', 'status', cwd=tmp_path, check=True).stdout)
+    assert status['enforcement'] == 'advisory-only'
+    assert status['activation'] == 'pending'
+    assert status['consumed_sec'] < 70
+    assert status['provenance'] == 'experimental-initial'
+    assert status['token'] == status['cost'] == {'status': 'unmeasured', 'reason': 'no-producer'}
+    assert 'headroom' in status['state_capacity_verdict']
+    out = json.loads(run('next', cwd=tmp_path, check=True).stdout)
+    assert out['budget']['total_sec'] == 1800
+    assert 'headroom' in out['budget']['state_capacity_verdict']
+    assert out['budget_pressure']['basis'] == 'active-clock'
+    assert out['budget_pressure']['level'] == 'ok'
+    assert out['next_action'] == 'run-planner'
+    assert path.read_bytes() == before
+    for args in (('set', 'budget_minutes=45'), ('set', 'budget_ledger=null'),
+                 ('init', 'replace ledger'), ('init', 'policy', '--budget-policy', 'policy.json')):
+        assert run(*args, cwd=tmp_path).returncode != 0
+        assert path.read_bytes() == before
+    doc['budget_ledger'] = None
+    path.write_text(json.dumps(doc))
+    assert run('next', cwd=tmp_path).returncode != 0
+    assert run('budget', 'status', cwd=tmp_path).returncode != 0
+
+
 def test_stop_slots_are_preallocated_and_f_maximum_rows_fit_both_encodings():
     import json
     from dataclasses import asdict, replace
