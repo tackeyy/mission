@@ -362,6 +362,9 @@
     "progress_age_seconds:replace": 2,
     "raw_document_copy:copy-ref": 1
   },
+  "lib/mission_persistence/capacity_gate.py": {
+    "_takeover_then_halt:copy-ref": 3
+  },
   "lib/mission_persistence/evidence_order.py": {
     "_claim_publication_path:dynamic": 1,
     "_publication_claims:dynamic": 2
@@ -410,6 +413,14 @@
     "_read_regular:open-write": 1,
     "collect_locked:replace": 1,
     "collect_locked:unlink": 1
+  },
+  "lib/mission_persistence/legacy_capacity.py": {
+    "__init__:write-ref": 1,
+    "acquire_legacy_lease:replace": 1,
+    "publish:atomic_write": 1,
+    "publish:write": 1,
+    "write_legacy_terminal:atomic_write": 1,
+    "write_legacy_terminal:write": 1
   },
   "lib/mission_persistence/legacy_v4.py": {
     "_command_with_missing_metadata:copy-ref": 1,

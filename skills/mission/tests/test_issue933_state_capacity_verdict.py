@@ -974,16 +974,20 @@ def _probe_table():
                         accept=False, code="state-capacity-exhausted", write_kind="normal"))
 
     for layout in ("v4", "v5"):
-        for defect in ("displaced_owner", "new_lease_id"):
+        for defect in ("displaced_owner", "new_lease_id", "unnormalized_displaced_owner"):
             base, encoding = _base(layout)
-            base = _set_lease(base, layout, owner="bad owner" if defect == "displaced_owner" else "a", lease_id="b")
+            base = _set_lease(base, layout, owner=(123 if defect == "unnormalized_displaced_owner"
+                else "bad owner" if defect == "displaced_owner" else "a"), lease_id="b")
             base = _push_over_capacity(base, encoding)
             old_owner = (base if layout == "v4" else base["lease"])["owner_session_id"]
             proposed = _set_lease(base, layout, owner="c", epoch=2,
                                   lease_id="bad lease" if defect == "new_lease_id" else "d",
                                   history=[_entry(old_owner, "b", 1)])
+            # #918: exact displaced-token copies are historical values; new tokens are bounded.
+            copied = defect == "displaced_owner"
             cases.append(_case(f"takeover_non_conformant_{defect}_{layout}", base, proposed, encoding,
-                                accept=False, code="state-capacity-exhausted", write_kind="normal"))
+                                accept=copied, code=None if copied else "state-capacity-exhausted",
+                                write_kind="stop-takeover" if copied else "normal"))
 
     # A halt carries the command's lease renewal (expiry only) and stays a halt on an
     # over-capacity base; a lease identity change with it does not. An empty diff is no stop.
