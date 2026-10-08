@@ -295,7 +295,7 @@
     "decode_request:replace": 1,
     "prepare_request_state:dynamic": 1,
     "prepare_request_state:replace": 1,
-    "projection_document:dynamic": 3,
+    "projection_document:dynamic": 4,
     "reserve_request:replace": 1,
     "visit:remove": 1
   },

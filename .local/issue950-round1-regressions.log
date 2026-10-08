@@ -1,0 +1,10 @@
+terminal blocked: initial source function rejected by regression (AssertionError)
+terminal blocked: current source passes
+terminal abandoned-unknown: initial source function rejected by regression (AssertionError)
+terminal abandoned-unknown: current source passes
+reservation/class binding: initial source function rejected by regression (Failed)
+reservation/class binding: current source passes
+main bytes: initial source function rejected by regression (AssertionError)
+main bytes: current source passes
+launch operation: initial source function rejected by regression (Failed)
+launch operation: current source passes

@@ -18,6 +18,22 @@ from .json_codec import freeze_json_value
 from .model import FrozenJsonObject
 
 DISPATCH_FIELDS = tuple(FRESH_REVIEW_DISPATCH_SHAPE)
+FRESH_REVIEW_BUDGET_CLASSES = frozenset((
+    'planning', 'implementation', 'verification', 'repair', 'final',
+))
+
+
+def reservation_id_for_operation(operation_id):
+    """Derive the durable reservation identity from one dispatch operation."""
+    _identifier(operation_id)
+    return 'reservation:' + canonical_digest({
+        'domain': 'fresh-review-dispatch', 'operation_id': operation_id,
+    })[7:]
+
+
+def budget_class_for_fresh_review_dispatch():
+    """D2c fresh review is the verification entry before later budget policy."""
+    return 'verification'
 
 
 def validate_launch(request, dispatch, raw):
@@ -50,6 +66,10 @@ def decode_dispatch_record(fields):
             dispatch['outbound_packet_digest'], dispatch['iteration'], dispatch['status'], dispatch['lifecycle_state']) != (
             'inv_' + canonical_digest(request.request_id)[7:39], fields['operation_id'], request.input_digest, request.iteration,
             'dispatch-unknown', 'dispatch-unknown'):
+        raise FreshReviewError('fresh-review-dispatch-invalid')
+    if (dispatch['reservation_id'] != reservation_id_for_operation(fields['operation_id'])
+            or dispatch['budget_class'] != budget_class_for_fresh_review_dispatch()
+            or dispatch['budget_class'] not in FRESH_REVIEW_BUDGET_CLASSES):
         raise FreshReviewError('fresh-review-dispatch-invalid')
     _digest(fields['intent_digest']); _digest(fields['payload_digest'])
     launch = fields['launch']
@@ -123,6 +143,8 @@ def dispatch_state(state, command):
     elif isinstance(command, RecordFreshReviewLaunch):
         if record.status != 'dispatch-unknown' or not isinstance(command.launch, FrozenJsonObject):
             raise FreshReviewError('fresh-review-not-dispatch-unknown')
+        if command.operation_id != record.operation_id:
+            raise FreshReviewError('fresh-review-operation-conflict')
         launch, independent = validate_launch(request, record.dispatch.thaw(), command.launch.thaw())
         if any(isinstance(item, FreshReviewRecord) and item.launch is not None and item.launch.thaw()['child_identity'] == launch.child_identity
                for item in state.fresh_review.requests):

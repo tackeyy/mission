@@ -1,0 +1,26 @@
+{
+  "changes": {
+    "skills/mission/lib/mission_kernel/fresh_review.py": {
+      "additions": 6,
+      "deletions": 3
+    },
+    "skills/mission/lib/mission_kernel/fresh_review_dispatch.py": {
+      "additions": 22,
+      "deletions": 0
+    },
+    "skills/mission/lib/mission_kernel/state_capacity.py": {
+      "additions": 11,
+      "deletions": 8
+    },
+    "skills/mission/tests/fixtures/state-writer-inventory.json": {
+      "additions": 1,
+      "deletions": 1
+    },
+    "skills/mission/tests/test_issue912_dispatch_kernel.py": {
+      "additions": 140,
+      "deletions": 4
+    }
+  },
+  "round1_reviewed_lines": 196,
+  "pr_reviewed_upper_bound": 662
+}

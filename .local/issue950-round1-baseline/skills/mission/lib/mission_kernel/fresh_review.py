@@ -354,16 +354,13 @@ def projection_document(projection):
             continue
         if not isinstance(record, FreshReviewRecord):
             raise FreshReviewError('fresh-review-projection-shape-invalid')
-        fields = {key: getattr(record, key) for key in FreshReviewRecord.__dataclass_fields__
-                  if key not in ('dispatch', 'launch', 'independent')}
+        fields = {key: getattr(record, key) for key in FreshReviewRecord.__dataclass_fields__}
         fields['request'] = request_document(record.request)
         if record.result is not None and not isinstance(record.result, FrozenJsonObject):
             raise FreshReviewError('fresh-review-result-invalid')
         fields['result'] = record.result.thaw() if record.result is not None else None
-        for key in ('dispatch', 'launch', 'independent'):
-            value = getattr(record, key)
-            if value is not None:
-                fields[key] = value.thaw() if key in ('dispatch', 'launch') else value
+        for key in ('dispatch', 'launch'):
+            fields[key] = getattr(record, key).thaw() if getattr(record, key) is not None else None
         records.append(fields)
     return {'schema': PROJECTION_SCHEMA, 'requests': records}
 
