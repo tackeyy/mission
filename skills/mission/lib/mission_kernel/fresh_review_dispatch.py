@@ -32,7 +32,12 @@ def reservation_id_for_operation(operation_id):
 
 
 def budget_class_for_fresh_review_dispatch():
-    """D2c fresh review is the verification entry before later budget policy."""
+    """Verification denotes the unprotected shared pool in design 881 section 3.1.
+
+    Planning/implementation/verification wire labels share that pool;
+    repair/final denote the protected pools. D2c has no final latch yet;
+    budget integration will select final for this entry after final latch.
+    """
     return 'verification'
 
 
@@ -73,12 +78,17 @@ def decode_dispatch_record(fields):
         raise FreshReviewError('fresh-review-dispatch-invalid')
     _digest(fields['intent_digest']); _digest(fields['payload_digest'])
     launch = fields['launch']
+    launch_operation_id = fields.get('launch_operation_id')
     if launch is not None:
+        if launch_operation_id is not None:
+            _identifier(launch_operation_id)
+            if launch_operation_id == fields['prepare_operation_id']:
+                raise FreshReviewError('fresh-review-operation-conflict')
         _, independent = validate_launch(request, dispatch, launch)
         if type(fields['independent']) is not bool or fields['independent'] != independent:
             raise FreshReviewError('fresh-review-independent-invalid')
         fields['launch'] = freeze_json_value(launch)
-    elif fields['independent'] is not None:
+    elif launch_operation_id is not None or fields['independent'] is not None:
         raise FreshReviewError('fresh-review-record-invalid')
     if fields['status'] == 'running' and launch is None or fields['status'] == 'dispatch-unknown' and launch is not None:
         raise FreshReviewError('fresh-review-record-invalid')
@@ -143,13 +153,12 @@ def dispatch_state(state, command):
     elif isinstance(command, RecordFreshReviewLaunch):
         if record.status != 'dispatch-unknown' or not isinstance(command.launch, FrozenJsonObject):
             raise FreshReviewError('fresh-review-not-dispatch-unknown')
-        if command.operation_id != record.operation_id:
-            raise FreshReviewError('fresh-review-operation-conflict')
         launch, independent = validate_launch(request, record.dispatch.thaw(), command.launch.thaw())
         if any(isinstance(item, FreshReviewRecord) and item.launch is not None and item.launch.thaw()['child_identity'] == launch.child_identity
                for item in state.fresh_review.requests):
             raise FreshReviewError('fresh-review-child-reused')
-        new = replace(record, status='running', launch=command.launch, independent=independent)
+        new = replace(record, status='running', launch=command.launch,
+                      launch_operation_id=command.operation_id, independent=independent)
     else:
         if record.status not in ('dispatch-unknown', 'running') or not isinstance(command.receipt, FrozenJsonObject):
             raise FreshReviewError('fresh-review-consumed')

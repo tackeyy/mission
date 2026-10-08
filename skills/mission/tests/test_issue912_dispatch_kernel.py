@@ -69,7 +69,9 @@ def test_dispatch_decoder_uses_the_e0_closed_shape():
 def test_dispatch_statuses_release_only_the_completed_stage_reservation():
     from mission_kernel import state_capacity as capacity
     table = capacity._FRESH_REVIEW_FIXED_RESERVE_BY_STATUS
-    assert table['dispatch-unknown'] == table['reserved'] + 3455
+    assert table['dispatch-unknown'] == (table['reserved'] + 3455
+                                         + capacity.FRESH_REVIEW_LAUNCH_OPERATION_STAGE_DELTA)
+    assert capacity.FRESH_REVIEW_LAUNCH_OPERATION_STAGE_DELTA == 153
     assert table['running'] == table['reserved']
     assert table['blocked'] == table['abandoned-unknown'] == 0
 
@@ -155,12 +157,13 @@ def test_withdraw_command_obeys_fence_and_keeps_one_use_identity():
 
 
 def test_kernel_binds_begin_launch_and_terminal_to_one_dispatch_operation():
+    import copy
     import json
     from dataclasses import replace
     from acceptance_contract import canonical_contract_digest
     from mission_kernel import decode_mission_state
     from mission_kernel.commands import BeginFreshReviewDispatch, CommitFreshReviewResult, RecordFreshReviewLaunch
-    from mission_kernel.fresh_review import FreshReviewError, FreshReviewProjection, canonical_digest, projection_document, request_document
+    from mission_kernel.fresh_review import FreshReviewError, FreshReviewProjection, FreshReviewRecord, canonical_digest, decode_projection, projection_document, request_document
     from mission_kernel.fresh_review_dispatch import dispatch_state, reservation_id_for_operation
     from mission_kernel.json_codec import freeze_json_value
     from .test_issue895_fresh_review import _pure_projection
@@ -194,27 +197,63 @@ def test_kernel_binds_begin_launch_and_terminal_to_one_dispatch_operation():
     assert state.fresh_review.requests[0].operation_id == 'dispatch'
     with pytest.raises(FreshReviewError, match='fresh-review-nonce-reused'):
         dispatch_state(state, begin)
-    with pytest.raises(FreshReviewError, match='fresh-review-operation-conflict'):
-        dispatch_state(state, RecordFreshReviewLaunch(
-            request.request_id, 'reconcile', 1, freeze_json_value(launch), request.candidate_digest))
+    state = replace(state, lease=replace(state.lease, fencing_epoch=2))
     state = dispatch_state(state, RecordFreshReviewLaunch(
-        request.request_id, 'dispatch', 1, freeze_json_value(launch), request.candidate_digest))
+        request.request_id, 'reconcile', 2, freeze_json_value(launch), request.candidate_digest))
     assert state.fresh_review.requests[0].status == 'running'
+    assert state.fresh_review.requests[0].launch_operation_id == 'reconcile'
+    second_request = replace(request, request_id='request-2', nonce='nonce-2')
+    second_record = FreshReviewRecord(second_request, 'prepare-two',
+                                      canonical_digest('second-intent'), canonical_digest('second-payload'))
+    with_second = FreshReviewProjection((*state.fresh_review.requests, second_record))
+    second_document = state.legacy_passthrough.thaw()
+    second_document['fresh_review'] = projection_document(with_second)
+    second_document['fencing_epoch'] = 2
+    state_with_second = decode_mission_state(json.dumps(second_document).encode())
+    second_dispatch = dict(dispatch, operation_id='reconcile', fencing_epoch=2,
+        invocation_id='inv_' + canonical_digest(second_request.request_id)[7:39],
+        reservation_id=reservation_id_for_operation('reconcile'))
+    with pytest.raises(FreshReviewError, match='fresh-review-operation-conflict'):
+        dispatch_state(state_with_second, BeginFreshReviewDispatch(
+            second_request.request_id, 'reconcile', 2, canonical_digest('second-dispatch-intent'),
+            canonical_digest('second-dispatch-payload'), freeze_json_value(second_dispatch), second_request.candidate_digest))
     with pytest.raises(FreshReviewError, match='fresh-review-not-dispatch-unknown'):
         dispatch_state(state, RecordFreshReviewLaunch(
-            request.request_id, 'dispatch', 1, freeze_json_value(launch), request.candidate_digest))
+            request.request_id, 'reconcile', 2, freeze_json_value(launch), request.candidate_digest))
     receipt = terminal_document('abandoned-unknown')
     receipt.update(request_id=request.request_id, request_digest=canonical_digest(request_document(request)),
                    nonce=request.nonce, dispatch_operation_id='dispatch', dispatch_fencing_epoch=1,
-                   commit_operation_id='dispatch', commit_fencing_epoch=1,
+                   commit_operation_id='reconcile', commit_fencing_epoch=2,
                    candidate_digest=request.candidate_digest, launch_receipt=launch,
                    launch_digest=canonical_digest(launch))
     state = dispatch_state(state, CommitFreshReviewResult(
-        request.request_id, 'dispatch', 1, freeze_json_value(receipt)))
+        request.request_id, 'reconcile', 2, freeze_json_value(receipt)))
     assert state.fresh_review.requests[0].status == 'abandoned-unknown'
+    wire = projection_document(state.fresh_review)
+    assert decode_projection({'fresh_review': wire}) == state.fresh_review
+    for field, value in (('launch_operation_id', 'x' * 129),
+                         ('launch_operation_id', True),
+                         ('launch_operation_id', 'prepare-one')):
+        invalid = copy.deepcopy(wire)
+        invalid['requests'][0][field] = value
+        with pytest.raises(FreshReviewError):
+            decode_projection({'fresh_review': invalid})
+    invalid = copy.deepcopy(wire)
+    invalid['requests'][0].pop('launch')
+    with pytest.raises(FreshReviewError, match='fresh-review-record-invalid'):
+        decode_projection({'fresh_review': invalid})
+    second = copy.deepcopy(wire['requests'][0])
+    second['request'].update(request_id='request-2', nonce='nonce-2')
+    second.update(prepare_operation_id='reconcile', status='pending', operation_id=None,
+                  intent_digest=None, payload_digest=None, result=None)
+    for field in ('dispatch', 'launch', 'launch_operation_id', 'independent'):
+        second.pop(field, None)
+    for records in ((wire['requests'][0], second), (second, wire['requests'][0])):
+        with pytest.raises(FreshReviewError):
+            decode_projection({'fresh_review': {'schema': wire['schema'], 'requests': list(records)}})
     with pytest.raises(FreshReviewError, match='fresh-review-consumed'):
         dispatch_state(state, CommitFreshReviewResult(
-            request.request_id, 'dispatch', 1, freeze_json_value(receipt)))
+            request.request_id, 'reconcile', 2, freeze_json_value(receipt)))
 
 
 @pytest.mark.parametrize('status', ['dispatch-unknown', 'running', 'blocked', 'abandoned-unknown'])
@@ -262,6 +301,7 @@ def test_actual_maximum_dispatch_records_fit_e0_reservations(status):
     updated = replace(record, status=status, operation_id=dispatch['operation_id'],
         intent_digest=record.prepare_intent_digest, payload_digest=record.prepare_payload_digest,
         dispatch=freeze_json_value(dispatch), launch=freeze_json_value(launch) if launched else None,
+        launch_operation_id='l' * 128 if launched else None,
         independent=independent if launched else None, result=freeze_json_value(result) if result else None)
     raw = {'fresh_review': projection_document(FreshReviewProjection((updated,)))}
     assert decode_projection(raw).requests == (updated,)
@@ -313,3 +353,100 @@ def test_terminal_variant_cannot_drop_a_persisted_launch(status, launch_missing)
                   launch=launch, independent=True, result=result)
     with pytest.raises(FreshReviewError, match='terminal-binding-mismatch'):
         decode_dispatch_record(fields)
+
+
+def _launch_collision_fixture():
+    from dataclasses import replace
+    from acceptance_contract import canonical_contract_digest
+    from mission_kernel.fresh_review import canonical_digest, request_document
+    from mission_kernel.fresh_review_dispatch import reservation_id_for_operation
+    from mission_kernel.json_codec import freeze_json_value
+    from .test_issue895_fresh_review import _pure_projection
+    from .test_issue909_fresh_review_receipts import launch_document
+    from .test_issue917_fresh_review_bounds import maximum_intent
+    from .test_issue936_state_capacity_reservation import _flat_doc, _minimal_contract
+
+    document = _flat_doc(contract=_minimal_contract())
+    pending = _pure_projection().requests[0]
+    request = replace(pending.request,
+        contract_digest=canonical_contract_digest(document['acceptance_contract']))
+    dispatch = maximum_intent()
+    dispatch.update(operation_id='dispatch', fencing_epoch=1, parent_identity='parent',
+        invocation_id='inv_' + canonical_digest(request.request_id)[7:39],
+        outbound_packet_digest=request.input_digest, iteration=request.iteration,
+        reservation_id=reservation_id_for_operation('dispatch'), budget_class='verification')
+    target = replace(pending, request=request, status='dispatch-unknown', operation_id='dispatch',
+        intent_digest=pending.prepare_intent_digest, payload_digest=pending.prepare_payload_digest,
+        dispatch=freeze_json_value(dispatch))
+    other = replace(pending, prepare_operation_id='other-prepare',
+        request=replace(request, request_id='request-other', nonce='nonce-other'))
+    launch = launch_document()
+    launch.update(request_digest=canonical_digest(request_document(request)), operation_id='dispatch',
+        fencing_epoch=1, parent_identity='parent', received_input_digest=request.input_digest)
+    document['fencing_epoch'] = 2
+    return document, target, other, launch
+
+
+@pytest.mark.parametrize('owner', ('prepare', 'dispatch', 'withdraw', 'commit', 'launch'))
+def test_takeover_launch_rejects_every_other_record_operation(owner):
+    import json
+    from dataclasses import replace
+    from mission_kernel import decode_mission_state
+    from mission_kernel.commands import RecordFreshReviewLaunch
+    from mission_kernel.fresh_review import (FreshReviewError, FreshReviewProjection,
+        canonical_digest, projection_document, request_document, withdraw_request)
+    from mission_kernel.fresh_review_dispatch import dispatch_state, reservation_id_for_operation
+    from mission_kernel.json_codec import freeze_json_value
+    from .test_issue909_fresh_review_receipts import terminal_document
+
+    document, target, other, launch = _launch_collision_fixture()
+    if owner == 'withdraw':
+        other = withdraw_request(FreshReviewProjection((other,)), request_id=other.request.request_id,
+            operation_id='other-withdraw', fencing_epoch=2).requests[0]
+    elif owner != 'prepare':
+        dispatch = target.dispatch.thaw()
+        dispatch.update(operation_id='other-dispatch',
+            invocation_id='inv_' + canonical_digest(other.request.request_id)[7:39],
+            reservation_id=reservation_id_for_operation('other-dispatch'))
+        other = replace(other, status='dispatch-unknown', operation_id='other-dispatch',
+            intent_digest=target.intent_digest, payload_digest=target.payload_digest,
+            dispatch=freeze_json_value(dispatch))
+        if owner == 'commit':
+            receipt = terminal_document('blocked')
+            receipt.update(request_id=other.request.request_id, nonce=other.request.nonce,
+                request_digest=canonical_digest(request_document(other.request)),
+                dispatch_operation_id='other-dispatch', dispatch_fencing_epoch=1,
+                commit_operation_id='other-commit', commit_fencing_epoch=2,
+                candidate_digest=other.request.candidate_digest)
+            other = replace(other, status='blocked', result=freeze_json_value(receipt))
+        elif owner == 'launch':
+            other_launch = dict(launch, request_id=other.request.request_id, nonce=other.request.nonce,
+                request_digest=canonical_digest(request_document(other.request)), operation_id='other-dispatch',
+                child_identity='other-child', context_identity='other-context')
+            other = replace(other, status='running', launch=freeze_json_value(other_launch),
+                independent=True, launch_operation_id='other-launch')
+    document['fresh_review'] = projection_document(FreshReviewProjection((target, other)))
+    state = decode_mission_state(json.dumps(document).encode())
+    with pytest.raises(FreshReviewError, match='^fresh-review-operation-conflict$'):
+        dispatch_state(state, RecordFreshReviewLaunch(target.request.request_id, 'other-' + owner,
+            2, freeze_json_value(launch), target.request.candidate_digest))
+    assert state.fresh_review.requests[0].status == 'dispatch-unknown'
+
+
+def test_capacity_withdrawal_skips_the_saved_launch_operation_identity():
+    import json
+    from mission_kernel import decode_mission_state, state_capacity as capacity
+    from mission_kernel.commands import RecordFreshReviewLaunch
+    from mission_kernel.fresh_review import FreshReviewProjection, projection_document
+    from mission_kernel.fresh_review_dispatch import dispatch_state
+    from mission_kernel.json_codec import encode_json_value, freeze_json_value
+
+    document, target, other, launch = _launch_collision_fixture()
+    document['fresh_review'] = projection_document(FreshReviewProjection((target, other)))
+    state = decode_mission_state(json.dumps(document).encode())
+    state = dispatch_state(state, RecordFreshReviewLaunch(target.request.request_id, '0' * 128,
+        2, freeze_json_value(launch), target.request.candidate_digest))
+    document = state.legacy_passthrough.thaw()
+    encode = lambda value: len(encode_json_value(freeze_json_value(value)))
+    before = encode(document)
+    assert capacity._withdraw_all_pending_len(document, before, encode=encode) < before

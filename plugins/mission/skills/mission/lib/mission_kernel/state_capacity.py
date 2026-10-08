@@ -234,6 +234,13 @@ if STATE_CAPACITY_TAKEOVER_LIMIT < 1:
 _FRESH_REVIEW_KEY_SLACK = 32
 _FRESH_REVIEW_RESERVED_SLOT_COUNT = 3
 
+#: E0a's 3,455-byte running maximum intentionally remains the receipt shape
+# only. D2c persists the launch writer separately from the child dispatch
+# identity; the 19-character key, colon, 128-character identifier and object
+# comma measure 153 canonical bytes. This supplemental bound is owned here,
+# rather than widening the receipt maximum pinned by test_issue917.
+FRESH_REVIEW_LAUNCH_OPERATION_STAGE_DELTA = 153
+
 #: Envelope growth (``updated_at`` / ``last_activity_at`` / lease refresh)
 #: that rides along with any stage-advancing write.
 _FRESH_REVIEW_ENVELOPE_ALLOWANCE = 128
@@ -244,7 +251,7 @@ _FRESH_REVIEW_ENVELOPE_ALLOWANCE = 128
 #: longest delta + the reserved-slot key slack + the envelope allowance.
 FRESH_REVIEW_DISPATCH_STAGE_DELTA = (
     (130 - 4) + 2 * ((71 + 2) - 4)
-    + 1797 + 3455
+    + 1797 + 3455 + FRESH_REVIEW_LAUNCH_OPERATION_STAGE_DELTA
     + 20
     + _FRESH_REVIEW_KEY_SLACK * _FRESH_REVIEW_RESERVED_SLOT_COUNT
     + _FRESH_REVIEW_ENVELOPE_ALLOWANCE
@@ -340,7 +347,7 @@ _FRESH_REVIEW_FIXED_RESERVE_BY_STATUS = {
     + FRESH_REVIEW_TERMINAL_STAGE_DELTA,
     "reserved": FRESH_REVIEW_CONSUME_STAGE_DELTA + FRESH_REVIEW_TERMINAL_STAGE_DELTA,
     "consumed": FRESH_REVIEW_TERMINAL_STAGE_DELTA,
-    "dispatch-unknown": (FRESH_REVIEW_MAX_ENCODED_BYTES['running']
+    "dispatch-unknown": (FRESH_REVIEW_MAX_ENCODED_BYTES['running'] + FRESH_REVIEW_LAUNCH_OPERATION_STAGE_DELTA
                          + FRESH_REVIEW_CONSUME_STAGE_DELTA + FRESH_REVIEW_TERMINAL_STAGE_DELTA),
     "running": FRESH_REVIEW_CONSUME_STAGE_DELTA + FRESH_REVIEW_TERMINAL_STAGE_DELTA,
     "blocked": 0,
@@ -1231,16 +1238,11 @@ def _withdraw_all_pending_len(document: Mapping, encoded_len: int, *, encode) ->
     if not pending_ids:
         return encoded_len
     used_operations = {
-        (record.withdraw_operation_id if isinstance(record, WithdrawnFreshReviewRecord)
-         else record.prepare_operation_id)
+        operation
         for record in projection.requests
+        for operation in _fresh_review.record_operation_ids(record)
+        if operation is not None
     }
-    used_operations |= {
-        record.operation_id
-        for record in projection.requests
-        if isinstance(record, FreshReviewRecord) and record.operation_id is not None
-    }
-    used_operations |= {record.prepare_operation_id for record in projection.requests}
     working = projection
     epoch = _lease_mapping(document).get("fencing_epoch")
     if not _lease_epoch_value_ok(epoch):
