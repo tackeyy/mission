@@ -337,28 +337,11 @@ def _fsync(descriptor: int) -> None:
 
 
 def _write_private_file(path: Path, content: bytes) -> None:
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(os.fspath(path), flags, 0o600)
+    from .spawn_jobs import write_private_file
     try:
-        os.fchmod(descriptor, 0o600)
-        view = memoryview(content)
-        while view:
-            written = os.write(descriptor, view)
-            if written <= 0:
-                raise LocalUnitOfWorkError("stage-write-failed", "staged file write made no progress")
-            view = view[written:]
-        _fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    staged = path.lstat()
-    if (
-        not stat.S_ISREG(staged.st_mode)
-        or staged.st_nlink != 1
-        or stat.S_IMODE(staged.st_mode) != 0o600
-        or staged.st_size != len(content)
-        or read_stable_bytes(path, limit=max(len(content), 1)) != content
-    ):
-        raise LocalUnitOfWorkError("staged-object-changed", "staged file failed identity validation")
+        write_private_file(path, content, fsync=_fsync)
+    except ValueError as exc:
+        raise LocalUnitOfWorkError("staged-object-changed", "staged file failed identity validation") from exc
 
 
 def _fsync_directory(path: Path) -> None:
