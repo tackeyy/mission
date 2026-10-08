@@ -450,23 +450,29 @@ def test_physical_limit_check_does_not_misfire_at_exactly_state_limit():
 @pytest.mark.parametrize("layout", ["v4", "v5"])
 @pytest.mark.parametrize("excess", [0, 1])
 @pytest.mark.parametrize("operation_id", ["w", "w" * 128], ids=["short-id", "maximum-id"])
-def test_legacy_full_withdraw_boundary_uses_current_epoch_and_maximum_id(layout, excess, operation_id):
-    pending = _v5_pending_record()
+@pytest.mark.parametrize("count", [1, 2], ids=["one-pending", "two-pending"])
+def test_legacy_full_withdraw_boundary_uses_current_epoch_and_maximum_id(layout, excess, operation_id, count):
+    pending = tuple(_v5_pending_record(f"request-{i}", f"nonce-{i}") for i in range(count))
     doc, encoding = _base(layout)
-    doc = _set_lease(_set_fresh_review(doc, layout, _project(pending)), layout, epoch=10**17)
+    doc = _set_lease(_set_fresh_review(doc, layout, _project(*pending)), layout, epoch=10**17)
     size = lambda value: encode(value, encoding)
     threshold = sc.STATE_LIMIT - sc.STATE_CAPACITY_HALT_DELTA
-    # Independent oracle: the real reducer, with the current epoch and concrete ID.
-    withdrawn = withdraw_request(_project(pending), request_id=pending.request.request_id,
+    withdrawn = withdraw_request(_project(*pending), request_id=pending[0].request.request_id,
                                   operation_id=operation_id, fencing_epoch=_fencing_epoch(doc, layout))
-    reference_doc = _set_fresh_review(doc, layout, withdrawn)
-    savings = size(doc) - size(reference_doc)
+    remaining = withdrawn if count == 1 else withdraw_request(
+        withdrawn, request_id=pending[1].request.request_id, operation_id="x" * 128, fencing_epoch=10**17)
+    savings = size(doc) - size(_set_fresh_review(doc, layout, remaining))
     assert savings > 0
-    padded = _pad_to(doc, threshold + savings + excess, encode_fn=size)
+    target = threshold + (size(doc) - size(_set_fresh_review(doc, layout, withdrawn)) + 10
+                          if count == 2 and not excess else savings + excess)
+    padded = _pad_to(doc, target, encode_fn=size)
     proposed = _set_fresh_review(padded, layout, withdrawn)
-    assert size(proposed) == threshold + excess
-    assert sc._withdraw_all_pending_len(padded, size(padded), encode=size) >= size(proposed)
-    legacy_full = bool(excess or len(operation_id) < 128)
+    final_len = size(_set_fresh_review(padded, layout, remaining))
+    assert (final_len <= threshold) is (excess == 0)
+    if count == 1 or excess: assert final_len == threshold + excess
+    if count == 2 and not excess: assert size(proposed) == threshold + 10
+    assert sc._withdraw_all_pending_len(padded, size(padded), encode=size) >= final_len
+    legacy_full = bool(excess or (count == 1 and len(operation_id) < 128))
     assert sc._is_legacy_full(padded, size(padded), encode=size) is legacy_full
     halted = _apply_control(padded, layout, halt_reason="stagnation", phase="halted")
     halt_verdict = sc.state_capacity_verdict(sc.CapacityBase(padded, size(padded)), halted,
@@ -479,7 +485,7 @@ def test_legacy_full_withdraw_boundary_uses_current_epoch_and_maximum_id(layout,
     assert verdict.code == ("state-capacity-legacy-full" if excess else None)
 
 @pytest.mark.parametrize("layout", ["v4", "v5"])
-@pytest.mark.parametrize("epoch", [None, "invalid", False])
+@pytest.mark.parametrize("epoch", [None, "invalid", False, -1, 2**63])
 def test_legacy_full_probe_uses_epoch_one_for_missing_or_non_integer_epoch(layout, epoch):
     pending = _v5_pending_record()
     doc, encoding = _base(layout)

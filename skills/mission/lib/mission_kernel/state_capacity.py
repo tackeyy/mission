@@ -1223,7 +1223,7 @@ def _withdraw_all_pending_len(document: Mapping, encoded_len: int, *, encode) ->
     used_operations |= {record.prepare_operation_id for record in projection.requests}
     working = projection
     epoch = _lease_mapping(document).get("fencing_epoch")
-    if type(epoch) is not int:
+    if not _lease_epoch_value_ok(epoch):
         epoch = 1
     for request_id in pending_ids:
         operation_id = _maximum_unused_operation_id(used_operations)
@@ -1382,9 +1382,10 @@ def state_capacity_verdict(
 
     if base_over_capacity:
         threshold = STATE_LIMIT - STATE_CAPACITY_HALT_DELTA
-        # A concrete withdrawal can recover even when maximum unknown IDs cannot.
+        # Recover from the concrete withdrawal plus maximum IDs for remaining pending records.
         if base.encoded_len > threshold and (
-            threshold < encoded_len < base.encoded_len if write_kind is WriteKind.WITHDRAW
+            encoded_len < base.encoded_len and _is_legacy_full(proposed, encoded_len, encode=encode_for)
+            if write_kind is WriteKind.WITHDRAW
             else _is_legacy_full(base_document, base.encoded_len, encode=encode_for)
         ):
             return _rejected(
