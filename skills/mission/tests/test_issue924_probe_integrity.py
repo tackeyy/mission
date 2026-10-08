@@ -144,6 +144,7 @@ def test_deadline_only_varies_across_valid_records_and_versions_are_distinct():
     record['manifest']['package']['sha256'] = 'old'
     record['budget_policy'] = None
     record['mission_state'] = None
+    record.pop('session_init')
     result = integrity().check_record(record, arms)
     assert result['matches'] and result['planned_arm'] == 'mission_baseline'
 
@@ -209,7 +210,7 @@ def test_every_exit_retains_identity_and_post_run_disk_read(tmp_path, monkeypatc
         assert fake.closed
         if mode == 'post_failed': raise RuntimeError('post failed')
         return {'mission_state': integrity().read_evaluated_state(root, observed['thread_id'])}
-    result = probe.run_codex_assignment(tmp_path, 'o', 'a', 10, None, 1, 'm', 'high', 'p', 'mission', skill.parents[2], evidence=evidence, pre_turn=pre, post_run=post)
+    result = probe.run_codex_assignment(tmp_path, 'o', 'a', 10, None, 1, 'm', 'high', 'p', 'mission', skill.parents[2], evidence=evidence, pre_turn=pre, post_run=post, mission_edition='verified-complex')
     assert all(key in result for key in ('observed_config', 'config_matches', 'package_delivery', 'turn_start_sent', 'exec_events', 'provider_version_after'))
     assert result['provider_version_before'] == result['provider_version_after'] == 'v'
     assert result['turn_start_sent'] == (0 if mode in ('skill_missing', 'pre_failed') else 1)
@@ -385,6 +386,7 @@ def test_native_arm_can_share_package_with_verified_arm():
     native['budget_policy_template_sha256'] = None
     arms['native_goal'] = native
     record.update(arm='codex_native_goal', package_delivery=None, budget_policy=None)
+    record.pop('session_init')
     record['manifest']['conditions'] = native['conditions']
     result = integrity().check_record(record, arms)
     assert result['matches'] and result['planned_arm'] == 'native_goal'
@@ -419,6 +421,7 @@ def test_baseline_reports_unavailable_exec_scan(monkeypatch, damage):
     record, arms = record_and_spec()
     arms = {'mission_baseline': arms['mission_verified_complex']}
     record['budget_policy'] = None
+    record.pop('session_init')
     if damage == 'exception':
         def fail(*_): raise ValueError('fixture')
         monkeypatch.setattr(integrity(), 'scan_exec_events', fail)
@@ -495,6 +498,7 @@ def test_persistence_failure_is_non_quality_even_without_verified_stream_require
     record, arms = record_and_spec()
     arms = {arm: arms['mission_verified_complex']}
     record['budget_policy'] = None
+    record.pop('session_init')
     if arm == 'native_goal':
         record.update(arm='codex_native_goal', package_delivery=None)
         record['manifest']['conditions']['arm'] = 'goal'
@@ -505,3 +509,161 @@ def test_persistence_failure_is_non_quality_even_without_verified_stream_require
     saved = json.loads(output.read_text())
     assert not integrity().check_record(saved, arms)['matches']
     assert integrity().check_record(saved, arms)['classification'] == 'non_quality'
+
+
+@pytest.mark.parametrize('arm', ['mission_baseline', 'native_goal'])
+@pytest.mark.parametrize('initialized', [None, {'session_id': 'cx-t'}])
+def test_non_verified_arm_rejects_harness_session_init(arm, initialized):
+    record, arms = record_and_spec()
+    arms = {arm: arms['mission_verified_complex']}
+    record.update(budget_policy=None, session_init=initialized)
+    if arm == 'native_goal':
+        record.update(arm='codex_native_goal', package_delivery=None)
+        record['manifest']['conditions']['arm'] = 'goal'
+    result = integrity().check_record(record, arms)
+    assert result['classification'] == 'non_quality'
+    assert result['reasons'] == ['execution_config_mismatch']
+
+
+@pytest.mark.parametrize('field,value', [('max_turns', True), ('max_turns', 1.0), ('timeout_seconds', 10.0)])
+def test_conditions_require_matching_types(field, value):
+    record, arms = record_and_spec()
+    record['manifest']['conditions'] = {**record['manifest']['conditions'], field: value}
+    result = integrity().check_record(record, arms)
+    assert result['classification'] == 'non_quality'
+    assert result['reasons'] == ['execution_config_mismatch']
+
+
+@pytest.mark.parametrize('hook', [False, True])
+def test_post_run_projects_state_without_mutating_reader_document(tmp_path, hook):
+    record, _ = record_and_spec()
+    full = {**record['mission_state'], 'mission': 'PRIVATE TASK', 'cwd': '/Users/USER/secret', 'halt_reason': 'PRIVATE REASON'}
+    path = write_state(tmp_path, full)
+    before = path.read_bytes()
+    post = (lambda *_: {'mission_state': full, 'session_init': full}) if hook else None
+    integrity().collect_post_run(tmp_path, record, post)
+    allowed = {'session_id', 'mission_id', 'budget_policy', 'reactivation_history', 'budget_policy_template_sha256'}
+    for key in ('mission_state', 'session_init'):
+        assert set(record[key]) <= allowed
+        assert record[key]['mission_id'] == 'mid'
+    assert full['mission'] == 'PRIVATE TASK' and path.read_bytes() == before
+
+
+@pytest.mark.parametrize('slot', ['mission_state', 'session_init'])
+@pytest.mark.parametrize('field', ['budget_policy', 'reactivation_history'])
+@pytest.mark.parametrize('private', ['/Users/x/known/file', '/Users/USER/unknown/file'])
+def test_projected_state_paths_remain_subject_to_privacy_guard(tmp_path, slot, field, private):
+    from record_paths import write_probe_record
+    from native_goal_benchmark import _UNSAFE_TRACE
+    record, _ = record_and_spec()
+    if field == 'budget_policy': record[slot][field]['extra'] = private
+    else: record[slot][field] = [{'reason': private}]
+    integrity().collect_post_run(tmp_path, record, lambda *_: {})
+    output = tmp_path / 'projected.json'
+    write_probe_record(output, record, dict(home='/Users/x', package='/package', interpreter=PYTHON))
+    saved = json.loads(output.read_text())
+    assert not any(marker in output.read_text() for marker in _UNSAFE_TRACE)
+    assert bool(saved.get('record_persistence_error')) is ('USER' in private)
+    if 'USER' in private: assert saved['classification'] == 'non_quality'
+
+
+@pytest.mark.parametrize('edition', ['goal', 'baseline', 'verified-complex'])
+@pytest.mark.parametrize('mode', ['success', 'deadline', 'eof', 'exception', 'launch_failed', 'version_failed'])
+def test_main_records_validate_schema_on_all_exit_paths(tmp_path, monkeypatch, edition, mode):
+    from contextlib import nullcontext
+    import jsonschema
+    probe = _load_probe()
+    physical = tmp_path / 'physical'; physical.mkdir()
+    alias = tmp_path / 'alias'; alias.symlink_to(physical, target_is_directory=True)
+    monkeypatch.setattr(probe.tempfile, 'TemporaryDirectory', lambda **_: nullcontext(str(alias)))
+    full = dict(session_id='cx-t', mission_id='mid', budget_policy={'reactivate': 'forbidden'}, reactivation_history=[], mission='PRIVATE TASK', workspace='/Users/USER/private')
+    def package(_repo, _commit, output): output.write_bytes(b'fixture'); return output
+    def unpack(_archive, destination, **_kwargs):
+        for prefix in ('', 'plugins/mission/'):
+            path = Path(destination) / prefix / 'skills/mission/SKILL.md'
+            path.parent.mkdir(parents=True); path.write_text('fixture')
+    def worker(_source, _commit, destination, _allow): destination.mkdir(parents=True); return destination
+    monkeypatch.setattr(probe, 'create_immutable_package', package)
+    monkeypatch.setattr(probe.shutil, 'unpack_archive', unpack)
+    monkeypatch.setattr(probe, 'create_worker_export', worker)
+    monkeypatch.setattr(probe, 'initialize_worker_export_repository', lambda _: 'b' * 40)
+    monkeypatch.setattr(probe, 'worker_export_manifest', lambda _: {'sha256': 'sha256:' + 'c' * 64})
+    monkeypatch.setattr(probe, '_task_snapshot', lambda _: {'observed': 'a' * 40, 'clean': True})
+    monkeypatch.setattr(probe, '_fresh_mission_state', lambda *_: {'passes': True})
+    def version():
+        if mode == 'version_failed': raise RuntimeError('unavailable')
+        return 'v'
+    monkeypatch.setattr(probe, '_codex_version', version)
+    calls, initialized = [], []
+    class Rpc:
+        def __init__(self, *_):
+            if mode == 'launch_failed': raise FileNotFoundError('missing provider')
+            assert mode != 'version_failed'
+            self.events, self.wait_end_reason = [], None
+        def request(self, method, params):
+            calls.append((method, params))
+            if method == 'thread/start': return {'thread': {'id': 't'}, 'model': 'm', 'reasoningEffort': 'high', 'activePermissionProfile': {'id': 'p'}}
+            if method == 'skills/extraRoots/set': self.skill = Path(params['extraRoots'][0]) / 'mission/SKILL.md'
+            if method == 'skills/list': return {'data': [{'skills': [{'path': str(self.skill)}]}]}
+            if method == 'thread/goal/set': self.objective = params['objective']
+            if method == 'thread/goal/clear': return {'cleared': True}
+            if method.startswith('thread/goal/'): return {'goal': {'threadId': 't', 'objective': self.objective, 'status': 'complete' if mode == 'success' else 'active', 'createdAt': 1}}
+            if method == 'turn/start':
+                if edition == 'verified-complex': assert 'mission' not in self.evidence['session_init']
+                if mode == 'exception': raise RuntimeError('fake failure')
+                return {'turn': {'id': 'turn'}}
+            return {}
+        def wait_for_event(self, *_):
+            self.wait_end_reason = 'deadline' if mode == 'deadline' else 'eof' if mode == 'eof' else None
+            if mode == 'deadline': raise probe.AssignmentDeadlineReached()
+            self.events.extend({'method': m, 'params': {'threadId': 't', 'turnId': 'turn'}} for m in ('turn/started', 'turn/completed'))
+            return mode != 'eof'
+        def close(self): pass
+    monkeypatch.setattr(probe, 'RpcProcess', Rpc)
+    def pre(*_): initialized.append(True); return full
+    output = tmp_path / 'result.json'
+    monkeypatch.setattr(sys, 'argv', ['probe', '--host', 'codex', '--arm', 'goal' if edition == 'goal' else 'mission', '--objective', 'PRIVATE TASK', '--task-id', 't', '--assignment-id', 'a', '--acceptance-criterion', 'PRIVATE ACCEPTANCE', '--starting-commit', 'a' * 40, '--mission-source-repo', str(tmp_path), '--mission-source-commit', 'a' * 40, '--model-id', 'm', '--effort', 'high', '--permissions', 'p', '--worktree', str(tmp_path), '--output', str(output), '--worker-allow-path', 'task.txt'])
+    assert probe.main(mission_edition='verified-complex' if edition == 'verified-complex' else 'baseline', pre_turn=pre, post_run=lambda *_: {'mission_state': full}) == 0
+    record = json.loads(output.read_text())
+    jsonschema.validate(record, json.loads((BENCH / 'native_goal_result.schema.json').read_text()))
+    assert record.get('reason') != 'package_prepare_failed'
+    assert record['outcome'] == ('completed' if mode == 'success' else 'failed')
+    assert bool(initialized) is (edition == 'verified-complex' and mode not in ('launch_failed', 'version_failed'))
+    assert ('session_init' in record) is bool(initialized)
+    if mode in ('launch_failed', 'version_failed'):
+        assert 'config_matches' not in record and 'observed_config' not in record
+    assert 'PRIVATE TASK' not in output.read_text() and 'PRIVATE ACCEPTANCE' not in output.read_text()
+    assert '/Users/USER/private' not in output.read_text()
+    if edition != 'goal' and mode != 'version_failed':
+        assert record['mission_state']['mission_id'] == 'mid'
+        assert record['mission_state_path'].startswith('/__mission_paths__/package/')
+    assert full['mission'] == 'PRIVATE TASK'
+
+
+def test_symlink_package_uses_same_recorded_and_delivered_paths(tmp_path, monkeypatch):
+    from exec_event_scan import scan_exec_events
+    probe = _load_probe()
+    root = tmp_path / 'physical/package'
+    skill = root / 'skills/mission/SKILL.md'
+    skill.parent.mkdir(parents=True); skill.write_text('fixture')
+    alias = tmp_path / 'alias'; alias.symlink_to(root.parent, target_is_directory=True)
+    evidence = {}
+    class Rpc(FakeRpc):
+        def request(self, method, params):
+            if method == 'skills/extraRoots/set': assert params['extraRoots'] == [str(root / 'skills')]
+            if method == 'turn/start':
+                assert params['input'][0]['path'] == str(skill)
+                evidence['exec_events'].append({'command': [str(root / 'skills/mission/bin/mission-state.py'), 'status', '.mission-state/x']})
+                return {'turn': {'id': 'turn'}}
+            return super().request(method, params)
+    monkeypatch.setattr(probe, 'RpcProcess', lambda *_: Rpc(skill, 'success', probe))
+    probe.probe_codex(tmp_path, 'o', 'a', 10, None, 1, 'm', 'high', 'p', 'mission', alias / 'package', evidence=evidence, pre_turn=lambda *_: pytest.fail('baseline must not initialise'))
+    assert evidence['mission_state_path'] == str(root / 'skills/mission/bin/mission-state.py')
+    assert scan_exec_events(evidence['exec_events'], evidence['mission_state_path'], evidence['interpreter_path'], str(tmp_path)) == []
+
+
+@pytest.mark.parametrize('document', ['PRIVATE TASK', ['PRIVATE TASK'], None])
+def test_invalid_session_documents_do_not_publish_task_prose(tmp_path, document):
+    record, _ = record_and_spec()
+    integrity().collect_post_run(tmp_path, record, lambda *_: {'mission_state': document, 'session_init': document})
+    assert record['mission_state'] is None and record['session_init'] is None

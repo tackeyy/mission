@@ -22,7 +22,7 @@ import threading
 from pathlib import Path
 from datetime import datetime, timezone
 
-from evaluation_integrity import collect_post_run, policy_digest
+from evaluation_integrity import collect_post_run, policy_digest, project_session_evidence
 from record_paths import write_probe_record
 
 from native_goal_benchmark import (
@@ -183,8 +183,10 @@ def _codex_version() -> str:
 
 def probe_codex(worktree: Path, objective: str, acceptance: str, timeout: float, token_budget: int | None, max_turns: int,
                 model: str, effort: str, permissions: str, arm: str = "goal", package_root: Path | None = None,
-                evidence: dict | None = None, pre_turn=None) -> dict:
+                evidence: dict | None = None, pre_turn=None, mission_edition="baseline") -> dict:
     evidence = evidence if evidence is not None else {}
+    if package_root is not None:
+        package_root = package_root.resolve()
     evidence.update(observed_config=None, config_matches=None, package_delivery=None, turn_start_sent=0, exec_events=[], deadline_reached=False,
                     mission_state_path=str((package_root / "skills/mission/bin/mission-state.py").resolve()) if package_root else None,
                     interpreter_path=os.path.abspath(sys.executable), workspace=str(worktree))
@@ -201,14 +203,14 @@ def probe_codex(worktree: Path, objective: str, acceptance: str, timeout: float,
         profile_id = profile.get("id") if isinstance(profile, dict) else None
         config_matches = observed_config["model"] == model and observed_config["reasoningEffort"] == effort and profile_id == permissions
         evidence.update(thread_id=thread_id, observed_config=observed_config, config_matches=config_matches)
-        if arm == "mission" and pre_turn is not None:
+        if arm == "mission" and mission_edition == "verified-complex" and pre_turn is not None:
             try:
                 initialized = pre_turn(worktree, thread_id, evidence)
                 if not isinstance(initialized, dict) or initialized.get("ok") is False or initialized.get("reason"):
                     raise RuntimeError("mission_session_init_failed")
                 initialized = dict(initialized)
                 initialized["budget_policy_template_sha256"] = policy_digest(initialized["budget_policy"])
-                evidence["session_init"] = initialized
+                evidence["session_init"] = project_session_evidence(initialized)
             except Exception as exc:
                 return {"native_goal_observed": False, "fidelity": "unverified", "outcome": "failed", "reason": "mission_session_init_failed", "error_type": type(exc).__name__}
         assignment = f"{objective}\n\nAcceptance criterion: {acceptance}"
@@ -290,8 +292,8 @@ def probe_codex(worktree: Path, objective: str, acceptance: str, timeout: float,
 
 def run_codex_assignment(worktree, objective, acceptance, timeout, token_budget, max_turns,
                          model, effort, permissions, arm="goal", package_root=None,
-                         *, evidence=None, pre_turn=None, post_run=None):
-    """Preserve established identity and post-run evidence on every exit path."""
+                         *, evidence=None, pre_turn=None, post_run=None, mission_edition="baseline"):
+    """Preserve evidence; the harness opts into verified-complex initialisation."""
     evidence = evidence if evidence is not None else {}
     evidence.update(observed_config=None, config_matches=None, package_delivery=None, turn_start_sent=0, exec_events=[], deadline_reached=False)
     result = {}
@@ -301,7 +303,7 @@ def run_codex_assignment(worktree, objective, acceptance, timeout, token_budget,
         return {**evidence, "provider_version_before": None, "provider_version_after": None, "native_goal_observed": False, "fidelity": "unverified", "outcome": "failed", "reason": "provider_version_unavailable", "error_type": type(exc).__name__}
     try:
         result = probe_codex(worktree, objective, acceptance, timeout, token_budget, max_turns,
-                             model, effort, permissions, arm, package_root, evidence=evidence, pre_turn=pre_turn)
+                             model, effort, permissions, arm, package_root, evidence=evidence, pre_turn=pre_turn, mission_edition=mission_edition)
     except Exception as exc:
         unsupported = arm == "goal" and _unsupported_goal_protocol(exc)
         result = {"native_goal_observed": False, "fidelity": "not_applicable" if unsupported else "unverified", "outcome": "unsupported" if unsupported else "failed", "reason": "native_goal_protocol_unavailable" if unsupported else "adapter_execution_failed", "error_type": type(exc).__name__}
@@ -420,7 +422,7 @@ def _task_snapshot(worktree: Path) -> dict:
     return {"observed": commit, "clean": not bool(status.stdout.strip())}
 
 
-def main(*, pre_turn=None, post_run=None) -> int:
+def main(*, pre_turn=None, post_run=None, mission_edition="baseline") -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", choices=("codex", "claude"), required=True)
     parser.add_argument("--arm", choices=("goal", "mission"), default="goal")
@@ -461,7 +463,7 @@ def main(*, pre_turn=None, post_run=None) -> int:
         with tempfile.TemporaryDirectory(prefix="mission-native-goal-package-") as temporary:
             package = Path(temporary) / "mission.tar"
             create_immutable_package(mission_source_repo, args.mission_source_commit, package)
-            package_root = Path(temporary) / "package"
+            package_root = (Path(temporary) / "package").resolve()
             path_roots['package'] = str(package_root)
             shutil.unpack_archive(str(package), str(package_root), format="tar")
             manifest = immutable_manifest(args.mission_source_commit, package_root, package, {
@@ -491,8 +493,9 @@ def main(*, pre_turn=None, post_run=None) -> int:
             else:
                 try:
                     if args.host == "codex":
-                        observation = run_codex_assignment(worker_root, args.objective, args.acceptance_criterion, args.timeout_seconds, args.token_budget, args.max_turns, args.model_id, args.effort, args.permissions, args.arm, package_root, pre_turn=pre_turn, post_run=post_run)
-                        manifest["provider_version"] = observation.get("provider_version_before")
+                        observation = run_codex_assignment(worker_root, args.objective, args.acceptance_criterion, args.timeout_seconds, args.token_budget, args.max_turns, args.model_id, args.effort, args.permissions, args.arm, package_root, pre_turn=pre_turn, post_run=post_run, mission_edition=mission_edition)
+                        if observation.get("provider_version_before") is not None:
+                            manifest["provider_version"] = observation["provider_version_before"]
                     else:
                         observation = probe_claude(worker_root, package_root, args.objective, args.acceptance_criterion, args.timeout_seconds, args.max_budget_usd, args.arm, args.model_id, args.effort, args.permissions)
                         version = subprocess.run(["claude", "--version"], text=True, capture_output=True, check=False)
@@ -507,6 +510,13 @@ def main(*, pre_turn=None, post_run=None) -> int:
             except ValueError:
                 manifest["worker_export"]["candidate_state"] = "stale"
                 observation = {**observation, "fidelity": "unverified", "outcome": "failed", "reason": "candidate_snapshot_invalid"}
+            # Null state/stream documents explicitly report an unreadable source,
+            # and Goal's null delivery means no skill. Other null observations
+            # have not established a value (notably the boolean config_matches).
+            observation = {k: v for k, v in observation.items() if v is not None or k in ('package_delivery', 'mission_state', 'session_init', 'exec_scan')}
+            for key in ('mission_state', 'session_init'):
+                if key in observation:
+                    observation[key] = project_session_evidence(observation[key])
             write_probe_record(output, {"schema": NATIVE_SCHEMA, "run_id": output.stem, "assignment_id": args.assignment_id, "task_id": args.task_id, "arm": label, "manifest": manifest, "package_prepared": package_prepared, **observation}, path_roots)
     except (OSError, RuntimeError, ValueError, shutil.ReadError) as exc:
         write_probe_record(output, {"schema": NATIVE_SCHEMA, "run_id": output.stem, "assignment_id": args.assignment_id, "task_id": args.task_id, "arm": label,

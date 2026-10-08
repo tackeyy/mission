@@ -5,6 +5,7 @@ here; the runner can connect the pre-turn hook after budget support lands.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import sys
@@ -47,6 +48,14 @@ def read_evaluated_state(workspace, thread_id):
     return state
 
 
+def project_session_evidence(state):
+    """Publish only configuration evidence; keep task prose in the live state."""
+    if not isinstance(state, dict):
+        return None
+    keys = ('session_id', 'mission_id', 'budget_policy', 'reactivation_history', 'budget_policy_template_sha256')
+    return {key: copy.deepcopy(state[key]) for key in keys if key in state}
+
+
 def collect_post_run(workspace, evidence, post_run=None):
     """Always called after app-server shutdown, including EOF and deadline exits."""
     if post_run is not None:
@@ -59,6 +68,9 @@ def collect_post_run(workspace, evidence, post_run=None):
             evidence['mission_state'] = read_evaluated_state(workspace, evidence['thread_id'])
         except Exception as exc:
             evidence.update(mission_state=None, post_run_error=type(exc).__name__)
+    for key in ('mission_state', 'session_init'):
+        if key in evidence:
+            evidence[key] = project_session_evidence(evidence[key])
     try:
         evidence['exec_scan'] = scan_exec_events(evidence['exec_events'], evidence['mission_state_path'], evidence['interpreter_path'], str(workspace))
     except Exception as exc:
@@ -92,7 +104,9 @@ def _check_record(record, planned_arms, expected_arm=None):
     required = ('host', 'arm', 'model_id', 'effort', 'permissions', 'timeout_seconds', 'max_turns', 'token_budget', 'max_budget_usd')
     observed = record.get('observed_config') or {}
     if (record.get('arm') != ('mission' if mission else 'codex_native_goal')
-            or any(k not in conditions or k not in spec['conditions'] or conditions[k] != spec['conditions'][k] for k in required)
+            or any(k not in conditions or k not in spec['conditions']
+                   or type(conditions[k]) is not type(spec['conditions'][k])
+                   or conditions[k] != spec['conditions'][k] for k in required)
             or record.get('package_delivery', 'missing') != ('skill_input' if mission else None)
             or record.get('config_matches') is not True
             or not observed or observed.get('model') != conditions.get('model_id')
@@ -146,9 +160,7 @@ def _check_record(record, planned_arms, expected_arm=None):
             unobserved.append('reactivation_history')
         elif state.get('reactivation_history') != []:
             reasons.append('evaluated_session_mismatch')
-        if not verified and record.get('budget_policy') is not None:
-            reasons.append('execution_config_mismatch')
-    elif record.get('budget_policy') is not None:
+    if not verified and (record.get('budget_policy') is not None or 'session_init' in record):
         reasons.append('execution_config_mismatch')
     result = dict(matches=not reasons, planned_arm=arm, classification='non_quality' if reasons else None, reasons=sorted(set(reasons)), unobserved=sorted(set(unobserved)))
     if scan_error: result['exec_scan_error'] = scan_error
