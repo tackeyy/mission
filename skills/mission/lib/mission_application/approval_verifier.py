@@ -155,6 +155,8 @@ def verify_approval_request(request, verifier_name, *, verifiers, resolve, execu
                             budgeted=False, state=None):
     if not isinstance(verifier_name, str) or not re.fullmatch(r'[a-z][a-z0-9-]{0,63}', verifier_name):
         raise ValueError('approval verifier is invalid or not configured')
+    if state is not None and (not isinstance(state, dict) or not isinstance(state.get('extensions', {}), dict)):
+        raise ValueError('approval state is invalid')
     verifier = verifiers.get(verifier_name)
     policy_present = state is not None and ('budget_ledger' in state or 'budget_ledger' in (state.get('extensions') or {}))
     if verifier is not None and (budgeted or policy_present):

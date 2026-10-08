@@ -53,14 +53,20 @@ def test_exec_keeps_leader_unreaped_until_group_cleanup(tmp_path, monkeypatch):
             child.wait(timeout=1)
 
 
-def test_budget_callable_rejected_without_spawn(tmp_path, monkeypatch):
+@pytest.mark.parametrize('options', [{'budgeted': True}, {'state': {'extensions': {'budget_ledger': {}}}}])
+def test_budget_callable_rejected_without_spawn(tmp_path, monkeypatch, options):
     from .test_score_provenance import _load_state_module
     module = _load_state_module()
-    called = []
-    module.register_approval_verifier('fixture-verifier', lambda request: called.append(request))
-    with pytest.raises(ValueError, match='budget-deadline-unenforceable'):
-        module.verify_force_approval({}, 'fixture-verifier', cwd=tmp_path, budgeted=True)
-    assert called == []
+    spawned = []
+    module.register_approval_verifier('fixture-verifier', lambda request: {})
+    monkeypatch.setattr(module, '_run_approval_verifier', lambda *args, **kw: spawned.append(args))
+    error = None
+    try:
+        module.verify_force_approval({}, 'fixture-verifier', cwd=tmp_path, **options)
+    except ValueError as exc:
+        error = str(exc)
+    assert error == 'budget-deadline-unenforceable', 'budgeted callable was not refused before execution'
+    assert spawned == [], 'budgeted callable reached the spawn boundary'
 
 
 @pytest.mark.parametrize('failure', ['write', 'fsync', 'validation'])
@@ -347,3 +353,52 @@ def test_post_spawn_fd_close_failure_still_sweeps_child(tmp_path, installed_veri
     assert spawned[0][0].returncode is not None
     assert execution._group_absent(spawned[0][0].pid)
     assert list((tmp_path / 'jobs').iterdir()) == []
+
+
+@pytest.mark.parametrize('result_fd', [0, 1, 2])
+def test_job_rejects_reserved_result_descriptors(installed_verifier, result_fd):
+    import json
+    from mission_application.spawn_trampoline import decode_job
+    pin, request, _, _ = installed_verifier
+    raw = json.dumps(dict(schema='mission-exec-job/1', kind='approval-verifier',
+                          result_fd=result_fd, verifier=pin, request=request)).encode()
+    rejected = False
+    try:
+        decode_job(raw)
+    except ValueError:
+        rejected = True
+    assert rejected, f'reserved result fd {result_fd} was accepted'
+
+
+@pytest.mark.parametrize('state', [[], {'extensions': 5}])
+def test_approval_rejects_malformed_state_with_value_error(state):
+    from mission_application.approval_verifier import verify_approval_request
+    with pytest.raises(ValueError, match='approval state is invalid'):
+        verify_approval_request({}, 'fixture-verifier', state=state,
+                                verifiers={'fixture-verifier': lambda _: {}}, resolve=None, execute=None)
+
+
+def test_frame_deadline_fails_finitely_if_timeout_check_is_missing():
+    import threading
+    import time
+    from types import SimpleNamespace
+    from budgeted_exec import read_frame
+    receiver, sender = os.pipe()  # open, silent writer; no EOF can terminate the loop
+    stop, outcome = threading.Event(), []
+    def read():
+        try:
+            read_frame(SimpleNamespace(pid=0), receiver, time.monotonic() + .05,
+                       exit_probe=lambda _: stop.is_set())
+        except Exception as exc:
+            outcome.append(type(exc))
+    worker = threading.Thread(target=read, daemon=True)
+    try:
+        worker.start()
+        worker.join(2)
+        assert not worker.is_alive(), 'read_frame did not stop at its deadline within the watchdog'
+        assert outcome == [TimeoutError], 'silent live child must end with the deadline refusal'
+    finally:
+        stop.set()  # release a deadline mutant through the independent leader-exit path
+        worker.join(1)
+        os.close(receiver)
+        os.close(sender)
