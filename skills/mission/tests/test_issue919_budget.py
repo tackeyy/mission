@@ -345,3 +345,30 @@ def test_direct_session_read_rejects_duplicate_keys_in_a_budget_document(tmp_pat
     # Without a ledger the historical legacy tolerance is unchanged.
     path.write_text('{"schema_version": 4, "phase": "planning", "phase": "executing"}')
     assert read_session_json(path)['phase'] == 'executing'
+
+
+def test_ledger_placement_and_time_digits_are_closed():
+    from mission_kernel.budget import BudgetError, decode_ledger, decode_policy, default_policy_document, new_ledger, ledger_document
+    wire = ledger_document(new_ledger(decode_policy(default_policy_document(1800)), '2026-01-01T00:00:00Z'))
+    with pytest.raises(BudgetError, match='budget-ledger-location-invalid'):
+        decode_ledger({'schema_version': 5, 'budget_minutes': 30, 'budget_ledger': wire, 'extensions': {}})
+    # A v5 document without extensions has no ledger, like the fresh-review projection.
+    assert decode_ledger({'schema_version': 5, 'mission': 'x'}).policy is None
+    with pytest.raises(BudgetError, match='budget-ledger-shape-invalid'):
+        decode_ledger({'schema_version': 5, 'extensions': []})
+    wire['clock']['last_observed_at'] = '٢٠٢٦-01-01T00:00:00Z'
+    with pytest.raises(BudgetError):
+        decode_ledger({'budget_minutes': 30, 'budget_ledger': wire})
+
+
+def test_closeout_margin_exhausts_only_without_an_open_final_reservation():
+    from dataclasses import replace
+    from mission_kernel.budget import DispatchReservation, decode_policy, default_policy_document, exhaustion, new_ledger
+    ledger = new_ledger(decode_policy(default_policy_document(1800)), '2026-01-01T00:00:00Z')
+    at = '2026-01-01T00:29:45Z'  # inside the 30 s closeout margin, before the overall deadline
+    assert exhaustion(ledger, at).cause == 'closeout-margin'
+    final = DispatchReservation('reservation:1', 'verification-run', 'final', 'command:1', 'op:1', 1,
+                                '2026-01-01T00:29:40Z', '2026-01-01T00:29:50Z', '2026-01-01T00:29:58Z', 18, 0)
+    opened = replace(ledger, reservations=(final,))
+    result = exhaustion(opened, at)
+    assert result is None or result.cause != 'closeout-margin'
