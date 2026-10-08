@@ -18,11 +18,11 @@ capacity.
 Pure function only: no ``os``/``pathlib``/clock/random (``datetime.
 fromisoformat`` only *parses* an already-present string, never reads the
 clock). Kernel deps: :mod:`mission_kernel.json_codec`,
-:mod:`mission_kernel.fresh_review`, and (write_kind half only)
-``_TIMING_ACTIVITY_FIELDS`` from :mod:`mission_kernel.transitions`.
-Deliberately does *not* import :mod:`mission_kernel.fresh_review_receipts`
-(D terminal shapes are duplicated as closed literals, import-light, pinned
-independent of that module's shapes; only the test suite cross-checks).
+:mod:`mission_kernel.fresh_review`, the running-shape maximum from
+:mod:`mission_kernel.fresh_review_receipts`, and (write_kind half only)
+``_TIMING_ACTIVITY_FIELDS`` from :mod:`mission_kernel.transitions`. D terminal
+shape maxima remain duplicated as closed literals; only the dispatch residual
+derives its running-shape maximum from the shared receipt contract.
 """
 from __future__ import annotations
 
@@ -41,6 +41,7 @@ from .fresh_review import (
     FreshReviewRecord,
     WithdrawnFreshReviewRecord,
 )
+from .fresh_review_receipts import FRESH_REVIEW_MAX_ENCODED_BYTES
 #: The real halt writers' own timing/activity compatibility fields
 #: (``MarkHalt``'s entry in ``_COMPATIBILITY_FIELDS``, minus the metadata
 #: fields a halt never actually touches). Imported, not hand-copied, so
@@ -233,6 +234,13 @@ if STATE_CAPACITY_TAKEOVER_LIMIT < 1:
 _FRESH_REVIEW_KEY_SLACK = 32
 _FRESH_REVIEW_RESERVED_SLOT_COUNT = 3
 
+#: E0a's 3,455-byte running maximum intentionally remains the receipt shape
+# only. D2c persists the launch writer separately from the child dispatch
+# identity; the 19-character key, colon, 128-character identifier and object
+# comma measure 153 canonical bytes. This supplemental bound is owned here,
+# rather than widening the receipt maximum pinned by test_issue917.
+FRESH_REVIEW_LAUNCH_OPERATION_STAGE_DELTA = 153
+
 #: Envelope growth (``updated_at`` / ``last_activity_at`` / lease refresh)
 #: that rides along with any stage-advancing write.
 _FRESH_REVIEW_ENVELOPE_ALLOWANCE = 128
@@ -243,7 +251,7 @@ _FRESH_REVIEW_ENVELOPE_ALLOWANCE = 128
 #: longest delta + the reserved-slot key slack + the envelope allowance.
 FRESH_REVIEW_DISPATCH_STAGE_DELTA = (
     (130 - 4) + 2 * ((71 + 2) - 4)
-    + 1797 + 3455
+    + 1797 + 3455 + FRESH_REVIEW_LAUNCH_OPERATION_STAGE_DELTA
     + 20
     + _FRESH_REVIEW_KEY_SLACK * _FRESH_REVIEW_RESERVED_SLOT_COUNT
     + _FRESH_REVIEW_ENVELOPE_ALLOWANCE
@@ -339,6 +347,11 @@ _FRESH_REVIEW_FIXED_RESERVE_BY_STATUS = {
     + FRESH_REVIEW_TERMINAL_STAGE_DELTA,
     "reserved": FRESH_REVIEW_CONSUME_STAGE_DELTA + FRESH_REVIEW_TERMINAL_STAGE_DELTA,
     "consumed": FRESH_REVIEW_TERMINAL_STAGE_DELTA,
+    "dispatch-unknown": (FRESH_REVIEW_MAX_ENCODED_BYTES['running'] + FRESH_REVIEW_LAUNCH_OPERATION_STAGE_DELTA
+                         + FRESH_REVIEW_CONSUME_STAGE_DELTA + FRESH_REVIEW_TERMINAL_STAGE_DELTA),
+    "running": FRESH_REVIEW_CONSUME_STAGE_DELTA + FRESH_REVIEW_TERMINAL_STAGE_DELTA,
+    "blocked": 0,
+    "abandoned-unknown": 0,
 }
 
 #: Baselines kept for backward-compatible direct comparison in tests; a
@@ -623,7 +636,9 @@ def residual_reservation(
         fixed = _FRESH_REVIEW_FIXED_RESERVE_BY_STATUS.get(
             record.status, _FRESH_REVIEW_FIXED_RESERVE_BY_STATUS["pending"]
         )
-        total += fixed + lineage_stage_delta(document, record.request)
+        total += fixed
+        if record.status not in ('blocked', 'abandoned-unknown'):
+            total += lineage_stage_delta(document, record.request)
     total += repair_attempt_reserve(document) + disposition_reserve(document)
     return total
 
@@ -1223,16 +1238,11 @@ def _withdraw_all_pending_len(document: Mapping, encoded_len: int, *, encode) ->
     if not pending_ids:
         return encoded_len
     used_operations = {
-        (record.withdraw_operation_id if isinstance(record, WithdrawnFreshReviewRecord)
-         else record.prepare_operation_id)
+        operation
         for record in projection.requests
+        for operation in _fresh_review.record_operation_ids(record)
+        if operation is not None
     }
-    used_operations |= {
-        record.operation_id
-        for record in projection.requests
-        if isinstance(record, FreshReviewRecord) and record.operation_id is not None
-    }
-    used_operations |= {record.prepare_operation_id for record in projection.requests}
     working = projection
     epoch = _lease_mapping(document).get("fencing_epoch")
     if not _lease_epoch_value_ok(epoch):
@@ -1515,7 +1525,8 @@ def _diff_is_record_status_advance(base_document: Mapping, proposed: Mapping) ->
         return False
     if len(base_projection.requests) != len(proposed_projection.requests):
         return False
-    _ADVANCE_ORDER = {"pending": 0, "reserved": 1, "consumed": 2}
+    _ADVANCE_ORDER = {"pending": 0, "reserved": 1, "consumed": 2,
+                      "dispatch-unknown": 1, "running": 2, "blocked": 3, "abandoned-unknown": 3}
     advanced = False
     for before, after in zip(base_projection.requests, proposed_projection.requests):
         if before == after:
@@ -1528,4 +1539,3 @@ def _diff_is_record_status_advance(base_document: Mapping, proposed: Mapping) ->
             return False
         advanced = True
     return advanced
-

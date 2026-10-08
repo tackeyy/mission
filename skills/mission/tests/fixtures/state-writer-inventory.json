@@ -295,12 +295,17 @@
     "decode_request:replace": 1,
     "prepare_request_state:dynamic": 1,
     "prepare_request_state:replace": 1,
-    "projection_document:dynamic": 2,
+    "projection_document:dynamic": 3,
     "reserve_request:replace": 1,
     "visit:remove": 1
   },
   "lib/mission_kernel/fresh_review_coverage.py": {
     "_validated:dynamic": 2
+  },
+  "lib/mission_kernel/fresh_review_dispatch.py": {
+    "_publish_projection:replace": 1,
+    "dispatch_state:replace": 3,
+    "validate_launch:dynamic": 2
   },
   "lib/mission_kernel/fresh_review_receipts.py": {
     "_timestamp:replace": 1,
