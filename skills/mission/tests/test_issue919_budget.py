@@ -377,6 +377,9 @@ def test_closeout_margin_exhausts_only_without_an_open_final_reservation():
 @pytest.mark.parametrize('source, rejected', (
     # The ledger sits in a shadowed duplicate extensions object.
     ('{"schema_version":5,"extensions":{"budget_minutes":30,"budget_ledger":{}},"extensions":{}}', True),
+    # The same with a non-integer v5 spelling and a ledger that is not the last key.
+    ('{"schema_version":5.0,"extensions":{"budget_ledger":{},"budget_minutes":30},"extensions":{}}', True),
+    ('{"schema_version":5e0,"extensions":{"budget_ledger":{},"budget_minutes":30},"extensions":{}}', True),
     # A shadowed duplicate top-level ledger.
     ('{"schema_version":4,"budget_ledger":{},"budget_ledger":null}', True),
     # v4 extensions.budget_ledger is user data; legacy duplicate tolerance stays.

@@ -964,8 +964,8 @@ def _raw_document_carries_budget_ledger(text: str) -> bool:
     top = json.loads(text, object_pairs_hook=_JsonPairs)
     if not isinstance(top, _JsonPairs):
         return False
-    versions = {value for key, value in top if key == "schema_version" and type(value) is int}
-    if 5 not in versions:
+    # Same predicate as decode_projection / decode_ledger (``== 5`` also matches 5.0).
+    if not any(key == "schema_version" and value == 5 for key, value in top):
         return any(key == "budget_ledger" for key, _ in top)
     return any(key == "budget_ledger" for key, _ in top) or any(
         key == "extensions" and isinstance(value, _JsonPairs)
