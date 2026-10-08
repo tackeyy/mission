@@ -982,7 +982,7 @@ def _probe_table():
             old_owner = (base if layout == "v4" else base["lease"])["owner_session_id"]
             proposed = _set_lease(base, layout, owner="c", epoch=2,
                                   lease_id="bad lease" if defect == "new_lease_id" else "d",
-                                  history=[_entry(old_owner, "b", 1)])
+                                  history=[_entry(old_owner, "b", 1, at="9999-12-31T23:59:59Z")])
             # #918: exact displaced-token copies are historical values; new tokens are bounded.
             copied = defect == "displaced_owner"
             cases.append(_case(f"takeover_non_conformant_{defect}_{layout}", base, proposed, encoding,

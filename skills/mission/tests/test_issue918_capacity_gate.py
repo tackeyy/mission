@@ -19,7 +19,7 @@ def _canonical(document):
     ('goal_dispatch_host', '\x01' * 128, True), ('goal_dispatch_host', 'x' * 129, False),
     ('goal_dispatch_resolution_fallback_reason', 'x' * 129, False),
     ('owner_session_id', 'a' * 128, True), ('lease_id', 'a' * 129, False),
-    ('lease_id', 'bad token', False), ('fencing_epoch', 0, True),
+    ('lease_id', 'bad token', False), ('fencing_epoch', 0, False),
     ('fencing_epoch', sc.LEASE_EPOCH_MAX, True), ('fencing_epoch', sc.LEASE_EPOCH_MAX + 1, False),
     ('fencing_epoch', True, False), ('fencing_epoch', 1.5, False),
 ])
@@ -161,3 +161,114 @@ def test_excess_takeover_halt_archives_only_the_exact_old_lease(layout, old_toke
     else:
         assert check_state_capacity(encode(base), encode(proposed), encoding=encoding).accepted
 
+
+
+def _lease_trial(layout):
+    from .test_issue933_state_capacity_verdict import _base
+    base, encoding = _base(layout)
+    lease = base if layout == 'v4' else base['lease']
+    lease.update(fencing_epoch=2, lease_history=[dict(owner_session_id='retired',
+        lease_id='retired-token', fencing_epoch=1, reason='takeover', at='2026-10-08T00:00:00Z')])
+    proposed = copy.deepcopy(base)
+    target = proposed if layout == 'v4' else proposed['lease']
+    target['lease_history'].append(dict(owner_session_id=lease['owner_session_id'],
+        lease_id=lease['lease_id'], fencing_epoch=2, reason='takeover', at='2026-10-09T00:00:00Z'))
+    target.update(owner_session_id='new-owner', lease_id='new-token', fencing_epoch=3)
+    encode = _canonical if layout == 'v5' else lambda d: json.dumps(d, indent=2).encode()
+    return base, proposed, target, encoding, encode
+
+
+@pytest.mark.parametrize('layout', ['v4', 'v5'])
+@pytest.mark.parametrize('defect', ['valid', 'missing-at', 'invalid-at', 'naive-at',
+                                  'reused-id', 'no-append-reused-id', 'offset-at', 'offset-expiry',
+                                  'untrimmed-owner', 'zero-epoch', 'extra-key'])
+def test_appended_lease_and_current_identity_obey_decoder(layout, defect):
+    from mission_persistence.capacity_gate import check_state_capacity, CapacityWriteError
+    from mission_kernel.codec_v4 import _decode_legacy_lease
+    from mission_kernel.codec_v5 import _decode_lease
+    from mission_kernel.errors import MissionStateDecodeError
+    base, proposed, lease, encoding, encode = _lease_trial(layout)
+    entry = lease['lease_history'][-1]
+    read_lease = _decode_legacy_lease if layout == 'v4' else lambda fields: _decode_lease({'lease': {'kind': 'fenced', **fields}})
+    if defect == 'missing-at':
+        del entry['at']
+    elif defect == 'invalid-at':
+        entry['at'] = 'invalid'
+    elif defect == 'naive-at':
+        entry['at'] = '2026-10-09T00:00:00'
+    elif defect == 'reused-id':
+        lease['lease_id'] = 'retired-token'
+    elif defect == 'no-append-reused-id':
+        lease['lease_history'].pop()
+        lease['lease_id'] = 'retired-token'
+    elif defect == 'offset-at':
+        entry['at'] = '2026-10-09T09:00:00+09:00'
+    elif defect == 'offset-expiry':
+        lease['lease_expires_at'] = '9999-12-31T23:59:59+00:00'
+    elif defect == 'untrimmed-owner':
+        (base if layout == 'v4' else base['lease'])['owner_session_id'] = entry['owner_session_id'] = ' old '
+    elif defect == 'zero-epoch':
+        (base if layout == 'v4' else base['lease'])['fencing_epoch'] = entry['fencing_epoch'] = 0
+        lease.update(fencing_epoch=1, lease_history=[entry])
+        (base if layout == 'v4' else base['lease'])['lease_history'] = []
+    elif defect == 'extra-key':
+        entry['extra'] = True
+    valid = defect == 'valid' or (layout == 'v4' and defect in ('offset-at', 'offset-expiry'))
+    if valid:
+        read_lease(lease)
+        assert sc.classify_write_kind(base, proposed, encoding=encoding) is sc.WriteKind.STOP_TAKEOVER
+        assert check_state_capacity(encode(base), encode(proposed), encoding=encoding).accepted
+    else:
+        if defect != 'extra-key' or layout == 'v5':
+            with pytest.raises(MissionStateDecodeError):
+                read_lease(lease)
+        assert sc.classify_write_kind(base, proposed, encoding=encoding) is sc.WriteKind.NORMAL
+        with pytest.raises(CapacityWriteError, match='state-capacity-invariant-broken'):
+            check_state_capacity(encode(base), encode(proposed), encoding=encoding)
+
+
+@pytest.mark.parametrize('layout', ['v4', 'v5'])
+@pytest.mark.parametrize('historical', ['reason', 'owner', 'lease-id', 'epoch', 'extra-key'])
+def test_over_capacity_renewal_preserves_unchanged_history(layout, historical):
+    from mission_persistence.capacity_gate import check_state_capacity
+    from .test_issue933_state_capacity_verdict import _push_over_capacity
+    base, _, _, encoding, encode = _lease_trial(layout)
+    lease = base if layout == 'v4' else base['lease']
+    row = lease['lease_history'][0]
+    if historical == 'reason': row['reason'] = 'old reason'
+    elif historical == 'owner': row['owner_session_id'] = 'old owner'
+    elif historical == 'lease-id': row['lease_id'] = 'old token'
+    elif historical == 'epoch':
+        row['fencing_epoch'] = sc.LEASE_EPOCH_MAX + 1
+        lease['fencing_epoch'] = sc.LEASE_EPOCH_MAX + 2
+    else: row['extra'] = True
+    lease['lease_expires_at'] = '2026-10-09T00:00:00Z'
+    base = _push_over_capacity(base, encoding)
+    proposed = copy.deepcopy(base)
+    target = proposed if layout == 'v4' else proposed['lease']
+    target['lease_expires_at'] = '2099-01-01T00:00:00Z'
+    assert sc.classify_write_kind(base, proposed, encoding=encoding) is sc.WriteKind.STOP_TAKEOVER
+    assert check_state_capacity(encode(base), encode(proposed), encoding=encoding).accepted
+    assert target['lease_history'] == (base if layout == 'v4' else base['lease'])['lease_history']
+
+
+@pytest.mark.parametrize('container', ['extensions', 'lease'])
+@pytest.mark.parametrize('value', [None, []])
+@pytest.mark.parametrize('side', ['base', 'proposed'])
+def test_malformed_v5_containers_return_capacity_error(container, value, side):
+    from mission_persistence.capacity_gate import check_state_capacity, CapacityWriteError
+    base, proposed, _, encoding, encode = _lease_trial('v5')
+    (base if side == 'base' else proposed)[container] = value
+    with pytest.raises(CapacityWriteError, match='state-capacity-invariant-broken'):
+        check_state_capacity(encode(base), encode(proposed), encoding=encoding)
+
+
+@pytest.mark.parametrize('history', ['corrupt', None, [None]])
+def test_malformed_expired_legacy_history_is_a_lease_refusal(history):
+    from .test_issue936_state_capacity_reservation import _acquire_capacity_lease
+    state = dict(owner_session_id='old', lease_id='old-token', fencing_epoch=1,
+        lease_expires_at='2000-01-01T00:00:00Z', lease_history=history)
+    before = copy.deepcopy(state)
+    with pytest.raises(ValueError, match='lease held.*invalid lease history'):
+        _acquire_capacity_lease(state, 'new', lease_id='new-token', reason='takeover')
+    assert state == before

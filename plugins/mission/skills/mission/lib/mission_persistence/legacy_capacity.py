@@ -55,9 +55,14 @@ def acquire_legacy_lease(state, session_id, *, reason, presented_lease_id, now,
             f"lease held by {owner} until {state.get('lease_expires_at')}"
         )
 
+    history = state.get("lease_history", [])
+    if not isinstance(history, list) or any(not isinstance(item, dict) for item in history):
+        raise rejected_error(
+            f"lease held by {owner} until {state.get('lease_expires_at')} (invalid lease history)"
+        )
     retired_lease_ids = {
         str(item.get("lease_id"))
-        for item in state.get("lease_history", [])
+        for item in history
         if isinstance(item, dict) and item.get("lease_id")
     }
     if presented_lease_id and (
