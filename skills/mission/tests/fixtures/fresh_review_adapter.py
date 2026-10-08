@@ -111,7 +111,7 @@ class Adapter:
             record = next(item for item in _state()['fresh_review']['requests']
                           if item.get('dispatch', {}).get('operation_id') == dispatch.thaw().get('operation_id'))
             _journal().with_suffix('.cancel').write_text(record['status'])
-        return freeze_json_value({'status': 'cancelled'})
+        return freeze_json_value({'status': os.environ.get('FIXTURE_CANCEL', 'cancelled')})
 
 
 def factory():
