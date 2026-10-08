@@ -1005,10 +1005,11 @@ def _takeover_case(base: Mapping, proposed: Mapping) -> Optional[str]:
 
 def validate_lease_allocation(lease: Mapping, *, v5: bool = False) -> None:
     """Reuse decoder contracts for a newly allocated lease and its history."""
-    from .codec_v4 import _decode_history, _decode_legacy_lease
+    from .codec_v4 import _decode_history, _decode_legacy_lease, legacy_lease_history
     from .errors import MissionStateDecodeError
     decoded = _decode_legacy_lease(dict(lease, lease_history=[]))
-    _decode_history(lease.get("lease_history", []), "$.lease_history", decoded.fencing_epoch,
+    history = lease.get("lease_history", []) if v5 else legacy_lease_history(lease)
+    _decode_history(history, "$.lease_history", decoded.fencing_epoch,
                     decoded.lease_id, v5=v5)
     if v5 and lease.get("lease_expires_at") != decoded.lease_expires_at:
         raise MissionStateDecodeError("invalid-value", "$.lease.lease_expires_at",

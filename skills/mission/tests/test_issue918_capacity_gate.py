@@ -183,6 +183,12 @@ def _lease_trial(layout):
                                   'reused-id', 'no-append-reused-id', 'offset-at', 'offset-expiry',
                                   'untrimmed-owner', 'zero-epoch', 'extra-key'])
 def test_appended_lease_and_current_identity_obey_decoder(layout, defect):
+    """Takeover requires the complete history to remain decoder-readable.
+
+    An unreadable old row blocks takeover; renewal and halt may preserve it.
+    Unlike unchanged historical bounds, decoder validity applies to the whole
+    history when allocating a new lease.
+    """
     from mission_persistence.capacity_gate import check_state_capacity, CapacityWriteError
     from mission_kernel.codec_v4 import _decode_legacy_lease
     from mission_kernel.codec_v5 import _decode_lease
@@ -272,3 +278,44 @@ def test_malformed_expired_legacy_history_is_a_lease_refusal(history):
     with pytest.raises(ValueError, match='lease held.*invalid lease history'):
         _acquire_capacity_lease(state, 'new', lease_id='new-token', reason='takeover')
     assert state == before
+
+
+@pytest.mark.parametrize('layout', ['v4', 'v5'])
+@pytest.mark.parametrize('history', [None, '', False, 0, {}])
+@pytest.mark.parametrize('operation', ['withdraw', 'first-lease', 'genesis'])
+def test_decoder_empty_history_values_preserve_v4_admission(layout, history, operation):
+    from mission_persistence.capacity_gate import check_state_capacity, CapacityWriteError
+    from .test_issue933_state_capacity_verdict import _base, _push_over_capacity, _v5_pending_record
+    from mission_kernel.fresh_review import FreshReviewProjection, projection_document, withdraw_request
+    base, encoding = _base(layout)
+    lease = base if layout == 'v4' else base['lease']
+    lease['lease_history'] = history
+    if operation == 'withdraw':
+        record = _v5_pending_record()
+        projection = FreshReviewProjection((record,))
+        fields = base if layout == 'v4' else base['extensions']
+        fields['fresh_review'] = projection_document(projection)
+        base = _push_over_capacity(base, encoding)
+        proposed = copy.deepcopy(base)
+        withdrawn = withdraw_request(projection, request_id=record.request.request_id,
+            operation_id='withdraw', fencing_epoch=2)
+        (proposed if layout == 'v4' else proposed['extensions'])['fresh_review'] = projection_document(withdrawn)
+        (proposed if layout == 'v4' else proposed['lease'])['fencing_epoch'] = 2
+    else:
+        for key in ('owner_session_id', 'lease_id', 'fencing_epoch', 'lease_expires_at'):
+            lease.pop(key, None)
+        proposed = copy.deepcopy(base)
+        (proposed if layout == 'v4' else proposed['lease']).update(owner_session_id='owner',
+            lease_id='new-token', fencing_epoch=1, lease_expires_at='2099-01-01T00:00:00Z')
+        if operation == 'genesis': base = None
+    encode = _canonical if layout == 'v5' else lambda d: json.dumps(d, indent=2).encode()
+    raw = encode(proposed)
+    before = None if base is None else encode(base)
+    if layout == 'v4':
+        verdict = sc.state_capacity_verdict(None if base is None else sc.CapacityBase(base, len(before)),
+            proposed, len(raw), encoding=encoding)
+        assert verdict.accepted
+        assert check_state_capacity(before, raw, encoding=encoding).accepted
+    else:
+        with pytest.raises(CapacityWriteError, match='state-capacity-invariant-broken'):
+            check_state_capacity(before, raw, encoding=encoding)
