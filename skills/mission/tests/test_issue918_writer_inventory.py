@@ -1,8 +1,11 @@
 """Freeze the conservative bin/lib publication inventory before capacity gates.
 
 This is a syntactic inventory, not proof of gate reachability.
-書込みを伴いうる呼び出し・参照をすべて数え、無関係な変更でも manifest の更新を
-求める。偽陽性は manifest の更新で解消する。
+列挙した sink 名と動的取得パターンに一致する呼び出し・参照を保守的に数え、
+無関係な変更でも manifest の更新を求める。偽陽性は manifest の更新で解消する。
+スコープ・実行順序は追わず、一度結び付いた別名の対象をファイル全体で保持する。
+実行時に組み立てる名前の解決、生成コード・生成系の呼び出し、列挙外の公開経路は
+検査対象外であり、任意の実行時書込みを網羅する保証はない。
 """
 import ast
 import json
@@ -25,23 +28,68 @@ def _writer_calls(source):
     found = Counter()
     tree = ast.parse(source)
     parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    # Union bindings across the file: shadowing must never erase a possible sink.
     aliases = {}
+    dynamic_names = {'getattr', 'vars', 'methodcaller', 'attrgetter'}
+
+    def bind(alias, targets):
+        known = aliases.setdefault(alias, set())
+        previous = len(known)
+        known.update(targets)
+        return len(known) != previous
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for item in node.names:
-                aliases[item.asname or item.name.split('.')[0]] = (
-                    item.name if item.asname else item.name.split('.')[0])
+                bind(item.asname or item.name.split('.')[0], {
+                    item.name if item.asname else item.name.split('.')[0]})
         elif isinstance(node, ast.ImportFrom):
             for item in node.names:
-                aliases[item.asname or item.name] = '.'.join(
-                    part for part in (node.module, item.name) if part)
+                bind(item.asname or item.name, {'.'.join(
+                    part for part in (node.module, item.name) if part)})
 
-    def name_of(node):
+    def names_of(node):
         if isinstance(node, ast.Name):
-            return aliases.get(node.id, node.id)
+            names = aliases.get(node.id, {node.id})
+            return names | {node.id} if node.id in sinks | dynamic_names else names
         if isinstance(node, ast.Attribute):
-            return name_of(node.value) + '.' + node.attr
-        return ''
+            return {name + '.' + node.attr for name in names_of(node.value) or {''}}
+        if isinstance(node, ast.NamedExpr):
+            return names_of(node.value)
+        return set()
+
+    def assignment_bindings(target, value):
+        if isinstance(target, ast.Name):
+            yield target.id, value
+        elif isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, (ast.Tuple, ast.List)):
+            for child, item in zip(target.elts, value.elts):
+                yield from assignment_bindings(child, item)
+
+    assignments = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                assignments.extend(assignment_bindings(target, node.value))
+        elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
+            assignments.extend(assignment_bindings(node.target, node.value))
+    # Propagate assignment aliases to a fixed point, including forward chains.
+    # Store only finite terminal kinds (plus open's mode convention), so cyclic
+    # attribute assignments cannot grow qualified names without bound.
+    changed = True
+    while changed:
+        changed = False
+        for alias, value in assignments:
+            targets = set()
+            for name in names_of(value):
+                tail = name.rsplit('.', 1)[-1]
+                if tail in sinks | dynamic_names:
+                    if tail == 'open':
+                        name = name if name in ('os.open', 'io.open', 'builtins.open', 'open') else '.open'
+                    else:
+                        name = tail
+                    targets.add(name)
+            if targets:
+                changed = bind(alias, targets) or changed
 
     def may_write(node, name):
         # os.open uses flags, not a text mode. Keep even literal read flags.
@@ -76,40 +124,48 @@ def _writer_calls(source):
         visit_AsyncFunctionDef = visit_FunctionDef
 
         def visit_Call(self, node):
-            name = name_of(node.func)
-            tail = name.rsplit('.', 1)[-1]
-            if tail in sinks:
-                if tail not in ('open', 'fdopen', 'FileIO'):
-                    self.record(tail)
-                elif may_write(node, name):
-                    self.record(tail + '-write')
-            elif tail == 'getattr':
-                attribute = node.args[1] if len(node.args) > 1 else None
-                if isinstance(attribute, ast.Constant) and isinstance(attribute.value, str):
-                    if attribute.value in sinks:
-                        self.record(attribute.value + '-dynamic')
-                else:
-                    self.record('dynamic')
-            elif tail in ('methodcaller', 'attrgetter'):
-                self.record('dynamic')
+            kinds = set()
+            for name in names_of(node.func):
+                tail = name.rsplit('.', 1)[-1]
+                if tail in sinks:
+                    if tail not in ('open', 'fdopen', 'FileIO'):
+                        kinds.add(tail)
+                    elif may_write(node, name):
+                        kinds.add(tail + '-write')
+                elif tail == 'getattr':
+                    attribute = node.args[1] if len(node.args) > 1 else None
+                    if isinstance(attribute, ast.Constant) and isinstance(attribute.value, str):
+                        if attribute.value in sinks:
+                            kinds.add(attribute.value + '-dynamic')
+                    else:
+                        kinds.add('dynamic')
+                elif tail in ('methodcaller', 'attrgetter'):
+                    kinds.add('dynamic')
+            for kind in kinds:
+                self.record(kind)
             self.generic_visit(node)
 
         def visit_Name(self, node):
             if isinstance(node.ctx, ast.Load):
                 parent = parents.get(node)
                 if not (isinstance(parent, ast.Call) and parent.func is node):
-                    tail = name_of(node).rsplit('.', 1)[-1]
-                    if tail in sinks:
-                        self.record(tail + '-ref')
-                    elif tail in ('methodcaller', 'attrgetter'):
-                        self.record('dynamic')
+                    kinds = set()
+                    for name in names_of(node):
+                        tail = name.rsplit('.', 1)[-1]
+                        if tail in sinks:
+                            kinds.add(tail + '-ref')
+                        elif tail in dynamic_names:
+                            kinds.add('dynamic')
+                    for kind in kinds:
+                        self.record(kind)
             self.generic_visit(node)
 
         visit_Attribute = visit_Name
 
         def visit_Subscript(self, node):
             value = node.value
-            if (isinstance(value, ast.Call) and name_of(value.func).rsplit('.', 1)[-1] == 'vars'
+            if (isinstance(value, ast.Call) and any(
+                    name.rsplit('.', 1)[-1] == 'vars' for name in names_of(value.func))
                     or isinstance(value, ast.Attribute) and value.attr == '__dict__'):
                 self.record('dynamic')
             self.generic_visit(node)
@@ -148,6 +204,7 @@ def test_writer_inventory_matches_baseline_manifest():
     'io.FileIO(path, mode=unknown)', 'os.open(path, os.O_RDONLY)',
     'pipe.write(data)', 'dt.replace(year=2026)', 'sys.stdout.write(data)',
     'dataclasses.replace(item, value=1)',
+    'factory().replace(target)', 'factory()[0].unlink()',
 ])
 def test_inventory_detects_new_raw_publication(save):
     source = 'from os import replace as publish\ndef unguarded(path, data):\n    ' + save
@@ -187,6 +244,7 @@ def test_inventory_detects_new_raw_publication(save):
     ('run(shutil.copyfileobj, src, dst)', 'copyfileobj-ref'),
     ('run(os.pwrite, fd, data, 0)', 'pwrite-ref'),
     ('run(path.unlink)', 'unlink-ref'),
+    ('run(factory().write_bytes, data)', 'write_bytes-ref'),
     ('operator.methodcaller', 'dynamic'),
     ('operator.attrgetter', 'dynamic'),
     ('from operator import methodcaller as factory; factory(name)', 'dynamic'),
@@ -225,3 +283,52 @@ def test_inventory_resolves_publication_imports(source, kind):
 ])
 def test_inventory_omits_known_read_modes(source):
     assert not _writer_calls(source)
+
+
+@pytest.mark.parametrize(('binding', 'call', 'kind'), [
+    ('from os import unlink as sink', 'sink(path)', 'unlink'),
+    ('from os import truncate as sink', 'sink(path, 0)', 'truncate'),
+    ('from os import fdopen as sink', 'sink(fd, "wb")', 'fdopen-write'),
+    ('from builtins import getattr as sink', 'sink(path, name)', 'dynamic'),
+    ('from builtins import vars as sink', 'sink(path)[name]', 'dynamic'),
+])
+@pytest.mark.parametrize('template', [
+    '{binding}\n{call}\nfrom math import sqrt as sink',
+    'from math import sqrt as sink\n{binding}\n{call}',
+    '{binding}\nsink = harmless\n{call}',
+    'def publish():\n    {binding}\n    {call}\n    from math import sqrt as sink',
+])
+def test_inventory_keeps_every_imported_sink_binding(binding, call, kind, template):
+    calls = _writer_calls(template.format(binding=binding, call=call))
+    assert sum(count for (_, sink), count in calls.items() if sink == kind) == 1
+
+
+@pytest.mark.parametrize(('source', 'count'), [
+    ('lookup = getattr; lookup(path, name)', 2),
+    ('g = vars; g(path)[name]', 2),
+    ('lookup = getattr; lookup = harmless; lookup(path, name)', 2),
+    ('g = vars; g = harmless; g(path)[name]', 2),
+    ('second = first; first = getattr; second(path, name)', 3),
+    ('g: object = vars; g(path)[name]', 2),
+    ('(lookup := getattr)(path, name)', 2),
+])
+def test_inventory_tracks_assigned_dynamic_acquisition(source, count):
+    assert _writer_calls(source)[('<module>', 'dynamic')] == count
+
+
+def test_inventory_retains_multiple_targets_without_counting_imports_twice():
+    calls = _writer_calls('from os import unlink as sink\nfrom os import unlink as sink\n'
+                          'from os import truncate as sink\nfrom math import sqrt as sink\n'
+                          'sink(path, 0)')
+    assert calls == {('<module>', 'unlink'): 1, ('<module>', 'truncate'): 1}
+
+
+@pytest.mark.parametrize('source', [
+    'import os as api\napi.truncate(path, 0)\nimport math as api',
+    'from os import unlink as sink\nsink = harmless\nsink(path)',
+    'sink = path.unlink\nsink = harmless\nsink(path)',
+    'sink = sink.unlink\nsink(path)',
+])
+def test_inventory_preserves_sink_aliases_through_rebinding_and_cycles(source):
+    calls = _writer_calls(source)
+    assert calls[('<module>', 'truncate')] or calls[('<module>', 'unlink')]
