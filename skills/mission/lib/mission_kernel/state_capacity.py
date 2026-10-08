@@ -907,27 +907,19 @@ def _fresh_review_withdraw_match(base: Mapping, proposed: Mapping) -> bool:
         return False
     return reconstructed == proposed_projection
 
-def _halt_value_bounds_ok(proposed: Mapping) -> bool:
-    """Fail-closed guard for #918's unenforced bounds (``HALT_REASON_MAX_
-    CHARS``/``GOAL_DISPATCH_REASON_MAX_CHARS``): an over-bound diff already
-    broke the Δ guarantee, so it is judged ``normal`` instead.
-    """
-    reason = _halt_reason_value(proposed)
-    candidates = [reason]
-    if _is_v5(proposed):
-        extensions = proposed.get("extensions")
-        aux_source = extensions if isinstance(extensions, Mapping) else {}
-        candidates.append(aux_source.get("halt_reason"))
-    else:
-        aux_source = proposed
-    for value in candidates:
-        if isinstance(value, str) and len(value) > HALT_REASON_MAX_CHARS:
-            return False
-    for key in ("goal_dispatch_effective", "goal_dispatch_host", "goal_dispatch_fallback_reason"):
-        value = aux_source.get(key)
-        if isinstance(value, str) and len(value) > GOAL_DISPATCH_REASON_MAX_CHARS:
-            return False
+def _halt_value_bounds_ok(base: Mapping, proposed: Mapping) -> bool:
+    """Only changed values consume the bounded halt allocation (#918)."""
+    before = (base.get('control', {}), base.get('extensions', {})) if _is_v5(base) else (base,)
+    after = (proposed.get('control', {}), proposed.get('extensions', {})) if _is_v5(proposed) else (proposed,)
+    for old, fields in zip(before, after):
+        for key, value in fields.items():
+            bound = HALT_REASON_MAX_CHARS if key == 'halt_reason' else (
+                GOAL_DISPATCH_REASON_MAX_CHARS if key.startswith('goal_dispatch_') else None)
+            if bound is not None and not _strict_equal(old.get(key), value):
+                if not isinstance(value, str) or len(value) > bound:
+                    return False
     return True
+
 
 def _history_or_empty(value: object) -> Optional[list]:
     """``[]`` for an absent key (design doc: 0 件とみなす), the list itself,
@@ -950,9 +942,9 @@ def _takeover_entry_matches_prior_lease(before_lease: Mapping, entry: object) ->
         return False
     expected_owner = str(before_lease.get("owner_session_id"))
     expected_lease_id = str(before_lease.get("lease_id"))
-    if str(entry.get("owner_session_id")) != expected_owner:
+    if entry.get("owner_session_id") != expected_owner:
         return False
-    if str(entry.get("lease_id")) != expected_lease_id:
+    if entry.get("lease_id") != expected_lease_id:
         return False
     entry_epoch = entry.get("fencing_epoch")
     return isinstance(entry_epoch, int) and not isinstance(entry_epoch, bool) and entry_epoch == expected_epoch
@@ -1003,7 +995,25 @@ def _takeover_case(base: Mapping, proposed: Mapping) -> Optional[str]:
             return None
     except (KeyError, TypeError, ValueError, OverflowError):
         return None
+    from .errors import MissionStateDecodeError
+    try:
+        validate_lease_allocation(after_lease, v5=_is_v5(proposed))
+    except MissionStateDecodeError:
+        return None
     return "takeover"
+
+
+def validate_lease_allocation(lease: Mapping, *, v5: bool = False) -> None:
+    """Reuse decoder contracts for a newly allocated lease and its history."""
+    from .codec_v4 import _decode_history, _decode_legacy_lease, legacy_lease_history
+    from .errors import MissionStateDecodeError
+    decoded = _decode_legacy_lease(dict(lease, lease_history=[]))
+    history = lease.get("lease_history", []) if v5 else legacy_lease_history(lease)
+    _decode_history(history, "$.lease_history", decoded.fencing_epoch,
+                    decoded.lease_id, v5=v5)
+    if v5 and lease.get("lease_expires_at") != decoded.lease_expires_at:
+        raise MissionStateDecodeError("invalid-value", "$.lease.lease_expires_at",
+                                      "timestamp must use canonical UTC Z form")
 
 def _lease_token_value_ok(value: object) -> bool:
     return isinstance(value, str) and LEASE_TOKEN_PATTERN.fullmatch(value) is not None
@@ -1011,29 +1021,31 @@ def _lease_token_value_ok(value: object) -> bool:
 def _lease_epoch_value_ok(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= LEASE_EPOCH_MAX
 
-def _takeover_value_bounds_ok(proposed: Mapping) -> bool:
+def _takeover_value_bounds_ok(base: Mapping, proposed: Mapping) -> bool:
     """Mirrors ``_halt_value_bounds_ok`` for takeover: owner/lease_id/entry
-    reason match ``LEASE_TOKEN_PATTERN``, every epoch within
+    reason match ``LEASE_TOKEN_PATTERN`` (exact prior token copies are
+    historical data), every epoch within
     ``LEASE_EPOCH_MAX``, and the entry's key set is exactly
     ``_LEASE_HISTORY_ENTRY_KEYS`` (about the *new* write only).
     """
-    lease = _lease_mapping(proposed)
-    if not _lease_token_value_ok(lease.get("owner_session_id")):
-        return False
-    if not _lease_token_value_ok(lease.get("lease_id")):
-        return False
-    if not _lease_epoch_value_ok(lease.get("fencing_epoch")):
-        return False
+    lease, previous = _lease_mapping(proposed), _lease_mapping(base)
+    for key in ("owner_session_id", "lease_id", "fencing_epoch"):
+        if _strict_equal(lease.get(key), previous.get(key)):
+            continue
+        valid = _lease_epoch_value_ok if key == "fencing_epoch" else _lease_token_value_ok
+        if not valid(lease.get(key)):
+            return False
     history = lease.get("lease_history")
-    if isinstance(history, list) and history:
+    old_history = _history_or_empty(previous.get("lease_history"))
+    if isinstance(history, list) and old_history is not None and len(history) > len(old_history):
         entry = history[-1]
         if not isinstance(entry, Mapping):
             return False
         if frozenset(entry.keys()) - _LEASE_HISTORY_ENTRY_KEYS:
             return False
-        if not _lease_token_value_ok(entry.get("owner_session_id")):
-            return False
-        if not _lease_token_value_ok(entry.get("lease_id")):
+        copied = _takeover_entry_matches_prior_lease(_lease_mapping(base), entry)
+        if not copied and any(not _lease_token_value_ok(entry.get(key))
+                              for key in ("owner_session_id", "lease_id")):
             return False
         if not _lease_epoch_value_ok(entry.get("fencing_epoch")):
             return False
@@ -1108,7 +1120,7 @@ def _is_stop_halt_diff(base: Mapping, proposed: Mapping, encoding: "StateEncodin
     # Every command renews the lease: a halt may carry a renewal, never another lease change.
     if not _lease_is_pure_renewal(base, proposed):
         return False
-    if not _halt_value_bounds_ok(proposed):
+    if not _halt_value_bounds_ok(base, proposed):
         return False
     top_diff = _diff_keys(base, proposed)
     if _is_v5(base):
@@ -1151,7 +1163,7 @@ def _is_stop_takeover_diff(base: Mapping, proposed: Mapping, encoding: "StateEnc
             return False
     if _takeover_case(base, proposed) is None:
         return False
-    if not _takeover_value_bounds_ok(proposed):
+    if not _takeover_value_bounds_ok(base, proposed):
         return False
     return _encode_increase_within(base, proposed, encoding, next_takeover_cost(base))
 
