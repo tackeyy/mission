@@ -465,3 +465,19 @@ def test_budget_status_reads_the_snapshot_without_entering_the_write_path(tmp_pa
                                now=lambda: '2026-01-01T00:01:00Z', fail=fail)
     status = json.loads(run_budget_status_cli(None, services))
     assert status['total_sec'] == 1800 and status['enforcement'] == 'advisory-only'
+
+
+@pytest.mark.parametrize('source', (
+    'not json',
+    '{"schema_version":4,"budget_minutes":1,"budget_minutes":30}',
+    '{"schema_version":9}',
+))
+def test_budget_status_rejects_a_malformed_state_with_a_reason_code(legacy_run_cli, tmp_path, source):
+    run = legacy_run_cli
+    run('init', 'budget fixture', '--budget-minutes', '30', cwd=tmp_path, check=True)
+    path = tmp_path / '.mission-state' / 'sessions' / 'test.json'
+    path.write_text(source)
+    result = run('budget', 'status', cwd=tmp_path)
+    assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+    assert 'internal-error' not in result.stdout
+    assert result.stderr.strip()

@@ -15,7 +15,14 @@ def run_budget_status_cli(args, services):
     try:
         # A query must not enter the write path: repository.load() would run lease
         # admission and pending-transaction recovery.  Read the authoritative snapshot.
-        _, document = services.load_snapshot(state_file)
+        try:
+            _, document = services.load_snapshot(state_file)
+        except BudgetError:
+            raise
+        except Exception as exc:
+            # Like `next`, an unreadable or malformed state is a reason-coded rejection.
+            code = getattr(exc, 'code', None)
+            services.fail(code if isinstance(code, str) and code else 'repository-format-invalid', 2)
         ledger = decode_ledger(document)
         capacity = services.capacity_status(state_file)
         return json.dumps(budget_status(ledger, services.now(), capacity), ensure_ascii=False)
