@@ -52,7 +52,7 @@ import sys
 import tempfile
 import time
 import shutil
-from functools import lru_cache
+from functools import lru_cache, partial
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -61,6 +61,14 @@ from typing import NamedTuple, NoReturn, Optional, Protocol
 LIB_DIR = Path(__file__).resolve().parents[1] / "lib"
 if str(LIB_DIR) not in sys.path:
     sys.path.insert(0, str(LIB_DIR))
+
+from mission_persistence.capacity_gate import (  # noqa: E402
+    CapacityWriteError, state_capacity_status,
+)
+
+from mission_persistence.legacy_capacity import (  # noqa: E402
+    acquire_legacy_lease, checked_legacy_state_content, write_legacy_json,
+)
 
 from mission_common import (  # noqa: E402
     HALT_CATEGORIES,
@@ -1267,73 +1275,13 @@ def acquire_or_verify_lease(
     legacy state may acquire without one. A foreign writer must wait for expiry
     and receives a new token with an incremented epoch.
     """
-    now = _lease_now()
-    presented_lease_id = lease_id if lease_id is not None else os.environ.get("MISSION_LEASE_ID")
-
-    lease_field_count = sum(state.get(key) not in (None, "") for key in LEASE_STATE_FIELDS)
-    if 0 < lease_field_count < len(LEASE_STATE_FIELDS):
-        raise LeaseRejectedError("malformed partial session lease")
-    if not _lease_fields_present(state):
-        lease_id = presented_lease_id or _new_lease_id()
-        state["owner_session_id"] = session_id
-        state["lease_id"] = lease_id
-        state["fencing_epoch"] = 1
-        state["lease_expires_at"] = _lease_expiry(now)
-        return LeaseDecision("acquired", lease_id, 1)
-
-    owner = str(state["owner_session_id"])
-    current_lease_id = str(state["lease_id"])
-    try:
-        epoch = int(state["fencing_epoch"])
-    except (TypeError, ValueError):
-        raise LeaseRejectedError(
-            f"lease held by {owner} until {state.get('lease_expires_at')} (invalid fencing epoch)"
-        )
-
-    same_owner = owner == session_id
-    token_matches = presented_lease_id == current_lease_id if same_owner else False
-    if same_owner and token_matches:
-        state["lease_expires_at"] = _renewed_lease_expiry(
-            str(state["lease_expires_at"]), now
-        )
-        return LeaseDecision("renewed", current_lease_id, epoch)
-
-    expires = parse_iso_datetime(str(state.get("lease_expires_at") or ""))
-    if expires is not None and expires.tzinfo is None:
-        expires = expires.replace(tzinfo=timezone.utc)
-    expired = expires is not None and now >= expires.astimezone(timezone.utc)
-    if not expired:
-        # Same-owner writers without the matching token wait like any foreign
-        # writer: after expiry they recover through the fenced takeover below.
-        raise LeaseRejectedError(
-            f"lease held by {owner} until {state.get('lease_expires_at')}"
-        )
-
-    retired_lease_ids = {
-        str(item.get("lease_id"))
-        for item in state.get("lease_history", [])
-        if isinstance(item, dict) and item.get("lease_id")
-    }
-    if presented_lease_id and (
-        presented_lease_id == current_lease_id
-        or presented_lease_id in retired_lease_ids
-    ):
-        raise LeaseRejectedError(
-            f"lease held by {owner} until {state.get('lease_expires_at')} (stale fencing token)"
-        )
-    new_lease_id = presented_lease_id or _new_lease_id()
-    state.setdefault("lease_history", []).append({
-        "owner_session_id": owner,
-        "lease_id": current_lease_id,
-        "fencing_epoch": epoch,
-        "reason": reason,
-        "at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-    })
-    state["owner_session_id"] = session_id
-    state["lease_id"] = new_lease_id
-    state["fencing_epoch"] = epoch + 1
-    state["lease_expires_at"] = _lease_expiry(now)
-    return LeaseDecision("taken-over", new_lease_id, epoch + 1)
+    return acquire_legacy_lease(
+        state, session_id, reason=reason,
+        presented_lease_id=lease_id if lease_id is not None else os.environ.get('MISSION_LEASE_ID'),
+        now=_lease_now(), new_token=_new_lease_id, fields_present=_lease_fields_present,
+        lease_fields=LEASE_STATE_FIELDS, expiry=_lease_expiry, renewed_expiry=_renewed_lease_expiry,
+        rejected_error=LeaseRejectedError, decision=LeaseDecision,
+    )
 
 
 def resolve_agent() -> str:
@@ -1688,6 +1636,8 @@ def _enforce_session_lease_for_write(path: Path, data: dict) -> LeaseDecision | 
 
 
 _FENCED_CLI_EXPECTED_GATE_CODES = frozenset({
+    "state-capacity-exhausted", "state-capacity-legacy-full",
+    "state-capacity-invariant-broken", "state-capacity-withdraw-not-needed",
     # #747: the commit CAS reports from two places.  Both are concurrency,
     # not a defect; only the first is retried, but neither is an internal
     # error.
@@ -1736,7 +1686,7 @@ def _reject_fenced_lease_for_cli(
     try:
         target_path = state_path or resolve_state_file(Path.cwd())
         _snapshot, state = _load_authoritative_state(target_path)
-    except (CanonicalStateEncodingError, FreshReviewError):
+    except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
         raise
     except (OSError, ValueError, FencedCommitError):
         pass
@@ -1805,20 +1755,15 @@ def atomic_write_json(
     上書きされ壁時計が最大 500 倍膨張した実害があるため)。
 
     """
-    if _is_session_state_shape(data):
-        _validate_specialist_public_state(data)
-    if lease_decision is _LEASE_DECISION_UNSET:
-        lease_decision = _enforce_session_lease_for_write(path, data)
-    if not administrative and _is_session_state_shape(data):
-        data["last_activity_at"] = iso_now()
-    _atomic_write(
-        path,
-        lambda f: json.dump(data, f, indent=2, ensure_ascii=False),
-        expected_identity=expected_identity,
+    write_legacy_json(
+        path, data, administrative=administrative, lease_decision=lease_decision,
+        expected_identity=expected_identity, services=SimpleNamespace(
+            is_state_shape=_is_session_state_shape, is_state_path=_is_session_state_path,
+            unset=_LEASE_DECISION_UNSET, enforce_lease=_enforce_session_lease_for_write,
+            now=iso_now, atomic_write=_atomic_write, decision_type=LeaseDecision,
+            process_leases=_PROCESS_LEASE_IDS, emit_lease=_emit_lease_carrier,
+        ),
     )
-    if isinstance(lease_decision, LeaseDecision):
-        _PROCESS_LEASE_IDS[str(path.resolve())] = lease_decision.lease_id
-    _emit_lease_carrier(data, lease_decision)
 
 
 def atomic_write_text(path: Path, content: str) -> None:
@@ -3186,7 +3131,7 @@ def _warn_s3_file_overlap(cwd: Path, planned_files: list[str], cur_sid: str) -> 
     for sf_other in _iter_state_files(cwd):
         try:
             other = read_session_json(sf_other)
-        except (CanonicalStateEncodingError, FreshReviewError):
+        except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
             raise
         except Exception:
             continue
@@ -6565,7 +6510,7 @@ def _artifact_profile_coverage(cwd: Path, data: dict) -> dict:
     for path in _iter_state_files(cwd, include_archive=True):
         try:
             candidate = read_session_json(path)
-        except (CanonicalStateEncodingError, FreshReviewError):
+        except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
             raise
         except (OSError, UnicodeError, ValueError, TypeError):
             continue
@@ -6930,7 +6875,7 @@ def _read_init_peer_state(path: Path) -> dict:
     try:
         _snapshot, document = _load_authoritative_state(path)
         return document
-    except (CanonicalStateEncodingError, FreshReviewError):
+    except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
         raise
     except (OSError, ValueError, FencedCommitError):
         return _read_legacy_json_file(path)
@@ -7780,7 +7725,7 @@ def _parallel_status(store: _ParallelGroupStore, group_id: str) -> tuple[Path, d
                 store.sessions_fd, name, limit=4 * 1024 * 1024
             )
             state = read_session_json(session_dir(store.cwd), name=name, source=state_content)
-        except (CanonicalStateEncodingError, FreshReviewError):
+        except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
             raise
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             raise ValueError("parallel group session state is malformed or unsafe") from exc
@@ -8335,6 +8280,7 @@ _ACCEPTANCE_CONTRACT_CLI_SERVICES = AcceptanceContractCliServices(
     _compatibility_operation_arguments,
     _canonical_compatibility_operation,
     load_verifier_policy,
+    partial(state_capacity_status, load_snapshot=_load_authoritative_state),
 )
 
 
@@ -8678,7 +8624,7 @@ def cmd_next(args):
         snapshot, data = _load_authoritative_state(
             sf, legacy_compatibility=True
         )
-    except (CanonicalStateEncodingError, FreshReviewError):
+    except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
         raise
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -8806,7 +8752,7 @@ def _guard_resolved_root(value: Optional[str]) -> Optional[str]:
 def _guard_session_fact(sf: Path) -> GuardSessionFact:
     try:
         snapshot, _document = _load_authoritative_state(sf)
-    except (CanonicalStateEncodingError, FreshReviewError):
+    except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
         raise
     except Exception as exc:
         return GuardSessionFact(
@@ -9234,7 +9180,7 @@ def cmd_freshness(args):
         raise SystemExit(2) from exc
     try:
         snapshot, _data = _load_authoritative_state(sf)
-    except (CanonicalStateEncodingError, FreshReviewError):
+    except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
         raise
     except Exception as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
@@ -9389,7 +9335,7 @@ def cmd_codex_preflight(args):
     if state_present:
         try:
             snapshot, data = _load_authoritative_state(sf, legacy_compatibility=True)
-        except (CanonicalStateEncodingError, FreshReviewError):
+        except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
             raise
         except Exception:
             snapshot = None
@@ -9515,7 +9461,7 @@ def _permission_preflight(cwd: Path) -> dict:
         }
     try:
         _snapshot, data = _load_authoritative_state(sf)
-    except (CanonicalStateEncodingError, FreshReviewError):
+    except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
         raise
     except (OSError, ValueError, FencedCommitError):
         # Preserve the established v1-v4 schema diagnostic instead of
@@ -9523,7 +9469,7 @@ def _permission_preflight(cwd: Path) -> dict:
         try:
             legacy_candidate = _read_legacy_json_file(sf)
             _validate_schema_version(legacy_candidate)
-        except (CanonicalStateEncodingError, FreshReviewError):
+        except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
             raise
         except UnsupportedSchemaVersionError:
             raise
@@ -9681,7 +9627,7 @@ def _record_permission_probe_observation(
                 file=sys.stderr,
             )
         return result.halt_recorded, result.terminal_outcome
-    except (CanonicalStateEncodingError, FreshReviewError):
+    except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
         raise
     except UnsupportedSchemaVersionError:
         raise
@@ -10357,7 +10303,7 @@ def _force_envelope_replayed(cwd: Path, envelope: dict) -> bool:
             if not isinstance(recorded, dict):
                 continue
             validated = validate_recorded_envelope(recorded)
-        except (CanonicalStateEncodingError, FreshReviewError):
+        except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
             raise
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
             # A malformed record must never become a bypass; it is not a
@@ -14705,10 +14651,10 @@ def _terminalize_state_file(
         return sampled
 
     def write_terminal_state(data: dict, *, administrative: bool = False) -> None:
-        _validate_specialist_public_state(data)
+        content = checked_legacy_state_content(sf, data)
         # Legacy janitor CAS deliberately bypasses owner-token acquisition;
         # the state was revalidated under StateLock by the repository.
-        _atomic_write(sf, lambda f: json.dump(data, f, indent=2, ensure_ascii=False))
+        _atomic_write(sf, lambda f: f.write(content))
 
     _selection_snapshot, selection_state = _load_authoritative_state(
         sf,
@@ -14885,7 +14831,7 @@ def cmd_list(args):
                     "mission": snapshot.mission[:80],
                     "updated_at": snapshot.updated_at,
                 })
-            except (CanonicalStateEncodingError, FreshReviewError):
+            except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
                 raise
             except Exception as e:
                 results.append({"path": str(sf), "error": str(e)})
@@ -15000,7 +14946,7 @@ def cmd_lane_report(args):
                     legacy_compatibility=True,
                     allow_missing_schema_session_mismatch=True,
                 )
-            except (CanonicalStateEncodingError, FreshReviewError):
+            except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
                 raise
             except Exception as exc:
                 if is_live_session_path(sf):
@@ -15078,7 +15024,7 @@ def cmd_halt(args):
                     )
                     if changed:
                         halted.append(str(proj))
-            except (CanonicalStateEncodingError, FreshReviewError):
+            except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
                 raise
             except Exception as e:
                 print(f"WARN: skip {sf}: {e}", file=sys.stderr)
@@ -15145,7 +15091,7 @@ def _collect_states(
                 legacy_compatibility=True,
                 allow_missing_schema_session_mismatch=True,
             )
-        except (CanonicalStateEncodingError, FreshReviewError):
+        except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
             raise
         except UnsupportedSchemaVersionError:
             raise
@@ -15222,7 +15168,7 @@ def _collect_learning_brief_states(
             try:
                 canonical_bytes = read_state_archive_file_bytes(project_root, canonical_path)
                 canonical_state = read_session_json(canonical_path, source=canonical_bytes)
-            except (CanonicalStateEncodingError, FreshReviewError):
+            except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
                 raise
             except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
                 continue
@@ -15697,7 +15643,7 @@ def _publish_state_archive_compaction(
         canonical_bytes = read_state_archive_file_bytes(cwd, canonical_ref)
         canonical_data = read_session_json(canonical, source=canonical_bytes)
         target_bytes = read_state_archive_file_bytes(cwd, target_ref)
-    except (CanonicalStateEncodingError, FreshReviewError):
+    except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
         raise
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise WorktreeArchiveError("canonical state is unreadable") from exc
@@ -16963,7 +16909,7 @@ def main():
     except CommandOutcomeInputError:
         print('{"ok": false, "outcome_kind": "invalid-input"}')
         raise SystemExit(2)
-    except FreshReviewError as error:
+    except (FreshReviewError, CapacityWriteError) as error:
         print(f"ERROR: {error.code}", file=sys.stderr)
         sys.exit(2)
     except SpecialistPublicContractError as error:

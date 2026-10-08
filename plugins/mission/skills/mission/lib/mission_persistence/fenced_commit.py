@@ -3514,6 +3514,16 @@ class LocalFencedRepository:
             raise FencedCommitError("request-invalid", "admitted snapshot type is invalid")
         if type(state_bytes) is not bytes or type(effects) is not tuple:
             raise FencedCommitError("request-invalid", "stage inputs must be immutable")
+        from .capacity_gate import StateEncoding, check_state_capacity
+        try:
+            check_state_capacity(
+                admitted.base.state_bytes if admitted.base is not None else None,
+                state_bytes,
+                encoding=StateEncoding.CANONICAL,
+            )
+        except Exception as exc:
+            raise FencedCommitError(getattr(exc, 'code', 'record-invalid'),
+                                    getattr(exc, 'detail', 'target state is invalid')) from exc
         try:
             target_state = decode_mission_state(state_bytes)
         except Exception as exc:

@@ -244,27 +244,21 @@ def test_takeover_delta_is_bounded_by_the_real_production_writers():
     proposed so it does not change the delta -- constructing a full
     ``ExecutionRequest`` for ``admit_lease`` is out of scope here).
 
-    A *non*-conformant new token (128 control characters, which nothing
-    stops ``acquire_or_verify_lease`` from accepting today) exceeds this
-    constant -- an accepted, documented #918 gap, not a regression this
-    module can close on its own.
+    #918 rejects non-conformant new tokens before modifying the lease;
+    historical tokens are measured when they are copied into history.
     """
     after, measured_max = _takeover_delta("c" * 128)
     assert sc.LEASE_TOKEN_PATTERN.fullmatch(after["owner_session_id"])
     assert measured_max + _TAKEOVER_DELTA_SLACK == sc.STATE_CAPACITY_TAKEOVER_DELTA
 
-    non_conformant_after, non_conformant_max = _takeover_delta("\x01" * 128)
-    assert not sc.LEASE_TOKEN_PATTERN.fullmatch(non_conformant_after["owner_session_id"])
-    assert non_conformant_max > sc.STATE_CAPACITY_TAKEOVER_DELTA
+    with pytest.raises(ValueError, match="state-capacity-invariant-broken"):
+        _takeover_delta("\x01" * 128)
 
 
-#: Old-lease field values (owner/lease_id/epoch, normalized by the real
-#: writer's own ``str()``/``str()``/``int()`` and copied into history --
-#: an oversized epoch costs bytes *twice*: history entry and new current
-#: field). All accepted by the real "taken-over" branch under the shared
-#: setup below.
+#: Historical token values still use the measured migration bound. Epochs
+#: that cannot advance within the new int range must reject before mutation.
 _TAKEOVER_SWEEP = [
-    ("a" * 128, "b" * 128, sc.LEASE_EPOCH_MAX),  # pattern-max identifiers
+    ("a" * 128, "b" * 128, sc.LEASE_EPOCH_MAX - 1),  # maximum legal takeover
     ("\x01" * 128, "b", 1),                      # control characters
     ("\u3042" * 128, "b", 1),                    # multi-byte
     ([" " * 128], "b", 1),                       # list -- Codex repro #2
@@ -275,7 +269,7 @@ _TAKEOVER_SWEEP = [
     ("a", "b", "123456"),                        # numeric string
     ("a", "b", -(10 ** 20)),                      # negative big int
     ("a", "b", 10 ** 20 - 1),                     # growing-digit int
-    ("a", "b", True),                            # bool (writer does not special-case it)
+    ("a", "b", True),                            # bool is not an epoch
     ("a" * 300, "b", 1),                         # over-pattern-length owner
     ("a", "b" * 300, 1),                         # over-pattern-length lease_id
     (0, "b", 1),                                 # non-string owner
@@ -315,8 +309,14 @@ def test_next_takeover_cost_bounds_the_real_writer(owner, lease_id, epoch):
             del doc["lease_history"], old_lease["lease_history"]
             doc["lease_expires_at"] = old_lease["lease_expires_at"] = "2000-01-01T00Z"
         after = copy.deepcopy(old_lease)
-        _mission_state_module().acquire_or_verify_lease(after, "9" * 128, lease_id="9" * 128, reason="9" * 128)
-        assert sc.next_takeover_cost(doc) >= legacy(dict(doc, **after)) - legacy(doc), first
+        if type(epoch) is not int or not 0 <= epoch < sc.LEASE_EPOCH_MAX:
+            with pytest.raises(ValueError, match="state-capacity-invariant-broken"):
+                _mission_state_module().acquire_or_verify_lease(
+                    after, "9" * 128, lease_id="9" * 128, reason="9" * 128)
+            assert after == old_lease
+        else:
+            _mission_state_module().acquire_or_verify_lease(after, "9" * 128, lease_id="9" * 128, reason="9" * 128)
+            assert sc.next_takeover_cost(doc) >= legacy(dict(doc, **after)) - legacy(doc), first
 
 
 @pytest.mark.parametrize("owner,lease_id,epoch,expected", _TAKEOVER_SWEEP_REJECTED)
@@ -329,10 +329,7 @@ def test_next_takeover_cost_when_the_real_writer_would_reject(owner, lease_id, e
 
 
 def test_next_takeover_cost_fails_closed_for_a_current_value_that_cannot_encode():
-    """``float('nan')`` is accepted by the real writer's own ``str()``
-    normalization (not rejected), but a document containing it could not
-    itself be valid JSON -- this still fails closed rather than silently
-    measuring a smaller, wrong delta."""
+    """Malformed historical values fail closed instead of under-reserving."""
     doc = _flat_doc(lease_history=[], extra=_old_lease(float("nan"), "b", 1))
     assert sc.next_takeover_cost(doc) == sc.STATE_LIMIT
 
