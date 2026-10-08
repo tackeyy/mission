@@ -20,6 +20,9 @@ import tempfile
 import time
 import threading
 from pathlib import Path
+from datetime import datetime, timezone
+
+from evaluation_integrity import collect_post_run, policy_digest
 
 from native_goal_benchmark import (
     NATIVE_SCHEMA, create_immutable_package, create_worker_export, immutable_manifest, initialize_worker_export_repository, observe_claude_goal, worker_export_manifest,
@@ -27,13 +30,25 @@ from native_goal_benchmark import (
 )
 
 
+class AssignmentDeadlineReached(TimeoutError):
+    """The assignment wall-clock limit elapsed; this is not transport EOF."""
+
+
+class RpcEOFError(RuntimeError):
+    """The host stream ended before the expected response."""
+
+
 class RpcProcess:
     """Small JSON-RPC client for the public ``codex app-server --stdio`` entrypoint."""
 
     def __init__(self, command: list[str], timeout: float):
-        self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+        self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
+                                        env={k: v for k, v in os.environ.items() if k not in {"MISSION_SESSION_ID", "CLAUDE_CODE_SESSION_ID"}})
         self.timeout = timeout
         self.deadline = time.monotonic() + timeout
+        self.run_started_at = datetime.now(timezone.utc).isoformat()
+        self.wait_end_reason = None
+        self.evidence = None
         self.sequence = 0
         self.events: list[dict] = []
         self._buffer = bytearray()
@@ -66,12 +81,25 @@ class RpcProcess:
                     error = message["error"] if isinstance(message["error"], dict) else {}
                     raise RpcProtocolError(method, error.get("code"), error.get("message"))
                 return message.get("result", {})
-            if isinstance(message.get("method"), str):
-                # Store names and identity only; raw turn text is never an artifact.
-                params = message.get("params") if isinstance(message.get("params"), dict) else {}
-                turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
-                self.events.append({"method": message["method"], "params": {"threadId": params.get("threadId"), "turnId": turn.get("id")}})
-        raise TimeoutError(f"app-server assignment deadline expired during {method}")
+            self._record_event(message)
+        if time.monotonic() >= self.deadline:
+            raise AssignmentDeadlineReached(f"app-server assignment deadline expired during {method}")
+        if self.wait_end_reason == "eof":
+            raise RpcEOFError(f"app-server EOF during {method}")
+        raise AssignmentDeadlineReached(f"app-server assignment deadline expired during {method}")
+
+    def _record_event(self, message):
+        if not isinstance(message.get("method"), str):
+            return
+        params = message.get("params") if isinstance(message.get("params"), dict) else {}
+        turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+        self.events.append({"method": message["method"], "params": {"threadId": params.get("threadId"), "turnId": turn.get("id")}})
+        item = params.get("item") if isinstance(params.get("item"), dict) else {}
+        msg = params.get("msg") if isinstance(params.get("msg"), dict) else {}
+        if ((item.get("type") == "commandExecution" and message["method"] in {"item/started", "item/completed"})
+                or message["method"].endswith(("exec_command_begin", "exec_command_end"))):
+            if self.evidence is not None:
+                self.evidence["exec_events"].append({"method": message["method"], "command": item.get("command", msg.get("command", params.get("command"))), "cwd": item.get("cwd", msg.get("cwd", params.get("cwd")))})
 
     def wait_for_event(self, method: str, thread_id: str | None = None, turn_id: str | None = None) -> bool:
         while time.monotonic() < self.deadline:
@@ -80,11 +108,13 @@ class RpcProcess:
             if isinstance(message.get("method"), str):
                 params = message.get("params") if isinstance(message.get("params"), dict) else {}
                 turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
-                self.events.append({"method": message["method"], "params": {"threadId": params.get("threadId"), "turnId": turn.get("id")}})
+                self._record_event(message)
                 if (message["method"] == method
                         and (thread_id is None or params.get("threadId") == thread_id)
                         and (turn_id is None or turn.get("id") == turn_id)):
                     return True
+        if self.wait_end_reason is None:
+            self.wait_end_reason = "deadline"
         return False
 
     def _next_message(self) -> dict | None:
@@ -92,12 +122,14 @@ class RpcProcess:
         while b"\n" not in self._buffer:
             ready = self.selector.select(max(0, self.deadline - time.monotonic()))
             if not ready:
+                self.wait_end_reason = "deadline"
                 return None
             assert self.process.stdout is not None
             chunk = os.read(self.process.stdout.fileno(), 65536)
             if not chunk:
                 if self._buffer:
                     raise RuntimeError("malformed_jsonrpc")
+                self.wait_end_reason = "eof"
                 return None
             self._buffer.extend(chunk)
             if len(self._buffer) > 1_048_576:
@@ -149,8 +181,15 @@ def _codex_version() -> str:
 
 
 def probe_codex(worktree: Path, objective: str, acceptance: str, timeout: float, token_budget: int | None, max_turns: int,
-                model: str, effort: str, permissions: str, arm: str = "goal", package_root: Path | None = None) -> dict:
+                model: str, effort: str, permissions: str, arm: str = "goal", package_root: Path | None = None,
+                evidence: dict | None = None, pre_turn=None) -> dict:
+    evidence = evidence if evidence is not None else {}
+    evidence.update(observed_config=None, config_matches=None, package_delivery=None, turn_start_sent=0, exec_events=[], deadline_reached=False,
+                    mission_state_path=str((package_root / "skills/mission/bin/mission-state.py").resolve()) if package_root else None,
+                    interpreter_path=os.path.abspath(sys.executable), workspace=str(worktree))
     rpc = RpcProcess(["codex", "app-server", "--stdio"], timeout)
+    rpc.evidence = evidence
+    evidence["run_started_at"] = getattr(rpc, "run_started_at", datetime.now(timezone.utc).isoformat())
     observation: dict | None = None
     try:
         rpc.request("initialize", {"clientInfo": {"name": "mission-native-goal-benchmark", "version": "1"}, "capabilities": {"experimentalApi": True}})
@@ -160,6 +199,17 @@ def probe_codex(worktree: Path, objective: str, acceptance: str, timeout: float,
         profile = observed_config["activePermissionProfile"]
         profile_id = profile.get("id") if isinstance(profile, dict) else None
         config_matches = observed_config["model"] == model and observed_config["reasoningEffort"] == effort and profile_id == permissions
+        evidence.update(thread_id=thread_id, observed_config=observed_config, config_matches=config_matches)
+        if arm == "mission" and pre_turn is not None:
+            try:
+                initialized = pre_turn(worktree, thread_id, evidence)
+                if not isinstance(initialized, dict) or initialized.get("ok") is False or initialized.get("reason"):
+                    raise RuntimeError("mission_session_init_failed")
+                initialized = dict(initialized)
+                initialized["budget_policy_template_sha256"] = policy_digest(initialized["budget_policy"])
+                evidence["session_init"] = initialized
+            except Exception as exc:
+                return {"native_goal_observed": False, "fidelity": "unverified", "outcome": "failed", "reason": "mission_session_init_failed", "error_type": type(exc).__name__}
         assignment = f"{objective}\n\nAcceptance criterion: {acceptance}"
         skill_input: list[dict] = []
         if arm == "mission":
@@ -181,8 +231,10 @@ def probe_codex(worktree: Path, objective: str, acceptance: str, timeout: float,
             matched = any(isinstance(entry, dict) and any(is_expected_skill(skill) for skill in entry.get("skills", [])) for entry in entries)
             if not matched:
                 return {"native_goal_observed": False, "fidelity": "unverified", "outcome": "failed", "reason": "package_skill_unobserved", "observed_config": observed_config, "config_matches": config_matches}
+            evidence["package_delivery"] = "skill_input"
             skill_input = [{"type": "skill", "name": "mission", "path": str(skill_path)}]
             state_started_ns = time.time_ns()
+            evidence["turn_start_sent"] += 1
             started = rpc.request("turn/start", {"threadId": thread_id, "model": model, "effort": effort, "permissions": permissions, "input": [*skill_input, {"type": "text", "text": assignment}]})
             turn = started.get("turn") if isinstance(started, dict) else None
             turn_id = turn.get("id") if isinstance(turn, dict) else None
@@ -190,7 +242,7 @@ def probe_codex(worktree: Path, objective: str, acceptance: str, timeout: float,
             state = _fresh_mission_state(worktree, state_started_ns, thread_id) if completed else None
             base = {"native_goal_observed": False, "package_delivery": "skill_input", "budget_enforcement": "unavailable", "observed_config": observed_config, "config_matches": config_matches}
             if not completed:
-                return {**base, "fidelity": "unverified", "outcome": "failed", "reason": "turn_completion_unobserved", "mission_state": None}
+                return {**base, "fidelity": "unverified", "outcome": "failed", "reason": "assignment_deadline_reached" if getattr(rpc, "wait_end_reason", None) == "deadline" else "turn_completion_unobserved", "deadline_reached": getattr(rpc, "wait_end_reason", None) == "deadline", "mission_state": None}
             if state and state.get("passes") is True and config_matches:
                 return {**base, "fidelity": "verified", "outcome": "completed", "reason": None, "mission_state": state}
             if state and isinstance(state.get("halt_reason"), str) and state["halt_reason"] and config_matches:
@@ -202,6 +254,7 @@ def probe_codex(worktree: Path, objective: str, acceptance: str, timeout: float,
         set_response = rpc.request("thread/goal/set", goal)
         get_response: dict = {}
         for _ in range(max_turns):
+            evidence["turn_start_sent"] += 1
             turn_started = rpc.request("turn/start", {"threadId": thread_id, "model": model, "effort": effort, "permissions": permissions, "input": [*skill_input, {"type": "text", "text": assignment}]})
             turn = turn_started.get("turn") if isinstance(turn_started, dict) else None
             turn_id = turn.get("id") if isinstance(turn, dict) else None
@@ -227,8 +280,41 @@ def probe_codex(worktree: Path, objective: str, acceptance: str, timeout: float,
         if not isinstance(clear_response, dict):
             return {**observation, "goal_cleared": False, "cleanup_error": "malformed_clear_response", "observed_config": observed_config, "config_matches": config_matches, "budget_enforcement": "goal_native", "package_delivery": None, "stderr_bytes": getattr(rpc, "stderr_bytes", 0), "stderr_truncated": getattr(rpc, "stderr_truncated", False)}
         return {**observation, "goal_cleared": bool(clear_response.get("cleared")), "cleanup_error": None, "observed_config": observed_config, "config_matches": config_matches, "budget_enforcement": "goal_native" if arm == "goal" else "unavailable", "package_delivery": "skill_input" if arm == "mission" else None, "stderr_bytes": getattr(rpc, "stderr_bytes", 0), "stderr_truncated": getattr(rpc, "stderr_truncated", False)}
+    except AssignmentDeadlineReached:
+        evidence["deadline_reached"] = True
+        return {**(observation or {}), "native_goal_observed": bool(observation and observation.get("native_goal_observed")), "fidelity": "unverified", "outcome": "failed", "reason": "assignment_deadline_reached", "deadline_reached": True}
     finally:
         rpc.close()
+
+
+def run_codex_assignment(worktree, objective, acceptance, timeout, token_budget, max_turns,
+                         model, effort, permissions, arm="goal", package_root=None,
+                         *, evidence=None, pre_turn=None, post_run=None):
+    """Preserve established identity and post-run evidence on every exit path."""
+    evidence = evidence if evidence is not None else {}
+    evidence.update(observed_config=None, config_matches=None, package_delivery=None, turn_start_sent=0, exec_events=[], deadline_reached=False)
+    result = {}
+    try:
+        evidence["provider_version_before"] = _codex_version()
+    except (OSError, RuntimeError) as exc:
+        return {**evidence, "provider_version_before": None, "provider_version_after": None, "native_goal_observed": False, "fidelity": "unverified", "outcome": "failed", "reason": "provider_version_unavailable", "error_type": type(exc).__name__}
+    try:
+        result = probe_codex(worktree, objective, acceptance, timeout, token_budget, max_turns,
+                             model, effort, permissions, arm, package_root, evidence=evidence, pre_turn=pre_turn)
+    except Exception as exc:
+        unsupported = arm == "goal" and _unsupported_goal_protocol(exc)
+        result = {"native_goal_observed": False, "fidelity": "not_applicable" if unsupported else "unverified", "outcome": "unsupported" if unsupported else "failed", "reason": "native_goal_protocol_unavailable" if unsupported else "adapter_execution_failed", "error_type": type(exc).__name__}
+    finally:
+        try:
+            evidence["provider_version_after"] = _codex_version()
+        except (OSError, RuntimeError):
+            evidence["provider_version_after"] = None
+        conflicts = [k for k in ("observed_config", "config_matches", "package_delivery") if k in result and result[k] != evidence.get(k)]
+        if conflicts: evidence["identity_conflicts"] = conflicts
+        evidence.update({k: v for k, v in result.items() if k not in {"observed_config", "config_matches", "package_delivery"}})
+        if arm == "mission":
+            collect_post_run(worktree, evidence, post_run)
+    return evidence
 
 
 def probe_claude(worktree: Path, package_root: Path, objective: str, acceptance: str, timeout: float, max_budget_usd: float | None, arm: str = "goal", model: str | None = None, effort: str | None = None, permissions: str | None = None) -> dict:
@@ -333,7 +419,7 @@ def _task_snapshot(worktree: Path) -> dict:
     return {"observed": commit, "clean": not bool(status.stdout.strip())}
 
 
-def main() -> int:
+def main(*, pre_turn=None, post_run=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", choices=("codex", "claude"), required=True)
     parser.add_argument("--arm", choices=("goal", "mission"), default="goal")
@@ -401,8 +487,8 @@ def main() -> int:
             else:
                 try:
                     if args.host == "codex":
-                        observation = probe_codex(worker_root, args.objective, args.acceptance_criterion, args.timeout_seconds, args.token_budget, args.max_turns, args.model_id, args.effort, args.permissions, args.arm, package_root)
-                        manifest["provider_version"] = _codex_version()
+                        observation = run_codex_assignment(worker_root, args.objective, args.acceptance_criterion, args.timeout_seconds, args.token_budget, args.max_turns, args.model_id, args.effort, args.permissions, args.arm, package_root, pre_turn=pre_turn, post_run=post_run)
+                        manifest["provider_version"] = observation.get("provider_version_before")
                     else:
                         observation = probe_claude(worker_root, package_root, args.objective, args.acceptance_criterion, args.timeout_seconds, args.max_budget_usd, args.arm, args.model_id, args.effort, args.permissions)
                         version = subprocess.run(["claude", "--version"], text=True, capture_output=True, check=False)
