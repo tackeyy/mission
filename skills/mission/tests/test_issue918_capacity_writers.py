@@ -490,6 +490,7 @@ def test_expired_owner_halt_checks_takeover_and_stop_without_backup_on_refusal(t
     state = json.loads(path.read_bytes())
     state['lease_expires_at'] = '2000-01-01T00:00:00Z'
     state['lease_history'] = _history(history_count)
+    state['fencing_epoch'] = history_count + 1  # 履歴と現在の lease の epoch を整合させる
     state['padding'] = ''
     state['padding'] = 'p' * (sc.STATE_LIMIT - space - len(json.dumps(state, indent=2).encode()))
     path.write_text(json.dumps(state, indent=2))
