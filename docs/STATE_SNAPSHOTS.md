@@ -108,6 +108,46 @@ an authentication key they cannot protect against a malicious owner who rewrites
 every related field and recomputes the digest. Do not accept snapshots from an
 untrusted user or transport.
 
+## State capacity and manual recovery
+
+State writes reserve space for unfinished review items, one halt slot, and the
+remaining bounded lease takeovers within the 4 MiB limit. `fresh-review status`
+reports `capacity`: the actual `encoded_len`, item `reserved` bytes,
+`system_remaining`, `headroom`, `excess_bytes`, `remaining_takeovers`, `mode`,
+`code`, and pending `withdraw_candidates`. Reading status does not acquire a
+lease or write state. A lease with no remaining takeover allowance reports
+zero; attempts to add another takeover are rejected with
+`state-capacity-exhausted` even when physical bytes remain.
+
+An over-capacity session can write only stopping mutations between E0b-1 and
+D2c. The capacity-aware withdrawal command belongs to D2c (Issue #912) and is
+not yet available here. Legacy pretty JSON cannot advance a D item beyond
+pending. Reservations are derived from state; no capacity marker is saved.
+
+`state-capacity-legacy-full` means even replacing every pending request with a
+smaller withdrawn record cannot leave room for the halt slot. Every mutation
+is refused, including halt, takeover, resume and reinitialization. The owner
+must close this session manually:
+
+1. Stop its agent/writer processes and inspect `fresh-review status`. Keep the
+   original session read-only; do not truncate history or edit request nonces.
+2. Make an offline archive of the entire `.mission-state` directory, including
+   session heads, objects, generations, commits, operations and evidence. Verify
+   the archive's bytes against the original before changing any location. A
+   standalone head JSON is insufficient for a fenced session.
+3. Preserve the archived session as stopped/unresolved, and record why it was
+   closed in the owner's operational record. An archive is not a successful
+   mission or fresh-review receipt.
+4. Use a separate working directory with a fresh state store and a distinct
+   session ID. Initialize with `MISSION_SESSION_ID=<new-id>` and the normal
+   `mission-state.py init` command; keep the old store read-only.
+   Re-establish its requirements and acceptance evidence; do not copy the old
+   lease or claim its unfinished work completed. Retain the archived lineage.
+
+`state-capacity-invariant-broken` rejects a write that breaks a reservation or
+stored-field bound; `state-capacity-withdraw-not-needed` refuses withdrawal of
+an in-capacity request. These codes do not authorize discarding evidence.
+
 ## Performance scope
 
 The optimization removes repeated state/evidence byte reads, content hashing,
