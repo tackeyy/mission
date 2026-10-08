@@ -105,7 +105,7 @@ def _set_lease(doc, layout, *, history=None, owner=None, lease_id=None, epoch=No
             target[key] = value
     return out
 
-def _entry(owner, lease_id, epoch, reason="lease-expired-takeover", at=TS27):
+def _entry(owner, lease_id, epoch, reason="lease-expired-takeover", at="9999-12-31T23:59:59Z"):
     return {"owner_session_id": owner, "lease_id": lease_id, "fencing_epoch": epoch, "reason": reason, "at": at}
 
 def _history(n):
@@ -146,6 +146,15 @@ def _takeover(layout, *, entry=None, cur=None, base=None):
     c = sc._lease_mapping(b)
     e = dict(_entry(c["owner_session_id"], c["lease_id"], c["fencing_epoch"]), **(entry or {}))
     cu = dict(owner="new-owner", lease_id="new-lease", epoch=c["fencing_epoch"] + 1, **(cur or {}))
+    if layout == "v5" and "expires_at" in cu:
+        # The v5 writer emits the decoder's canonical UTC seconds, not the
+        # offset spelling supplied to this fixture. Keep invalid inputs raw.
+        from mission_kernel.codec_v4 import _aware_time
+        from mission_kernel.errors import MissionStateDecodeError
+        try:
+            cu["expires_at"] = _aware_time(cu["expires_at"], "$.lease.lease_expires_at")
+        except MissionStateDecodeError:
+            pass
     p = _set_lease(b, layout, history=[e], owner=cu["owner"], lease_id=cu["lease_id"], epoch=cu["epoch"],
                    expires_at=cu.get("expires_at"))
     return b, p

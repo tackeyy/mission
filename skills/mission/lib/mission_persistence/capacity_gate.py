@@ -5,13 +5,14 @@ import copy
 import json
 from dataclasses import asdict
 
-from mission_kernel.errors import StateBoundaryError
+from mission_kernel.errors import StateBoundaryError, MissionStateDecodeError
+from mission_kernel.codec_v4 import legacy_lease_history
 from mission_kernel.json_codec import STATE_LIMIT, decode_json_object, encode_json_value, freeze_json_value
 from mission_kernel.state_capacity import (
     CapacityBase, StateEncoding, state_capacity_verdict,
     HALT_REASON_MAX_CHARS, GOAL_DISPATCH_REASON_MAX_CHARS,
     LEASE_TOKEN_PATTERN, LEASE_EPOCH_MAX,
-    remaining_takeovers, classify_write_kind, WriteKind,
+    remaining_takeovers, classify_write_kind, WriteKind, validate_lease_allocation,
 )
 
 
@@ -22,7 +23,11 @@ class CapacityWriteError(StateBoundaryError):
 
 def validate_capacity_fields(document, base=None, *, encoding=StateEncoding.CANONICAL):
     """Bound stored values, including raw compatibility copies of halt reasons."""
-    v5 = document.get('schema_version') == 5 and isinstance(document.get('control'), dict)
+    v5 = document.get('schema_version') == 5
+    for image in (document, base):
+        if image is not None and image.get('schema_version') == 5:
+            if any(not isinstance(image.get(key), dict) for key in ('control', 'extensions', 'lease')):
+                raise CapacityWriteError('state-capacity-invariant-broken')
     def unchanged(value, old):
         return json.dumps(value, sort_keys=True) == json.dumps(old, sort_keys=True)
 
@@ -51,8 +56,13 @@ def validate_capacity_fields(document, base=None, *, encoding=StateEncoding.CANO
                 continue
         if active or value not in (None, ''):
             (validate_lease_epoch if key == 'fencing_epoch' else validate_lease_token)(value)
-    history = lease.get('lease_history', [])
-    old_history = previous.get('lease_history', [])
+    if active and not inherited:
+        try:
+            validate_lease_allocation(lease, v5=v5)
+        except MissionStateDecodeError as error:
+            raise CapacityWriteError('state-capacity-invariant-broken') from error
+    history = lease.get('lease_history', []) if v5 else legacy_lease_history(lease)
+    old_history = previous.get('lease_history', []) if v5 else legacy_lease_history(previous)
     if unchanged(history, old_history):
         return
     if not isinstance(history, list):

@@ -645,6 +645,11 @@ def _decode_history(
     return tuple(entries)
 
 
+def legacy_lease_history(document: Mapping[str, Any]) -> Any:
+    """v4 treats every falsey history representation as an empty array."""
+    return document.get("lease_history") or []
+
+
 def _decode_legacy_lease(document: Mapping[str, Any]):
     names = ("owner_session_id", "lease_id", "fencing_epoch", "lease_expires_at")
     present = [document.get(name) not in (None, "") for name in names]
@@ -660,7 +665,7 @@ def _decode_legacy_lease(document: Mapping[str, Any]):
         lease_id=lease_id,
         fencing_epoch=epoch,
         lease_expires_at=_aware_time(document["lease_expires_at"], "$.lease_expires_at"),
-        lease_history=_decode_history(document.get("lease_history") or [], "$.lease_history", epoch, lease_id),
+        lease_history=_decode_history(legacy_lease_history(document), "$.lease_history", epoch, lease_id),
     )
 
 

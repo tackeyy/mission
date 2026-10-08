@@ -995,7 +995,25 @@ def _takeover_case(base: Mapping, proposed: Mapping) -> Optional[str]:
             return None
     except (KeyError, TypeError, ValueError, OverflowError):
         return None
+    from .errors import MissionStateDecodeError
+    try:
+        validate_lease_allocation(after_lease, v5=_is_v5(proposed))
+    except MissionStateDecodeError:
+        return None
     return "takeover"
+
+
+def validate_lease_allocation(lease: Mapping, *, v5: bool = False) -> None:
+    """Reuse decoder contracts for a newly allocated lease and its history."""
+    from .codec_v4 import _decode_history, _decode_legacy_lease, legacy_lease_history
+    from .errors import MissionStateDecodeError
+    decoded = _decode_legacy_lease(dict(lease, lease_history=[]))
+    history = lease.get("lease_history", []) if v5 else legacy_lease_history(lease)
+    _decode_history(history, "$.lease_history", decoded.fencing_epoch,
+                    decoded.lease_id, v5=v5)
+    if v5 and lease.get("lease_expires_at") != decoded.lease_expires_at:
+        raise MissionStateDecodeError("invalid-value", "$.lease.lease_expires_at",
+                                      "timestamp must use canonical UTC Z form")
 
 def _lease_token_value_ok(value: object) -> bool:
     return isinstance(value, str) and LEASE_TOKEN_PATTERN.fullmatch(value) is not None
@@ -1018,7 +1036,8 @@ def _takeover_value_bounds_ok(base: Mapping, proposed: Mapping) -> bool:
         if not valid(lease.get(key)):
             return False
     history = lease.get("lease_history")
-    if isinstance(history, list) and history:
+    old_history = _history_or_empty(previous.get("lease_history"))
+    if isinstance(history, list) and old_history is not None and len(history) > len(old_history):
         entry = history[-1]
         if not isinstance(entry, Mapping):
             return False
