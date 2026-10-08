@@ -511,11 +511,9 @@ def test_unknown_mission_subcommand_is_unparsed(argument):
     ('eval "cd .mission-state"; cp x a', ['state_path_command']),
     ('eval "cd .mission-state"; echo x >a', ['state_path_command', 'state_redirection']),
     (f'eval "cd .mission-state"; {MS} context-manifest --out a', ['state_output_option']),
-    ('eval "echo ok"; echo x >a', []),
-    (f'f() {{ eval "echo ok"; }}; f; {MS} context-manifest --out a', []),
+    ('eval "echo ok"; echo x >a', []), (f'f() {{ eval "echo ok"; }}; f; {MS} context-manifest --out a', []),
     ('source ./other.sh; echo x >a', ['state_redirection']),
-    ('source ./other.sh; cp x a', []),
-    ('cd "$REPO" && make test', []), ('cd $TMPDIR && ls', []),
+    ('source ./other.sh; cp x a', []), ('cd "$REPO" && make test', []), ('cd $TMPDIR && ls', []),
     ('tmp=$(mktemp -d); cd $tmp; ls', []), ('cd - && ls', []),
     ('cd "$REPO"; cat .mission-state/a=b', ['state_path_command']),
     ('cd "$REPO"; echo x >a', ['state_redirection'])])
@@ -528,11 +526,19 @@ def test_unknown_cwd_only_rejects_relative_write_destinations(script, kinds):
     ('f(){ cd .mission-state; }; f; sed -i s/a/b/ x.json', 'state_path_command'),
     ('f(){ cd .mission-state; }; f && rm a', 'state_path_command'),
     ('cd .mission-state; ' + '; '.join(f'cd a{i} || cd b{i}' for i in range(7)) + '; sed -i 1d x', 'state_path_command'),
-    ('f(){ cd /tmp; }; f; cp x a', None),
-    ('f(){ cd .mission-state; cd ..; }; f; cp x a', None),
-    ('f(){ cd "$REPO"; }; f; make test', None),
+    ('f(){ cd /tmp; }; f; cp x a', None), ('f(){ cd .mission-state; cd ..; }; f; cp x a', None), ('f(){ cd "$REPO"; }; f; make test', None),
     ('; '.join(f'cd a{i} || cd b{i}' for i in range(7)) + '; make test', None)])
 def test_cwd_collapse_retains_known_state_candidates(script, kind):
+    assert_kinds(script, [kind] if kind else [])
+
+
+@pytest.mark.parametrize('script,kind', [
+    *[(f'cd "$D"/{state}; {tail}', kind) for state in ('.MISSION-STATE', '.mission-st?t?') for tail, kind in (('cd ..; cp x a', 'state_path_command'), ('cd /tmp; cp x a', None), (f'{MS} status', None), (f'{MS} aggregate-reviews --out /tmp/x', None), ('cd /$D/x; cp x a', 'state_path_command'), ('cd /tmp; cd -; cp x a', 'state_path_command'), ('cd -; cp x a', 'state_path_command'), ('D=/tmp; cd "$D"; cp x a', 'state_path_command'))],
+    ('PWD=/work/.mission-state; cd "$PWD"; cp x a', 'state_path_command'), ('. x; echo x >rel', 'state_redirection'), ('PWD=/work; cd .mission-state; cd "$PWD"; cp x a', 'state_path_command'), ('PWD=/work/.mission-state; cd /tmp; cd "$PWD"; cp x a', None),
+    *[('cd .mission-state; ' + '; '.join(f'case "$v{i}" in 1) cd .;; *) cd a{i};; esac' for i in range(6)) + '; cd ..; ' + cmd, 'state_path_command') for cmd in ('cp x a', 'sed -i 1d x')],
+    *[(prefix + sep + cmd, 'state_path_command') for prefix in ('cd "$(git rev-parse --show-toplevel)/.mission-state"', 'cd "$D"/.mission-state', 'cd "$D"; cd .mission-state', 'cd "$ROOT"; cd .mission-state', '; '.join(f'cd a{i} || cd b{i}' for i in range(7)) + '; cd .mission-state') for sep in ('; ', ' && ') for cmd in ('sed -i 1d x', 'rm -f x', 'python3 -c "open(\'x\',\'w\')"', 'ls')],
+    *[(script, None) for script in ('cd "$REPO" && make test', 'cd "$(git rev-parse --show-toplevel)" && make test', 'cd $TMPDIR && ls', 'f(){ cd sub; }; f; make test', '; '.join(f'cd a{i} || cd b{i}' for i in range(7)) + '; ls', 'cd .mission-state; cd /work/ws; make test')]])
+def test_unknown_cwd_preserves_state_possibility(script, kind):
     assert_kinds(script, [kind] if kind else [])
 
 
