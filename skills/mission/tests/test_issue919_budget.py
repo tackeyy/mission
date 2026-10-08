@@ -22,12 +22,12 @@ def test_closed_ledger_roundtrip_and_reservation_accounting():
     from mission_kernel.budget import BudgetError, decode_ledger, decode_policy, default_policy_document, new_ledger, ledger_document
     policy = decode_policy(default_policy_document(1800))
     wire = ledger_document(new_ledger(policy, '2026-01-01T00:00:00Z'))
-    assert decode_ledger({'budget_ledger': wire}).policy == policy
-    assert decode_ledger({'schema_version': 5, 'extensions': {'budget_ledger': wire}}) == decode_ledger({'budget_ledger': wire})
+    assert decode_ledger({'budget_minutes': 30, 'budget_ledger': wire}).policy == policy
+    assert decode_ledger({'schema_version': 5, 'extensions': {'budget_minutes': 30, 'budget_ledger': wire}}) == decode_ledger({'budget_minutes': 30, 'budget_ledger': wire})
     assert decode_ledger({}).policy is None
     for bad in (None, {}, {**wire, 'extra': 1}):
         with pytest.raises(BudgetError):
-            decode_ledger({'budget_ledger': bad})
+            decode_ledger({'budget_minutes': 30, 'budget_ledger': bad})
     wire['clock']['last_observed_at'] = '2026-01-01T00:01:00Z'
     reservation = dict(reservation_id='reservation:1', entry='verification-run', budget_class='verification',
                        target='command:1', operation_id='op:1', fencing_epoch=1,
@@ -35,7 +35,7 @@ def test_closed_ledger_roundtrip_and_reservation_accounting():
                        settle_by='2026-01-01T00:00:54Z', reserved_sec=54, reserved_bytes=1000)
     wire['reservations'] = [reservation]
     wire['phase_charges']['verification'].update(reservation_count=1, open_count=1)
-    assert decode_ledger({'budget_ledger': wire}).reservations[0].reserved_sec == 54
+    assert decode_ledger({'budget_minutes': 30, 'budget_ledger': wire}).reservations[0].reserved_sec == 54
     for mutate in (
         lambda x: x['reservations'].append(deepcopy(reservation)),
         lambda x: x['reservations'][0].update(reserved_sec=53),
@@ -47,7 +47,7 @@ def test_closed_ledger_roundtrip_and_reservation_accounting():
         bad = deepcopy(wire)
         mutate(bad)
         with pytest.raises(BudgetError):
-            decode_ledger({'budget_ledger': bad})
+            decode_ledger({'budget_minutes': 30, 'budget_ledger': bad})
 
 
 def test_deadlines_protect_open_reservations_and_exhaustion_waits_for_final():
@@ -104,10 +104,11 @@ def test_codec_projection_is_bound_and_generic_budget_writes_are_rejected():
     payload = current_v5_open_state()
     ledger = new_ledger(decode_policy(default_policy_document(1800)), '2026-01-01T00:00:00Z')
     payload['extensions']['budget_ledger'] = ledger_document(ledger)
+    payload['extensions']['budget_minutes'] = 30
     snapshot = decode_snapshot(json.dumps(payload).encode())
     assert snapshot.state.budget == ledger
     assert decode_mission_state(encode_v5_state(snapshot.state, snapshot.guidance)).budget == ledger
-    v4 = dict(schema_version=4, mission='budget fixture', budget_ledger=ledger_document(ledger))
+    v4 = dict(schema_version=4, mission='budget fixture', budget_minutes=30, budget_ledger=ledger_document(ledger))
     legacy_state = decode_mission_state(json.dumps(v4).encode())
     assert decode_mission_state(project_legacy_document(legacy_state)).budget == ledger
     with pytest.raises(ValueError, match='budget-projection-backing-mismatch'):
@@ -138,7 +139,7 @@ def test_stop_slots_are_preallocated_and_f_maximum_rows_fit_both_encodings():
     # Open-reservations in BudgetStop is a policy-bounded count.
     slots = replace(slots, budget_stop=replace(slots.budget_stop, open_reservations=3))
     full = replace(ledger, stop_slots=slots)
-    assert decode_ledger({'budget_ledger': ledger_document(full)}) == full
+    assert decode_ledger({'budget_minutes': 30, 'budget_ledger': ledger_document(full)}) == full
     for pretty in (False, True):
         def size(row):
             return len(json.dumps(row, ensure_ascii=False, indent=2 if pretty else None,
@@ -180,7 +181,7 @@ def test_v5_authoritative_consumer_preserves_budget_and_unrelated_extensions(ext
     from .mission_state_fixture_corpus import current_v5_open_state
     payload = current_v5_open_state()
     ledger = new_ledger(decode_policy(default_policy_document(1800)), '2026-01-01T00:00:00Z')
-    payload['extensions'] = {'budget_ledger': ledger_document(ledger), **extra}
+    payload['extensions'] = {'budget_minutes': 30, 'budget_ledger': ledger_document(ledger), **extra}
     assert decode_mission_state(json.dumps(payload).encode()).budget == ledger
     snapshot = authoritative_snapshot_from_document(json.loads(json.dumps(payload)))
     assert decode_ledger(snapshot.document_copy()) == ledger
@@ -223,10 +224,10 @@ def test_recovery_cannot_be_both_open_and_settled_but_unconfirmed_kill_stays_ope
         observed={'at': '2026-01-01T00:01:00Z', 'elapsed_sec': 43},
         telemetry={'tool_calls': None, 'replays': None, 'output_bytes': None})]
     with pytest.raises(BudgetError, match='budget-settlement-open-invalid'):
-        decode_ledger({'budget_ledger': wire})
+        decode_ledger({'budget_minutes': 30, 'budget_ledger': wire})
     wire['settlements'][0]['outcome'] = 'kill-unconfirmed'
     wire['stop_slots'] = stop_slots_document(StopSlots(system_recovery=SystemRecovery(43, 1, DispatchReservation(**reservation))))
-    assert decode_ledger({'budget_ledger': wire}).stop_slots.system_recovery.reservation.reservation_id == 'same'
+    assert decode_ledger({'budget_minutes': 30, 'budget_ledger': wire}).stop_slots.system_recovery.reservation.reservation_id == 'same'
 
 
 def test_child_timeout_is_clipped_before_adding_to_the_calendar():
@@ -234,3 +235,92 @@ def test_child_timeout_is_clipped_before_adding_to_the_calendar():
     ledger = new_ledger(decode_policy(default_policy_document(1800)), '2026-01-01T00:00:00Z')
     assert child_deadlines(ledger, '2026-01-01T00:01:00Z', 'verification-run', 'verification', INT_MAX) == (
         '2026-01-01T00:20:06Z', '2026-01-01T00:20:30Z', 1170)
+
+
+def _ledger_with_reservation(entry, budget_class):
+    from mission_kernel.budget import (BUDGET_SPAWN_ENTRIES, cleanup_sec, decode_policy, default_policy_document,
+                                       new_ledger, ledger_document)
+    policy = decode_policy(default_policy_document(1800))
+    wire = ledger_document(new_ledger(policy, '2026-01-01T00:00:00Z'))
+    wire['clock']['last_observed_at'] = '2026-01-01T00:01:00Z'
+    # Timings follow the entry's cleanup so only the entry/class pairing varies.
+    reserved = 30 + (cleanup_sec(policy, entry) if isinstance(entry, str) and entry in BUDGET_SPAWN_ENTRIES
+                     else cleanup_sec(policy, 'verification-run')) + policy.commit_margin_sec
+    wire['reservations'] = [dict(
+        reservation_id='reservation:1', entry=entry, budget_class=budget_class, target='command:1',
+        operation_id='op:1', fencing_epoch=1, reserved_at='2026-01-01T00:00:00Z',
+        child_deadline_at='2026-01-01T00:00:30Z', settle_by=f'2026-01-01T00:{reserved // 60:02d}:{reserved % 60:02d}Z',
+        reserved_sec=reserved, reserved_bytes=1000)]
+    if isinstance(budget_class, str) and budget_class in wire['phase_charges']:
+        wire['phase_charges'][budget_class].update(reservation_count=1, open_count=1)
+    return {'budget_minutes': 30, 'budget_ledger': wire}
+
+
+@pytest.mark.parametrize('entry', (['verification-run'], {'verification-run': 1}))
+def test_unhashable_entry_is_a_budget_error_not_a_type_error(entry):
+    import json
+    from mission_kernel import decode_mission_state
+    from mission_kernel.budget import BudgetError, cleanup_sec, decode_ledger, decode_policy, default_policy_document
+    from mission_kernel.errors import MissionStateDecodeError
+    from .mission_state_fixture_corpus import current_v5_open_state
+    with pytest.raises(BudgetError, match='budget-entry-invalid'):
+        cleanup_sec(decode_policy(default_policy_document(1800)), entry)
+    document = _ledger_with_reservation(entry, 'verification')
+    with pytest.raises(BudgetError, match='budget-entry-invalid'):
+        decode_ledger(document)
+    payload = current_v5_open_state()
+    payload['extensions'] = document
+    with pytest.raises(MissionStateDecodeError, match='budget-entry-invalid'):
+        decode_mission_state(json.dumps(payload).encode())
+
+
+@pytest.mark.parametrize('entry, budget_class, accepted', (
+    ('repair-reverify', 'repair', True),
+    ('repair-disposition-run', 'repair', True),
+    ('verification-run', 'verification', True),
+    ('verification-run', 'final', True),
+    ('recover', 'repair', True),
+    ('repair-reverify', 'verification', False),
+    ('repair-reverify', 'final', False),
+    ('verification-run', 'repair', False),
+    ('invoke-command', 'repair', False),
+    ('fresh-review-run', 'repair', False),
+    ('verification-run', ['verification'], False),
+))
+def test_stored_reservation_class_follows_the_entry(entry, budget_class, accepted):
+    # design 881 §3.1: only repair entries use the repair class; recovery inherits.
+    from mission_kernel.budget import BudgetError, decode_ledger
+    document = _ledger_with_reservation(entry, budget_class)
+    if accepted:
+        assert decode_ledger(document).reservations[0].budget_class == budget_class
+    else:
+        with pytest.raises(BudgetError, match='budget-class-invalid'):
+            decode_ledger(document)
+
+
+@pytest.mark.parametrize('minutes', ('absent', None))
+def test_ledger_without_budget_minutes_is_rejected(minutes):
+    from mission_kernel.budget import BudgetError, decode_ledger
+    document = _ledger_with_reservation('verification-run', 'verification')
+    if minutes == 'absent':
+        del document['budget_minutes']
+    else:
+        document['budget_minutes'] = minutes
+    with pytest.raises(BudgetError, match='budget-total-mismatch'):
+        decode_ledger(document)
+    with pytest.raises(BudgetError, match='budget-total-mismatch'):
+        decode_ledger({'schema_version': 5, 'extensions': document})
+
+
+@pytest.mark.parametrize('key, maximum', (
+    ('max_concurrent_dispatches', 8), ('max_dispatches_per_phase', 64), ('no_progress_limit', 32),
+    ('closeout_margin_sec', 86400), ('kill_wait_sec', 86400)))
+def test_policy_integers_are_bounded(key, maximum):
+    from mission_kernel.budget import BudgetError, decode_policy, default_policy_document
+    wire = default_policy_document(10 ** 6)
+    wire[key] = maximum + 1
+    with pytest.raises(BudgetError, match='budget-integer-invalid'):
+        decode_policy(wire)
+    if key.startswith('max_') or key == 'no_progress_limit':
+        wire[key] = maximum
+        assert getattr(decode_policy(wire), key) == maximum
