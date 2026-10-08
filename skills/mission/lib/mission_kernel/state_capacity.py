@@ -717,10 +717,7 @@ def _strict_equal(left: object, right: object) -> bool:
     return left == right
 
 def _diff_keys(base: Mapping, proposed: Mapping) -> frozenset:
-    """Top-level keys changed/added/removed (shallow). Presence, not just
-    value, is compared: an injected key present-with-``None`` must not look
-    unchanged to a ``.get()``-based comparison.
-    """
+    """Top-level keys changed/added/removed; presence counts (a key added as ``None`` is a change)."""
     changed = set()
     for key in frozenset(base.keys()) | frozenset(proposed.keys()):
         in_base, in_proposed = key in base, key in proposed
@@ -729,9 +726,7 @@ def _diff_keys(base: Mapping, proposed: Mapping) -> frozenset:
     return frozenset(changed)
 
 def _mapping_diff_keys(base_value: object, proposed_value: object) -> frozenset:
-    """Field-level diff of a nested mapping (v5's ``control``/``extensions``
-    are opaque top-level keys otherwise).
-    """
+    """Field-level diff of a nested mapping (v5's ``control``/``extensions``)."""
     base_map = base_value if isinstance(base_value, Mapping) else {}
     proposed_map = proposed_value if isinstance(proposed_value, Mapping) else {}
     changed = set()
@@ -793,10 +788,7 @@ def _lease_top_level_keys_closed(base: Mapping, proposed: Mapping) -> bool:
     return True
 
 def _lease_identity_absent(lease: Mapping) -> bool:
-    """Owner, lease id, *and* epoch all absent/empty (checking all three,
-    unlike the reservation-half's epoch-only ``_lease_never_acquired``,
-    rejects a *partial* lease as neither absent nor present).
-    """
+    """Owner, lease id and epoch all absent/empty (a partial lease is neither absent nor present)."""
     return (
         lease.get("owner_session_id") in (None, "")
         and lease.get("lease_id") in (None, "")
@@ -804,9 +796,7 @@ def _lease_identity_absent(lease: Mapping) -> bool:
     )
 
 def _lease_identity_present(lease: Mapping) -> bool:
-    """Complement of :func:`_lease_identity_absent`: all three fields
-    present (a partial lease matches neither case).
-    """
+    """All three identity fields present (a partial lease matches neither case)."""
     return (
         lease.get("owner_session_id") not in (None, "")
         and lease.get("lease_id") not in (None, "")
