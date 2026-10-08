@@ -132,11 +132,12 @@ Reservations are derived from state; no capacity marker is saved.
 smaller withdrawn record cannot leave room for the halt slot. For a session
 that has not stopped, every mutation is refused, including halt, takeover,
 resume and reinitialization. A session that has already stopped (v4
-`loop_active` false, or a terminal v5 session) can be replaced in place by
-`init` (v5: `init --new-mission`); the replacement is judged on its own
-capacity and the old state or generation is moved to the archive directory.
-For a legacy-full session that has not stopped, the owner must close it
-manually:
+`loop_active` false, or a terminal v5 session) and holds no `fresh_review`
+records can be replaced in place by `init` (v5: `init --new-mission`); the
+replacement is judged on its own capacity and the old state or generation is
+moved to the archive directory. A session that holds `fresh_review` records
+(including pending requests) refuses reinitialization even after it stops. In
+every other case the owner must close the legacy-full session manually:
 
 1. Stop its agent/writer processes and inspect `fresh-review status`. Keep the
    original session read-only; do not truncate history or edit request nonces.

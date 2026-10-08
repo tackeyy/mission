@@ -116,11 +116,13 @@ D item を pending より先へ進める書込みを拒否します。予約は 
 
 `state-capacity-legacy-full` は、全 pending request を小さい withdrawn record に
 置き換えても halt slot の空きが残らない状態です。**停止していない session では**、
-halt・takeover・resume・reinit を含む全 mutation を拒否します。すでに停止した
-session（v4 の `loop_active` が false、または終了済みの v5 session）は、同じ場所で
-`init`（v5 は `init --new-mission`）により置き換えられます。置き換えは新しい state の
-容量で判定され、旧 state・旧 generation は archive ディレクトリへ移されます。
-停止していない legacy-full の session は、owner が次の手順で手動で閉じます。
+halt・takeover・resume・reinit を含む全 mutation を拒否します。すでに停止し
+（v4 の `loop_active` が false、または終了済みの v5 session）、`fresh_review` の record を
+持たない session は、同じ場所で `init`（v5 は `init --new-mission`）により置き換えられます。
+置き換えは新しい state の容量で判定され、旧 state・旧 generation は archive ディレクトリへ
+移されます。`fresh_review` の record（pending request を含む）を持つ session は、停止した
+後も reinit を拒否します。それ以外の場合は、owner が次の手順で legacy-full の session を
+手動で閉じます。
 
 1. 対象 agent／writer process を停止し、`fresh-review status` を確認します。元 session
    は読取り専用で保ち、履歴の切捨てや request nonce の編集は行いません。
