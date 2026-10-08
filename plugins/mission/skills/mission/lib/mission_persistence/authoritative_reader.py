@@ -951,6 +951,28 @@ def preflight_session_paths(roots, discover):
     return paths
 
 
+class _JsonPairs(list):
+    """Object pairs with duplicates preserved, for inspecting a document before collapsing it."""
+
+
+def _raw_document_carries_budget_ledger(text: str) -> bool:
+    """Decide ledger presence on the uncollapsed document (any duplicate occurrence counts).
+
+    v4 keeps the ledger at the top level; v5 keeps it inside a top-level
+    ``extensions`` object. A v4 ``extensions`` property is retained user data.
+    """
+    top = json.loads(text, object_pairs_hook=_JsonPairs)
+    if not isinstance(top, _JsonPairs):
+        return False
+    versions = {value for key, value in top if key == "schema_version" and type(value) is int}
+    if 5 not in versions:
+        return any(key == "budget_ledger" for key, _ in top)
+    return any(key == "budget_ledger" for key, _ in top) or any(
+        key == "extensions" and isinstance(value, _JsonPairs)
+        and any(inner == "budget_ledger" for inner, _ in value)
+        for key, value in top)
+
+
 def read_session_json(session_path: Union[Path, str], *, source: Union[str, bytes, None] = None, name: Optional[str] = None, resolve_head: bool = True):
     """Read direct session JSON with the shared UTF-8 renderability boundary.
 
@@ -974,8 +996,7 @@ def read_session_json(session_path: Union[Path, str], *, source: Union[str, byte
         return snapshot.document_copy()
     if isinstance(document, dict):
         decode_projection(document.get("extensions", {}) if document.get("schema_version") == 5 else document)
-        extensions = document.get("extensions")
-        if "budget_ledger" in document or (isinstance(extensions, dict) and "budget_ledger" in extensions):
+        if _raw_document_carries_budget_ledger(source.decode("utf-8")):
             # Legacy tolerance keeps the last duplicate; a budget ledger is bound to
             # budget_minutes, so its document must not hide an earlier duplicate.
             json.loads(source.decode("utf-8"), object_pairs_hook=_reject_duplicate_json_pairs)

@@ -372,3 +372,23 @@ def test_closeout_margin_exhausts_only_without_an_open_final_reservation():
     opened = replace(ledger, reservations=(final,))
     result = exhaustion(opened, at)
     assert result is None or result.cause != 'closeout-margin'
+
+
+@pytest.mark.parametrize('source, rejected', (
+    # The ledger sits in a shadowed duplicate extensions object.
+    ('{"schema_version":5,"extensions":{"budget_minutes":30,"budget_ledger":{}},"extensions":{}}', True),
+    # A shadowed duplicate top-level ledger.
+    ('{"schema_version":4,"budget_ledger":{},"budget_ledger":null}', True),
+    # v4 extensions.budget_ledger is user data; legacy duplicate tolerance stays.
+    ('{"schema_version":4,"mission":"x","phase":"planning","phase":"executing","extensions":{"budget_ledger":1}}', False),
+))
+def test_budget_duplicate_detection_uses_the_uncollapsed_document(tmp_path, source, rejected):
+    from mission_kernel.errors import MissionStateDecodeError
+    from mission_persistence.authoritative_reader import read_session_json
+    path = tmp_path / 'state.json'
+    path.write_text(source)
+    if rejected:
+        with pytest.raises(MissionStateDecodeError, match='duplicate-json-key'):
+            read_session_json(path)
+    else:
+        assert read_session_json(path)['phase'] == 'executing'
