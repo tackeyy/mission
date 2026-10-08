@@ -97,41 +97,6 @@ mode `0600`、content digest、semantic self-consistency、live metadata freshne
 digest を再計算する攻撃までは防げません。信頼できない利用者や transport から受け取った
 snapshot は使用しないでください。
 
-## state 容量と手動での回復
-
-state は 4 MiB の上限内に、未終端 item・halt 1 回・残りの lease takeover 分を予約します。
-`fresh-review status` の `capacity` は、公開済み state の実際の `encoded_len`、item の
-`reserved`、`system_remaining`、`headroom`、`excess_bytes`、`remaining_takeovers`、
-`mode`、`code`、pending の `withdraw_candidates` を返します。status は lease の取得や
-書込みを行いません。takeover の残回数が 0 の場合、物理的な空きがあっても次の takeover は
-`state-capacity-exhausted` で拒否されます。
-
-**E0b-1 から D2c までの間、超過状態の session は停止系しか書けません。** 容量のための
-取下げ command は D2c（Issue #912）の範囲で、この版にはありません。整形 JSON の v4
-では D item を pending より先へ進める書込みを拒否します。予約は state から導出し、
-容量の移行 marker は保存しません。
-
-`state-capacity-legacy-full` は、全 pending request を小さい withdrawn record に
-置き換えても halt slot の空きが残らない状態です。halt・takeover・resume・reinit を
-含む全 mutation を拒否するため、owner が次の手順で手動で閉じます。
-
-1. 対象 agent／writer process を停止し、`fresh-review status` を確認します。元 session
-   は読取り専用で保ち、履歴の切捨てや request nonce の編集は行いません。
-2. `.mission-state` 全体（session head・objects・generations・commits・operations・
-   evidence）を offline archive に保存し、元の bytes と一致することを確認します。
-   fenced session は head JSON だけを保存しても復元できません。
-3. archive は停止・未解決として保持し、owner の運用記録へ閉じた理由を残します。
-   archive の作成を mission の成功や fresh-review receipt として扱いません。
-4. 別の作業ディレクトリの新しい state store で、別の session ID を選びます。
-   `MISSION_SESSION_ID=<new-id>` と通常の `mission-state.py init` で初期化し、旧 store
-   は読取り専用で保持します。要件と受入れ証拠を改めて
-   確立し、旧 lease をコピーしたり未終端の作業を完了扱いにしたりしません。旧 lineage
-   は archive に保持します。
-
-`state-capacity-invariant-broken` は予約または保存 field の上限を破る書込み、
-`state-capacity-withdraw-not-needed` は容量内の request の取下げを拒否します。
-これらのコードは証拠の破棄を許可するものではありません。
-
 ## 性能の範囲
 
 削減対象は、snapshot consumer における state/evidence byte read、content hash、JSON parse、
