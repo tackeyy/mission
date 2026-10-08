@@ -2,7 +2,7 @@
 
 Issue: [probe の識別・構成照合 #924](https://github.com/tackeyy/mission/issues/924)
 
-状態: record 永続化の修正に続き、独立探索で指摘された shell 走査の字句・構文境界と baseline の走査不能の診断を修正し、ローカル対象検証済み。修正済みコードを前提に、scanner 単体テストの配置だけを変更。今回のテスト移動は未コミット。コミット、PR、正式レビュー、独立 Checker、full suite、CI は親が行う。基点は `2749e1831f263193a7aaf4c31816203288a80554`、テスト移動前の head は `4fa4c8dc2ec1dee37846e43e9e67692ab6f2061d`。設計書は変更していない。
+状態: record 永続化の修正に続き、独立探索で指摘された shell 走査の字句・構文境界と baseline の走査不能の診断を修正し、ローカル対象検証済み。PR は 2 本に分けた（scanner と単体テストを先行 PR、probe・照合・永続化を本 PR）。基点は `2749e1831f263193a7aaf4c31816203288a80554`。設計書は変更していない。
 
 ## 変更と完了条件
 
@@ -36,7 +36,7 @@ Issue: [probe の識別・構成照合 #924](https://github.com/tackeyy/mission/
 
 - 対象 425 件通過（3.58 秒）: `test_issue924_probe_integrity.py` 154 件、`test_issue924_shell_scan.py` 227 件、既存 probe 44 件。fixture/fake とローカル state CLI のみ。実 provider・smoke・pilot は実行していない。
 - 関連ガード 99 件通過（26.82 秒）: wrapper/plugin 同期、artifact hygiene、neutral vocabulary、thin-adapter、persistence/kernel の import 境界。
-- reviewed area は未追跡の新規ファイルを含めて約 1,710 行（1,400 超）。`git diff origin/main --stat` と working tree の numstat に未追跡ファイルの行数を加えて測定（生成物除外 0）。commit 間だけを数える `pr_size.py --head HEAD` は今回の未コミット修正を含まない。分割案は末尾。
+- reviewed area（`scripts/pr_size.py`）: 先行 PR 782 行、本 PR 999 行（先行 PR の branch との差分）。
 - thin-adapter ratchet と `git diff --check` は通過。現時点の ratchet 出力は `base=current-only`（CI の PR base 比較ではない）。
 - 前回の独立入力探索: scanner 49 件 + policy/record 7 件を実測。malformed record が例外になる反例を Red にして修正。正式なレビュー accepted の代替にはしていない。
 - 前回の永続化の追加 Red: 固定した匿名 home 配下の interpreter/workspace/package path で main の 3 件が元の record を失うことを再現。正常/拒否の正規化 62 件、未知 trace の保存 20 件、既存 writer の秘匿による走査差 1 件、baseline/Goal の拒否 2 件で保護。独立 writer matrix 61 件も全件通過。未引用の空白 path 等で走査差が出た 10 件は、検出結果を変えて保存せず non_quality に落とすことを確認した。
@@ -51,31 +51,10 @@ Issue: [probe の識別・構成照合 #924](https://github.com/tackeyy/mission/
 - scanner は shell の完全な interpreter ではない。未対応の構文を検出し、script file・source/alias の展開は追わない。難読化・process 内部の操作という凍結済みの限界も維持。具体例: `cd .mission-state && python3 -c "open('a','w')"` は検出しない。非 shell 本文は `.mission-state` を含む path の literal のみを走査するという §2.1 の範囲を保ち、Python 等の内部 cwd・API の解釈は追加していない。
 - 実 host の event の完全性と全文は未確認。これは fixture 検証で保証できないため、承認された後続 smoke の対象。
 - 未知 path を秘匿すると正確な session 操作の再走査を保証できないため、`evaluated_session_unverifiable` を選んだ。package は既に準備済みなので `package_prepare_failed` にはしない。消した stream を空の観測と扱わず、保存失敗の情報を checker が全 arm で拒否する。ディスク自体が書けない場合の record 保存は保証できない。
-- in-flight 照合と代替の open PR 一覧は GitHub 接続エラー（両方非 0）。指定 worktree・branch・基点・clean な開始状態はローカルで確認した。GitHub 書き込みはしていない。
 
-## コミット / PR 分割案
+## PR の分割
 
-scanner 単体の 7 テスト関数（78 ケース）を移動済み。移動前は shell 149 件 + probe 232 件、移動後は shell 227 件 + probe 154 件で、合計 381 件を維持。test 名と全 parameter ID の multiset が一致し、移動した test 本体の AST も不変。両ファイルは 381 件通過（1.90 秒）。scanner 側の import は `exec_event_scan` と標準 library / pytest のみ。正常/拒否入力 table は、後続の record 正規化の結合テストにも必要なため両側で保持し、先行から後続 module への依存を作らない。
+reviewed area が分割必須の閾値（1,400）を超えたため 2 本に分けた。scanner 単体の 7 テスト関数（78 ケース）を先行 PR へ移し、移動前後で合計 381 件（test 名と parameter ID の multiset）が一致することを確かめた。
 
-今回のコミット案:
-
-- `refactor(test): scanner 単体テストを先行 PR 用に分離する`
-- 対象: `skills/mission/tests/{test_issue924_shell_scan,test_issue924_probe_integrity}.py`、この引き継ぎ。production code の変更はない。
-
-先行 PR（scanner）:
-
-- `benchmarks/mission-vs-goal/shell_syntax.py`
-- `benchmarks/mission-vs-goal/exec_event_scan.py`
-- `skills/mission/tests/test_issue924_shell_scan.py`
-
-後続 PR（probe・照合・永続化。先行 PR を基点にする）:
-
-- `benchmarks/mission-vs-goal/run_native_goal_probe.py`
-- `benchmarks/mission-vs-goal/evaluation_integrity.py`
-- `benchmarks/mission-vs-goal/record_paths.py`
-- `benchmarks/mission-vs-goal/native_goal_benchmark.py`
-- `skills/mission/tests/test_issue924_probe_integrity.py`
-- `skills/mission/tests/test_issue882_native_goal_benchmark.py`
-- `docs/reports/924-probe-integrity.md`
-
-1 子 Issue = 1 PR の作業単位の判断と GitHub/Git 操作は親が行う。凍結した設計の判定規則・値は変更しない。実際の branch 分割後に reviewed area を再計測する。
+- 先行 PR（scanner）: `shell_syntax.py`・`exec_event_scan.py`・`test_issue924_shell_scan.py`
+- 本 PR（probe・照合・永続化。先行 PR の上に積む）: `run_native_goal_probe.py`・`evaluation_integrity.py`・`record_paths.py`・`native_goal_benchmark.py`・`test_issue924_probe_integrity.py`・`test_issue882_native_goal_benchmark.py`・本書
