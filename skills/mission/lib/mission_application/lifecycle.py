@@ -449,6 +449,9 @@ def initialize(
             reason=reason,
         ) from error
     document = current.document_copy()
+    from mission_kernel.budget import decode_ledger
+    if decode_ledger(document).policy is not None:
+        raise LifecycleFailure("budget-reinitialization-forbidden", reason="budget-reinitialization-forbidden")
     if "fresh_review" in document:
         raise LifecycleFailure(
             "fresh-review-reinitialization-forbidden",

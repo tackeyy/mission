@@ -256,7 +256,7 @@ PARITY_DEPENDENCY_INVENTORY = (
     ParityDependency(
         "application.clock-budget-override",
         "outside-parity",
-        ("$.budget_minutes", "$.started_at", "iso_now()"),
+        ("$.budget_minutes", "$.started_at", "$.budget_ledger", "iso_now()"),
     ),
     ParityDependency(
         "legacy.goal-dispatch",

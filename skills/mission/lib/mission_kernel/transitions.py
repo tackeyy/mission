@@ -642,6 +642,13 @@ def _merge_extension_fields(
     ):
         raise _Rejected("invalid-set-fields")
     requested = set(keys)
+    if any(key.startswith("budget_ledger.") for key in requested):
+        raise _Rejected("budget-policy-frozen")
+    nested = fields.thaw().get("extensions")
+    if isinstance(nested, dict) and "budget_ledger" in nested:
+        raise _Rejected("budget-policy-frozen")
+    if state.budget.policy is not None and "budget_minutes" in requested:
+        raise _Rejected("budget-policy-frozen")
     if requested & GENERIC_SET_FROZEN_FIELDS:
         raise _Rejected("frozen-field")
     if requested & GENERIC_SET_DEDICATED_FIELDS:

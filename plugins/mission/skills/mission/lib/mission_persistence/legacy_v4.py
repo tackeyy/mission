@@ -6,6 +6,7 @@ import copy
 import contextlib
 import json
 import secrets
+from mission_kernel.budget import decode_ledger
 from mission_kernel.fresh_review import decode_projection
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -387,6 +388,7 @@ class LegacyV4Repository:
             return document
         encode_legacy_document(document)
         decode_projection(document)
+        decode_ledger(document)
         self._loaded_document = copy.deepcopy(document)
         return copy.deepcopy(document)
 

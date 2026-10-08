@@ -691,12 +691,21 @@ def _decode_v4_object(document: Mapping[str, Any], frozen: FrozenJsonObject) -> 
         legacy_passthrough=frozen,
         a4=_decode_a4_projection(document, handoff, "$.a4"),
         fresh_review=_decode_fresh_review_projection(document, "$.fresh_review"),
+        budget=_decode_budget_projection(document, "$.budget_ledger"),
     )
 
 
 def _decode_v4_state(source: bytes) -> MissionState:
     frozen = decode_json_object(source)
     return _decode_v4_object(thaw_json_object(frozen), frozen)
+
+
+def _decode_budget_projection(document, path, *, embedded=False):
+    from .budget import decode_ledger, BudgetError
+    try:
+        return decode_ledger(document, embedded=embedded)
+    except BudgetError as exc:
+        raise _fail(exc.code, path, exc.code) from exc
 
 
 def _decode_fresh_review_projection(document, path):
@@ -938,6 +947,15 @@ def project_legacy_document(state: MissionState) -> bytes:
         document["executor_handoff"] = _handoff_json(state.handoff)
     from .fresh_review import validate_projection_backing
     validate_projection_backing(document, state.fresh_review)
+    from .budget import validate_projection_backing as validate_budget_backing
+    if state.schema_origin is SchemaOrigin.V5:
+        from .budget import ledger_document
+        validate_budget_backing(state.extensions.thaw(), state.budget, embedded=True)
+        if state.budget.policy is not None:
+            # The ledger is bound to budget_minutes; project both or neither.
+            document["budget_ledger"] = ledger_document(state.budget)
+            document["budget_minutes"] = state.extensions.thaw()["budget_minutes"]
+    validate_budget_backing(document, state.budget)
     project_v4_a4(document, state.a4, state.handoff)
     input_refs = [reference for reference in state.reviews if isinstance(reference, ReviewInputRef)]
     if (

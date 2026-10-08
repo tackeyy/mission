@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Optional, Tuple, Union
 
 from mission_kernel import MissionState, decode_mission_state
+from mission_kernel.budget import decode_ledger
 from mission_kernel.fresh_review import FreshReviewError, decode_projection
 from mission_kernel.codec_v4 import MissionStateDecodeError
 from mission_kernel.json_codec import (
@@ -295,6 +296,7 @@ def _legacy_compatibility_snapshot(
     if "schema" in document or {"commit", "state_generation"} & set(document):
         raise ValueError("legacy compatibility input uses an unsupported format")
     decode_projection(document)
+    decode_ledger(document)
     schema_origin = read_schema_version(document, max_reader_version=4)
     identity_values = (document.get("mission"), document.get("mission_id"))
     has_identity = any(isinstance(value, str) and value for value in identity_values)
@@ -493,6 +495,7 @@ def _snapshot_from_document(
         encode_json_value(document)
     values = thaw_json_object(document)
     decode_projection(values)
+    decode_ledger(values)
     loop_active = values.get("loop_active", False)
     passes = values.get("passes", False)
     awaiting_user = values.get("awaiting_user", False)
@@ -948,6 +951,30 @@ def preflight_session_paths(roots, discover):
     return paths
 
 
+class _JsonPairs(list):
+    """Object pairs with duplicates preserved, for inspecting a document before collapsing it."""
+
+
+def _raw_document_carries_budget_ledger(text: str) -> bool:
+    """Decide ledger presence on the uncollapsed document (any duplicate occurrence counts).
+
+    v4 keeps the ledger at the top level; v5 keeps it inside a top-level
+    ``extensions`` object. A v4 ``extensions`` property is retained user data.
+    """
+    top = json.loads(text, object_pairs_hook=_JsonPairs)
+    if not isinstance(top, _JsonPairs):
+        return False
+    # The collapsed document keeps the last schema_version; use it with the same
+    # predicate as decode_projection / decode_ledger (``== 5`` also matches 5.0).
+    versions = [value for key, value in top if key == "schema_version"]
+    if not versions or versions[-1] != 5:
+        return any(key == "budget_ledger" for key, _ in top)
+    return any(key == "budget_ledger" for key, _ in top) or any(
+        key == "extensions" and isinstance(value, _JsonPairs)
+        and any(inner == "budget_ledger" for inner, _ in value)
+        for key, value in top)
+
+
 def read_session_json(session_path: Union[Path, str], *, source: Union[str, bytes, None] = None, name: Optional[str] = None, resolve_head: bool = True):
     """Read direct session JSON with the shared UTF-8 renderability boundary.
 
@@ -971,6 +998,11 @@ def read_session_json(session_path: Union[Path, str], *, source: Union[str, byte
         return snapshot.document_copy()
     if isinstance(document, dict):
         decode_projection(document.get("extensions", {}) if document.get("schema_version") == 5 else document)
+        if _raw_document_carries_budget_ledger(source.decode("utf-8")):
+            # Legacy tolerance keeps the last duplicate; a budget ledger is bound to
+            # budget_minutes, so its document must not hide an earlier duplicate.
+            json.loads(source.decode("utf-8"), object_pairs_hook=_reject_duplicate_json_pairs)
+        decode_ledger(document)
     return document
 
 

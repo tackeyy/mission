@@ -567,7 +567,7 @@ def _decode_v5_object(document: Mapping[str, Any]) -> MissionState:
         for index, value in enumerate(_list(document["scores"], "$.scores"))
     )
     extensions = _freeze_object(_object(document["extensions"], "$.extensions"))
-    from .codec_v4 import _decode_a4_projection, _decode_fresh_review_projection
+    from .codec_v4 import _decode_a4_projection, _decode_fresh_review_projection, _decode_budget_projection
 
     return MissionState(
         schema_origin=SchemaOrigin.V5,
@@ -583,6 +583,7 @@ def _decode_v5_object(document: Mapping[str, Any]) -> MissionState:
         legacy_passthrough=None,
         a4=_decode_a4_projection(extensions.thaw(), handoff, "$.extensions"),
         fresh_review=_decode_fresh_review_projection(extensions.thaw(), "$.extensions.fresh_review"),
+        budget=_decode_budget_projection(extensions.thaw(), "$.extensions.budget_ledger", embedded=True),
     )
 
 
@@ -732,6 +733,8 @@ def _state_payload(state: MissionState, guidance: Any) -> dict[str, Any]:
     extensions = state.extensions.thaw()
     from .fresh_review import validate_projection_backing
     validate_projection_backing(extensions, state.fresh_review)
+    from .budget import validate_projection_backing as validate_budget_backing
+    validate_budget_backing(extensions, state.budget, embedded=True)
     project_v4_a4(
         extensions,
         state.a4,
