@@ -23,10 +23,11 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 from evaluation_integrity import collect_post_run, policy_digest
+from record_paths import write_probe_record
 
 from native_goal_benchmark import (
     NATIVE_SCHEMA, create_immutable_package, create_worker_export, immutable_manifest, initialize_worker_export_repository, observe_claude_goal, worker_export_manifest,
-    observe_codex_goal, write_record,
+    observe_codex_goal,
 )
 
 
@@ -454,12 +455,14 @@ def main(*, pre_turn=None, post_run=None) -> int:
     mission_source_repo = Path(args.mission_source_repo).resolve()
     output = Path(args.output).resolve()
     label = "codex_native_goal" if args.host == "codex" and args.arm == "goal" else ("claude_code_native_goal" if args.arm == "goal" else "mission")
+    path_roots = dict(home=str(Path.home()), workspace=str(worktree), interpreter=os.path.abspath(sys.executable))
     try:
         actual_snapshot = _task_snapshot(worktree)
         with tempfile.TemporaryDirectory(prefix="mission-native-goal-package-") as temporary:
             package = Path(temporary) / "mission.tar"
             create_immutable_package(mission_source_repo, args.mission_source_commit, package)
             package_root = Path(temporary) / "package"
+            path_roots['package'] = str(package_root)
             shutil.unpack_archive(str(package), str(package_root), format="tar")
             manifest = immutable_manifest(args.mission_source_commit, package_root, package, {
                 "host": args.host, "arm": args.arm, "model_id": args.model_id,
@@ -471,6 +474,7 @@ def main(*, pre_turn=None, post_run=None) -> int:
             manifest["mission_source_commit"] = args.mission_source_commit
             candidate_root = output.parent / "candidates" / output.stem
             worker_root = create_worker_export(worktree, args.starting_commit, candidate_root, args.worker_allow_path)
+            path_roots['workspace'] = str(worker_root)
             export_commit = initialize_worker_export_repository(worker_root)
             manifest["worker_export"] = {
                 "source_commit": args.starting_commit,
@@ -503,12 +507,12 @@ def main(*, pre_turn=None, post_run=None) -> int:
             except ValueError:
                 manifest["worker_export"]["candidate_state"] = "stale"
                 observation = {**observation, "fidelity": "unverified", "outcome": "failed", "reason": "candidate_snapshot_invalid"}
-            write_record(output, {"schema": NATIVE_SCHEMA, "run_id": output.stem, "assignment_id": args.assignment_id, "task_id": args.task_id, "arm": label, "manifest": manifest, "package_prepared": package_prepared, **observation})
+            write_probe_record(output, {"schema": NATIVE_SCHEMA, "run_id": output.stem, "assignment_id": args.assignment_id, "task_id": args.task_id, "arm": label, "manifest": manifest, "package_prepared": package_prepared, **observation}, path_roots)
     except (OSError, RuntimeError, ValueError, shutil.ReadError) as exc:
-        write_record(output, {"schema": NATIVE_SCHEMA, "run_id": output.stem, "assignment_id": args.assignment_id, "task_id": args.task_id, "arm": label,
+        write_probe_record(output, {"schema": NATIVE_SCHEMA, "run_id": output.stem, "assignment_id": args.assignment_id, "task_id": args.task_id, "arm": label,
                               "manifest": {"schema": "native-goal-benchmark-manifest/1", "state": "unprepared"},
                               "package_prepared": False, "outcome": "failed", "fidelity": "not_applicable",
-                              "reason": "package_prepare_failed", "error_type": type(exc).__name__})
+                              "reason": "package_prepare_failed", "error_type": type(exc).__name__}, path_roots)
     return 0
 
 

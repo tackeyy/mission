@@ -337,6 +337,8 @@ def test_main_persists_record_with_versions_candidate_and_failed_post_run(tmp_pa
     monkeypatch.setattr(probe, 'worker_export_manifest', lambda _: {'sha256': 'candidate'})
     monkeypatch.setattr(probe, '_task_snapshot', lambda _: {'observed': 'a' * 40, 'clean': True})
     monkeypatch.setattr(probe, '_codex_version', lambda: 'v')
+    monkeypatch.setattr(probe.sys, 'executable', '/Users/x/venv/bin/python3')
+    monkeypatch.setattr(Path, 'home', classmethod(lambda cls: Path('/Users/x')))
     fake = FakeRpc(None, mode, probe)
     def create_rpc(*_):
         # package_root exists only inside main's temporary package context.
@@ -347,7 +349,12 @@ def test_main_persists_record_with_versions_candidate_and_failed_post_run(tmp_pa
     def run(*args, **kwargs):
         captured['package_root'] = args[10]
         fake.probe_evidence = kwargs['evidence']
-        return original(*args, **kwargs)
+        try:
+            return original(*args, **kwargs)
+        finally:
+            observed = kwargs['evidence']
+            observed.update(workspace='/Users/x/project', mission_state_path='/Users/x/package/skills/mission/bin/mission-state.py')
+            observed['exec_events'] = [{'command': ['/Users/x/venv/bin/python3', observed['mission_state_path'], 'status', '--input', '/Users/x/project/.mission-state/x'], 'cwd': '/Users/x/project'}, {'command': ['bash', '-lc', 'cp /Users/x/project/.mission-state/x /tmp/x'], 'cwd': '/Users/x/project'}]
     monkeypatch.setattr(probe, 'probe_codex', run)
     monkeypatch.setattr(probe, 'RpcProcess', create_rpc)
     def post(root, observed):
@@ -362,6 +369,12 @@ def test_main_persists_record_with_versions_candidate_and_failed_post_run(tmp_pa
     assert record['manifest']['worker_export']['candidate_sha256'] == 'candidate'
     assert record['post_run_error'] == 'OSError' and record['mission_state'] is None
     assert record['exec_events'] and record['exec_scan'] and record['turn_start_sent'] == 1
+    from native_goal_benchmark import _UNSAFE_TRACE
+    assert not any(marker in output.read_text() for marker in _UNSAFE_TRACE)
+    assert record['interpreter_path'].startswith('/') and record['mission_state_path'].startswith('/')
+    assert record['exec_events'][0]['command'][:2] == [record['interpreter_path'], record['mission_state_path']]
+    from exec_event_scan import scan_exec_events
+    assert scan_exec_events(record['exec_events'], record['mission_state_path'], record['interpreter_path'], record['workspace']) == record['exec_scan']
 
 
 def test_goal_deadline_preserves_last_observation_and_identity(tmp_path, monkeypatch):
@@ -454,3 +467,80 @@ def test_unexpected_adapter_exception_keeps_post_run_record(tmp_path, monkeypatc
 def test_unsupported_control_grammar_fails_closed(script):
     from exec_event_scan import scan_exec_events
     assert scan_exec_events([{'command': ['bash', '-lc', script]}], SCRIPT, PYTHON, '/work')
+
+
+@pytest.mark.parametrize('script,tampered', [(s, False) for s in SAFE] + [(s, True) for s in BAD])
+def test_path_normalization_preserves_scan_and_sanitises_record(tmp_path, script, tampered):
+    from record_paths import write_probe_record
+    from exec_event_scan import scan_exec_events
+    from native_goal_benchmark import _UNSAFE_TRACE
+    package = '/Users/x/package'
+    interpreter = '/Users/x/venv/bin/python3'
+    mission = package + '/skills/mission/bin/mission-state.py'
+    workspace = '/Users/x/project'
+    command = script.replace(SCRIPT, mission).replace(PYTHON, interpreter).replace('/work', workspace)
+    raw, arms = record_and_spec()
+    raw.update(mission_state_path=mission, interpreter_path=interpreter, workspace=workspace,
+               exec_events=[{'command': ['bash', '-lc', command], 'cwd': workspace}],
+               nested={workspace + '/file': [workspace + '/file']})
+    before = scan_exec_events(raw['exec_events'], mission, interpreter, workspace)
+    output = tmp_path / 'normalised.json'
+    roots = dict(home='/Users/x', workspace=workspace, package=package, interpreter=interpreter)
+    write_probe_record(output, raw, roots)
+    saved = json.loads(output.read_text())
+    after = scan_exec_events(saved['exec_events'], saved['mission_state_path'], saved['interpreter_path'], saved['workspace'])
+    assert bool(before) is tampered and before == after == saved['exec_scan']
+    assert integrity().check_record(saved, arms)['matches'] is (not tampered)
+    assert not saved.get('record_persistence_error')
+    assert not any(marker in output.read_text() for marker in _UNSAFE_TRACE)
+    assert raw['workspace'] == workspace  # no mutation of live callback/reader evidence
+
+
+@pytest.mark.parametrize('slot', ['command', 'cwd', 'dict_key', 'nested'])
+@pytest.mark.parametrize('unknown', ['/Users/USER/other/file', '/tmp/.codex/memories/file', '/tmp/.claude/projects/file', '/tmp/.codex/memories', '/tmp/.claude/projects'])
+def test_unpersistable_trace_keeps_safe_non_quality_record(tmp_path, slot, unknown):
+    from record_paths import write_probe_record
+    from native_goal_benchmark import _UNSAFE_TRACE
+    record, arms = record_and_spec()
+    record.update(run_id='run', assignment_id='assignment', task_id='task', workspace='/work', outcome='completed', fidelity='verified')
+    if slot == 'command': record['exec_events'] = [{'command': ['cat', unknown]}]
+    elif slot == 'cwd': record['exec_events'] = [{'command': [SCRIPT, 'status'], 'cwd': unknown}]
+    elif slot == 'dict_key': record['nested'] = {unknown: True}
+    else: record['nested'] = [{'path': unknown}]
+    output = tmp_path / 'failed.json'
+    write_probe_record(output, record, dict(home='/Users/x', workspace='/work', package='/package', interpreter=PYTHON))
+    saved = json.loads(output.read_text())
+    assert saved['assignment_id'] == 'assignment' and saved['manifest']['package']['sha256'] == 'pkg'
+    assert saved['classification'] == 'non_quality' and saved['reason'] == 'evaluated_session_unverifiable'
+    assert saved['record_persistence_error'] and saved['exec_events'] is None and saved['exec_scan'] is None
+    assert integrity().check_record(saved, arms)['classification'] == 'non_quality'
+    assert not any(marker in output.read_text() for marker in _UNSAFE_TRACE)
+
+
+def test_writer_redaction_cannot_silently_change_saved_scan(tmp_path):
+    from record_paths import write_probe_record
+    record = dict(arm='mission', workspace='/work', mission_state_path=SCRIPT, interpreter_path=PYTHON,
+                  exec_events=[{'command': 'echo Bearer .mission-state/x'}])
+    output = tmp_path / 'redacted.json'
+    write_probe_record(output, record, dict(workspace='/work', package='/package', interpreter=PYTHON))
+    saved = json.loads(output.read_text())
+    assert saved['record_persistence_error'] == 'path_normalization_changed_scan'
+    assert saved['classification'] == 'non_quality' and saved['exec_events'] is None
+
+
+@pytest.mark.parametrize('arm', ['mission_baseline', 'native_goal'])
+def test_persistence_failure_is_non_quality_even_without_verified_stream_requirement(tmp_path, arm):
+    from record_paths import write_probe_record
+    record, arms = record_and_spec()
+    arms = {arm: arms['mission_verified_complex']}
+    record['budget_policy'] = None
+    if arm == 'native_goal':
+        record.update(arm='codex_native_goal', package_delivery=None)
+        record['manifest']['conditions']['arm'] = 'goal'
+    assert integrity().check_record(record, arms)['matches']
+    record['nested'] = '/Users/USER/unknown'
+    output = tmp_path / 'failed.json'
+    write_probe_record(output, record, dict(home='/Users/x'))
+    saved = json.loads(output.read_text())
+    assert not integrity().check_record(saved, arms)['matches']
+    assert integrity().check_record(saved, arms)['classification'] == 'non_quality'

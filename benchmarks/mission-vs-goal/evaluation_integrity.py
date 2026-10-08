@@ -81,6 +81,9 @@ def _check_record(record, planned_arms, expected_arm=None):
     if arm is None or (expected_arm is not None and arm != expected_arm):
         return dict(matches=False, planned_arm=arm, classification='non_quality', reasons=['execution_config_mismatch'])
     spec = planned_arms[arm]
+    if record.get('record_persistence_error'):
+        return dict(matches=False, planned_arm=arm, classification='non_quality', reasons=[
+            'execution_config_mismatch' if arm == 'native_goal' else 'evaluated_session_unverifiable'])
     mission = arm != 'native_goal'
     verified = arm == 'mission_verified_complex'
     conditions = manifest.get('conditions') or {}

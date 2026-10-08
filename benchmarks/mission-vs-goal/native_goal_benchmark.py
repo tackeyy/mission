@@ -302,8 +302,8 @@ def initialize_worker_export_repository(worker_root: Path) -> str:
     return commit
 
 
-def write_record(path: Path, record: dict[str, Any]) -> None:
-    """Persist one sanitised assignment record without replacing earlier evidence."""
+def serialise_record(record: dict[str, Any]) -> str:
+    """Apply the publication guard before either inspecting or writing bytes."""
     def sanitise(value: Any, key: str | None = None) -> Any:
         if key in {"objective", "acceptance_criterion"} and isinstance(value, str):
             return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
@@ -317,6 +317,12 @@ def write_record(path: Path, record: dict[str, Any]) -> None:
     serialised = json.dumps(sanitise(record), ensure_ascii=False, sort_keys=True)
     if any(marker in serialised for marker in _UNSAFE_TRACE):
         raise ValueError("unsafe trace data in benchmark record")
+    return serialised
+
+
+def write_record(path: Path, record: dict[str, Any]) -> None:
+    """Persist one sanitised assignment record without replacing earlier evidence."""
+    serialised = serialise_record(record)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("x", encoding="utf-8") as stream:
         stream.write(serialised + "\n")
