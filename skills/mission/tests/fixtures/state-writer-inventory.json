@@ -272,6 +272,15 @@
     "_iso:replace": 1,
     "_reservation:dynamic": 1
   },
+  "lib/mission_kernel/budget_decisions.py": {
+    "_reject:replace": 3,
+    "enter_final:replace": 2,
+    "record_exhaustion:replace": 2,
+    "reserve:replace": 4,
+    "settle:replace": 11,
+    "stop:replace": 2,
+    "with_clock:replace": 1
+  },
   "lib/mission_kernel/codec_v4.py": {
     "_aggregate_ref_json:dynamic": 1,
     "_aware_time:replace": 1
@@ -317,11 +326,13 @@
   "lib/mission_kernel/transitions.py": {
     "_advance:replace": 2,
     "_apply_compatibility:replace": 1,
+    "_budget_stop:replace": 1,
     "_decline_specialist_selection:replace": 2,
     "_handoff_state:replace": 1,
     "_mark_halt:replace": 1,
     "_mark_pass:replace": 2,
     "_merge_extension_fields:replace": 1,
+    "_prepare_budget_admission:replace": 2,
     "_reactivate:replace": 1,
     "_record_specialist_recommendation:replace": 1,
     "_resume_stale:replace": 1,
