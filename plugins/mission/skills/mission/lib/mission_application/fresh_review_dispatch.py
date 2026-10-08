@@ -216,8 +216,6 @@ def _reconcile(record, args, operation, repo, root, services, host):
         raise FreshReviewError('fresh-review-operation-conflict')
     if record.dispatch is None or record.dispatch.thaw()['adapter_id'] != args.adapter:
         raise FreshReviewError('fresh-review-adapter-pin-changed')
-    if record.status == 'running' and record.launch_operation_id == operation:
-        return json.dumps({'ok': True, 'record': _wire(record)})
     if record.status in ('blocked', 'abandoned-unknown'):
         if record.result.thaw()['commit_operation_id'] != operation:
             raise FreshReviewError('fresh-review-operation-conflict')
@@ -241,15 +239,17 @@ def _reconcile(record, args, operation, repo, root, services, host):
     observation = observed.get('observation')
     raw = observation.get('launch_receipt') if isinstance(observation, dict) else None
     if raw is not None:
-        # Foreign reports are command rejections; an unobservable receipt can
-        # only close our own saga as unknown.
+        # A saved launch rejects foreign reports. Before launch persistence,
+        # binding mismatch can become blocked only after confirmed cancellation.
         try:
             launch, _ = validate_launch(record.request, record.dispatch.thaw(), raw)
             if record.launch is not None and raw != record.launch.thaw():
                 raise FreshReviewError('fresh-review-launch-binding-mismatch')
         except FreshReviewError as exc:
             if exc.code == 'fresh-review-launch-binding-mismatch':
-                raise
+                if record.launch is not None:
+                    raise
+                reason = 'binding-mismatch'
             raw = None
     if raw is not None:
         # Dispatch epoch identifies the child; the current epoch is the writer.
@@ -281,11 +281,12 @@ def _reconcile(record, args, operation, repo, root, services, host):
         if current.status not in ('dispatch-unknown', 'running'):
             raise FreshReviewError('fresh-review-consumed')
         _candidate(state, root, current.request, services)
-        if pin is None or host.cancel(pin, current.dispatch.thaw()) != 'cancelled':
+        if (pin is None or host.cancel(pin, current.dispatch.thaw()) != 'cancelled') and not exited:
             raise FreshReviewError('fresh-review-kill-unconfirmed')
         epoch = state['fencing_epoch']
         return CommitFreshReviewResult(args.request, operation, epoch,
-            _terminal(current, operation, epoch, 'abandoned-unknown', reason, services.now(),
+            _terminal(current, operation, epoch, 'blocked' if reason == 'binding-mismatch' else 'abandoned-unknown', reason, services.now(),
+                      attempted=reason == 'binding-mismatch', cancel='cancelled',
                       wall_time_sec=math.ceil(time.monotonic() - callback_start) if adapter_called else 0))
     record = _execute(repo(':terminal'), finish)
     return json.dumps({'ok': True, 'record': _wire(record)})

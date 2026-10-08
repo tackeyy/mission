@@ -107,7 +107,8 @@ def test_crash_reconcile_after_lease_takeover_never_launches_twice(reviewer, run
         result = run_cli('fresh-review', 'reconcile', '--request', reviewer[1]['request_id'], '--adapter', 'neutral', cwd=root,
                          env_extra={**reviewer[2], 'MISSION_OPERATION_ID': 'reconcile-one', 'MISSION_LEASE_ID': 'takeover-lease', 'FIXTURE_CANCEL': 'unknown'})
         assert result.returncode == 2 and 'fresh-review-kill-unconfirmed' in result.stderr
-    running = invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one', MISSION_LEASE_ID='takeover-lease')
+    running = (json.loads(run_cli('get', cwd=root).stdout)['fresh_review']['requests'][0] if unconfirmed else
+               invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one', MISSION_LEASE_ID='takeover-lease'))
     assert running['status'] == 'running'
     assert running['launch']['fencing_epoch'] == unknown['dispatch']['fencing_epoch']
     assert running['launch']['operation_id'] == unknown['dispatch']['operation_id']
@@ -115,18 +116,14 @@ def test_crash_reconcile_after_lease_takeover_never_launches_twice(reviewer, run
     assert json.loads(run_cli('get', cwd=root).stdout)['fencing_epoch'] > unknown['dispatch']['fencing_epoch']
     assert json.loads(journal.read_text())['count'] == 1
     assert running['result'] is None  # D2c does not import collected output.
-    # A saved launch stage is replayed even when its child is now unobservable
-    # and the deadline has elapsed; replay cannot consume the request.
-    from .test_issue879_completion_cli import _public_bytes
-    journal.unlink()
-    journal.with_suffix('.recover').unlink()
-    _expire_dispatch(reviewer)
-    running['dispatch']['deadline_at'] = '2000-01-01T00:00:00.000000Z'
-    before = _public_bytes(root)
-    assert invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one',
-                  MISSION_LEASE_ID='takeover-lease') == running
-    assert _public_bytes(root) == before and not journal.with_suffix('.recover').exists()
-    assert invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='retry-cancel', MISSION_LEASE_ID='takeover-lease')['status'] == 'abandoned-unknown'
+    if unconfirmed:
+        _reject_unchanged(run_cli, root, ['fresh-review', 'reconcile', '--request', reviewer[1]['request_id'], '--adapter', 'neutral'],
+                          'fresh-review-kill-unconfirmed', env={**reviewer[2], 'MISSION_OPERATION_ID': 'reconcile-one',
+                          'MISSION_LEASE_ID': 'takeover-lease', 'FIXTURE_CANCEL': 'unknown'})
+    else:
+        assert invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one', MISSION_LEASE_ID='takeover-lease') == running
+        _expire_dispatch(reviewer)
+    assert invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one', MISSION_LEASE_ID='takeover-lease')['status'] == 'abandoned-unknown'
 
 
 def test_unknown_without_host_output_is_abandoned_with_split_epochs(reviewer, run_cli):
@@ -162,7 +159,7 @@ def test_unknown_without_host_output_is_abandoned_with_split_epochs(reviewer, ru
 
 
 @pytest.mark.parametrize('mode,status,independent,cancel', [('inline', 'running', False, 'cancelled')] + [
-    (mode, 'blocked', None, cancel) for mode in ('unobservable', 'provider-invalid')
+    (mode, 'blocked', None, cancel) for mode in ('unobservable', 'provider-invalid', 'binding-mismatch')
     for cancel in ('cancelled', 'failed', 'unknown')])
 def test_host_observation_controls_identity_and_independence(reviewer, run_cli, mode, status, independent, cancel):
     if status == 'blocked' and cancel != 'cancelled':
@@ -172,13 +169,15 @@ def test_host_observation_controls_identity_and_independence(reviewer, run_cli, 
         assert result.returncode == 2 and 'fresh-review-kill-unconfirmed' in result.stderr
         assert json.loads(run_cli('fresh-review', 'status', cwd=root).stdout)['requests'][0]['status'] == 'dispatch-unknown'
         _expire_dispatch(reviewer)
-        assert invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='retry-cancel', FIXTURE_REVIEW_MODE='malformed-observation')['status'] == 'abandoned-unknown'
+        recovered = invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='retry-cancel',
+                           FIXTURE_REVIEW_MODE='' if mode == 'binding-mismatch' else 'malformed-observation')
+        assert recovered['status'] == ('blocked' if mode == 'binding-mismatch' else 'abandoned-unknown')
         return
     record = invoke(run_cli, reviewer, FIXTURE_REVIEW_MODE=mode)
     assert record['status'] == status
     assert record.get('independent') is independent
     if status == 'blocked':
-        assert record['result']['reason'] == ('launch-invalid' if mode == 'provider-invalid' else 'identity-unobservable')
+        assert record['result']['reason'] == ('binding-mismatch' if mode == 'binding-mismatch' else 'launch-invalid' if mode == 'provider-invalid' else 'identity-unobservable')
         assert record['result']['launch_attempted'] is True
         assert record['result']['budget_used']['wall_time_sec'] >= 1
         assert record['result']['cancel_result'] == 'cancelled'
@@ -245,16 +244,21 @@ def test_unobservable_recovery_receipt_converges_to_abandoned(reviewer, run_cli,
 
 @pytest.mark.parametrize('status', ['dispatch-unknown', 'running'])
 @pytest.mark.parametrize('field', ['operation_id', 'fencing_epoch', 'request_id', 'nonce'])
-def test_foreign_recovery_binding_is_rejected_without_consuming(reviewer, run_cli, status, field):
+def test_recovery_binding_mismatch_is_recoverable_only_before_launch_saved(reviewer, run_cli, status, field):
     root, request, environment, journal = reviewer
     invoke(run_cli, reviewer, **({'FIXTURE_REVIEW_MODE': 'crash'} if status == 'dispatch-unknown' else {}))
     stored = json.loads(journal.read_text())
     stored['launch'][field] = stored['launch'][field] + 1 if field == 'fencing_epoch' else 'foreign-child'
     stored.update(output=None, process_exited=True)
     journal.write_text(json.dumps(stored))
-    _reject_unchanged(run_cli, root, ['fresh-review', 'reconcile', '--request', request['request_id'],
-                      '--adapter', 'neutral'], 'fresh-review-launch-binding-mismatch',
-                      env={**environment, 'MISSION_OPERATION_ID': 'reconcile-one'})
+    if status == 'dispatch-unknown':
+        assert invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one')['status'] == status
+        _expire_dispatch(reviewer)
+        assert invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one')['status'] == 'blocked'
+    else:
+        _reject_unchanged(run_cli, root, ['fresh-review', 'reconcile', '--request', request['request_id'],
+                          '--adapter', 'neutral'], 'fresh-review-launch-binding-mismatch',
+                          env={**environment, 'MISSION_OPERATION_ID': 'reconcile-one'})
     assert json.loads(journal.read_text())['count'] == 1
 
 
@@ -619,7 +623,7 @@ def test_invalid_parent_observation_has_identity_reason(monkeypatch, parent):
         host.observe(None)
 
 
-@pytest.mark.parametrize('exited', [True, 'true', 1])
+@pytest.mark.parametrize('exited', [True, False, 'true', 1])
 def test_only_confirmed_exact_child_exit_can_abandon_before_deadline(reviewer, run_cli, exited):
     from .test_issue879_completion_cli import _public_bytes
     root, _, _, journal = reviewer
@@ -628,7 +632,7 @@ def test_only_confirmed_exact_child_exit_can_abandon_before_deadline(reviewer, r
     stored.update(output=None, process_exited=exited)
     journal.write_text(json.dumps(stored))
     before = _public_bytes(root)
-    record = invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one')
+    record = invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one', FIXTURE_CANCEL='unknown')
     if exited is True:
         assert record['status'] == 'abandoned-unknown'
         assert journal.with_suffix('.cancel').read_text() == 'running'

@@ -78,6 +78,8 @@ class Adapter:
             enforced_tools=request['allowed_tools'], enforced_budget={key: request[key] for key in (
                 'wall_time_sec', 'max_tool_calls', 'max_replays', 'max_output_bytes', 'max_packet_bytes')})
         mode = os.environ.get('FIXTURE_REVIEW_MODE', '')
+        if mode == 'binding-mismatch':
+            launch['parent_identity'] = 'foreign-parent'
         if mode == 'inline':
             launch.update(context_mode='inline', child_identity='fixture-parent', context_identity='fixture-parent')
         if mode == 'unobservable':
