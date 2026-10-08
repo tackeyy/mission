@@ -105,8 +105,7 @@ def _check_record(record, planned_arms, expected_arm=None):
     observed = record.get('observed_config') or {}
     if (record.get('arm') != ('mission' if mission else 'codex_native_goal')
             or any(k not in conditions or k not in spec['conditions']
-                   or type(conditions[k]) is not type(spec['conditions'][k])
-                   or conditions[k] != spec['conditions'][k] for k in required)
+                   or not _same_condition(conditions[k], spec['conditions'][k]) for k in required)
             or record.get('package_delivery', 'missing') != ('skill_input' if mission else None)
             or record.get('config_matches') is not True
             or not observed or observed.get('model') != conditions.get('model_id')
@@ -165,6 +164,16 @@ def _check_record(record, planned_arms, expected_arm=None):
     result = dict(matches=not reasons, planned_arm=arm, classification='non_quality' if reasons else None, reasons=sorted(set(reasons)), unobserved=sorted(set(unobserved)))
     if scan_error: result['exec_scan_error'] = scan_error
     return result
+
+
+def _same_condition(observed, expected):
+    """bool never stands in for a number; int and float compare by value (the probe writes float seconds)."""
+    if isinstance(observed, bool) or isinstance(expected, bool):
+        return type(observed) is type(expected) and observed == expected
+    numeric = (int, float)
+    if isinstance(observed, numeric) and isinstance(expected, numeric):
+        return observed == expected
+    return type(observed) is type(expected) and observed == expected
 
 
 def check_record(record, planned_arms, expected_arm=None):

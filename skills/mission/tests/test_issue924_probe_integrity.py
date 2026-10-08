@@ -525,13 +525,23 @@ def test_non_verified_arm_rejects_harness_session_init(arm, initialized):
     assert result['reasons'] == ['execution_config_mismatch']
 
 
-@pytest.mark.parametrize('field,value', [('max_turns', True), ('max_turns', 1.0), ('timeout_seconds', 10.0)])
+@pytest.mark.parametrize('field,value', [('max_turns', True), ('max_budget_usd', False), ('max_turns', '1'), ('token_budget', 1.5)])
 def test_conditions_require_matching_types(field, value):
     record, arms = record_and_spec()
     record['manifest']['conditions'] = {**record['manifest']['conditions'], field: value}
     result = integrity().check_record(record, arms)
     assert result['classification'] == 'non_quality'
     assert result['reasons'] == ['execution_config_mismatch']
+
+
+@pytest.mark.parametrize('field,value', [('timeout_seconds', 10.0), ('max_turns', 1.0)])
+def test_conditions_compare_int_and_float_by_value(field, value):
+    # The probe parses --timeout-seconds as float, so the record carries 10.0 against a spec written as 10.
+    record, arms = record_and_spec()
+    record['manifest']['conditions'] = {**record['manifest']['conditions'], field: value}
+    record = json.loads(json.dumps(record))
+    result = integrity().check_record(record, arms)
+    assert result['matches'] is True and result['reasons'] == []
 
 
 @pytest.mark.parametrize('hook', [False, True])
