@@ -156,6 +156,7 @@ def test_init_mission_change_assumptions_failure_leaves_old_state(
     module = _load_state_module()
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("MISSION_SESSION_ID", sid)
+    monkeypatch.setenv("MISSION_LEASE_ID", state_a["lease_id"])
     monkeypatch.setattr(
         module,
         "atomic_write_text",
@@ -208,6 +209,7 @@ def test_init_mission_change_archive_write_failure_leaves_old_state(
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("MISSION_SESSION_ID", sid)
+    monkeypatch.setenv("MISSION_LEASE_ID", state_a["lease_id"])
     monkeypatch.setattr(module, "atomic_write_bytes", deny_archive)
     args = SimpleNamespace(
         mission="mission B",

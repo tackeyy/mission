@@ -32,6 +32,7 @@ class AcceptanceContractCliServices:
     compatibility_arguments: object
     canonical_operation: object
     load_verifier_policy: object
+    capacity_status: object = None
 
 
 def prepare_acceptance_contract_import(state: object, *, now: object, raw: object, verifier_policy=None) -> PreparedEvidenceOperation:

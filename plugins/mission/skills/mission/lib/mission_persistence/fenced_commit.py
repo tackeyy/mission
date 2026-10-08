@@ -2685,13 +2685,44 @@ class LocalFencedRepository:
             precondition = CommitPrecondition(base_generation, head_digest, pending.digest)
             return AdmittedSnapshot(request, base, pending, base_generation + 1, precondition)
 
+    def _check_replacement_capacity(self, base_bytes, state_bytes):
+        """Preserve inherited lease validation while funding a new mission independently."""
+        from .capacity_gate import (CapacityWriteError, StateEncoding,
+                                    state_capacity_verdict, validate_capacity_fields)
+        from mission_kernel.state_capacity import lease_history_length, remaining_takeovers
+        base, proposed = json.loads(base_bytes), json.loads(state_bytes)
+        inherited = base
+        if base.get('schema_version') == 5 and proposed.get('schema_version') != 5:
+            inherited = {**base.get('extensions', {}), **base.get('control', {}), **base.get('lease', {})}
+        validate_capacity_fields(proposed, inherited, encoding=StateEncoding.CANONICAL)
+        if lease_history_length(proposed) > lease_history_length(base) and remaining_takeovers(base) == 0:
+            raise CapacityWriteError('state-capacity-exhausted')
+        verdict = state_capacity_verdict(None, proposed, len(state_bytes), encoding=StateEncoding.CANONICAL)
+        if not verdict.accepted:
+            raise CapacityWriteError(verdict.code)
+        return verdict
+
+    def preflight_initialization(self, request, *, state_bytes, base_bytes=None):
+        """Check the candidate and pending reinit lease without filesystem writes."""
+        from .capacity_gate import StateEncoding, check_state_capacity, validate_capacity_fields
+        validate_capacity_fields(json.loads(state_bytes))
+        validate_execution_request(request, repository_root_name=self.root.name)
+        if base_bytes is not None:
+            base_state = decode_mission_state(base_bytes)
+            pending = admit_lease(request, base_state.lease, self.clock(), self.lease_ttl_seconds)
+            state_bytes = project_legacy_document(replace(decode_mission_state(state_bytes),
+                lease=pending.target, snapshot_provenance=None))
+            return self._check_replacement_capacity(base_bytes, state_bytes)
+        return check_state_capacity(None, state_bytes, encoding=StateEncoding.CANONICAL)
+
     def initialize(
         self,
         request: ExecutionRequest,
         *,
         state_bytes: bytes,
         terminal_reinitialization_head_digest: Optional[str] = None,
-    ) -> CommitResult:
+        prepare_only: bool = False,
+    ):
         """Publish the sole admitted genesis path for a v5 session.
 
         Genesis deliberately accepts validated v4 projection bytes.  The v5
@@ -2700,7 +2731,7 @@ class LocalFencedRepository:
         """
         admitted = self.begin(request)
         if isinstance(admitted, OperationReplay):
-            return admitted.result
+            return (lambda: admitted.result) if prepare_only else admitted.result
         if admitted.base is not None:
             if terminal_reinitialization_head_digest is None:
                 raise FencedCommitError(
@@ -2737,8 +2768,10 @@ class LocalFencedRepository:
             admitted,
             state_bytes=state_bytes,
             effects=(),
+            capacity_replacement=admitted.base is not None,
         )
-        return self.commit(prepared, prepared.precondition)
+        publish = lambda: self.commit(prepared, prepared.precondition)
+        return publish if prepare_only else publish()
 
     def stage(
         self,
@@ -3509,11 +3542,25 @@ class LocalFencedRepository:
         *,
         state_bytes: bytes,
         effects: tuple[BlobBinding, ...],
+        capacity_replacement: bool = False,
     ) -> PreparedCommit:
         if not isinstance(admitted, AdmittedSnapshot):
             raise FencedCommitError("request-invalid", "admitted snapshot type is invalid")
         if type(state_bytes) is not bytes or type(effects) is not tuple:
             raise FencedCommitError("request-invalid", "stage inputs must be immutable")
+        from .capacity_gate import StateEncoding, check_state_capacity
+        try:
+            if capacity_replacement:
+                self._check_replacement_capacity(admitted.base.state_bytes, state_bytes)
+            else:
+                check_state_capacity(
+                    admitted.base.state_bytes if admitted.base is not None else None,
+                    state_bytes,
+                    encoding=StateEncoding.CANONICAL,
+                )
+        except Exception as exc:
+            raise FencedCommitError(getattr(exc, 'code', 'record-invalid'),
+                                    getattr(exc, 'detail', 'target state is invalid')) from exc
         try:
             target_state = decode_mission_state(state_bytes)
         except Exception as exc:

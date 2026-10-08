@@ -233,8 +233,10 @@ def test_init_emits_structured_fallback_when_first_state_write_fails(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("MISSION_SESSION_ID", "test")
 
-    def deny_state_write(_self, _request, *, state_bytes):
+    def deny_state_write(_self, _request, *, state_bytes, **kwargs):
         del state_bytes
+        # initialize stages the first state write before publishing assumptions.
+        assert kwargs["prepare_only"] is True
         raise PermissionError("denied")
 
     monkeypatch.setattr(module.LocalFencedRepository, "initialize", deny_state_write)

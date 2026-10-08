@@ -84,13 +84,11 @@
     "_write_temp_at:open-write": 1,
     "_write_temp_at:unlink": 1,
     "_write_temp_at:write": 1,
-    "acquire_or_verify_lease:replace": 1,
     "atomic_write_bytes:fdopen-write": 1,
     "atomic_write_bytes:replace": 1,
     "atomic_write_bytes:unlink": 1,
     "atomic_write_bytes:write": 1,
-    "atomic_write_json:_atomic_write": 1,
-    "atomic_write_json:dump": 1,
+    "atomic_write_json:_atomic_write-ref": 1,
     "atomic_write_text:_atomic_write": 1,
     "atomic_write_text:write": 1,
     "backup_state:atomic_write_bytes": 1,
@@ -102,8 +100,7 @@
     "iso_now:replace": 1,
     "rollback_guarded_backup:atomic_write_bytes": 1,
     "rollback_guarded_backup:unlink": 1,
-    "write_terminal_state:_atomic_write": 1,
-    "write_terminal_state:dump": 1
+    "write_terminal_state:_atomic_write-ref": 1
   },
   "lib/activity_segments.py": {
     "_parse_at:replace": 2
@@ -204,7 +201,7 @@
     "_report_exhaustion:write": 2
   },
   "lib/mission_application/legacy_initialization.py": {
-    "initialize_legacy_v4:atomic_write_bytes": 2,
+    "initialize_legacy_v4:atomic_write_bytes": 1,
     "initialize_legacy_v4:atomic_write_text": 1,
     "initialize_legacy_v4:move": 1
   },
@@ -406,6 +403,7 @@
     "_write_temp:write": 1,
     "execute:replace": 1,
     "initialize:replace": 1,
+    "preflight_initialization:replace": 1,
     "read_pinned_head:open-write": 1,
     "stage:replace": 2
   },
@@ -456,6 +454,7 @@
     "_cleanup_reserved_assumptions:unlink": 1,
     "_reserve_new_assumptions:open-write": 3,
     "_reserve_new_assumptions:unlink": 2,
+    "start_new_mission:dynamic": 1,
     "start_new_mission:write": 1,
     "write_exclusive:fdopen-write": 1,
     "write_exclusive:open-write": 1,

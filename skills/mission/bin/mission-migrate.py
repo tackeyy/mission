@@ -35,10 +35,8 @@ def migrate_one(state_file: Path, execute: bool, remove_legacy: bool, force: boo
         return {"status": "skipped", "reason": "state.json not found"}
 
     try:
-        data = _gs.read_session_json(state_file)
-    except _gs.CanonicalStateEncodingError as error:
-        print(f"ERROR: {error}", file=sys.stderr)
-        raise SystemExit(2)
+        source_bytes = state_file.read_bytes()
+        data = _gs.read_session_json(state_file, source=source_bytes)
     except Exception as e:
         return {"status": "error", "reason": f"invalid JSON: {e}"}
 
@@ -67,12 +65,23 @@ def migrate_one(state_file: Path, execute: bool, remove_legacy: bool, force: boo
     if not execute:
         return result
 
-    sessions_dir.mkdir(parents=True, exist_ok=True)
     # state.json をコピー (session_id がない場合は追加)
     data["session_id"] = sid
     data.setdefault("pid", None)  # pid 未設定 legacy を明示 null 化 (hook の owner check 用)
     data.setdefault("created_at_session", data.get("started_at") or _gs.iso_now())
-    _gs.atomic_write_json(target, data)
+    publish = _gs.atomic_write_json(target, data, administrative=True, lease_decision=None,
+                                   base_bytes=source_bytes, prepare_only=True)
+    created = not sessions_dir.exists()
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        publish()
+    except BaseException:
+        if created:
+            try:
+                sessions_dir.rmdir()
+            except OSError:
+                pass
+        raise
 
     # aggregate.json 更新 (既存があればマージ)
     agg = {}
@@ -127,9 +136,14 @@ def main():
 
     results = []
     for sf in targets:
-        results.append(migrate_one(sf, args.execute, args.remove_legacy, args.force))
+        try:
+            results.append(migrate_one(sf, args.execute, args.remove_legacy, args.force))
+        except Exception as error:
+            results.append({"status": "error", "state_file": str(sf), "reason": str(error)})
 
     print(json.dumps({"dry_run": not args.execute, "remove_legacy": args.remove_legacy, "results": results}, indent=2, ensure_ascii=False))
+    if any(result['status'] == 'error' for result in results):
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":

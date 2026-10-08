@@ -177,6 +177,7 @@ def run_fresh_review_status_cli(args, services):
     try:
         with repository.transaction():
             projection = decode_projection(repository.load())
+            capacity = services.capacity_status(state_file)
         requests = []
         for item in projection.requests:
             if isinstance(item, WithdrawnFreshReviewRecord):
@@ -186,6 +187,6 @@ def run_fresh_review_status_cli(args, services):
                 requests.append({'request': request_document(item.request), 'status': item.status,
                                  'operation_id': item.operation_id,
                                  'result': item.result.thaw() if item.result is not None else None})
-        return json.dumps({'requests': requests}, ensure_ascii=False, indent=2)
+        return json.dumps({'requests': requests, 'capacity': capacity}, ensure_ascii=False, indent=2)
     except FreshReviewError as exc:
         services.fail(exc.code, 2)
