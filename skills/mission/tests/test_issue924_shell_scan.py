@@ -1,4 +1,9 @@
-"""Shell structure must expose state operations without rejecting ordinary work."""
+"""Exact Mission exclusions with conservative, non-executing word/cwd checks.
+
+Tables cover bypasses and safe literals/fd operations at the public scanner;
+expanded words and state-like data arguments deliberately permit false positives.
+All cases use strings/argv and run without worker commands or providers.
+"""
 from pathlib import Path
 import sys
 
@@ -10,7 +15,7 @@ PY = '/usr/bin/python3'
 SCRIPT = MS
 PYTHON = PY
 
-SAFE = [
+ORDINARY = [
     f'{MS} status 2>&1', 'pytest -q 2>&1 | tail', 'echo hi >&2',
     'echo hi 1>&2', 'cat <&-', 'echo hi >&-',
     f'for s in a b; do {MS} status --session $s; done',
@@ -51,6 +56,22 @@ SAFE = [
     f'echo "$({{ {MS} status; }})"',
     'case a in a) cd .mission-state;; b) cp x a;; esac',
 ]
+# General word/cwd rules intentionally detect these former data/control cases.
+CONSERVATIVE = [
+    f'x=$({MS} status); echo $x', 'bash <<EOF\necho $HOME\nEOF',
+    'node -e "console.log(`x`)"', 'echo ${HOME}',
+    f'cd .mission-state; (cd ..; {MS} context-manifest --out x)',
+    f'(cd .mission-state); {MS} context-manifest --out x',
+    f'/bin/echo {MS} reactivate', 'cd .mission-state && cd .. && cp x a',
+    f'echo "${{X:-$({MS} status)}}"', '(cd .mission-state; echo ok); cp x a',
+    f'{{ cd .mission-state; echo ok; }}; {MS} status',
+    f'x=$(case a in a) {MS} status;; esac); echo $x',
+    'x=$(cat <<EOF\n)\nEOF\n); echo $x', 'echo "$(date)"', 'echo "$(pwd)/x"',
+    f'echo "$(case a in a) {MS} status;; esac)"',
+    f'echo "$(if true; then {MS} status; fi)"', f'echo "$({{ {MS} status; }})"',
+    'case a in a) cd .mission-state;; b) cp x a;; esac',
+]
+
 BAD = [
     'echo x | xargs -I{} cp {} .mission-state/a',
     'find . -exec cp {} .mission-state/ \\;',
@@ -101,7 +122,7 @@ def module_path(monkeypatch):
     monkeypatch.syspath_prepend(str(BENCH))
 
 
-@pytest.mark.parametrize('script,tampered', [(s, False) for s in SAFE] + [(s, True) for s in BAD])
+@pytest.mark.parametrize('script,tampered', [(s, s in CONSERVATIVE) for s in ORDINARY] + [(s, True) for s in BAD])
 def test_shell_structure_preserves_detection_boundary(script, tampered):
     from exec_event_scan import scan_exec_events
     assert bool(scan_exec_events([{'command': script}], MS, PY, '/work')) is tampered
@@ -134,12 +155,13 @@ EXEC_SAFE = [
     f'{SCRIPT} status > /tmp/out', f'{SCRIPT} status 2>/tmp/error',
     f'{SCRIPT} status | tee /tmp/out',
     f'{SCRIPT} context-manifest -- --out .mission-state/x',
-    f'cd /work/.mission-state; {SCRIPT} context-manifest --out /tmp/out',
+
     f'(cd /tmp); {SCRIPT} context-manifest --out x',
     'echo normal', 'bash -lc "printf ok"', 'source ./other.sh', '. ./other.sh',
 ]
 
 EXEC_BAD = [
+    f'cd /work/.mission-state; {SCRIPT} context-manifest --out /tmp/out',
     'cp -r .mission-state /tmp/copy', 'rsync -a .mission-state/ /tmp/copy',
     'mv .mission-state/x /tmp/x', 'printf x > .mission-state/x',
     'echo x >> .mission-state/x', 'echo x 2>.mission-state/x',
@@ -183,11 +205,11 @@ def test_exec_scan_contract(script, tampered):
 
 
 @pytest.mark.parametrize('script,tampered', [
-    (f'cd "$DIR"; cd /work; {SCRIPT} context-manifest --out /tmp/x', False),
+    (f'cd "$DIR"; cd /work; {SCRIPT} context-manifest --out /tmp/x', True),
     (f'cd /work/.mission-state; cp x /tmp/x', True),
     (f'cd /tmp || {SCRIPT} context-manifest --out x', True),
     ('source .mission-state/script.sh', True),
-    (f'f() {{ {SCRIPT} status; }}; f', False),
+    (f'f() {{ {SCRIPT} status; }}; f', True),
 ])
 def test_shell_scope_and_literal_paths(script, tampered):
     from exec_event_scan import scan_exec_events
@@ -211,20 +233,140 @@ def test_interpreter_payload_and_read_only_redirect(script, tampered):
     assert bool(scan_exec_events([{'command': ['bash', '-lc', script]}], SCRIPT, PYTHON, '/work')) is tampered
 
 
-@pytest.mark.parametrize('script', ['echo reactivate', f'{SCRIPT} get reactivate', f'{SCRIPT} status --input reactivate'])
-def test_reactivate_word_is_not_command_issuance(script):
+@pytest.mark.parametrize('script,kind', [('echo reactivate', None), (f'{SCRIPT} get reactivate', 'reactivate_command'), (f'{SCRIPT} status --input reactivate', 'reactivate_command')])
+def test_reactivate_after_any_mission_word_is_detected(script, kind):
     from exec_event_scan import scan_exec_events
-    assert not scan_exec_events([{'command': ['bash', '-lc', script]}], SCRIPT, PYTHON, '/work')
+    found = scan_exec_events([{'command': ['bash', '-lc', script]}], SCRIPT, PYTHON, '/work')
+    assert ({'event_index': 0, 'kind': kind} in found) if kind else found == []
 
 
 def test_command_substitution_is_recursively_scanned():
     from exec_event_scan import scan_exec_events
-    assert not scan_exec_events([{'command': ['bash', '-lc', f'echo "$({SCRIPT} status --input .mission-state/x)"']}], SCRIPT, PYTHON, '/work')
+    first = scan_exec_events([{'command': ['bash', '-lc', f'echo "$({SCRIPT} status --input .mission-state/x)"']}], SCRIPT, PYTHON, '/work')
+    assert {'event_index': 0, 'kind': 'unparsed_script'} in first
     found = scan_exec_events([{'command': ['bash', '-lc', 'echo "$(cp .mission-state/x /tmp/x)"']}], SCRIPT, PYTHON, '/work')
     assert any(item['kind'] == 'state_path_command' for item in found)
 
 
 @pytest.mark.parametrize('script', ['if true; then echo ok; fi', 'for name in x; do echo "$name"; done'])
-def test_read_only_control_grammar_is_scanned_without_rejection(script):
+def test_control_grammar_with_expansion_fails_closed(script):
     from exec_event_scan import scan_exec_events
-    assert not scan_exec_events([{'command': ['bash', '-lc', script]}], SCRIPT, PYTHON, '/work')
+    found = scan_exec_events([{'command': ['bash', '-lc', script]}], SCRIPT, PYTHON, '/work')
+    assert {'event_index': 0, 'kind': 'unparsed_script'} in found if '$' in script else found == []
+
+
+# Frozen exclusions are exact argv shapes; conservative data-path detections
+# deliberately include echo/grep and quoted here-doc literals.
+RULE_CASES = [
+    *[(f'{wrapper} {MS} status --input .mission-state/x', 'state_path_command')
+      for wrapper in ('env', 'command', 'timeout 5', 'nice -n 5', 'exec', 'xargs', 'uv run')],
+    (f'X=1 {MS} status --input .mission-state/x', None),
+    (f'{MS} "$READ_COMMAND" --input .mission-state/x', None),
+    (f'{PY} {MS} status --input .mission-state/x', None),
+    *[(f'{wrapper} {MS} reactivate', 'reactivate_command') for wrapper in
+      ('nice -n 5', 'xargs', 'exec -a foo', 'timeout -s KILL 5', f'{PY} -X dev', f'{PY} -W ignore', 'uv run')],
+    (f"env -S '{MS} reactivate'", 'reactivate_command'),
+    (f'{MS} --session s reactivate', 'reactivate_command'),
+    (f'{MS} reactivate', 'reactivate_command'),
+    ('echo reactivate', None),
+    ('echo .mission-state/x', 'state_path_command'),
+    ('grep .mission-state README.md', 'state_path_command'),
+    ("cat <<'EOF'\n.mission-state/x\nEOF", 'state_path_interpreter'),
+    ('D=.mission-state; sed -i 1d $D/x.json', 'state_path_command'),
+    (r"cat $'\x2emission-state/x'", 'state_path_command'),
+    ('cat $".mission-state/x"', 'state_path_command'),
+    ('cat --input=.Mission-State/x', 'state_path_command'),
+    ('cat .mission-stat?/x', 'state_path_command'),
+    *[(f'cd .mission-state; {command}', 'state_path_command') for command in
+      ('sed -i 1d a', 'perl -i -pe 1 a', 'chmod 600 a', 'unlink a', 'tar cf a b', 'git checkout -- a', 'cat a', 'ed a', 'pwd')],
+    (f'cd .mission-state; {MS} status 2>&1', 'state_path_command'),
+    *[(f'cat <<EOF\n{body}\nEOF', 'reactivate_command') for body in
+      (f'$({MS} reactivate)', f'`{MS} reactivate`', f"'$( {MS} reactivate )'")],
+    (f"cat <<'EOF'\n$({MS} reactivate)\nEOF", None),
+    (f'cat <<EOF\n\\$({MS} reactivate)\nEOF', None),
+    ('cat <<EOF\n$HOME\nEOF', None),
+    ('eval "echo $COMMAND"', 'unparsed_script'),
+    ('bash -c "echo $COMMAND"', 'unparsed_script'),
+    ("eval 'echo $COMMAND'", 'unparsed_script'),
+    ("bash -c 'echo $COMMAND'", 'unparsed_script'),
+    ("eval \"echo '\\$OUT'\"", None),
+    ("bash -c \"echo '\\$OUT'\"", None),
+    *[(f"bash {flags} '{MS} reactivate'", 'reactivate_command') for flags in
+      ('-c --', '-c -x', '-c -e', '-c -o pipefail', '-c -O extglob', '-c +o pipefail', '-c +O extglob', '-c +e', '-lc --')],
+    (f"fish --command '{MS} reactivate'", 'reactivate_command'),
+    (f"fish --command='{MS} reactivate'", 'reactivate_command'),
+    ('bash -c -o', 'unparsed_script'),
+    ("printf '%s' harmless | sh", 'unparsed_script'),
+    ('echo x | sh', 'unparsed_script'),
+    ('printf hi | (sh)', 'unparsed_script'),
+    ('printf hi | { sh; }', 'unparsed_script'),
+    ('printf hi | env sh', 'unparsed_script'),
+    ('printf hi | sh -x', 'unparsed_script'),
+    ('printf hi | sh --', 'unparsed_script'),
+    ('cat script.sh | sh', 'unparsed_script'),
+    ('printf hi | tail', None),
+    (f'f() {{ {MS} context-manifest --out x; }}; cd .mission-state; f', 'state_output_option'),
+    (f'f() {{ cd .mission-state; }}; f; {MS} context-manifest --out x', 'state_output_option'),
+    (f'f() {{ {MS} status --input .mission-state/a; }}; f', None),
+    (f'if true; then f() {{ {MS} context-manifest --out x; }}; else f() {{ {MS} status; }}; fi; cd .mission-state; f', 'state_output_option'),
+    (f'f() {{ cd /tmp; }}; f; {MS} context-manifest --out x', 'state_output_option'),
+    (f'f() {{ {MS} context-manifest --out /tmp/x; }}; cd .mission-state; f', 'state_path_command'),
+    (f"{MS} context-manifest --out '$OUT'", None),
+    (f'{MS} context-manifest --out \\$OUT', None),
+    ("echo hi > '$OUT'", None),
+    ('echo hi > \\$OUT', None),
+    (f'{MS} context-manifest --out "$OUT"', 'state_output_option'),
+    ('echo hi > "$OUT"', 'state_redirection'),
+    (f'{MS} status 2>&1', None),
+    ('pytest -q 2>&1 | tail', None),
+]
+
+
+@pytest.mark.parametrize('script,kind', RULE_CASES)
+def test_position_independent_rules_and_detection_kinds(script, kind):
+    from exec_event_scan import scan_exec_events
+    found = scan_exec_events([{'command': script}], MS, PY, '/work')
+    if kind is None:
+        assert found == []
+    else:
+        assert {'event_index': 0, 'kind': kind} in found
+
+
+@pytest.mark.parametrize('value,expanded', [("'$OUT'", False), (r'\$OUT', False),
+    ('"$OUT"', True), ('$OUT', True), ("'$OUT'$X", True), ('$"literal"', True)])
+def test_lexer_retains_real_expansion_boundaries(value, expanded):
+    from shell_syntax import lex_shell
+    assert lex_shell(value)[0].expanded is expanded
+
+
+@pytest.mark.parametrize('command,kind', [
+    (['cat', 'a'], 'state_path_command'), (['pwd'], 'state_path_command'),
+    ([MS, 'status', '--input', '.mission-state/a'], None),
+    ([MS, 'context-manifest', '--out', '$OUT'], 'state_output_option'),
+    (['bash', '-c', '--', MS + ' reactivate'], 'reactivate_command'),
+    (['fish', '--command=' + MS + ' reactivate'], 'reactivate_command')])
+def test_direct_argv_and_event_cwd_follow_same_rules(command, kind):
+    from exec_event_scan import scan_exec_events
+    found = scan_exec_events([{'command': command, 'cwd': '/work/.mission-state'}], MS, PY, '/work')
+    if kind is None: assert found == []
+    else: assert {'event_index': 0, 'kind': kind} in found
+
+
+@pytest.mark.parametrize('command', [
+    ['bash', '-c', MS + " reactivate '"],
+    ['eval', MS + " reactivate '"],
+    ['bash', '-c', '-o', MS + ' reactivate'],
+])
+def test_malformed_nested_script_keeps_known_reactivate_kind(command):
+    from exec_event_scan import scan_exec_events
+    found = scan_exec_events([{'command': command}], MS, PY, '/work')
+    assert {'event_index': 0, 'kind': 'reactivate_command'} in found
+    assert {'event_index': 0, 'kind': 'unparsed_script'} in found
+
+
+@pytest.mark.parametrize('body,kind', [('cat <<EOF\n$HOME\nEOF', 'unparsed_script'),
+    ("cat <<'EOF'\n$HOME\nEOF", None)])
+def test_shell_command_string_includes_heredoc_expansion(body, kind):
+    from exec_event_scan import scan_exec_events
+    found = scan_exec_events([{'command': ['bash', '-c', body]}], MS, PY, '/work')
+    assert ({'event_index': 0, 'kind': kind} in found) if kind else found == []

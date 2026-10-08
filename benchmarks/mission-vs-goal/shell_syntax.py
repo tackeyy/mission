@@ -6,6 +6,7 @@ words only at command positions. Script files and alias expansion are not read.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 
 
 class ShellSyntaxError(ValueError):
@@ -22,6 +23,8 @@ class Word:
     substitutions: list = field(default_factory=list)
     body: str | None = None
     raw: str = ''
+    expanded: bool = False
+    body_expanded: bool = False
 
 
 @dataclass
@@ -54,6 +57,54 @@ def _balanced(text, start, opening='(', closing=')'):
                 return text[start:index], index + 1
         index += 1
     raise ShellSyntaxError('unclosed_expansion')
+
+
+def _backtick(text, start):
+    end = start
+    while end < len(text) and text[end] != '`':
+        end += 2 if text[end] == '\\' else 1
+    if end >= len(text): raise ShellSyntaxError('unclosed_backtick')
+    return text[start:end], end + 1
+
+
+def heredoc_substitutions(text):
+    """Unquoted delimiters expand substitutions; body quote marks are data."""
+    index, bodies = 0, []
+    while index < len(text):
+        if text[index] == '\\' and index + 1 < len(text) and text[index + 1] in '$`\\\n':
+            index += 2; continue
+        if text.startswith('$(', index):
+            body, index = _substitution(text, index + 2); bodies.append(body)
+        elif text.startswith('${', index):
+            body, index = _balanced(text, index + 2, '{', '}')
+            bodies.extend(heredoc_substitutions(body))
+        elif text[index] == '`':
+            body, index = _backtick(text, index + 1); bodies.append(body)
+        else: index += 1
+    return bodies
+
+
+def _ansi_quote(text, start):
+    """Decode shell ANSI-C literal words without evaluating an expansion."""
+    index, parts = start, []
+    escapes = dict(zip('abefnrtv\\\'"', '\a\b\x1b\f\n\r\t\v\\\'"'))
+    while index < len(text) and text[index] != "'":
+        if text[index] != '\\': parts.append(text[index]); index += 1; continue
+        index += 1
+        if index == len(text): break
+        char = text[index]; index += 1
+        if char in 'xuU01234567':
+            base, limit = (16, {'x': 2, 'u': 4, 'U': 8}[char]) if char in 'xuU' else (8, 3)
+            digits = '' if base == 16 else char
+            while index < len(text) and len(digits) < limit and text[index] in ('0123456789abcdefABCDEF' if base == 16 else '01234567'):
+                digits += text[index]; index += 1
+            try: parts.append(chr(int(digits, base)))
+            except ValueError as exc: raise ShellSyntaxError('invalid_ansi_escape') from exc
+        elif char == 'c' and index < len(text):
+            parts.append(chr(ord(text[index].upper()) & 31)); index += 1
+        else: parts.append(escapes.get(char, '\\' + char))
+    if index >= len(text): raise ShellSyntaxError('unclosed_ansi_quote')
+    return ''.join(parts), index + 1
 
 
 def _lex_shell(text, index=0):
@@ -89,13 +140,22 @@ def _lex_shell(text, index=0):
                             break
                         body.append(line)
                     delimiter.body = ''.join(body)
+                    # Quotes in a here-doc body are data. Only its delimiter
+                    # quoting and an odd escaping backslash suppress expansion.
+                    delimiter.body_expanded = not delimiter.quoted and re.search(r'(?:^|[^\\])(?:\\\\)*[$`]', delimiter.body) is not None
                 pending = []
             continue
-        start, quote, quoted, parts, substitutions = index, None, False, [], []
+        start, quote, quoted, parts, substitutions, expanded = index, None, False, [], [], False
         while index < len(text):
             char = text[index]
             if quote is None and (char in ' \t\r\n' or (char in ';|&<>()' and not text.startswith(('<(', '>('), index))):
                 break
+            if quote is None and text.startswith("$'", index):
+                literal, index = _ansi_quote(text, index + 2)
+                quoted = True; parts.append(literal); continue
+            if quote is None and text.startswith('$"', index):
+                # Locale-translated quoting is an expansion, not a literal '$'.
+                expanded = True; index += 1; continue
             if char in {"'", '"'} and (quote is None or quote == char):
                 quoted = True; quote = None if quote else char
                 index += 1; continue
@@ -110,24 +170,23 @@ def _lex_shell(text, index=0):
                 quoted = True; parts.append(following); index += 2; continue
             if quote != "'" and text.startswith(('$(', '<(', '>('), index):
                 body, index = _substitution(text, index + 2)
-                substitutions.append(body); parts.append('__command_substitution__')
+                expanded = True; substitutions.append(body); parts.append('__command_substitution__')
                 continue
             if quote != "'" and text.startswith('${', index):
+                expanded = True
                 body, index = _balanced(text, index + 2, '{', '}')
                 substitutions.extend(body for token in lex_shell(body) for body in token.substitutions)
                 parts.append('${' + body + '}'); continue
             if char == '`' and quote != "'":
-                end = index + 1
-                while end < len(text) and text[end] != '`':
-                    end += 2 if text[end] == '\\' else 1
-                if end >= len(text):
-                    raise ShellSyntaxError('unclosed_backtick')
-                substitutions.append(text[index + 1:end]); parts.append('__command_substitution__')
-                index = end + 1; continue
+                body, index = _backtick(text, index + 1)
+                expanded = True; substitutions.append(body); parts.append('__command_substitution__')
+                continue
+            if char == '$' and quote != "'" and index + 1 < len(text) and (text[index + 1].isalnum() or text[index + 1] in '_@*#?$!-'):
+                expanded = True
             parts.append(char); index += 1
         if quote:
             raise ShellSyntaxError('unclosed_quote')
-        word = Word(''.join(parts), quoted=quoted, start=start, end=index, substitutions=substitutions, raw=text[start:index])
+        word = Word(''.join(parts), quoted=quoted, start=start, end=index, substitutions=substitutions, raw=text[start:index], expanded=expanded)
         if last and last.value in {'<<', '<<-'}:
             pending.append((word, last.value == '<<-'))
         last = word
@@ -259,9 +318,10 @@ class Parser:
             return self.suffix(Node('sequence', [Node('expansions', words=words), Node('case', branches)]))
         following = self.tokens.get(self.index + 1)
         if self.at({'function'}) or (self.tokens[self.index].kind == 'word' and following is not None and following.value == '(' and self.tokens.get(self.index + 2) is not None and self.tokens[self.index + 2].value == ')'):
+            name = self.tokens[self.index + 1] if self.at({'function'}) else self.tokens[self.index]
             self.index += 2 if self.at({'function'}) else 1
             if self.at({'('}): self.require('('); self.require(')')
-            return Node('function', [self.statement()])
+            return Node('function', [self.statement()], words=[name])
         if self.at({'(', '{'}):
             opening = self.tokens[self.index].value; self.index += 1
             closing = ')' if opening == '(' else '}'
