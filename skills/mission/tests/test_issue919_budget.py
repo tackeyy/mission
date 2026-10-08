@@ -441,3 +441,27 @@ def test_budget_duplicate_detection_uses_the_uncollapsed_document(tmp_path, sour
             read_session_json(path)
     else:
         assert read_session_json(path)['phase'] == 'executing'
+
+
+def test_budget_status_reads_the_snapshot_without_entering_the_write_path(tmp_path, monkeypatch):
+    # A held lease or a pending transaction must not affect a read-only query.
+    import json
+    from types import SimpleNamespace
+    from mission_application.budget import run_budget_status_cli
+    from mission_kernel.budget import decode_policy, default_policy_document, new_ledger, ledger_document
+    state = tmp_path / 'state.json'
+    state.write_text('{}')
+    document = {'budget_minutes': 30, 'budget_ledger': ledger_document(
+        new_ledger(decode_policy(default_policy_document(1800)), '2026-01-01T00:00:00Z'))}
+
+    def write_path(*_args, **_kwargs):
+        raise AssertionError('budget status entered the repository write path')
+
+    def fail(code, status):
+        raise SystemExit((code, status))
+    monkeypatch.chdir(tmp_path)
+    services = SimpleNamespace(resolve_state_file=lambda root: state, repository=write_path,
+                               load_snapshot=lambda path: (None, document), capacity_status=lambda path: None,
+                               now=lambda: '2026-01-01T00:01:00Z', fail=fail)
+    status = json.loads(run_budget_status_cli(None, services))
+    assert status['total_sec'] == 1800 and status['enforcement'] == 'advisory-only'

@@ -33,6 +33,7 @@ class AcceptanceContractCliServices:
     canonical_operation: object
     load_verifier_policy: object
     capacity_status: object = None
+    load_snapshot: object = None
 
 
 def prepare_acceptance_contract_import(state: object, *, now: object, raw: object, verifier_policy=None) -> PreparedEvidenceOperation:

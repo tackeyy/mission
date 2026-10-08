@@ -8299,6 +8299,7 @@ _ACCEPTANCE_CONTRACT_CLI_SERVICES = AcceptanceContractCliServices(
     _canonical_compatibility_operation,
     load_verifier_policy,
     partial(state_capacity_status, load_snapshot=_load_authoritative_state),
+    _load_authoritative_state,
 )
 
 

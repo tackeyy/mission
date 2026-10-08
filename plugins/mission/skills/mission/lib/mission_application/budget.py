@@ -13,10 +13,11 @@ def run_budget_status_cli(args, services):
     if not state_file.exists():
         services.fail('budget-state-missing', 2)
     try:
-        repository = services.repository(root, state_file, stamp=False, strict_read=True)
-        with repository.transaction():
-            ledger = decode_ledger(repository.load())
-            capacity = services.capacity_status(state_file)
+        # A query must not enter the write path: repository.load() would run lease
+        # admission and pending-transaction recovery.  Read the authoritative snapshot.
+        _, document = services.load_snapshot(state_file)
+        ledger = decode_ledger(document)
+        capacity = services.capacity_status(state_file)
         return json.dumps(budget_status(ledger, services.now(), capacity), ensure_ascii=False)
     except BudgetError as exc:
         services.fail(exc.code, 2)
