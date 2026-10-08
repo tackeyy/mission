@@ -523,6 +523,19 @@ def test_unknown_cwd_only_rejects_relative_write_destinations(script, kinds):
     assert_kinds(script, kinds)
 
 
+@pytest.mark.parametrize('script,kind', [
+    ('f(){ cd .mission-state; }; f; cp x a', 'state_path_command'),
+    ('f(){ cd .mission-state; }; f; sed -i s/a/b/ x.json', 'state_path_command'),
+    ('f(){ cd .mission-state; }; f && rm a', 'state_path_command'),
+    ('cd .mission-state; ' + '; '.join(f'cd a{i} || cd b{i}' for i in range(7)) + '; sed -i 1d x', 'state_path_command'),
+    ('f(){ cd /tmp; }; f; cp x a', None),
+    ('f(){ cd .mission-state; cd ..; }; f; cp x a', None),
+    ('f(){ cd "$REPO"; }; f; make test', None),
+    ('; '.join(f'cd a{i} || cd b{i}' for i in range(7)) + '; make test', None)])
+def test_cwd_collapse_retains_known_state_candidates(script, kind):
+    assert_kinds(script, [kind] if kind else [])
+
+
 @pytest.mark.parametrize('size,depth', [(64, 4), (10, 6)])
 def test_nested_loop_visit_budget_finishes_within_one_second(size, depth):
     import json

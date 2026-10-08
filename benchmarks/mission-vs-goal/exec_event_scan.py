@@ -236,7 +236,10 @@ def _cd(words, location):
 
 def _merge(*locations):
     result = list(dict.fromkeys(item for group in locations for item in group))
-    return result if len(result) <= 64 else [(None, None)]
+    if len(result) <= 64: return result
+    # Retain a concrete state cwd witness when bounding candidate growth.
+    state = next((p for p in result if p[0] and _mentions_state(p[0])), None)
+    return ([state] if state else []) + [(None, None)]
 
 
 def _common(bindings):
@@ -334,12 +337,12 @@ class Inspection:
             if changes: return _merge(changes)
             if argv and argv[0] in self.functions:
                 if argv[0] in self.active:
-                    self.kinds.append('unparsed_script'); return [(None, None)]
+                    self.kinds.append('unparsed_script'); return _merge(locations, [(None, None)])
                 bodies = self.functions[argv[0]]; self.active.add(argv[0])
                 try: result = _merge(*(self.visit(body, locations) for body in bodies))
                 finally: self.active.remove(argv[0])
                 # Calls are opaque to subsequent cwd tracking if any body has cd.
-                return [(None, None)] if any(_has_cd(body) for body in bodies) else result
+                return _merge(result, [(None, None)]) if any(_has_cd(body) for body in bodies) else result
         elif node.kind == 'function':
             # Keep possible definitions across branches; replacing one would
             # incorrectly choose the last syntactically visited alternative.
