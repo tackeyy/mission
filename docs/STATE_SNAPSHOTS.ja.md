@@ -97,6 +97,53 @@ mode `0600`、content digest、semantic self-consistency、live metadata freshne
 digest を再計算する攻撃までは防げません。信頼できない利用者や transport から受け取った
 snapshot は使用しないでください。
 
+## state 容量と手動での回復
+
+state は 4 MiB の上限内に、未終端 item・halt 1 回・残りの lease takeover 分を予約します。
+`fresh-review status` の `capacity` は、`limit`、公開済み state の実際の `encoded_len`、
+item の `reserved`、`system_remaining`、`headroom`、`excess_bytes`、
+`remaining_takeovers`、`mode`（`normal`・`excess`・`legacy-full`）、`code`（例:
+`excess` のときは `state-capacity-exhausted`）、pending の `withdraw_candidates` を
+返します。status は lease の取得や書込みを行いません。ただし v5 の session では、lease
+が有効な間は保持者の lease token（`MISSION_LEASE_ID`）が必要です。lease が切れた後は
+token なしで読めます。takeover の残回数が 0 の場合、物理的な空きがあっても次の takeover
+は `state-capacity-exhausted` で拒否されます。
+
+**この版では、超過状態の session は停止系（halt）しか書けません。** 容量のための
+取下げ command は Issue #912 で扱い、この版にはありません。整形 JSON の v4 では
+D item を pending より先へ進める書込みを拒否します。予約は state から導出し、
+容量の移行 marker は保存しません。
+
+`state-capacity-legacy-full` は、全 pending request を小さい withdrawn record に
+置き換えても halt slot の空きが残らない状態です。**停止していない session では**、
+halt・takeover・resume・reinit を含む全 mutation を拒否します。すでに停止し
+（v4 の `loop_active` が false、または終了済みの v5 session）、`fresh_review` の record を
+持たない session は、同じ場所で `init`（v5 は `init --new-mission`）により置き換えられます。
+置き換えは新しい state の容量で判定され、旧 state・旧 generation は archive ディレクトリへ
+移されます。`fresh_review` の record（pending request を含む）を持つ session は、停止した
+後も reinit を拒否します。それ以外の場合は、owner が次の手順で legacy-full の session を
+手動で閉じます。
+
+1. 対象 agent／writer process を停止し、`fresh-review status` を確認します。元 session
+   は読取り専用で保ち、履歴の切捨てや request nonce の編集は行いません。
+2. `.mission-state` 全体（session head・objects・generations・commits・operations・
+   evidence）を offline archive に保存します。あわせて、証拠が `.mission-state` の外で
+   参照している repository 内の artifact（state に記録された artifact・publication の
+   path）も保存し、それらが参照する Git object を到達可能なまま保ちます。どの場所も
+   変更する前に、archive が元の bytes と一致することを確認します。fenced session は
+   head JSON だけを保存しても復元できません。
+3. archive は停止・未解決として保持し、owner の運用記録へ閉じた理由を残します。
+   archive の作成を mission の成功や fresh-review receipt として扱いません。
+4. 別の作業ディレクトリの新しい state store で、別の session ID を選びます。
+   `MISSION_SESSION_ID=<new-id>` と通常の `mission-state.py init` で初期化します。
+   archive を確認するまで、旧 store と旧作業ディレクトリは読取り専用で保持します。
+   要件と受入れ証拠を改めて確立し、旧 lease をコピーしたり未終端の作業を完了扱いに
+   したりしません。旧 lineage は archive に保持します。
+
+`state-capacity-invariant-broken` は予約または保存 field の上限を破る書込み、
+`state-capacity-withdraw-not-needed` は容量内の request の取下げを拒否します。
+これらのコードは証拠の破棄を許可するものではありません。
+
 ## 性能の範囲
 
 削減対象は、snapshot consumer における state/evidence byte read、content hash、JSON parse、
