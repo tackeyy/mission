@@ -305,6 +305,7 @@ class FreshReviewRecord:
     result: FrozenJsonObject | None = None
     dispatch: FrozenJsonObject | None = None
     launch: FrozenJsonObject | None = None
+    launch_operation_id: str | None = None
     independent: bool | None = None
 
 
@@ -339,7 +340,7 @@ def record_operation_ids(record):
         return (record.prepare_operation_id, record.withdraw_operation_id)
     commit = (record.result.thaw()['commit_operation_id']
               if record.status in ('blocked', 'abandoned-unknown') else None)
-    return (record.prepare_operation_id, record.operation_id, commit)
+    return (record.prepare_operation_id, record.operation_id, record.launch_operation_id, commit)
 
 
 def projection_document(projection):
@@ -355,12 +356,12 @@ def projection_document(projection):
         if not isinstance(record, FreshReviewRecord):
             raise FreshReviewError('fresh-review-projection-shape-invalid')
         fields = {key: getattr(record, key) for key in FreshReviewRecord.__dataclass_fields__
-                  if key not in ('dispatch', 'launch', 'independent')}
+                  if key not in ('dispatch', 'launch', 'launch_operation_id', 'independent')}
         fields['request'] = request_document(record.request)
         if record.result is not None and not isinstance(record.result, FrozenJsonObject):
             raise FreshReviewError('fresh-review-result-invalid')
         fields['result'] = record.result.thaw() if record.result is not None else None
-        for key in ('dispatch', 'launch', 'independent'):
+        for key in ('dispatch', 'launch', 'launch_operation_id', 'independent'):
             value = getattr(record, key)
             if value is not None:
                 fields[key] = value.thaw() if key in ('dispatch', 'launch') else value
@@ -403,7 +404,7 @@ def decode_projection(document):
             operations.add(withdraw_operation_id)
             records.append(WithdrawnFreshReviewRecord(**fields))
             continue
-        fields = {'dispatch': None, 'launch': None, 'independent': None, **item}
+        fields = {'dispatch': None, 'launch': None, 'launch_operation_id': None, 'independent': None, **item}
         _closed(fields, FreshReviewRecord.__dataclass_fields__, 'fresh-review-record-invalid')
         fields = dict(fields)
         fields['request'] = request = decode_request(fields['request'])
@@ -434,15 +435,20 @@ def decode_projection(document):
             if operation in operations:
                 raise FreshReviewError('fresh-review-operation-conflict')
             operations.add(operation)
+            launch_operation = fields['launch_operation_id']
+            if launch_operation is not None and launch_operation != operation:
+                if launch_operation in operations:
+                    raise FreshReviewError('fresh-review-operation-conflict')
+                operations.add(launch_operation)
         else:
             raise FreshReviewError('fresh-review-record-invalid')
         if fields['status'] in ('blocked', 'abandoned-unknown'):
             commit = fields['result'].thaw()['commit_operation_id']
-            if commit != fields['operation_id']:
+            if commit not in (fields['operation_id'], fields['launch_operation_id']):
                 if commit in operations:
                     raise FreshReviewError('fresh-review-operation-conflict')
                 operations.add(commit)
-        if fields['status'] in ('pending', 'reserved', 'consumed') and any(fields[key] is not None for key in ('dispatch', 'launch', 'independent')):
+        if fields['status'] in ('pending', 'reserved', 'consumed') and any(fields[key] is not None for key in ('dispatch', 'launch', 'launch_operation_id', 'independent')):
             raise FreshReviewError('fresh-review-record-invalid')
         records.append(FreshReviewRecord(**fields))
     return FreshReviewProjection(tuple(records))
