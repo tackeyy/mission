@@ -829,10 +829,13 @@ def _parse_lease_expiry(value: object) -> Optional[datetime]:
 
 def _lease_expiry_not_shortened(before_lease: Mapping, after_lease: Mapping) -> bool:
     """Expiry never moves backward; compared as parsed instants, unparseable fails closed."""
-    before_exp = before_lease.get("lease_expires_at")
-    after_dt = _parse_lease_expiry(after_lease.get("lease_expires_at"))
+    key = "lease_expires_at"
+    before_exp = before_lease.get(key)
+    if (key in before_lease) == (key in after_lease) and _strict_equal(before_exp, after_lease.get(key)):
+        return True  # untouched; any change (value or presence) must yield a parseable expiry
+    after_dt = _parse_lease_expiry(after_lease.get(key))
     if before_exp in (None, ""):
-        return after_lease.get("lease_expires_at") in (None, "") or after_dt is not None
+        return after_dt is not None
     before_dt = _parse_lease_expiry(before_exp)
     if before_dt is None or after_dt is None:
         return False
