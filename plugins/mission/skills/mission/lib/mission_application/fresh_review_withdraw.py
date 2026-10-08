@@ -1,4 +1,5 @@
 """Withdraw one pending request through the E0 fenced shrink-only gate."""
+from __future__ import annotations
 from pathlib import Path
 import json
 import secrets
@@ -7,7 +8,6 @@ from mission_application.cli_operation import prepare_cli_operation, CliOperatio
 from mission_application.fresh_review_dispatch import _execute, _record, _wire
 from mission_kernel.commands import WithdrawFreshReviewRequest
 from mission_kernel.fresh_review import FreshReviewError, WithdrawnFreshReviewRecord
-from mission_persistence.capacity_gate import CapacityWriteError
 
 
 def run_fresh_review_withdraw_cli(args, services):
@@ -35,5 +35,5 @@ def run_fresh_review_withdraw_cli(args, services):
         record = _execute(repository, lambda state: WithdrawFreshReviewRequest(
             args.request, operation, state.get('fencing_epoch', 0)))
         return json.dumps({'ok': True, 'record': _wire(record)})
-    except (FreshReviewError, CliOperationRejected, CapacityWriteError) as exc:
+    except (FreshReviewError, CliOperationRejected) + services.commit_errors as exc:
         services.fail(exc.code, 2)

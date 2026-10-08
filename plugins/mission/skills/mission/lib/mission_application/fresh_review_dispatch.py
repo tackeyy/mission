@@ -7,7 +7,6 @@ import base64
 import time
 import math
 from datetime import datetime, timedelta, timezone
-from mission_persistence.capacity_gate import CapacityWriteError
 
 from mission_application.cli_operation import prepare_cli_operation, CliOperationRejected
 from mission_application.planning import record_dispatch_intent, record_provider_receipt, reconcile_dispatch_unknown, PlanningFailure
@@ -19,7 +18,7 @@ from mission_kernel.fresh_review import (
     WithdrawnFreshReviewRecord,
 )
 from mission_kernel.fresh_review_receipts import decode_terminal_receipt, receipt_document, TERMINAL_SCHEMA
-from mission_kernel.fresh_review_dispatch import validate_launch
+from mission_kernel.fresh_review_dispatch import validate_launch, reservation_id_for_operation, budget_class_for_fresh_review_dispatch
 from mission_kernel.json_codec import freeze_json_value
 
 
@@ -151,8 +150,8 @@ def run_fresh_review_dispatch_cli(args, services, host):
                 outbound_packet_digest=current.request.input_digest, iteration=current.request.iteration, fencing_epoch=epoch))
             deadline = datetime.fromisoformat(services.now().replace('Z', '+00:00')) + timedelta(seconds=current.request.wall_time_sec)
             dispatch.update(parent_identity=parent, adapter_id=args.adapter, deadline_at=_utc(deadline.isoformat()),
-                reservation_id='reservation:' + canonical_digest({'domain': 'fresh-review-dispatch', 'operation_id': operation})[7:],
-                budget_class='review')
+                reservation_id=reservation_id_for_operation(operation),
+                budget_class=budget_class_for_fresh_review_dispatch())
             return BeginFreshReviewDispatch(args.request, operation, epoch, intent, payload,
                 freeze_json_value(dispatch), _candidate(state, root, current.request, services))
 
@@ -200,7 +199,7 @@ def run_fresh_review_dispatch_cli(args, services, host):
                           wall_time_sec=math.ceil(time.monotonic() - callback_start) if adapter_called else 0))
         record = _execute(repo(':terminal'), finish)
         return json.dumps({'ok': True, 'record': _wire(record)})
-    except (FreshReviewError, CliOperationRejected, VerifierPolicyError, PlanningFailure, CapacityWriteError) as exc:
+    except (FreshReviewError, CliOperationRejected, VerifierPolicyError, PlanningFailure) + services.commit_errors as exc:
         services.fail(getattr(exc, 'code', str(exc)), 2)
 
 
@@ -217,7 +216,10 @@ def _reconcile(record, args, operation, repo, root, services, host):
         return json.dumps({'ok': True, 'record': _wire(record)})
     if record.status not in ('dispatch-unknown', 'running'):
         raise FreshReviewError('fresh-review-not-dispatch-unknown')
-    observed = {}
+    capacity = services.capacity_status(services.resolve_state_file(root))
+    if capacity['code'] is not None:
+        raise FreshReviewError(capacity['code'])
+    observed, pin = {}, None
     reason = 'child-unobservable'
     callback_start, adapter_called = time.monotonic(), False
     try:
@@ -227,7 +229,7 @@ def _reconcile(record, args, operation, repo, root, services, host):
         adapter_called = True
         observed = host.recover(pin, record.dispatch.thaw())
     except (FreshReviewError, OSError):
-        pass
+        pin = None
     observation = observed.get('observation')
     raw = observation.get('launch_receipt') if isinstance(observation, dict) else None
     if raw is not None:
@@ -255,18 +257,25 @@ def _reconcile(record, args, operation, repo, root, services, host):
                 record_provider_receipt([record.dispatch.thaw()], _saga_intent(record),
                                         {'kind': 'provider', 'identity': launch.child_identity})
                 record = _execute(repo(':running'), lambda state: RecordFreshReviewLaunch(
-                    args.request, operation, state['fencing_epoch'], freeze_json_value(raw),
+                    args.request, record.dispatch.thaw()['operation_id'], state['fencing_epoch'], freeze_json_value(raw),
                     _candidate(state, root, record.request, services)))
             else:
                 reader = repo(':candidate', False)
                 with reader.transaction():
                     _candidate(reader.load(), root, record.request, services)
             return json.dumps({'ok': True, 'record': _wire(record)})
+    exited = raw is not None and observation.get('process_exited') is True
+    if _utc(services.now()) < record.dispatch.thaw()['deadline_at'] and not exited:
+        return json.dumps({'ok': True, 'record': _wire(record)})
     if record.status == 'dispatch-unknown':
         reconcile_dispatch_unknown([record.dispatch.thaw()], _saga_intent(record), observed_receipt=None)
     def finish(state):
         current = _record(state, args.request)
+        if current.status not in ('dispatch-unknown', 'running'):
+            raise FreshReviewError('fresh-review-consumed')
         _candidate(state, root, current.request, services)
+        if pin is not None:
+            host.cancel(pin, current.dispatch.thaw())
         epoch = state['fencing_epoch']
         return CommitFreshReviewResult(args.request, operation, epoch,
             _terminal(current, operation, epoch, 'abandoned-unknown', reason, services.now(),

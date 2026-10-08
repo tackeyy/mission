@@ -79,7 +79,10 @@ def observe(pin):
     if not isinstance(parent, dict) or set(parent) != {'parent_identity'}:
         raise FreshReviewError('fresh-review-identity-unobservable')
     from mission_kernel.fresh_review import _identifier
-    _identifier(parent['parent_identity'])
+    try:
+        _identifier(parent['parent_identity'])
+    except FreshReviewError as exc:
+        raise FreshReviewError('fresh-review-identity-unobservable') from exc
     return parent
 
 

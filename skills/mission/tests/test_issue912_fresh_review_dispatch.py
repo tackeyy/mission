@@ -109,6 +109,7 @@ def test_unknown_without_host_output_is_abandoned_with_split_epochs(reviewer, ru
     from .test_issue879_completion_cli import _rewrite_fixture_document
     root, _, _, journal = reviewer
     unknown = invoke(run_cli, reviewer, FIXTURE_REVIEW_MODE='crash')
+    _expire_dispatch(reviewer)
     journal.unlink()
     _rewrite_fixture_document(root, lambda state: state.update(lease_expires_at='2000-01-01T00:00:00Z'))
     abandoned = invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one', MISSION_LEASE_ID='takeover-lease')
@@ -142,7 +143,7 @@ def test_unknown_without_host_output_is_abandoned_with_split_epochs(reviewer, ru
 def test_host_observation_controls_identity_and_independence(reviewer, run_cli, mode, status, independent):
     record = invoke(run_cli, reviewer, FIXTURE_REVIEW_MODE=mode)
     assert record['status'] == status
-    assert record['independent'] is independent
+    assert record.get('independent') is independent
     if status == 'blocked':
         assert record['result']['reason'] == ('launch-invalid' if mode == 'provider-invalid' else 'identity-unobservable')
         assert record['result']['launch_attempted'] is True
@@ -176,13 +177,14 @@ def test_old_writer_is_rejected_by_kernel_fence_after_takeover(reviewer, run_cli
         old['dispatch']['fencing_epoch'], freeze_json_value(json.loads(journal.read_text())['launch']), request['candidate_digest'])
     decision = decide(state, command)
     assert not decision.accepted and decision.rejection.code == 'fresh-review-stale-fence'
-    assert decide(state, replace(command, operation_id='new-writer', fencing_epoch=state.lease.fencing_epoch)).accepted
+    assert decide(state, replace(command, fencing_epoch=state.lease.fencing_epoch)).accepted
 
 
 def test_crash_after_intent_before_spawn_abandons_without_launch(reviewer, run_cli):
     record = invoke(run_cli, reviewer, FIXTURE_REVIEW_MODE='intent-crash')
     assert record['status'] == 'dispatch-unknown'
     assert not reviewer[3].exists()
+    _expire_dispatch(reviewer)
     recovered = invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one')
     assert recovered['status'] == 'abandoned-unknown'
     assert not reviewer[3].exists()
@@ -197,8 +199,10 @@ def test_unobservable_recovery_receipt_converges_to_abandoned(reviewer, run_cli,
     if mutation == 'identity-missing':
         stored['launch'].pop('child_identity')
     journal.write_text(json.dumps(stored))
-    abandoned = invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one',
-                       FIXTURE_REVIEW_MODE='malformed-observation' if mutation == 'malformed-observation' else '')
+    mode = 'malformed-observation' if mutation == 'malformed-observation' else ''
+    assert invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one', FIXTURE_REVIEW_MODE=mode) == old
+    _expire_dispatch(reviewer)
+    abandoned = invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one', FIXTURE_REVIEW_MODE=mode)
     assert abandoned['status'] == 'abandoned-unknown'
     assert abandoned['result']['reason'] == 'child-unobservable'
     assert abandoned['result']['dispatch_operation_id'] == old['dispatch']['operation_id']
@@ -213,6 +217,7 @@ def test_foreign_recovery_binding_is_rejected_without_consuming(reviewer, run_cl
     invoke(run_cli, reviewer, **({'FIXTURE_REVIEW_MODE': 'crash'} if status == 'dispatch-unknown' else {}))
     stored = json.loads(journal.read_text())
     stored['launch'][field] = stored['launch'][field] + 1 if field == 'fencing_epoch' else 'foreign-child'
+    stored.update(output=None, process_exited=True)
     journal.write_text(json.dumps(stored))
     _reject_unchanged(run_cli, root, ['fresh-review', 'reconcile', '--request', request['request_id'],
                       '--adapter', 'neutral'], 'fresh-review-launch-binding-mismatch',
@@ -235,6 +240,7 @@ def test_running_child_identity_mismatch_is_rejected_without_consuming(reviewer,
 def test_reconcile_rechecks_candidate_before_abandoning(reviewer, run_cli, status):
     root, request, environment, journal = reviewer
     invoke(run_cli, reviewer, **({'FIXTURE_REVIEW_MODE': 'crash'} if status == 'dispatch-unknown' else {}))
+    _expire_dispatch(reviewer)
     journal.unlink()
     (root / 'app.txt').write_text('candidate changed')
     _reject_unchanged(run_cli, root, ['fresh-review', 'reconcile', '--request', request['request_id'],
@@ -289,7 +295,7 @@ def test_fenced_out_launch_writer_cannot_cancel_the_takeover_child(tmp_path, mon
     reader = Namespace(transaction=lambda: nullcontext(), load=lambda: state)
     services = Namespace(resolve_state_file=lambda _: sf, repository=lambda *a, **k: reader,
         compatibility_arguments=lambda *a, **k: ('dispatch', {}), canonical_operation=lambda *a, **k: ('dispatch', {}),
-        capacity_status=lambda _: {'code': None}, now=lambda: '2026-01-01T00:00:01+00:00', fail=lambda code, _: (_ for _ in ()).throw(FreshReviewError(code)))
+        capacity_status=lambda _: {'code': None}, commit_errors=(), now=lambda: '2026-01-01T00:00:01+00:00', fail=lambda code, _: (_ for _ in ()).throw(FreshReviewError(code)))
     monkeypatch.setattr(app, '_candidate', lambda *a: request.candidate_digest)
     raw = launch_document()
     raw['request_digest'] = canonical_digest(request_document(request))
@@ -326,7 +332,9 @@ def test_deadline_and_budget_identity_are_persisted_before_callback(reviewer, ru
     dispatch = record['dispatch']
     assert datetime.fromisoformat(dispatch['deadline_at'].replace('Z', '+00:00')).utcoffset() is not None
     assert dispatch['reservation_id'].startswith('reservation:')
-    assert dispatch['budget_class'] == 'review'
+    from mission_kernel.fresh_review_dispatch import reservation_id_for_operation, budget_class_for_fresh_review_dispatch
+    assert dispatch['reservation_id'] == reservation_id_for_operation(dispatch['operation_id'])
+    assert dispatch['budget_class'] == budget_class_for_fresh_review_dispatch()
     assert dispatch['reservation_id'] != dispatch['operation_id']
 
 
@@ -421,6 +429,7 @@ def test_public_dispatch_operation_identity_boundaries(reviewer, run_cli, explic
     if explicit:
         assert old['dispatch']['operation_id'] == 'd' * 128
         environment['MISSION_OPERATION_ID'] = 'r' * 128
+    _expire_dispatch(reviewer)
     journal.unlink()
     result = run_cli('fresh-review', 'reconcile', '--request', request['request_id'], '--adapter', 'neutral',
                      cwd=root, env_extra=environment)
@@ -432,6 +441,7 @@ def test_future_launch_clock_cannot_strand_a_running_request(reviewer, run_cli):
     from .test_issue879_completion_cli import _rewrite_fixture_document
     root, _, _, journal = reviewer
     record = invoke(run_cli, reviewer)
+    _expire_dispatch(reviewer)
     stored = json.loads(journal.read_text())
     stored['launch']['started_at'] = '9999-12-31T23:59:59.999999Z'
     stored['output'] = None
@@ -476,3 +486,113 @@ def test_resolved_child_pin_is_closed_and_bound_to_requested_adapter(monkeypatch
     monkeypatch.setattr(host, '_call', lambda *a, **k: {'pin': None if mutation == 'missing' else pin})
     with pytest.raises(FreshReviewError):
         host.resolve('neutral')
+
+
+def _expire_dispatch(reviewer):
+    from .test_issue879_completion_cli import _rewrite_fixture_document
+    _rewrite_fixture_document(reviewer[0], lambda state: state['fresh_review']['requests'][0]['dispatch'].update(
+        deadline_at='2000-01-01T00:00:00.000000Z'))
+
+
+def test_live_running_reconcile_before_deadline_is_read_only_then_cancels_before_abandon(reviewer, run_cli):
+    from .test_issue879_completion_cli import _public_bytes
+    root, _, _, journal = reviewer
+    running = invoke(run_cli, reviewer)
+    stored = json.loads(journal.read_text())
+    stored.update(output=None, process_exited=False)
+    journal.write_text(json.dumps(stored))
+    before = _public_bytes(root)
+    assert invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one') == running
+    assert _public_bytes(root) == before
+    assert not journal.with_suffix('.cancel').exists()
+    _expire_dispatch(reviewer)
+    abandoned = invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-two')
+    assert abandoned['status'] == 'abandoned-unknown'
+    assert abandoned['result']['reason'] == 'output-unobservable'
+    assert journal.with_suffix('.cancel').read_text() == 'running'
+    assert json.loads(journal.read_text())['count'] == 1
+
+
+@pytest.mark.parametrize('takeover', [False, True], ids=['same-lease', 'takeover'])
+@pytest.mark.parametrize('expired', [False, True], ids=['before-deadline', 'after-deadline'])
+def test_reconcile_inflight_launch_obeys_deadline_and_writer_fence(reviewer, run_cli, takeover, expired):
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    from .test_issue879_completion_cli import _public_bytes, _rewrite_fixture_document
+    root, request, env, journal = reviewer
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(run_cli, 'fresh-review', 'run', '--request', request['request_id'], '--adapter', 'neutral',
+                             cwd=root, env_extra={**env, 'FIXTURE_REVIEW_MODE': 'in-flight'})
+        try:
+            deadline = time.monotonic() + 30
+            while not journal.with_suffix('.launching').exists():
+                assert not future.done() and time.monotonic() < deadline
+                time.sleep(.01)
+            if takeover:
+                _rewrite_fixture_document(root, lambda state: state.update(lease_expires_at='2000-01-01T00:00:00Z'))
+                env = {**env, 'MISSION_LEASE_ID': 'takeover-lease'}
+                prepared = run_cli('fresh-review', 'prepare', '--perspective', 'counterexamples',
+                    '--adapter-registration-digest', request['adapter_registration_digest'], cwd=root,
+                    env_extra={**env, 'MISSION_OPERATION_ID': 'prepare-takeover'})
+                assert prepared.returncode == 0, prepared.stdout + prepared.stderr
+            if expired:
+                _expire_dispatch(reviewer)
+            before = _public_bytes(root)
+            result = run_cli('fresh-review', 'reconcile', '--request', request['request_id'], '--adapter', 'neutral',
+                             cwd=root, env_extra={**env, 'MISSION_OPERATION_ID': 'reconcile-in-flight'})
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert json.loads(result.stdout)['record']['status'] == ('abandoned-unknown' if expired else 'dispatch-unknown')
+            if expired:
+                assert journal.with_suffix('.cancel').read_text() == 'dispatch-unknown'
+            else:
+                assert _public_bytes(root) == before and not journal.with_suffix('.cancel').exists()
+        finally:
+            journal.with_suffix('.release').touch()
+        launched = future.result(timeout=30)
+    if expired:
+        assert launched.returncode == 2 and not journal.exists()
+        return
+    if takeover:
+        assert launched.returncode == 2 and ('fresh-review-stale-fence' in launched.stderr or 'lease held' in launched.stderr)
+        assert invoke(run_cli, (root, request, env, journal), 'reconcile', MISSION_OPERATION_ID='reconcile-after')['status'] == 'running'
+    else:
+        assert launched.returncode == 0 and json.loads(launched.stdout)['record']['status'] == 'running'
+    assert json.loads(journal.read_text())['count'] == 1
+
+
+@pytest.mark.parametrize('parent', ['', 'bad parent', 123])
+def test_invalid_parent_observation_has_identity_reason(monkeypatch, parent):
+    import fresh_review_host as host
+    from mission_kernel.fresh_review import FreshReviewError
+    monkeypatch.setattr(host, '_call', lambda *a, **k: {'parent': {'parent_identity': parent}})
+    with pytest.raises(FreshReviewError, match='^fresh-review-identity-unobservable$'):
+        host.observe(None)
+
+
+@pytest.mark.parametrize('exited', [True, 'true', 1])
+def test_only_confirmed_exact_child_exit_can_abandon_before_deadline(reviewer, run_cli, exited):
+    from .test_issue879_completion_cli import _public_bytes
+    root, _, _, journal = reviewer
+    running = invoke(run_cli, reviewer)
+    stored = json.loads(journal.read_text())
+    stored.update(output=None, process_exited=exited)
+    journal.write_text(json.dumps(stored))
+    before = _public_bytes(root)
+    record = invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one')
+    if exited is True:
+        assert record['status'] == 'abandoned-unknown'
+        assert journal.with_suffix('.cancel').read_text() == 'running'
+    else:
+        assert record == running and _public_bytes(root) == before
+        assert not journal.with_suffix('.cancel').exists()
+
+
+def test_reconcile_capacity_refuses_before_adapter_recover(reviewer, run_cli):
+    from .test_issue879_completion_cli import _rewrite_fixture_document
+    from mission_kernel.json_codec import STATE_LIMIT
+    root, request, env, journal = reviewer
+    invoke(run_cli, reviewer)
+    _rewrite_fixture_document(root, lambda state: state.update(capacity_fixture_padding='x' * (STATE_LIMIT - 200000)))
+    _reject_unchanged(run_cli, root, ['fresh-review', 'reconcile', '--request', request['request_id'], '--adapter', 'neutral'],
+                      'state-capacity-exhausted', env={**env, 'MISSION_OPERATION_ID': 'reconcile-one'})
+    assert not journal.with_suffix('.recover').exists()

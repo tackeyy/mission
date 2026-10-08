@@ -16,6 +16,15 @@ def _journal():
     return Path(os.environ['FIXTURE_REVIEW_JOURNAL'])
 
 
+def _state():
+    root = Path(os.environ['FIXTURE_REVIEW_STATE'])
+    state = json.loads((root / 'sessions' / 'test.json').read_bytes())
+    if state.get('schema') == 'mission-head/1':
+        manifest = json.loads((root / state['state_generation']['path']).read_bytes())
+        state = json.loads((root / manifest['state']['object']).read_bytes())
+    return state
+
+
 class Adapter:
     def observe_parent(self):
         if os.environ.get('FIXTURE_REVIEW_MODE') == 'callback-timeout':
@@ -34,10 +43,7 @@ class Adapter:
         envelope = dispatch.thaw()
         request = json.loads(request_bytes)
         state_root = Path(os.environ['FIXTURE_REVIEW_STATE'])
-        state = json.loads((state_root / 'sessions' / 'test.json').read_bytes())
-        if state.get('schema') == 'mission-head/1':
-            manifest = json.loads((state_root / state['state_generation']['path']).read_bytes())
-            state = json.loads((state_root / manifest['state']['object']).read_bytes())
+        state = _state()
         record = next(item for item in state['fresh_review']['requests'] if item['request']['request_id'] == request['request_id'])
         assert record['status'] == 'dispatch-unknown' and record['dispatch'] == envelope
         if os.environ.get('FIXTURE_REVIEW_MODE') == 'intent-crash':
@@ -47,6 +53,17 @@ class Adapter:
         if os.environ.get('FIXTURE_REVIEW_MODE') in ('unavailable', 'stale-unavailable'):
             from mission_kernel.fresh_review import FreshReviewError
             raise FreshReviewError('fresh-review-launch-unavailable')
+        if os.environ.get('FIXTURE_REVIEW_MODE') == 'in-flight':
+            import time
+            _journal().with_suffix('.launching').touch()
+            deadline = time.monotonic() + 30
+            while not _journal().with_suffix('.release').exists():
+                if time.monotonic() >= deadline:
+                    os._exit(8)
+                time.sleep(.01)
+            if _journal().with_suffix('.cancel').exists():
+                from mission_kernel.fresh_review import FreshReviewError
+                raise FreshReviewError('fresh-review-launch-unavailable')
         # Real child reads the immutable materialization, never an echoed digest.
         child = subprocess.run([sys.executable, '-c',
             'import hashlib,json,sys; from pathlib import Path; '
@@ -76,19 +93,24 @@ class Adapter:
         return freeze_json_value(launch)
 
     def recover(self, dispatch):
+        _journal().with_suffix('.recover').write_text('called')
         if os.environ.get('FIXTURE_REVIEW_MODE') == 'malformed-observation':
             from types import SimpleNamespace
             return CollectedReview(SimpleNamespace(thaw=lambda: None), None)
         if not _journal().exists():
             return CollectedReview(freeze_json_value({}), None)
         journal = json.loads(_journal().read_text())
-        return CollectedReview(freeze_json_value({'launch_receipt': journal['launch']}),
+        return CollectedReview(freeze_json_value({'launch_receipt': journal['launch'], 'process_exited': journal.get('process_exited')}),
                                None if journal['output'] is None else journal['output'].encode())
 
     def collect(self, launch):
         return self.recover(launch)
 
     def cancel(self, dispatch):
+        if dispatch.thaw().get('operation_id'):
+            record = next(item for item in _state()['fresh_review']['requests']
+                          if item.get('dispatch', {}).get('operation_id') == dispatch.thaw().get('operation_id'))
+            _journal().with_suffix('.cancel').write_text(record['status'])
         return freeze_json_value({'status': 'cancelled'})
 
 
