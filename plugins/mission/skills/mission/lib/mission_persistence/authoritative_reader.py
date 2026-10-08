@@ -974,6 +974,11 @@ def read_session_json(session_path: Union[Path, str], *, source: Union[str, byte
         return snapshot.document_copy()
     if isinstance(document, dict):
         decode_projection(document.get("extensions", {}) if document.get("schema_version") == 5 else document)
+        extensions = document.get("extensions")
+        if "budget_ledger" in document or (isinstance(extensions, dict) and "budget_ledger" in extensions):
+            # Legacy tolerance keeps the last duplicate; a budget ledger is bound to
+            # budget_minutes, so its document must not hide an earlier duplicate.
+            json.loads(source.decode("utf-8"), object_pairs_hook=_reject_duplicate_json_pairs)
         decode_ledger(document)
     return document
 
