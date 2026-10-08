@@ -58,8 +58,9 @@ def test_every_writer_propagates_verdict_code_without_publication(tmp_path, monk
     assert size == len(_canonical(proposed) if writer == 'stage' else json.dumps(proposed, indent=2, ensure_ascii=False).encode())
     after = _fenced_bytes(root) if writer == 'stage' else _public_bytes(root)
     if writer == 'janitor':
-        # Janitor recovery may create a derived index/backup before its save.
+        # Derived index recovery can precede save, but no rejected backup.
         assert after['sessions/test.json'] == before['sessions/test.json']
+        assert 'sessions/test.json.bak' not in after
     else:
         assert after == before
 
@@ -93,6 +94,7 @@ def test_raw_padded_halt_reason_cannot_overrun_reserved_slot(tmp_path, writer):
     assert after['sessions/test.json'] == before['sessions/test.json']
 
 
+@pytest.mark.parametrize('historical', [False, True])
 @pytest.mark.parametrize('layout', ['v4', 'v5'])
 @pytest.mark.parametrize('field,value,accepted', [
     ('halt_reason', '\x01' * 2048, True), ('halt_reason', '\x1c' * 2049, False),
@@ -103,7 +105,7 @@ def test_raw_padded_halt_reason_cannot_overrun_reserved_slot(tmp_path, writer):
     ('fencing_epoch', sc.LEASE_EPOCH_MAX, True), ('fencing_epoch', sc.LEASE_EPOCH_MAX + 1, False),
     ('fencing_epoch', True, False), ('fencing_epoch', 1.5, False),
 ])
-def test_shared_writer_bounds_cover_both_layouts(layout, field, value, accepted):
+def test_shared_writer_bounds_cover_both_layouts(layout, field, value, accepted, historical):
     from mission_persistence.capacity_gate import check_state_capacity, CapacityWriteError
     from .test_issue933_state_capacity_verdict import _base
     document, encoding = _base(layout)
@@ -115,8 +117,8 @@ def test_shared_writer_bounds_cover_both_layouts(layout, field, value, accepted)
     if layout == 'v5' and field == 'halt_reason':
         document['control']['halt_reason'] = value
     raw = _canonical(document) if layout == 'v5' else json.dumps(document, indent=2, ensure_ascii=False).encode()
-    if accepted:
-        assert check_state_capacity(None, raw, encoding=encoding).accepted
+    if accepted or historical:
+        assert check_state_capacity(raw if historical else None, raw, encoding=encoding).accepted
     else:
         with pytest.raises(CapacityWriteError, match='state-capacity-invariant-broken'):
             check_state_capacity(None, raw, encoding=encoding)
@@ -211,7 +213,7 @@ def _writer_calls(source):
             name = '.'.join([aliases.get(parts[0], parts[0]), *parts[1:]])
             tail = name.rsplit('.', 1)[-1]
             sink = None
-            if tail in ('_atomic_write', 'stage_generation') or name == 'services.atomic_write':
+            if tail in ('_atomic_write', 'stage_generation') or name in ('services.atomic_write', 'atomic_write'):
                 sink = tail if tail != 'atomic_write' else name
             elif tail in ('write', 'write_bytes', 'write_text', 'replace', 'rename',
                           'link', 'symlink', 'symlink_to', 'dump', 'copy', 'copy2',
@@ -257,8 +259,10 @@ def test_writer_inventory_requires_a_gate_at_every_authoritative_save():
     assert inventory == json.loads(fixture.read_text())
     for path, function, gate in [
         ('bin/mission-state.py', 'atomic_write_json', 'write_legacy_json'),
-        ('lib/mission_persistence/legacy_capacity.py', 'write_legacy_json', 'checked_legacy_state_content'),
-        ('bin/mission-state.py', 'write_terminal_state', 'checked_legacy_state_content'),
+        ('lib/mission_persistence/legacy_capacity.py', 'write_legacy_json', 'prepare_legacy_json'),
+        ('lib/mission_persistence/legacy_capacity.py', 'prepare_legacy_json', 'checked_legacy_state_content'),
+        ('bin/mission-state.py', 'write_terminal_state', 'write_legacy_terminal'),
+        ('lib/mission_persistence/legacy_capacity.py', 'write_legacy_terminal', 'checked_legacy_state_content'),
         ('lib/mission_persistence/fenced_commit.py', '_stage_persistence', 'check_state_capacity'),
         ('lib/mission_persistence/legacy_capacity.py', 'checked_legacy_state_content', 'check_state_capacity'),
     ]:
@@ -469,7 +473,7 @@ def test_legacy_save_reserves_system_space_before_publication(tmp_path):
 
 @pytest.mark.parametrize('field,value', [
     ('owner', 'bad token'), ('token', 'x' * 129), ('reason', '\x01' * 128),
-    ('epoch', True), ('epoch', 1.5), ('epoch', -1), ('epoch', sc.LEASE_EPOCH_MAX + 1),
+    ('epoch', -1), ('epoch', sc.LEASE_EPOCH_MAX + 1),
 ])
 def test_lease_admission_rejects_unbounded_values_before_mutating(field, value):
     cli = _load_cli_module('issue918_lease')
@@ -517,19 +521,21 @@ def test_stop_preserves_inherited_legacy_lease_without_bounding_new_tokens(layou
         check_state_capacity(encode(base), encode(proposed), encoding=encoding)
 
 
-def test_legacy_takeover_archives_old_token_with_measured_reservation(tmp_path):
+@pytest.mark.parametrize('owner', ['new-owner', 'old owner'])
+@pytest.mark.parametrize('epoch', [1, '5', 5.9, True])
+def test_legacy_takeover_archives_old_token_with_measured_reservation(tmp_path, epoch, owner):
     cli = _load_cli_module('issue918_migration')
     state = {'schema_version': 4, 'mission_id': 'm', 'loop_active': True,
-             'owner_session_id': 'old owner', 'lease_id': 'old token', 'fencing_epoch': 1,
+             'owner_session_id': 'old owner', 'lease_id': 'old token', 'fencing_epoch': epoch,
              'lease_expires_at': '2000-01-01T00:00:00Z', 'lease_history': []}
     path = tmp_path / '.mission-state/sessions/test.json'
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps(state, indent=2))
-    lease = cli.acquire_or_verify_lease(state, 'new-owner', lease_id='new-token', reason='takeover')
+    lease = cli.acquire_or_verify_lease(state, owner, lease_id='new-token', reason='takeover')
     cli.atomic_write_json(path, state, administrative=True, lease_decision=lease)
     stored = json.loads(path.read_bytes())
     assert stored['lease_history'][0]['owner_session_id'] == 'old owner'
-    assert stored['owner_session_id'] == 'new-owner'
+    assert stored['owner_session_id'] == owner
 
 
 @pytest.mark.parametrize('owner,token,epoch', [
@@ -578,3 +584,137 @@ def test_legacy_token_copy_requires_a_real_takeover():
     encode = lambda d: json.dumps(d, indent=2).encode()
     with pytest.raises(CapacityWriteError, match='state-capacity-invariant-broken'):
         check_state_capacity(encode(base), encode(proposed), encoding=sc.StateEncoding.LEGACY_PRETTY)
+
+
+@pytest.mark.parametrize('token,expired,accepted', [
+    ('', True, True), ('bad token', False, False), ('', False, False), ('x' * 129, False, False),
+])
+@pytest.mark.parametrize('backup_present', [False, True])
+def test_lease_refusal_keeps_guidance_and_backup_bytes(tmp_path, legacy_run_cli, token, expired, accepted, backup_present):
+    legacy_run_cli('init', 'lease ordering', '--force-mission', cwd=tmp_path, check=True)
+    path = tmp_path / '.mission-state/sessions/test.json'
+    state = json.loads(path.read_bytes())
+    state['lease_expires_at'] = '2000-01-01T00:00:00Z' if expired else '2099-01-01T00:00:00Z'
+    path.write_text(json.dumps(state, indent=2))
+    backup = path.with_suffix('.json.bak')
+    backup.unlink(missing_ok=True)
+    if backup_present:
+        backup.write_bytes(b'old backup')
+    before = path.read_bytes()
+    result = legacy_run_cli('refresh-pid', cwd=tmp_path, env_extra={'MISSION_LEASE_ID': token})
+    assert result.returncode == (0 if accepted else 2), result.stdout + result.stderr
+    if not accepted:
+        assert 'lease held' in result.stderr and 'MISSION_LEASE_ID' in result.stderr
+        assert path.read_bytes() == before
+        assert backup.read_bytes() == b'old backup' if backup_present else not backup.exists()
+
+
+@pytest.mark.parametrize('terminal,token_ok', [(False, True), (True, True), (True, False)])
+def test_init_capacity_preflight_precedes_archives_and_assumptions(tmp_path, legacy_run_cli, terminal, token_ok):
+    legacy_run_cli('init', 'old mission', '--force-mission', cwd=tmp_path, check=True)
+    path = tmp_path / '.mission-state/sessions/test.json'
+    state = json.loads(path.read_bytes())
+    state.update(loop_active=not terminal, phase='halted' if terminal else 'planning')
+    state['padding'] = 'p' * (sc.STATE_LIMIT - sc.STATE_CAPACITY_HALT_DELTA - len(json.dumps(state, indent=2).encode()) + 1)
+    path.write_text(json.dumps(state, indent=2))
+    before = _public_bytes(tmp_path)
+    result = legacy_run_cli('init', 'replacement mission', '--force-mission', cwd=tmp_path,
+        env_extra={} if token_ok else {'MISSION_LEASE_ID': 'foreign-token'})
+    assert result.returncode == (0 if terminal and token_ok else 2), result.stdout + result.stderr
+    if terminal and token_ok:
+        assert len(path.read_bytes()) < len(before['sessions/test.json'])
+    else:
+        assert ('state-capacity-legacy-full' if token_ok else 'lease held') in result.stderr
+        assert _public_bytes(tmp_path) == before
+
+
+@pytest.mark.parametrize('directives', ['a' * 77, 'a' * 200 + '\ngoal_dispatch: b'])
+def test_init_bounds_generated_goal_dispatch_fallback(tmp_path, legacy_run_cli, directives):
+    result = legacy_run_cli('init', 'goal_dispatch: ' + directives + '\nfix', '--force-mission', cwd=tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    state = json.loads((tmp_path / '.mission-state/sessions/test.json').read_bytes())
+    assert 0 < len(state['goal_dispatch_resolution_fallback_reason']) <= 128
+
+
+def test_halt_all_continues_after_legacy_full_and_does_not_create_backup(tmp_path, legacy_run_cli):
+    legacy_run_cli('init', 'halt inventory', '--force-mission', cwd=tmp_path, check=True)
+    path = tmp_path / '.mission-state/sessions/test.json'
+    state = json.loads(path.read_bytes())
+    full = path.with_name('a-full.json')
+    state.update(session_id='a-full')
+    state['padding'] = 'p' * (sc.STATE_LIMIT - sc.STATE_CAPACITY_HALT_DELTA - len(json.dumps(state, indent=2).encode()) + 1)
+    full.write_text(json.dumps(state, indent=2))
+    before = full.read_bytes()
+    result = legacy_run_cli('halt', '--all', '--root', str(tmp_path), '--reason', 'stop', cwd=tmp_path)
+    payload = json.loads(result.stdout)
+    assert result.returncode == 0 and payload['errors'][0]['error'] == 'state-capacity-legacy-full'
+    assert json.loads(path.read_bytes())['halt_reason'] == 'stop'
+    assert full.read_bytes() == before and not full.with_suffix('.json.bak').exists()
+
+
+@pytest.mark.parametrize('history_count', [0, sc.STATE_CAPACITY_TAKEOVER_LIMIT - 1, sc.STATE_CAPACITY_TAKEOVER_LIMIT])
+@pytest.mark.parametrize('space', [sc.STATE_CAPACITY_HALT_DELTA + 4096, sc.STATE_CAPACITY_HALT_DELTA - 1])
+def test_expired_owner_halt_checks_takeover_and_stop_without_backup_on_refusal(tmp_path, legacy_run_cli, space, history_count):
+    from .test_issue933_state_capacity_verdict import _history
+    legacy_run_cli('init', 'expired stop', '--force-mission', cwd=tmp_path, check=True)
+    path = tmp_path / '.mission-state/sessions/test.json'
+    state = json.loads(path.read_bytes())
+    state['lease_expires_at'] = '2000-01-01T00:00:00Z'
+    state['lease_history'] = _history(history_count)
+    state['padding'] = ''
+    state['padding'] = 'p' * (sc.STATE_LIMIT - space - len(json.dumps(state, indent=2).encode()))
+    path.write_text(json.dumps(state, indent=2))
+    before = path.read_bytes()
+    result = legacy_run_cli('mark-halt', '--reason', 'stop', cwd=tmp_path, env_extra={'MISSION_LEASE_ID': ''})
+    accepted = space > sc.STATE_CAPACITY_HALT_DELTA and history_count < sc.STATE_CAPACITY_TAKEOVER_LIMIT
+    assert result.returncode == (0 if accepted else 2), result.stdout + result.stderr
+    if accepted:
+        stopped = json.loads(path.read_bytes())
+        assert stopped['halt_reason'] == 'stop' and len(stopped['lease_history']) == history_count + 1
+    else:
+        assert path.read_bytes() == before and not path.with_suffix('.json.bak').exists()
+
+
+@pytest.mark.parametrize('layout', ['v4', 'v5'])
+def test_over_capacity_halt_preserves_historical_goal_value(layout):
+    from mission_persistence.capacity_gate import check_state_capacity
+    from .test_issue933_state_capacity_verdict import _base
+    base, encoding = _base(layout)
+    fields = base if layout == 'v4' else base['extensions']
+    fields['goal_dispatch_host'] = 'x' * 129
+    encode = _canonical if layout == 'v5' else lambda d: json.dumps(d, indent=2, ensure_ascii=False).encode()
+    fields['padding'] = 'p' * (sc.STATE_LIMIT - sc.STATE_CAPACITY_HALT_DELTA - 4096 - len(encode(base)) - 40)
+    proposed = copy.deepcopy(base)
+    target = proposed if layout == 'v4' else proposed['control']
+    target.update(halt_reason='stop', loop_active=False, phase='halted')
+    if layout == 'v5':
+        proposed['extensions'].update(halt_reason='stop', loop_active=False, phase='halted')
+    assert check_state_capacity(encode(base), encode(proposed), encoding=encoding).accepted
+
+
+@pytest.mark.parametrize('layout', ['v4', 'v5'])
+@pytest.mark.parametrize('old_token,epoch,extra_mutation,keep_owner', [('bad token', '5', False, False), ('x' * 129, True, False, False), ('bad token', 1, True, False), ('bad token', 1, False, True)])
+def test_excess_takeover_halt_archives_only_the_exact_old_lease(layout, old_token, epoch, extra_mutation, keep_owner):
+    from mission_persistence.capacity_gate import check_state_capacity, CapacityWriteError
+    from .test_issue933_state_capacity_verdict import _base
+    base, encoding = _base(layout)
+    lease = base if layout == 'v4' else base['lease']
+    lease.update(lease_id=old_token, fencing_epoch=epoch, lease_expires_at='2000-01-01T00:00:00Z')
+    if keep_owner:
+        lease['owner_session_id'] = 'old owner'
+    fields = base if layout == 'v4' else base['extensions']
+    encode = _canonical if layout == 'v5' else lambda d: json.dumps(d, indent=2, ensure_ascii=False).encode()
+    fields['padding'] = 'p' * (sc.STATE_LIMIT - sc.STATE_CAPACITY_HALT_DELTA - 4096 - len(encode(base)) - 40)
+    proposed = copy.deepcopy(base)
+    target = proposed if layout == 'v4' else proposed['lease']
+    target['lease_history'].append(dict(owner_session_id=lease['owner_session_id'], lease_id=old_token,
+        fencing_epoch=int(epoch), reason='halt', at='2026-10-09T00:00:00Z'))
+    target.update(owner_session_id=lease['owner_session_id'] if keep_owner else 'new-owner', lease_id='new-token', fencing_epoch=int(epoch) + 1,
+        lease_expires_at='2099-01-01T00:00:00Z')
+    (proposed if layout == 'v4' else proposed['control']).update(halt_reason='stop', loop_active=False, phase='halted')
+    if extra_mutation:
+        (proposed if layout == 'v4' else proposed['extensions'])['unrelated'] = True
+        with pytest.raises(CapacityWriteError, match='state-capacity-exhausted'):
+            check_state_capacity(encode(base), encode(proposed), encoding=encoding)
+    else:
+        assert check_state_capacity(encode(base), encode(proposed), encoding=encoding).accepted

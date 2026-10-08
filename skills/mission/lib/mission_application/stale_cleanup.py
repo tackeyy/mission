@@ -311,3 +311,8 @@ def run_cleanup_stale(request, services):
     return CleanupStaleResult(
         rendered=json.dumps(results, indent=2, ensure_ascii=False)
     )
+
+
+def record_session_error(errors, path, error):
+    """Keep one session's capacity refusal visible while processing its peers."""
+    errors.append({"path": str(path), "error": error.code})

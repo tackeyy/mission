@@ -12,7 +12,6 @@ from .capacity_gate import (StateEncoding, check_state_capacity, validate_lease_
 def acquire_legacy_lease(state, session_id, *, reason, presented_lease_id, now,
                          new_token, fields_present, lease_fields, expiry, renewed_expiry,
                          rejected_error, decision):
-    validate_lease_token(reason)
     lease_field_count = sum(state.get(key) not in (None, "") for key in lease_fields)
     if 0 < lease_field_count < len(lease_fields):
         raise rejected_error("malformed partial session lease")
@@ -28,20 +27,16 @@ def acquire_legacy_lease(state, session_id, *, reason, presented_lease_id, now,
 
     owner = str(state["owner_session_id"])
     current_lease_id = str(state["lease_id"])
-    epoch = state["fencing_epoch"]
 
     same_owner = owner == session_id
     token_matches = presented_lease_id == current_lease_id if same_owner else False
     if same_owner and token_matches:
+        epoch = int(state["fencing_epoch"])
         state["lease_expires_at"] = renewed_expiry(
             str(state["lease_expires_at"]), now
         )
         return decision("renewed", current_lease_id, epoch)
 
-    validate_lease_token(session_id)
-    if presented_lease_id is not None:
-        validate_lease_token(presented_lease_id)
-    validate_lease_epoch(epoch)
     expires = parse_iso_datetime(str(state.get("lease_expires_at") or ""))
     if expires is not None and expires.tzinfo is None:
         expires = expires.replace(tzinfo=timezone.utc)
@@ -65,6 +60,11 @@ def acquire_legacy_lease(state, session_id, *, reason, presented_lease_id, now,
         raise rejected_error(
             f"lease held by {owner} until {state.get('lease_expires_at')} (stale fencing token)"
         )
+    epoch = int(state["fencing_epoch"])
+    if session_id != state["owner_session_id"]:
+        validate_lease_token(session_id)
+    validate_lease_token(reason)
+    validate_lease_epoch(epoch)
     new_lease_id = presented_lease_id or new_token()
     validate_lease_token(new_lease_id)
     validate_lease_epoch(epoch + 1)
@@ -82,15 +82,16 @@ def acquire_legacy_lease(state, session_id, *, reason, presented_lease_id, now,
     return decision("taken-over", new_lease_id, epoch + 1)
 
 
-def checked_legacy_state_content(path, data):
+def checked_legacy_state_content(path, data, *, replacement=False):
     validate_specialist_public_state(data)
     content = json.dumps(data, indent=2, ensure_ascii=False)
     base_bytes = path.read_bytes() if path.exists() else None
-    check_state_capacity(base_bytes, content.encode('utf-8'), encoding=StateEncoding.LEGACY_PRETTY)
+    check_state_capacity(base_bytes, content.encode('utf-8'), encoding=StateEncoding.LEGACY_PRETTY, replacement=replacement)
     return content
 
 
-def write_legacy_json(path, data, *, administrative, lease_decision, expected_identity, services):
+def prepare_legacy_json(path, data, *, administrative, lease_decision, expected_identity, services,
+                        before_publish=None, replacement=False):
     is_state = services.is_state_shape(data) or services.is_state_path(path)
     if services.is_state_shape(data):
         validate_specialist_public_state(data)
@@ -99,10 +100,25 @@ def write_legacy_json(path, data, *, administrative, lease_decision, expected_id
     if not administrative and services.is_state_shape(data):
         data['last_activity_at'] = services.now()
     if is_state:
-        content = checked_legacy_state_content(path, data)
+        content = checked_legacy_state_content(path, data, replacement=replacement)
     else:
         content = json.dumps(data, indent=2, ensure_ascii=False)
-    services.atomic_write(path, lambda f: f.write(content), expected_identity=expected_identity)
-    if isinstance(lease_decision, services.decision_type):
-        services.process_leases[str(path.resolve())] = lease_decision.lease_id
-    services.emit_lease(data, lease_decision)
+    def publish():
+        if before_publish is not None:
+            before_publish(path)
+        services.atomic_write(path, lambda f: f.write(content), expected_identity=expected_identity)
+        if isinstance(lease_decision, services.decision_type):
+            services.process_leases[str(path.resolve())] = lease_decision.lease_id
+        services.emit_lease(data, lease_decision)
+    return publish
+
+
+def write_legacy_json(path, data, *, prepare_only=False, **options):
+    publish = prepare_legacy_json(path, data, **options)
+    return publish if prepare_only else publish()
+
+
+def write_legacy_terminal(path, data, *, atomic_write, backup_state):
+    content = checked_legacy_state_content(path, data)
+    backup_state(path)
+    atomic_write(path, lambda f: f.write(content))

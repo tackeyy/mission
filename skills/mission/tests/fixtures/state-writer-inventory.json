@@ -60,9 +60,7 @@
     "backup_state:atomic_write_bytes": 1,
     "cmd_verify_provider_approval:atomic_write_bytes": 1,
     "iso_now:replace": 1,
-    "rollback_guarded_backup:atomic_write_bytes": 1,
-    "write_terminal_state:_atomic_write": 1,
-    "write_terminal_state:write": 1
+    "rollback_guarded_backup:atomic_write_bytes": 1
   },
   "lib/activity_segments.py": {
     "_parse_at:replace": 2
@@ -108,7 +106,7 @@
     "_non_template_text_length:replace": 1
   },
   "lib/mission_application/legacy_initialization.py": {
-    "initialize_legacy_v4:atomic_write_bytes": 2,
+    "initialize_legacy_v4:atomic_write_bytes": 1,
     "initialize_legacy_v4:atomic_write_text": 1,
     "initialize_legacy_v4:move": 1
   },
@@ -195,8 +193,10 @@
   },
   "lib/mission_persistence/legacy_capacity.py": {
     "acquire_legacy_lease:replace": 1,
-    "write_legacy_json:services.atomic_write": 1,
-    "write_legacy_json:write": 1
+    "publish:services.atomic_write": 1,
+    "publish:write": 1,
+    "write_legacy_terminal:atomic_write": 1,
+    "write_legacy_terminal:write": 1
   },
   "lib/mission_persistence/local_uow.py": {
     "_create_private_stage_root:open-write": 1,

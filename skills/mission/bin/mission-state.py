@@ -63,12 +63,14 @@ if str(LIB_DIR) not in sys.path:
     sys.path.insert(0, str(LIB_DIR))
 
 from mission_persistence.capacity_gate import (  # noqa: E402
-    CapacityWriteError, state_capacity_status,
+    CapacityWriteError, state_capacity_status, GOAL_DISPATCH_REASON_MAX_CHARS,
 )
 
 from mission_persistence.legacy_capacity import (  # noqa: E402
-    acquire_legacy_lease, checked_legacy_state_content, write_legacy_json,
+    acquire_legacy_lease, write_legacy_json, write_legacy_terminal,
 )
+
+from mission_application.stale_cleanup import record_session_error
 
 from mission_common import (  # noqa: E402
     HALT_CATEGORIES,
@@ -1308,7 +1310,7 @@ def _read_routing_config(path: Path, source: str, allowed_root: Path | None = No
     if allowed_root is not None and path.is_symlink():
         reason = f"routing config symlink rejected at {source}"
         print(f"WARN #355: {reason}; using inline", file=sys.stderr)
-        return {"mode": "inline", "source": source, "fallback_reason": reason}
+        return {"mode": "inline", "source": source, "fallback_reason": reason[:GOAL_DISPATCH_REASON_MAX_CHARS]}
     if allowed_root is not None:
         try:
             resolved_path = path.resolve(strict=False)
@@ -1317,11 +1319,11 @@ def _read_routing_config(path: Path, source: str, allowed_root: Path | None = No
         except ValueError:
             reason = f"routing config escapes project root at {source}"
             print(f"WARN #355: {reason}; using inline", file=sys.stderr)
-            return {"mode": "inline", "source": source, "fallback_reason": reason}
+            return {"mode": "inline", "source": source, "fallback_reason": reason[:GOAL_DISPATCH_REASON_MAX_CHARS]}
         except (OSError, RuntimeError) as exc:
             reason = f"routing config path unreadable at {source}: {exc.__class__.__name__}"
             print(f"WARN #355: {reason}; using inline", file=sys.stderr)
-            return {"mode": "inline", "source": source, "fallback_reason": reason}
+            return {"mode": "inline", "source": source, "fallback_reason": reason[:GOAL_DISPATCH_REASON_MAX_CHARS]}
     if not path.is_file():
         return None
     values: dict[str, str] = {}
@@ -1330,7 +1332,7 @@ def _read_routing_config(path: Path, source: str, allowed_root: Path | None = No
     except (OSError, UnicodeError) as exc:
         reason = f"routing config unreadable at {source}: {exc.__class__.__name__}"
         print(f"WARN #355: {reason}; using inline", file=sys.stderr)
-        return {"mode": "inline", "source": source, "fallback_reason": reason}
+        return {"mode": "inline", "source": source, "fallback_reason": reason[:GOAL_DISPATCH_REASON_MAX_CHARS]}
     for raw_line in lines:
         line = raw_line.split("#", 1)[0].strip()
         if not line:
@@ -1338,28 +1340,28 @@ def _read_routing_config(path: Path, source: str, allowed_root: Path | None = No
         if ":" not in line:
             reason = f"invalid routing config syntax at {source}"
             print(f"WARN #355: {reason}; using inline", file=sys.stderr)
-            return {"mode": "inline", "source": source, "fallback_reason": reason}
+            return {"mode": "inline", "source": source, "fallback_reason": reason[:GOAL_DISPATCH_REASON_MAX_CHARS]}
         key, raw_value = line.split(":", 1)
         key = key.strip()
         value = raw_value.strip().strip("'\"")
         if key not in {"version", "goal_dispatch"}:
             reason = f"unknown routing config key '{key}' at {source}"
             print(f"WARN #355: {reason}; using inline", file=sys.stderr)
-            return {"mode": "inline", "source": source, "fallback_reason": reason}
+            return {"mode": "inline", "source": source, "fallback_reason": reason[:GOAL_DISPATCH_REASON_MAX_CHARS]}
         if key in values:
             reason = f"duplicate routing config key '{key}' at {source}"
             print(f"WARN #355: {reason}; using inline", file=sys.stderr)
-            return {"mode": "inline", "source": source, "fallback_reason": reason}
+            return {"mode": "inline", "source": source, "fallback_reason": reason[:GOAL_DISPATCH_REASON_MAX_CHARS]}
         values[key] = value
     if values.get("version") != "1":
         reason = f"unsupported routing config version '{values.get('version')}' at {source}"
         print(f"WARN #355: {reason}; using inline", file=sys.stderr)
-        return {"mode": "inline", "source": source, "fallback_reason": reason}
+        return {"mode": "inline", "source": source, "fallback_reason": reason[:GOAL_DISPATCH_REASON_MAX_CHARS]}
     mode = values.get("goal_dispatch")
     if mode not in GOAL_DISPATCH_MODES:
         reason = f"invalid goal_dispatch '{mode}' at {source}"
         print(f"WARN #355: {reason}; using inline", file=sys.stderr)
-        return {"mode": "inline", "source": source, "fallback_reason": reason}
+        return {"mode": "inline", "source": source, "fallback_reason": reason[:GOAL_DISPATCH_REASON_MAX_CHARS]}
     return {"mode": mode, "source": source, "fallback_reason": None}
 
 
@@ -1426,12 +1428,12 @@ def _resolve_goal_dispatch(mission: str, cli_mode: str | None, cwd: Path) -> dic
                 + ", ".join(unique_values)
             )
             print(f"WARN #355: {reason}; using inline", file=sys.stderr)
-            return {"mode": "inline", "source": "mission:user-explicit", "fallback_reason": reason}
+            return {"mode": "inline", "source": "mission:user-explicit", "fallback_reason": reason[:GOAL_DISPATCH_REASON_MAX_CHARS]}
         mode = unique_values[0]
         if mode not in GOAL_DISPATCH_MODES:
             reason = f"invalid goal_dispatch '{mode}' in mission user instruction"
             print(f"WARN #355: {reason}; using inline", file=sys.stderr)
-            return {"mode": "inline", "source": "mission:user-explicit", "fallback_reason": reason}
+            return {"mode": "inline", "source": "mission:user-explicit", "fallback_reason": reason[:GOAL_DISPATCH_REASON_MAX_CHARS]}
         return {"mode": mode, "source": "mission:user-explicit", "fallback_reason": None}
     if cli_mode is not None:
         return {"mode": cli_mode, "source": "cli:--goal-dispatch", "fallback_reason": None}
@@ -1454,7 +1456,7 @@ def _goal_dispatch_route_fields(data: dict) -> dict:
         "goal_dispatch_host": host,
     }
     if fallback_reason:
-        fields["goal_dispatch_fallback_reason"] = fallback_reason
+        fields["goal_dispatch_fallback_reason"] = fallback_reason[:GOAL_DISPATCH_REASON_MAX_CHARS]
     return fields
 
 
@@ -1686,7 +1688,7 @@ def _reject_fenced_lease_for_cli(
     try:
         target_path = state_path or resolve_state_file(Path.cwd())
         _snapshot, state = _load_authoritative_state(target_path)
-    except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
+    except (CanonicalStateEncodingError, FreshReviewError):
         raise
     except (OSError, ValueError, FencedCommitError):
         pass
@@ -1745,7 +1747,10 @@ def atomic_write_json(
     administrative: bool = False,
     lease_decision: LeaseDecision | None | object = _LEASE_DECISION_UNSET,
     expected_identity=None,
-) -> None:
+    before_publish=None,
+    prepare_only=False,
+    replacement=False,
+):
     """Phase B-2: fsync + os.replace で完全な前 or 後状態を保証.
 
     #310: session state 形状の書き込みは既定で `last_activity_at` を刻む (エージェント
@@ -1755,15 +1760,18 @@ def atomic_write_json(
     上書きされ壁時計が最大 500 倍膨張した実害があるため)。
 
     """
-    write_legacy_json(
+    return write_legacy_json(
         path, data, administrative=administrative, lease_decision=lease_decision,
-        expected_identity=expected_identity, services=SimpleNamespace(
+        expected_identity=expected_identity, before_publish=before_publish,
+        prepare_only=prepare_only, replacement=replacement,
+        services=SimpleNamespace(
             is_state_shape=_is_session_state_shape, is_state_path=_is_session_state_path,
             unset=_LEASE_DECISION_UNSET, enforce_lease=_enforce_session_lease_for_write,
             now=iso_now, atomic_write=_atomic_write, decision_type=LeaseDecision,
             process_leases=_PROCESS_LEASE_IDS, emit_lease=_emit_lease_carrier,
         ),
     )
+
 
 
 def atomic_write_text(path: Path, content: str) -> None:
@@ -3131,7 +3139,7 @@ def _warn_s3_file_overlap(cwd: Path, planned_files: list[str], cur_sid: str) -> 
     for sf_other in _iter_state_files(cwd):
         try:
             other = read_session_json(sf_other)
-        except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
+        except (CanonicalStateEncodingError, FreshReviewError):
             raise
         except Exception:
             continue
@@ -4797,8 +4805,7 @@ def _commit_specialist_state_with_archive(
             _publish_staged_specialist_archive(temp_path, dst)
             temp_path = None
             published = True
-        backup_state(sf)
-        atomic_write_json(sf, data)
+        atomic_write_json(sf, data, before_publish=backup_state)
     except BaseException:
         _rollback_specialist_archive(temp_path, dst, None, published)
         raise
@@ -6510,7 +6517,7 @@ def _artifact_profile_coverage(cwd: Path, data: dict) -> dict:
     for path in _iter_state_files(cwd, include_archive=True):
         try:
             candidate = read_session_json(path)
-        except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
+        except (CanonicalStateEncodingError, FreshReviewError):
             raise
         except (OSError, UnicodeError, ValueError, TypeError):
             continue
@@ -6561,7 +6568,7 @@ def _legacy_evidence_repository(cwd: Path, sf: Path, *, stamp: bool) -> LegacyV4
 
     def write_state(data: dict) -> None:
         proposed = stamp_metadata(data, cwd) if stamp else data
-        atomic_write_json(sf, proposed, lease_decision=lease["decision"])
+        atomic_write_json(sf, proposed, lease_decision=lease["decision"], before_publish=backup_state)
 
     return _select_legacy_repository_for_cli(
         sf.stem,
@@ -6570,7 +6577,7 @@ def _legacy_evidence_repository(cwd: Path, sf: Path, *, stamp: bool) -> LegacyV4
             lock=lambda: StateLock(lock_file(cwd)),
             read_state=read_state,
             write_state=write_state,
-            backup_state=lambda: backup_state(sf),
+            backup_state=lambda: None,
             effect_publisher=_publish_evidence_effects,
             effect_context=cwd,
             aggregate_recover=aggregate.recover,
@@ -6875,7 +6882,7 @@ def _read_init_peer_state(path: Path) -> dict:
     try:
         _snapshot, document = _load_authoritative_state(path)
         return document
-    except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
+    except (CanonicalStateEncodingError, FreshReviewError):
         raise
     except (OSError, ValueError, FencedCommitError):
         return _read_legacy_json_file(path)
@@ -6954,6 +6961,7 @@ def _initialize_legacy_v4(args, *, write_state, lock_state: bool = True):
         atomic_write_json=atomic_write_json,
         permission_preflight=_permission_preflight,
         write_state=write_state,
+        capacity_writer=atomic_write_json,
         exit_init_write_failure=_exit_init_write_failure,
         exit_init_evidence_write_failure=_exit_init_evidence_write_failure,
         exit_internal_invariant=_exit_internal_invariant,
@@ -7725,7 +7733,7 @@ def _parallel_status(store: _ParallelGroupStore, group_id: str) -> tuple[Path, d
                 store.sessions_fd, name, limit=4 * 1024 * 1024
             )
             state = read_session_json(session_dir(store.cwd), name=name, source=state_content)
-        except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
+        except (CanonicalStateEncodingError, FreshReviewError):
             raise
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             raise ValueError("parallel group session state is malformed or unsafe") from exc
@@ -8113,7 +8121,7 @@ def _legacy_lifecycle_repository(
             bak.unlink(missing_ok=True)
         backup_published[0] = False
 
-    def guarded_backup() -> None:
+    def guarded_backup(_path=None) -> None:
         if not pre_admit_lease:
             backup_state(sf)
             return
@@ -8169,6 +8177,7 @@ def _legacy_lifecycle_repository(
                         administrative=administrative,
                         lease_decision=admitted_lease[0],
                         expected_identity=admitted_identity[0],
+                        before_publish=guarded_backup,
                     )
                     backup_published[0] = False
                 except BaseException:
@@ -8180,11 +8189,12 @@ def _legacy_lifecycle_repository(
                     proposed,
                     administrative=administrative,
                     lease_decision=None,
+                    before_publish=guarded_backup,
                 )
             elif administrative:
-                atomic_write_json(sf, proposed, administrative=True)
+                atomic_write_json(sf, proposed, administrative=True, before_publish=guarded_backup)
             else:
-                atomic_write_json(sf, proposed)
+                atomic_write_json(sf, proposed, before_publish=guarded_backup)
 
     selected_session_id = session_id or sf.stem
 
@@ -8202,7 +8212,7 @@ def _legacy_lifecycle_repository(
             lock=lambda: StateLock(lock_file(cwd)),
             read_state=read_state,
             write_state=write_state,
-            backup_state=guarded_backup,
+            backup_state=lambda: None,
             effect_publisher=_publish_evidence_effects,
             effect_context=cwd,
             aggregate_recover=coordinator.recover,
@@ -8624,7 +8634,7 @@ def cmd_next(args):
         snapshot, data = _load_authoritative_state(
             sf, legacy_compatibility=True
         )
-    except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
+    except (CanonicalStateEncodingError, FreshReviewError):
         raise
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -8752,7 +8762,7 @@ def _guard_resolved_root(value: Optional[str]) -> Optional[str]:
 def _guard_session_fact(sf: Path) -> GuardSessionFact:
     try:
         snapshot, _document = _load_authoritative_state(sf)
-    except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
+    except (CanonicalStateEncodingError, FreshReviewError):
         raise
     except Exception as exc:
         return GuardSessionFact(
@@ -9180,7 +9190,7 @@ def cmd_freshness(args):
         raise SystemExit(2) from exc
     try:
         snapshot, _data = _load_authoritative_state(sf)
-    except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
+    except (CanonicalStateEncodingError, FreshReviewError):
         raise
     except Exception as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
@@ -9335,7 +9345,7 @@ def cmd_codex_preflight(args):
     if state_present:
         try:
             snapshot, data = _load_authoritative_state(sf, legacy_compatibility=True)
-        except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
+        except (CanonicalStateEncodingError, FreshReviewError):
             raise
         except Exception:
             snapshot = None
@@ -9461,7 +9471,7 @@ def _permission_preflight(cwd: Path) -> dict:
         }
     try:
         _snapshot, data = _load_authoritative_state(sf)
-    except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
+    except (CanonicalStateEncodingError, FreshReviewError):
         raise
     except (OSError, ValueError, FencedCommitError):
         # Preserve the established v1-v4 schema diagnostic instead of
@@ -9469,7 +9479,7 @@ def _permission_preflight(cwd: Path) -> dict:
         try:
             legacy_candidate = _read_legacy_json_file(sf)
             _validate_schema_version(legacy_candidate)
-        except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
+        except (CanonicalStateEncodingError, FreshReviewError):
             raise
         except UnsupportedSchemaVersionError:
             raise
@@ -10303,7 +10313,7 @@ def _force_envelope_replayed(cwd: Path, envelope: dict) -> bool:
             if not isinstance(recorded, dict):
                 continue
             validated = validate_recorded_envelope(recorded)
-        except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
+        except (CanonicalStateEncodingError, FreshReviewError):
             raise
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
             # A malformed record must never become a bypass; it is not a
@@ -14651,10 +14661,8 @@ def _terminalize_state_file(
         return sampled
 
     def write_terminal_state(data: dict, *, administrative: bool = False) -> None:
-        content = checked_legacy_state_content(sf, data)
-        # Legacy janitor CAS deliberately bypasses owner-token acquisition;
-        # the state was revalidated under StateLock by the repository.
-        _atomic_write(sf, lambda f: f.write(content))
+        # Janitor has already revalidated the state under the repository lock.
+        write_legacy_terminal(sf, data, atomic_write=_atomic_write, backup_state=backup_state)
 
     _selection_snapshot, selection_state = _load_authoritative_state(
         sf,
@@ -14682,7 +14690,7 @@ def _terminalize_state_file(
             lock=lambda: StateLock(lock_file(proj)),
             read_state=lambda: read_session_json(sf),
             write_state=write_terminal_state,
-            backup_state=lambda: backup_state(sf),
+            backup_state=lambda: None,
             aggregate_recover=coordinator.recover,
             aggregate_prepare=coordinator.prepare,
             aggregate_finalize=coordinator.finalize,
@@ -14831,7 +14839,7 @@ def cmd_list(args):
                     "mission": snapshot.mission[:80],
                     "updated_at": snapshot.updated_at,
                 })
-            except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
+            except (CanonicalStateEncodingError, FreshReviewError):
                 raise
             except Exception as e:
                 results.append({"path": str(sf), "error": str(e)})
@@ -14946,7 +14954,7 @@ def cmd_lane_report(args):
                     legacy_compatibility=True,
                     allow_missing_schema_session_mismatch=True,
                 )
-            except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
+            except (CanonicalStateEncodingError, FreshReviewError):
                 raise
             except Exception as exc:
                 if is_live_session_path(sf):
@@ -15013,6 +15021,7 @@ def cmd_halt(args):
         search_roots = [Path(args.root)] if getattr(args, "root", None) else _default_search_roots()
         category = _normalize_halt_category(getattr(args, "category", None))
         halted = []
+        errors = list()
         for sf in preflight_session_paths(search_roots, _iter_state_files):
             try:
                 data = _read_legacy_json_file(sf)
@@ -15024,11 +15033,13 @@ def cmd_halt(args):
                     )
                     if changed:
                         halted.append(str(proj))
-            except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
+            except CapacityWriteError as error:
+                record_session_error(errors, sf, error)
+            except (CanonicalStateEncodingError, FreshReviewError):
                 raise
             except Exception as e:
                 print(f"WARN: skip {sf}: {e}", file=sys.stderr)
-        print(json.dumps({"ok": True, "halted": halted, "halt_category": category}))
+        print(json.dumps({"ok": True, "halted": halted, "halt_category": category, "errors": errors}))
     else:
         if getattr(args, "root", None):
             print("WARN: --root は --all と併用時のみ有効です (無視されました)", file=sys.stderr)
@@ -15091,7 +15102,7 @@ def _collect_states(
                 legacy_compatibility=True,
                 allow_missing_schema_session_mismatch=True,
             )
-        except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
+        except (CanonicalStateEncodingError, FreshReviewError):
             raise
         except UnsupportedSchemaVersionError:
             raise
@@ -15168,7 +15179,7 @@ def _collect_learning_brief_states(
             try:
                 canonical_bytes = read_state_archive_file_bytes(project_root, canonical_path)
                 canonical_state = read_session_json(canonical_path, source=canonical_bytes)
-            except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
+            except (CanonicalStateEncodingError, FreshReviewError):
                 raise
             except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
                 continue
@@ -15643,7 +15654,7 @@ def _publish_state_archive_compaction(
         canonical_bytes = read_state_archive_file_bytes(cwd, canonical_ref)
         canonical_data = read_session_json(canonical, source=canonical_bytes)
         target_bytes = read_state_archive_file_bytes(cwd, target_ref)
-    except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
+    except (CanonicalStateEncodingError, FreshReviewError):
         raise
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise WorktreeArchiveError("canonical state is unreadable") from exc

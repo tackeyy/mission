@@ -309,7 +309,7 @@ def test_next_takeover_cost_bounds_the_real_writer(owner, lease_id, epoch):
             del doc["lease_history"], old_lease["lease_history"]
             doc["lease_expires_at"] = old_lease["lease_expires_at"] = "2000-01-01T00Z"
         after = copy.deepcopy(old_lease)
-        if type(epoch) is not int or not 0 <= epoch < sc.LEASE_EPOCH_MAX:
+        if not 0 <= int(epoch) < sc.LEASE_EPOCH_MAX:
             with pytest.raises(ValueError, match="state-capacity-invariant-broken"):
                 _mission_state_module().acquire_or_verify_lease(
                     after, "9" * 128, lease_id="9" * 128, reason="9" * 128)
