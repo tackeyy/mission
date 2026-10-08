@@ -17,7 +17,6 @@ from mission_application.spawn_trampoline import decode_job
 from mission_persistence import spawn_jobs
 from scoring_provenance import build_request
 
-
 PIN = dict(entry_point="neutral", distribution="neutral-verifier", module="neutral_verifier",
            source_digest="sha256:" + "a" * 64, version="1.0", entry_point_value="neutral_verifier:verify")
 REQUEST = build_request(session_id="test", mission_id="abc12345",
@@ -26,7 +25,6 @@ REQUEST = build_request(session_id="test", mission_id="abc12345",
     approved_actor="role:owner", approved_at=dt.datetime.now(dt.timezone.utc).isoformat(),
     reason_code="user-override", event_nonce="c" * 64)
 BASE = dict(schema="mission-exec-job/1", kind="approval-verifier", result_fd=3, verifier=PIN, request=REQUEST)
-
 
 def decoder_cases():
     cases = [("decoder/base", BASE, True)]
@@ -72,7 +70,6 @@ def decoder_cases():
         add("decoder/request-" + name, lambda x, k=key, v=value: x["request"].update({k: v}))
     return cases
 
-
 def strict_cases():
     return [
         ("strict/valid-object", b'{"a":1}', True),
@@ -85,7 +82,6 @@ def strict_cases():
         ("strict/null", b"null", True),
     ]
 
-
 def frame_cases():
     return [
         ("frame/valid-object", (2).to_bytes(4, "big") + b"{}", True),
@@ -95,7 +91,6 @@ def frame_cases():
         ("frame/scalar", (3).to_bytes(4, "big") + b"123", False),
         ("frame/invalid-utf8", (1).to_bytes(4, "big") + b"\xff", False),
     ]
-
 
 def run_case(name, value, expected):
     observed = False

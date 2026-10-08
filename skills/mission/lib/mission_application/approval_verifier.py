@@ -1,4 +1,5 @@
 """Approval execution in isolated registry children or legacy callable children."""
+from __future__ import annotations
 import contextlib
 import hashlib
 import importlib.metadata

@@ -305,7 +305,7 @@ def legacy_run_cli(raw_run_cli):
 
 
 @pytest.fixture
-def prepare_approved_invocation(run_cli):
+def prepare_approved_invocation(run_cli, isolated_provider_python):
     """Prepare and host-approve a command provider for canonical invocation tests."""
     def _prepare(*, cwd, provider, iteration, phase, env_extra=None, registry=None,
                  input_file=None, json_output=False):
@@ -333,6 +333,7 @@ def prepare_approved_invocation(run_cli):
             "[mission.approval_verifiers]\ntest-entry = test_approval_provider:verify\n",
             encoding="utf-8",
         )
+        isolated_provider_python(provider_root)
         config = root / ".test-host-config" / "mission"
         config.mkdir(parents=True, exist_ok=True)
         (config / "approval-verifiers.json").write_text(json.dumps({
