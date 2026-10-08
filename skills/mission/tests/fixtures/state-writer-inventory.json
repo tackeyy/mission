@@ -1,0 +1,263 @@
+{
+  "bin/mission-migrate.py": {
+    "migrate_one:copy2": 1
+  },
+  "bin/mission-state.py": {
+    "__enter__:open-write": 3,
+    "_archive_scoring_output:write_text": 1,
+    "_atomic_write:replace": 1,
+    "_budget_pressure:replace": 2,
+    "_build_worktree_archive_staging:copy2": 1,
+    "_build_worktree_archive_staging:write_bytes": 1,
+    "_configured_execution_isolator:open-write": 1,
+    "_create_parallel_manifest:link": 1,
+    "_expired_lease_without_heartbeat:replace": 2,
+    "_guard_observed_epoch:replace": 1,
+    "_lease_now:replace": 1,
+    "_mission_started_at:replace": 1,
+    "_open_parallel_child_directory:open-write": 2,
+    "_open_publish_directory:open-write": 1,
+    "_open_review_archive_directory:open-write": 3,
+    "_parse_reviewer_windows:replace": 4,
+    "_probe_directory_write:write": 1,
+    "_probe_file_write:open-write": 1,
+    "_probe_file_write:write": 2,
+    "_publish_archive_generation:replace": 1,
+    "_publish_output_transaction:link": 1,
+    "_publish_output_transaction:replace": 1,
+    "_publish_preflight_pointer_transaction:atomic_write_bytes": 1,
+    "_publish_recovery_residue:link": 1,
+    "_publish_review_archive_transaction:link": 1,
+    "_publish_staged_specialist_archive:replace": 1,
+    "_publish_state_archive_compaction:replace": 1,
+    "_read_approval_verifier_registry:open-write": 1,
+    "_read_bounded_manual_input:open-write": 1,
+    "_read_bounded_review_evidence:replace": 1,
+    "_read_core_plan_input:open-write": 1,
+    "_read_parallel_regular_at:open-write": 1,
+    "_read_registry_input:open-write": 1,
+    "_read_regular_artifact_utf8:open-write": 1,
+    "_read_review_archive_at:open-write": 1,
+    "_read_specialist_evidence_input:open-write": 1,
+    "_renewed_lease_expiry:replace": 1,
+    "_replace_parallel_manifest:replace": 1,
+    "_restore_current_after_rejected_restore:rename": 3,
+    "_rollback_published_file:rename": 2,
+    "_rollback_published_file:replace": 1,
+    "_rollback_specialist_archive:replace": 1,
+    "_stage_specialist_archive:write": 1,
+    "_verify_restore_content_at:open-write": 1,
+    "_write_parallel_temp:open-write": 1,
+    "_write_parallel_temp:write": 1,
+    "_write_stop_guard_state:link": 1,
+    "_write_stop_guard_state:replace": 1,
+    "_write_temp_at:open-write": 1,
+    "_write_temp_at:write": 1,
+    "acquire_or_verify_lease:replace": 1,
+    "atomic_write_bytes:replace": 1,
+    "atomic_write_bytes:write": 1,
+    "atomic_write_json:_atomic_write": 1,
+    "atomic_write_json:dump": 1,
+    "atomic_write_text:_atomic_write": 1,
+    "atomic_write_text:write": 1,
+    "backup_state:atomic_write_bytes": 1,
+    "cmd_verify_provider_approval:atomic_write_bytes": 1,
+    "iso_now:replace": 1,
+    "rollback_guarded_backup:atomic_write_bytes": 1,
+    "write_terminal_state:_atomic_write": 1,
+    "write_terminal_state:dump": 1
+  },
+  "lib/activity_segments.py": {
+    "_parse_at:replace": 2
+  },
+  "lib/artifact_contract.py": {
+    "_read_relative_regular_file:open-write": 3
+  },
+  "lib/audit_findings.py": {
+    "_as_utc:replace": 1
+  },
+  "lib/budgeted_exec.py": {
+    "write_frame:write": 1
+  },
+  "lib/command_outcomes.py": {
+    "__enter__:open-write": 2,
+    "_atomic_json_at:link": 1,
+    "_atomic_json_at:open-write": 1,
+    "_atomic_json_at:replace": 1,
+    "_atomic_json_at:write": 1,
+    "_open_sidecar_directory:open-write": 3,
+    "_read_regular_at:open-write": 1
+  },
+  "lib/evidence_handoff.py": {
+    "_fsync_directory:open-write": 1,
+    "_lock_file:open-write": 1,
+    "publish:link": 1,
+    "publish:write": 1
+  },
+  "lib/integration_gate.py": {
+    "lease:open-write": 1
+  },
+  "lib/merge_queue.py": {
+    "_capture_regular_file:open-write": 1,
+    "_fsync_directory:open-write": 1,
+    "_lock_file:open-write": 1,
+    "_queue_now:replace": 2,
+    "_write_queue_unlocked:link": 1,
+    "_write_queue_unlocked:replace": 1,
+    "_write_queue_unlocked:write": 1
+  },
+  "lib/mission_application/command_provider.py": {
+    "_invoke_command_provider:copy": 1,
+    "_non_template_text_length:replace": 1
+  },
+  "lib/mission_application/legacy_initialization.py": {
+    "initialize_legacy_v4:atomic_write_bytes": 2,
+    "initialize_legacy_v4:atomic_write_text": 1,
+    "initialize_legacy_v4:move": 1
+  },
+  "lib/mission_application/verification_runner.py": {
+    "_read:open-write": 1,
+    "execute_candidate:replace": 3,
+    "execute_candidate:write_bytes": 1,
+    "materialize_candidate:write_bytes": 1
+  },
+  "lib/mission_application/verifier_policy.py": {
+    "path_unsupported:replace": 1
+  },
+  "lib/mission_common.py": {
+    "parse_iso_datetime:replace": 1,
+    "state_age_details:replace": 2,
+    "state_dedupe_rank:replace": 1
+  },
+  "lib/mission_kernel/artifact.py": {
+    "normalized_artifact_section:replace": 1
+  },
+  "lib/mission_kernel/codec_v4.py": {
+    "_aware_time:replace": 1
+  },
+  "lib/mission_kernel/fresh_review.py": {
+    "decode_request:replace": 1
+  },
+  "lib/mission_kernel/fresh_review_receipts.py": {
+    "_timestamp:replace": 1
+  },
+  "lib/mission_persistence/administrative.py": {
+    "_fsync_directory:open-write": 1,
+    "_open_directory_at:open-write": 2,
+    "_read_file_at:open-write": 1,
+    "_write_generation_file:open-write": 1,
+    "_write_generation_file:write": 1,
+    "publish_administrative_generation:open-write": 5,
+    "publish_administrative_generation:rename": 1,
+    "publish_administrative_generation:write": 1,
+    "restore_record:write_bytes": 1
+  },
+  "lib/mission_persistence/aggregate_index.py": {
+    "_acquire_inflight:open-write": 1,
+    "_atomic_publish:replace": 1,
+    "_atomic_publish:write": 1,
+    "_fsync_directory:open-write": 1,
+    "_locked:open-write": 1,
+    "_utc_text:replace": 1
+  },
+  "lib/mission_persistence/authoritative_reader.py": {
+    "dedupe_rank:replace": 1,
+    "progress_age_seconds:replace": 2
+  },
+  "lib/mission_persistence/evidence_publish_path.py": {
+    "open_evidence_publish_directory:open-write": 4
+  },
+  "lib/mission_persistence/fenced_commit.py": {
+    "_apply_projections:link": 1,
+    "_apply_projections:rename": 1,
+    "_as_utc:replace": 1,
+    "_discard_unprepared_projection_bundle:open-write": 1,
+    "_fsync_projection_directory:open-write": 1,
+    "_lock:open-write": 2,
+    "_parse_time:replace": 1,
+    "_pinned_directory:open-write": 1,
+    "_pinned_projection_target:open-write": 2,
+    "_publish_named_immutable:link": 1,
+    "_read_pinned_file:open-write": 1,
+    "_read_pinned_projection_bytes:open-write": 1,
+    "_read_projection_bytes:open-write": 1,
+    "_replace_head:replace": 1,
+    "_rollback_projections_unlocked:rename": 1,
+    "_rollforward_projections_unlocked:link": 1,
+    "_stage_persistence:stage_generation": 1,
+    "_stage_projections:open-write": 2,
+    "_write_projection_after:open-write": 1,
+    "_write_projection_after:write": 1,
+    "_write_temp:open-write": 1,
+    "_write_temp:write": 1,
+    "read_pinned_head:open-write": 1
+  },
+  "lib/mission_persistence/gc.py": {
+    "_read_regular:open-write": 1,
+    "collect_locked:replace": 1
+  },
+  "lib/mission_persistence/local_uow.py": {
+    "_create_private_stage_root:open-write": 1,
+    "_fsync_directory:open-write": 1,
+    "_open_child_directory:open-write": 1,
+    "_open_directory:open-write": 1,
+    "_pin_completed_link_result:open-write": 1,
+    "_publish_immutable_file:link": 1,
+    "_publish_immutable_file:open-write": 1,
+    "_read_expected_file_at:open-write": 1,
+    "_remove_incomplete_stage:rename": 1,
+    "_remove_validated_stage:rename": 1
+  },
+  "lib/mission_persistence/reinitialization.py": {
+    "_cleanup_reserved_assumptions:open-write": 1,
+    "_reserve_new_assumptions:open-write": 3,
+    "write_exclusive:open-write": 1,
+    "write_exclusive:write": 1
+  },
+  "lib/mission_persistence/spawn_jobs.py": {
+    "read_job:open-write": 1,
+    "write_private_file:open-write": 1,
+    "write_private_file:write": 1
+  },
+  "lib/mission_persistence/strict_reader.py": {
+    "read_stable_bytes:open-write": 1,
+    "read_stable_bytes_beneath:open-write": 3
+  },
+  "lib/pregate_cache.py": {
+    "_capture_regular_file:open-write": 1,
+    "_fsync_directory:open-write": 1,
+    "_lock_file:open-write": 1,
+    "_maybe_load_now:replace": 1,
+    "_parse_iso_utc:replace": 2,
+    "record:link": 1,
+    "record:replace": 1,
+    "record:write": 1
+  },
+  "lib/provider_eligibility.py": {
+    "_yaml_scalar:replace": 1
+  },
+  "lib/provider_preflight.py": {
+    "safe_input_snapshot:open-write": 1
+  },
+  "lib/provider_public_contract.py": {
+    "_safe_relative_path:replace": 1,
+    "_safe_source:replace": 1
+  },
+  "lib/scoring_provenance.py": {
+    "_timestamp:replace": 1,
+    "open_evidence:open-write": 1,
+    "read_score_provenance_evidence:open-write": 1,
+    "read_state_local_bytes:open-write": 2
+  },
+  "lib/state_snapshot.py": {
+    "build_snapshot_document:replace": 2,
+    "read_snapshot:replace": 1,
+    "write_snapshot:open-write": 1,
+    "write_snapshot:replace": 1,
+    "write_snapshot:write": 1
+  },
+  "lib/worktree_archive.py": {
+    "_read_generation_file:open-write": 1,
+    "open_target:open-write": 1
+  }
+}
