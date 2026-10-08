@@ -6,6 +6,7 @@ from datetime import timezone
 
 from mission_common import parse_iso_datetime
 from provider_public_contract import validate_specialist_public_state
+from .legacy_v4 import LegacyV4Repository
 from .capacity_gate import (StateEncoding, check_state_capacity, validate_lease_token, validate_lease_epoch)
 
 
@@ -122,3 +123,16 @@ def write_legacy_terminal(path, data, *, atomic_write, backup_state):
     content = checked_legacy_state_content(path, data)
     backup_state(path)
     atomic_write(path, lambda f: f.write(content))
+
+
+class DeferredBackupRepository(LegacyV4Repository):
+    """Forward save's backup intent to the checked writer's publish callback."""
+    def __init__(self, *, write_state, backup_state, **bindings):
+        pending = [False]
+        def request():
+            pending[0] = True
+        def write(data, **options):
+            callback = backup_state if pending[0] else None
+            pending[0] = False
+            write_state(data, before_publish=callback, **options)
+        super().__init__(write_state=write, backup_state=request, **bindings)

@@ -67,7 +67,7 @@ from mission_persistence.capacity_gate import (  # noqa: E402
 )
 
 from mission_persistence.legacy_capacity import (  # noqa: E402
-    acquire_legacy_lease, write_legacy_json, write_legacy_terminal,
+    acquire_legacy_lease, write_legacy_json, write_legacy_terminal, DeferredBackupRepository,
 )
 
 from mission_application.stale_cleanup import record_session_error
@@ -8155,7 +8155,7 @@ def _legacy_lifecycle_repository(
             admitted_identity[0] = loaded_identity
         return data
 
-    def write_state(data: dict, *, administrative: bool = False) -> None:
+    def write_state(data: dict, *, administrative: bool = False, before_publish=None) -> None:
         proposed = stamp_metadata(data, cwd) if stamp else data
         with _lease_write_reason(lease_reason):
             lease_field_count = sum(
@@ -8177,7 +8177,7 @@ def _legacy_lifecycle_repository(
                         administrative=administrative,
                         lease_decision=admitted_lease[0],
                         expected_identity=admitted_identity[0],
-                        before_publish=guarded_backup,
+                        before_publish=before_publish,
                     )
                     backup_published[0] = False
                 except BaseException:
@@ -8189,12 +8189,12 @@ def _legacy_lifecycle_repository(
                     proposed,
                     administrative=administrative,
                     lease_decision=None,
-                    before_publish=guarded_backup,
+                    before_publish=before_publish,
                 )
             elif administrative:
-                atomic_write_json(sf, proposed, administrative=True, before_publish=guarded_backup)
+                atomic_write_json(sf, proposed, administrative=True, before_publish=before_publish)
             else:
-                atomic_write_json(sf, proposed, before_publish=guarded_backup)
+                atomic_write_json(sf, proposed, before_publish=before_publish)
 
     selected_session_id = session_id or sf.stem
 
@@ -8208,11 +8208,11 @@ def _legacy_lifecycle_repository(
 
     def legacy_factory(format_guard):
         coordinator = aggregate_coordinator("legacy-v4")
-        return LegacyV4Repository(
+        return DeferredBackupRepository(
             lock=lambda: StateLock(lock_file(cwd)),
             read_state=read_state,
             write_state=write_state,
-            backup_state=lambda: None,
+            backup_state=guarded_backup,
             effect_publisher=_publish_evidence_effects,
             effect_context=cwd,
             aggregate_recover=coordinator.recover,
