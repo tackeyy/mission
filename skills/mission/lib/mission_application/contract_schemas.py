@@ -150,6 +150,21 @@ def contract_schema_for(contract: str) -> dict:
                           "MISSION_OPERATION_ID replays only the stored identical intent and payload",
                           "candidate_digest binds the command-ID-ordered snapshot map",
                           "prepare does not launch a runtime or satisfy the completion gate"]}
+    if contract == "fresh-review-withdraw":
+        from mission_kernel.fresh_review import WithdrawnFreshReviewRecord
+        return {"schema": "mission-contract-schema/1", "contract": contract, "closed": True,
+                "required": ["request_id"], "record_fields": list(WithdrawnFreshReviewRecord.__dataclass_fields__),
+                "rules": ["pending requests only; over capacity and strictly shrinking",
+                          "same-operation replay returns the immutable withdrawn tombstone"]}
+    if contract in ("fresh-review-run", "fresh-review-reconcile"):
+        from mission_kernel.fresh_review_receipts import LAUNCH_SCHEMA, TERMINAL_SCHEMA
+        return {"schema": "mission-contract-schema/1", "contract": contract, "closed": True,
+                "required": ["request", "adapter"], "launch_schema": LAUNCH_SCHEMA,
+                "terminal_schema": TERMINAL_SCHEMA, "terminal_outcomes": ["blocked", "abandoned-unknown"],
+                "rules": ["durable dispatch intent precedes launch",
+                          "reconcile never redispatches and requires exact host-observed child and output",
+                          "dispatch identity and current commit fence are separate",
+                          "output import, replay and completed publication are not available"]}
     if contract == "acceptance-contract-import":
         return acceptance_contract_schema()
     raise ValueError("unknown contract: {}".format(contract))
