@@ -500,7 +500,7 @@ def test_force_pass_has_no_builtin_trusted_verifier(state_dir, run_cli):
     assert "not configured" in result.stderr
 
 
-def test_force_pass_bootstraps_only_a_registered_entry_point(state_dir, run_cli, tmp_path):
+def test_force_pass_bootstraps_only_a_registered_entry_point(state_dir, run_cli, tmp_path, isolated_provider_python):
     """A fresh CLI may load a verifier only through the fixed registry + entry-point contract."""
     state = json.loads((state_dir / "sessions" / "test.json").read_text())
     state["schema_version"] = 4
@@ -534,6 +534,7 @@ def test_force_pass_bootstraps_only_a_registered_entry_point(state_dir, run_cli,
             "source_digest": "sha256:" + hashlib.sha256((package_root / "fixture_provider.py").read_bytes()).hexdigest(),
         }],
     }))
+    isolated_provider_python(package_root)
     result = run_cli(
         "mark-passes", "--force", "--reason", "bounded override", "--approved-by-user",
         "--approval-evidence-ref", "sha256:" + "a" * 64,
@@ -548,7 +549,7 @@ def test_force_pass_bootstraps_only_a_registered_entry_point(state_dir, run_cli,
 
 
 @pytest.mark.parametrize("mode", ["load-error", "callback-error", "callback-hang"])
-def test_force_pass_verifier_failures_leave_state_bytes_unchanged(state_dir, run_cli, tmp_path, mode):
+def test_force_pass_verifier_failures_leave_state_bytes_unchanged(state_dir, run_cli, tmp_path, mode, isolated_provider_python):
     """#383: provider load/callback failures are bounded and precede every state write."""
     state = json.loads((state_dir / "sessions" / "test.json").read_text())
     state["schema_version"] = 4
@@ -566,6 +567,7 @@ def test_force_pass_verifier_failures_leave_state_bytes_unchanged(state_dir, run
     (dist_info / "entry_points.txt").write_text("[mission.approval_verifiers]\nfixture-entry = fixture_provider:verify\n")
     registry = tmp_path / "host-config" / "mission"; registry.mkdir(parents=True)
     (registry / "approval-verifiers.json").write_text(json.dumps({"schema": "mission-approval-verifier-registry/2", "verifiers": [{"id": "fixture-verifier", "entry_point": "fixture-entry", "distribution": "fixture-provider", "version": "1.0", "source_digest": "sha256:" + hashlib.sha256((package_root / "fixture_provider.py").read_bytes()).hexdigest()}]}))
+    isolated_provider_python(package_root)
     before = state_path.read_bytes()
     result = run_cli("mark-passes", "--force", "--reason", "bounded override", "--approved-by-user", "--approval-evidence-ref", "sha256:" + "a" * 64, "--approved-actor", "role:owner", "--approved-at", datetime.now(timezone.utc).isoformat(), "--reason-code", "user-override", "--approval-verifier", "fixture-verifier", cwd=state_dir.parent, env_extra={"PYTHONPATH": str(package_root), "XDG_CONFIG_HOME": str(tmp_path / "host-config")})
     assert result.returncode == 2

@@ -479,7 +479,7 @@ def test_verify_approval_without_host_registered_verifier_keeps_preflight_awaiti
     assert state_path.read_bytes() == before
 
 
-def test_host_verified_receipt_runs_exact_packet_once_and_rejects_replay(run_cli, tmp_path):
+def test_host_verified_receipt_runs_exact_packet_once_and_rejects_replay(run_cli, tmp_path, isolated_provider_python):
     command_dir = tmp_path / "commands"; command_dir.mkdir()
     marker, captured = tmp_path / "provider-ran", tmp_path / "captured-packet"
     command = command_dir / "provider-command"
@@ -508,6 +508,7 @@ def test_host_verified_receipt_runs_exact_packet_once_and_rejects_replay(run_cli
     }]}), encoding="utf-8")
     env = {"PATH": f"{command_dir}{os.pathsep}{os.environ.get('PATH', '')}", "PROVIDER_MARKER": str(marker),
            "CAPTURED_PACKET": str(captured), "PYTHONPATH": str(providers), "XDG_CONFIG_HOME": str(tmp_path / "host-config")}
+    isolated_provider_python(providers)
     secret = "private-fixture-value"
     source = tmp_path / "input.txt"; source.write_text(f"TOKEN={secret}\nbrief", encoding="utf-8")
     run_cli("init", "trusted receipt", "--complexity", "Complex", cwd=tmp_path, check=True, env_extra=env)
