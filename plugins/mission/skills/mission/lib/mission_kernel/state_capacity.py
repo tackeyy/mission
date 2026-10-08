@@ -1,6 +1,5 @@
-"""E0b-2a/#936 + E0b-2b-前半/#939: pure kernel derivation of the state
-capacity reservation, plus write_kind classification from a base/proposed
-diff.
+"""E0b-2 (#936/#939/#933): pure kernel derivation and judgement of state
+capacity.
 
 - *Reservation* half (#936): Delta constants, lineage variable part,
   halt-slot/lease-takeover system share, D request projection reader,
@@ -9,9 +8,12 @@ diff.
   never the caller's say-so. See the comment above ``WriteKind`` below for
   the design (docs/design/880-repair-lineage.md L65) and its round-1/
   round-2 history.
-
-*Verdict* half (legacy-full, ``state_capacity_verdict``) is a follow-up
-module (E0b-2b-後半/#933) importing this one. No writer lives here (D2c/#918).
+- *Verdict* half (#933): legacy-full detection and ``state_capacity_verdict``
+  itself, the single gate every writer must call. It calls
+  ``classify_write_kind`` directly -- the Δ-overshoot cap an earlier draft
+  re-applied here is now that function's own job -- so this half never
+  re-derives or re-caps a write_kind it already trusts. No writer lives
+  here (D2c/#918).
 
 Pure function only: no ``os``/``pathlib``/clock/random (``datetime.
 fromisoformat`` only *parses* an already-present string, never reads the
@@ -24,6 +26,7 @@ independent of that module's shapes; only the test suite cross-checks).
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 import json
@@ -1175,3 +1178,342 @@ def classify_write_kind(
     except Exception:
         return WriteKind.NORMAL
     return WriteKind.NORMAL
+
+
+# ---------------------------------------------------------------------------
+# Legacy-full detection.
+# ---------------------------------------------------------------------------
+
+
+def _maximum_unused_operation_id(used: set) -> str:
+    """Reserve the full ID bound; the actual writer's ID is not yet known."""
+    for index in range(len(used) + 1):
+        candidate = str(index).zfill(_fresh_review.FRESH_REVIEW_ID_MAX_CHARS)
+        if candidate not in used:
+            return candidate
+
+
+def _withdraw_all_pending_len(document: Mapping, encoded_len: int, *, encode) -> int:
+    """Upper-bound length after withdrawal at the current epoch with maximum IDs.
+
+    Returns ``encoded_len`` unchanged (a conservative "no savings" estimate)
+    if the embedded projection cannot be decoded or no synthetic withdrawal
+    can be derived without colliding with an existing operation id.
+    """
+    projection = fresh_review_projection(document)
+    if projection is None:
+        return encoded_len
+    pending_ids = [
+        record.request.request_id
+        for record in projection.requests
+        if isinstance(record, FreshReviewRecord) and record.status == "pending"
+    ]
+    if not pending_ids:
+        return encoded_len
+    used_operations = {
+        (record.withdraw_operation_id if isinstance(record, WithdrawnFreshReviewRecord)
+         else record.prepare_operation_id)
+        for record in projection.requests
+    }
+    used_operations |= {
+        record.operation_id
+        for record in projection.requests
+        if isinstance(record, FreshReviewRecord) and record.operation_id is not None
+    }
+    used_operations |= {record.prepare_operation_id for record in projection.requests}
+    working = projection
+    epoch = _lease_mapping(document).get("fencing_epoch")
+    if not _lease_epoch_value_ok(epoch):
+        epoch = 1
+    for request_id in pending_ids:
+        operation_id = _maximum_unused_operation_id(used_operations)
+        used_operations.add(operation_id)
+        try:
+            working = _fresh_review.withdraw_request(
+                working, request_id=request_id, operation_id=operation_id, fencing_epoch=epoch
+            )
+        except FreshReviewError:
+            return encoded_len
+    rebuilt = dict(document)
+    projected = _fresh_review.projection_document(working)
+    if _is_v5(document):
+        extensions = dict(document.get("extensions") or {})
+        extensions["fresh_review"] = projected
+        rebuilt["extensions"] = extensions
+    else:
+        rebuilt["fresh_review"] = projected
+    return encode(rebuilt)
+
+
+def _is_legacy_full(
+    document: Mapping, encoded_len: int, *, encode
+) -> bool:
+    threshold = STATE_LIMIT - STATE_CAPACITY_HALT_DELTA
+    if encoded_len <= threshold:
+        return False
+    withdrawn_len = _withdraw_all_pending_len(document, encoded_len, encode=encode)
+    return withdrawn_len > threshold
+
+
+# ---------------------------------------------------------------------------
+# Public verdict contract.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CapacityBase:
+    document: Mapping
+    encoded_len: int
+
+
+@dataclass(frozen=True)
+class CapacityMetrics:
+    encoded_len: int
+    reserved: int
+    system_remaining: int
+    limit: int
+    headroom: int
+    excess_bytes: int
+    withdraw_candidates: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CapacityVerdict:
+    accepted: bool
+    code: Optional[str]
+    mode: str
+    write_kind: str
+    metrics: CapacityMetrics
+
+
+def _metrics(
+    document: Mapping, encoded_len: int, *, encoding: "StateEncoding" = None
+) -> CapacityMetrics:
+    reserved = residual_reservation(document, encoding=encoding)
+    remaining = system_remaining(document)
+    limit = STATE_LIMIT
+    budget = limit - remaining
+    headroom = max(0, budget - (encoded_len + reserved))
+    excess = max(0, (encoded_len + reserved) - budget)
+    return CapacityMetrics(
+        encoded_len=encoded_len,
+        reserved=reserved,
+        system_remaining=remaining,
+        limit=limit,
+        headroom=headroom,
+        excess_bytes=excess,
+        withdraw_candidates=pending_withdraw_candidates(document),
+    )
+
+
+def _rejected(
+    document: Mapping, encoded_len: int, *, code: str, mode: str, write_kind: WriteKind,
+    encoding: "StateEncoding" = None,
+) -> CapacityVerdict:
+    return CapacityVerdict(
+        accepted=False, code=code, mode=mode, write_kind=write_kind.value,
+        metrics=_metrics(document, encoded_len, encoding=encoding),
+    )
+
+
+def _accepted(
+    document: Mapping, encoded_len: int, *, mode: str, write_kind: WriteKind,
+    encoding: "StateEncoding" = None,
+) -> CapacityVerdict:
+    return CapacityVerdict(
+        accepted=True, code=None, mode=mode, write_kind=write_kind.value,
+        metrics=_metrics(document, encoded_len, encoding=encoding),
+    )
+
+
+def _encode_for(document: Mapping, *, encoding: "StateEncoding") -> int:
+    # Branch on ``encoding`` *before* computing anything: a v4 legacy
+    # document may contain non-finite floats (NaN/Infinity) that
+    # ``json.dumps`` tolerates (``allow_nan`` defaults to True) but the
+    # canonical codec's strict decoder rejects. Computing the canonical
+    # length unconditionally here used to raise out of the legacy-full
+    # probe even when only the legacy-pretty length was ever needed.
+    if encoding is StateEncoding.CANONICAL:
+        return len(encode_json_value(freeze_json_value(document)))
+    return len(json.dumps(document, indent=2, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+
+
+
+def state_capacity_verdict(
+    base: Optional[CapacityBase],
+    proposed: Mapping,
+    encoded_len: int,
+    *,
+    encoding: StateEncoding,
+) -> CapacityVerdict:
+    """The single capacity gate every writer must call before persisting.
+
+    ``base`` is ``None`` at genesis. ``proposed`` is the JSON document that
+    will be written; ``encoded_len`` is its already-computed encoded length
+    (canonical or legacy-pretty, per ``encoding`` -- this function does not
+    re-encode ``proposed`` itself).
+    """
+    if encoded_len > STATE_LIMIT:
+        write_kind = classify_write_kind(
+            base.document if base is not None else None, proposed, encoding=encoding,
+        )
+        return _rejected(
+            proposed, encoded_len, code="state-capacity-exhausted",
+            mode="excess", write_kind=write_kind, encoding=encoding,
+        )
+
+    if base is None:
+        if satisfies_capacity(proposed, encoded_len, encoding=encoding):
+            return _accepted(
+                proposed, encoded_len, mode="normal", write_kind=WriteKind.GENESIS,
+                encoding=encoding,
+            )
+        return _rejected(
+            proposed, encoded_len, code="state-capacity-exhausted",
+            mode="normal", write_kind=WriteKind.GENESIS, encoding=encoding,
+        )
+
+    base_document = base.document
+    base_over_capacity = is_over_capacity(base_document, base.encoded_len, encoding=encoding)
+    write_kind = classify_write_kind(base_document, proposed, encoding=encoding)
+
+    def encode_for(document: Mapping) -> int:
+        return _encode_for(document, encoding=encoding)
+
+    if base_over_capacity:
+        threshold = STATE_LIMIT - STATE_CAPACITY_HALT_DELTA
+        # Recover from the concrete withdrawal plus maximum IDs for remaining pending records.
+        if base.encoded_len > threshold and (
+            encoded_len < base.encoded_len and _is_legacy_full(proposed, encoded_len, encode=encode_for)
+            if write_kind is WriteKind.WITHDRAW
+            else _is_legacy_full(base_document, base.encoded_len, encode=encode_for)
+        ):
+            return _rejected(
+                proposed, encoded_len, code="state-capacity-legacy-full",
+                mode="legacy-full", write_kind=write_kind, encoding=encoding,
+            )
+
+    proposed_history_len = lease_history_length(proposed)
+    base_history_len = lease_history_length(base_document)
+    if proposed_history_len > base_history_len and base_history_len >= STATE_CAPACITY_TAKEOVER_LIMIT:
+        return _rejected(
+            proposed, encoded_len, code="state-capacity-exhausted",
+            mode="normal", write_kind=write_kind, encoding=encoding,
+        )
+
+    if write_kind is WriteKind.WITHDRAW:
+        if not base_over_capacity:
+            return _rejected(
+                proposed, encoded_len, code="state-capacity-withdraw-not-needed",
+                mode="normal", write_kind=write_kind, encoding=encoding,
+            )
+        if encoded_len >= base.encoded_len:
+            return _rejected(
+                proposed, encoded_len, code="state-capacity-invariant-broken",
+                mode="excess" if base_over_capacity else "normal", write_kind=write_kind,
+                encoding=encoding,
+            )
+        return _accepted(proposed, encoded_len, mode="excess", write_kind=write_kind, encoding=encoding)
+
+    if base_over_capacity:
+        threshold = (
+            STATE_LIMIT if write_kind is WriteKind.STOP_HALT
+            else STATE_LIMIT - STATE_CAPACITY_HALT_DELTA
+        )
+        if write_kind in (WriteKind.STOP_HALT, WriteKind.STOP_TAKEOVER, WriteKind.STOP_SLOT):
+            if encoded_len <= threshold:
+                return _accepted(
+                    proposed, encoded_len, mode="excess", write_kind=write_kind, encoding=encoding,
+                )
+            return _rejected(
+                proposed, encoded_len, code="state-capacity-exhausted",
+                mode="excess", write_kind=write_kind, encoding=encoding,
+            )
+        return _rejected(
+            proposed, encoded_len, code="state-capacity-exhausted",
+            mode="excess", write_kind=write_kind, encoding=encoding,
+        )
+
+    # 判定の順序 8 (LEGACY_PRETTY): v4 has no writer past ``pending``, so any
+    # D-stage advance is rejected outright (v4 D items reserve 0; see
+    # ``residual_reservation``).
+    if encoding is StateEncoding.LEGACY_PRETTY and _advances_a_d_stage(base_document, proposed):
+        return _rejected(
+            proposed, encoded_len, code="state-capacity-exhausted",
+            mode="normal", write_kind=write_kind, encoding=encoding,
+        )
+
+    if satisfies_capacity(proposed, encoded_len, encoding=encoding):
+        return _accepted(proposed, encoded_len, mode="normal", write_kind=write_kind, encoding=encoding)
+
+    if _diff_is_record_status_advance(base_document, proposed):
+        return _rejected(
+            proposed, encoded_len, code="state-capacity-invariant-broken",
+            mode="normal", write_kind=write_kind, encoding=encoding,
+        )
+    return _rejected(
+        proposed, encoded_len, code="state-capacity-exhausted",
+        mode="normal", write_kind=write_kind, encoding=encoding,
+    )
+
+
+def _advances_a_d_stage(base_document: Mapping, proposed: Mapping) -> bool:
+    """True when an *existing* D request moved past ``pending`` (a brand
+    new ``pending`` request appended at the end -- prepare / 受付 -- is not
+    an advance; it never existed before).
+
+    Fails closed (treats it as an advance, so the caller rejects) when
+    either side's embedded projection cannot be decoded: an undecodable
+    ``base`` means this function has no way to know whether something
+    already present advanced, and returning ``False`` there would let a
+    v4/LEGACY_PRETTY write through 判定の順序 8's unconditional-rejection
+    gate on the strength of a check that could not actually run.
+    """
+    base_projection = fresh_review_projection(base_document)
+    if base_projection is None:
+        return True
+    proposed_projection = fresh_review_projection(proposed)
+    if proposed_projection is None:
+        return True
+    base_requests = base_projection.requests
+    proposed_requests = proposed_projection.requests
+    if len(proposed_requests) < len(base_requests):
+        return True  # A deletion can hide another record's advance; fail closed.
+    for before, after in zip(base_requests, proposed_requests):
+        if isinstance(before, FreshReviewRecord) and isinstance(after, FreshReviewRecord):
+            if before.status != after.status:
+                return True
+        elif before != after:
+            return True
+    for appended in proposed_requests[len(base_requests):]:
+        if not (isinstance(appended, FreshReviewRecord) and appended.status == "pending"):
+            return True
+    return False
+
+
+def _diff_is_record_status_advance(base_document: Mapping, proposed: Mapping) -> bool:
+    """True when the only semantic difference is a record's status moving
+    forward (pending -> reserved -> consumed -> terminal), used to decide
+    whether an over-budget normal mutation is an invariant failure (a
+    pinned Δ turned out too small) rather than an ordinary rejection.
+    """
+    base_projection = fresh_review_projection(base_document)
+    proposed_projection = fresh_review_projection(proposed)
+    if base_projection is None or proposed_projection is None:
+        return False
+    if len(base_projection.requests) != len(proposed_projection.requests):
+        return False
+    _ADVANCE_ORDER = {"pending": 0, "reserved": 1, "consumed": 2}
+    advanced = False
+    for before, after in zip(base_projection.requests, proposed_projection.requests):
+        if before == after:
+            continue
+        if not (isinstance(before, FreshReviewRecord) and isinstance(after, FreshReviewRecord)):
+            return False
+        before_rank = _ADVANCE_ORDER.get(before.status)
+        after_rank = _ADVANCE_ORDER.get(after.status)
+        if before_rank is None or after_rank is None or after_rank <= before_rank:
+            return False
+        advanced = True
+    return advanced
+
