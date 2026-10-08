@@ -964,8 +964,10 @@ def _raw_document_carries_budget_ledger(text: str) -> bool:
     top = json.loads(text, object_pairs_hook=_JsonPairs)
     if not isinstance(top, _JsonPairs):
         return False
-    # Same predicate as decode_projection / decode_ledger (``== 5`` also matches 5.0).
-    if not any(key == "schema_version" and value == 5 for key, value in top):
+    # The collapsed document keeps the last schema_version; use it with the same
+    # predicate as decode_projection / decode_ledger (``== 5`` also matches 5.0).
+    versions = [value for key, value in top if key == "schema_version"]
+    if not versions or versions[-1] != 5:
         return any(key == "budget_ledger" for key, _ in top)
     return any(key == "budget_ledger" for key, _ in top) or any(
         key == "extensions" and isinstance(value, _JsonPairs)

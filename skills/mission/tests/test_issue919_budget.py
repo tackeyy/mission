@@ -382,6 +382,10 @@ def test_closeout_margin_exhausts_only_without_an_open_final_reservation():
     ('{"schema_version":5e0,"extensions":{"budget_ledger":{},"budget_minutes":30},"extensions":{}}', True),
     # A shadowed duplicate top-level ledger.
     ('{"schema_version":4,"budget_ledger":{},"budget_ledger":null}', True),
+    # The last schema_version decides the placement, as in the collapsed document.
+    ('{"schema_version":5.0,"schema_version":4,"mission":"x","phase":"planning","phase":"executing",'
+     '"extensions":{"budget_ledger":1}}', False),
+    ('{"schema_version":4,"schema_version":5,"extensions":{"budget_ledger":{}},"extensions":{}}', True),
     # v4 extensions.budget_ledger is user data; legacy duplicate tolerance stays.
     ('{"schema_version":4,"mission":"x","phase":"planning","phase":"executing","extensions":{"budget_ledger":1}}', False),
 ))
