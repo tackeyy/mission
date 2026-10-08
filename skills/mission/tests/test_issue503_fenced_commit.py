@@ -423,7 +423,15 @@ def test_expired_lease_without_presented_token_generates_fenced_takeover(
     assert token_generation_calls[0] == 16
 
 
-def test_preliminary_domain_rejection_leaves_public_bytes_identical(tmp_path):
+def test_admission_leaves_public_bytes_identical(tmp_path):
+    """``begin()`` admission alone must not touch the public repository bytes.
+
+    This exercises only admission (``begin()``); it does not run a domain
+    rejection. Typed domain rejection with full public-byte invariance is
+    covered separately by
+    ``test_execute_decides_after_pending_lease_and_rejection_publishes_nothing``
+    in test_issue511_p1_repository_binding.py.
+    """
     local, repository, _clock, _state_path, _state_bytes, _result = _commit_cli_init(tmp_path)
     before = _public_bytes(repository)
 
@@ -1115,21 +1123,6 @@ def test_clock_failure_before_prepare_discards_private_stage(tmp_path):
     assert _public_bytes(repository) == public_before
     assert not list((repository / "transactions" / "prepared").glob("*.json"))
     assert not prepared.staged.root.exists()
-
-
-def test_p1_exposes_typed_stage_and_keeps_raw_bytes_private(tmp_path):
-    """P1 moves U2's non-public raw staging invariant to the typed boundary.
-
-    Public ``stage`` accepts only ``is_sealed_transition`` output and
-    canonically re-derives that transition from the admitted state and command;
-    raw bytes remain confined to ``_stage_persistence``.
-    """
-    from mission_persistence.fenced_commit import LocalFencedRepository
-
-    local = LocalFencedRepository(tmp_path / "repository" / ".mission-state")
-
-    assert callable(local.stage)
-    assert callable(local._stage_persistence)
 
 
 def test_u2_private_persistence_seam_is_not_exported_from_package_root():
