@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from importlib.metadata import EntryPoint
 from pathlib import Path
 import re
 import sys
@@ -24,11 +25,12 @@ def decode_job(raw):
         raise ValueError('invalid exec job')
     pin = job['verifier']
     patterns = {'entry_point': r'[a-z][a-z0-9-]{0,63}', 'distribution': r'[a-z0-9][a-z0-9._-]{0,127}',
-                'module': r'[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*',
+                'module': r'[\w.]+',
                 'source_digest': r'sha256:[0-9a-f]{64}', 'version': r'.{1,128}',
-                'entry_point_value': r'[A-Za-z_][A-Za-z0-9_.]*:[A-Za-z_][A-Za-z0-9_.]*(?:\s*\[[A-Za-z0-9_, .-]+\])?'}
+                'entry_point_value': EntryPoint.pattern.pattern}
     if (not isinstance(pin, dict) or set(pin) != set(patterns)
-            or any(not isinstance(pin[key], str) or not re.fullmatch(pattern, pin[key]) for key, pattern in patterns.items())):
+            or any(not isinstance(pin[key], str) or not re.fullmatch(pattern, pin[key]) for key, pattern in patterns.items())
+            or not all(part.isidentifier() for part in pin['module'].split('.'))):
         raise ValueError('invalid verifier pin')
     request = job['request']
     if not isinstance(request, dict):

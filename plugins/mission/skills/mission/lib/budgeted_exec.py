@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import json
+import errno
 import contextlib
 import math
 import os
 from pathlib import Path
 import selectors
+import select
 import signal
 import struct
 import subprocess
@@ -19,17 +21,43 @@ FRAME_LIMIT = 64 * 1024
 _UNREAPED_CHILDREN = []  # retain ownership if the OS cannot confirm leader exit
 
 
+def _has_waitid():
+    return all(hasattr(os, name) for name in ('waitid', 'WEXITED', 'WNOWAIT', 'WNOHANG', 'P_PID'))
+
+
+def _has_kqueue():
+    return sys.platform == 'darwin' and all(hasattr(select, name) for name in
+        ('kqueue', 'kevent', 'KQ_FILTER_PROC', 'KQ_NOTE_EXIT', 'KQ_EV_ADD', 'KQ_EV_ERROR'))
+
+
 def spawn_exec(argv, *, pass_fds=(), stdin=subprocess.DEVNULL,
                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=None):
     """No Python pre-exec callbacks or caller-supplied session options."""
-    if not all(hasattr(os, name) for name in ('waitid', 'WNOWAIT', 'WNOHANG', 'P_PID')):
+    if not (_has_waitid() or _has_kqueue()):
         raise ValueError('budget-deadline-unenforceable')
     return subprocess.Popen(argv, start_new_session=True, close_fds=True,
                             pass_fds=pass_fds, stdin=stdin, stdout=stdout, stderr=stderr, cwd=cwd)
 
 
 def observe_exit(pid):
-    return os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is not None
+    if _has_waitid():
+        return os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is not None
+    if not _has_kqueue():
+        raise ValueError('budget-deadline-unenforceable')
+    # Owned, unreaped children cannot reuse their PID. Darwin returns ESRCH
+    # when exit wins registration; otherwise NOTE_EXIT observes without reap.
+    # Never poll/wait Popen here; the leader must pin its group until cleanup.
+    with contextlib.closing(select.kqueue()) as queue:
+        change = select.kevent(pid, filter=select.KQ_FILTER_PROC,
+                               flags=select.KQ_EV_ADD, fflags=select.KQ_NOTE_EXIT)
+        events = queue.control([change], 1, 0)
+        for event in events:
+            if event.flags & select.KQ_EV_ERROR:
+                if event.data == errno.ESRCH:
+                    return True
+                raise OSError(event.data, 'process exit observation failed')
+        return any(event.ident == pid and event.filter == select.KQ_FILTER_PROC
+                   and event.fflags & select.KQ_NOTE_EXIT for event in events)
 
 
 def _signal_group(pid, number):
@@ -54,19 +82,29 @@ def _group_absent(pid):
 
 def cleanup_group(child, *, term_grace=.2, kill_wait=.2, timed_out=False, exit_probe=observe_exit, reap=None):
     """Leader remains owned until SIGKILL. Failure to confirm returns False."""
+    def exited():
+        try:
+            return exit_probe(child.pid)
+        except OSError:
+            return False  # observation failure must not prevent group SIGKILL
     if timed_out:
         _signal_group(child.pid, signal.SIGTERM)
         end = time.monotonic() + term_grace
-        while time.monotonic() < end and not exit_probe(child.pid):
+        while time.monotonic() < end and not exited():
             time.sleep(min(.01, max(0, end - time.monotonic())))
     _signal_group(child.pid, signal.SIGKILL)
     end = time.monotonic() + kill_wait
-    while not exit_probe(child.pid):
+    while not exited():
         if time.monotonic() >= end:
             _UNREAPED_CHILDREN.append(child)
             return False
         time.sleep(min(.01, max(0, end - time.monotonic())))
-    (reap if reap is not None else lambda: child.wait(timeout=0))()  # after killpg
+    try:
+        # NOTE_EXIT can arrive just before waitpid becomes ready on Darwin.
+        (reap if reap is not None else lambda: child.wait(timeout=max(0, end - time.monotonic())))()
+    except subprocess.TimeoutExpired:
+        _UNREAPED_CHILDREN.append(child)
+        return False
     while not _group_absent(child.pid):
         if time.monotonic() >= end:
             return False

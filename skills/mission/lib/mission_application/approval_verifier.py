@@ -21,6 +21,9 @@ from budgeted_exec import cleanup_group, read_frame, run_job, write_frame
 
 ENTRY_POINT_GROUP = 'mission.approval_verifiers'
 
+def valid_module_name(name):
+    return isinstance(name, str) and all(part.isidentifier() for part in name.split('.'))
+
 
 def invoke_registered(verifier, request):
     discovered = importlib.metadata.entry_points()
@@ -30,7 +33,7 @@ def invoke_registered(verifier, request):
     if len(matches) != 1:
         raise ValueError("approval verifier entry point is not installed")
     entry_point = matches[0]
-    attached_distribution = entry_point.dist
+    attached_distribution = getattr(entry_point, 'dist', None)
     distribution = attached_distribution
     if distribution is None:
         distribution = importlib.metadata.distribution(

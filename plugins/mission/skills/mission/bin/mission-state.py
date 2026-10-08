@@ -10273,7 +10273,7 @@ def _configured_approval_entry_point(cwd: Path, verifier_name: str):
         raise ValueError("approval verifier entry point is not installed")
     entry_point = matches[0]
     try:
-        attached_distribution = entry_point.dist
+        attached_distribution = getattr(entry_point, "dist", None)
         distribution = attached_distribution
         if distribution is None:
             distribution = importlib.metadata.distribution(
@@ -10306,8 +10306,9 @@ def _configured_approval_entry_point(cwd: Path, verifier_name: str):
         configured_item,
         group=_APPROVAL_VERIFIER_ENTRY_POINT_GROUP,
     )
+    from mission_application.approval_verifier import valid_module_name
     module_name = getattr(entry_point, "module", "")
-    if not isinstance(module_name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", module_name):
+    if not valid_module_name(module_name):
         raise ValueError("approval verifier entry point is invalid")
     module_spec = importlib.util.find_spec(module_name)
     origin = getattr(module_spec, "origin", None)
