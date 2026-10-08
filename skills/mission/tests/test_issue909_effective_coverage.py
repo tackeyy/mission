@@ -300,3 +300,13 @@ def test_equal_priority_partial_failures_use_sorted_criterion_identifiers():
     for criteria in (('AC1', 'AC2'), ('AC2', 'AC1')):
         result = judge_fresh_review(rows, criteria, bindings(rows))
         assert (result.reason_code, result.request_id) == ('acceptance-fresh-review-pending', 'request-3')
+
+
+def test_criterion_only_stale_failure_precedes_whole_nonindependent_failure():
+    from mission_kernel.fresh_review_coverage import judge_fresh_review
+    whole = attempt(independent=False)
+    partial = attempt('running', number=2, criteria=('AC2',), stale=True)
+    rows = (whole, partial)
+    decision = judge_fresh_review(rows, ('AC1', 'AC2'), bindings(rows))
+    assert decision.reason_code == 'acceptance-fresh-review-stale'
+    assert decision.request_id == 'request-2'

@@ -15,7 +15,7 @@ from .budget import (
     Settlement, SystemRecovery, Telemetry, active_seconds, child_deadlines,
     deadlines, exhaustion, observe_clock, reserve_erosion_sec,
     _int, _text,
-    _digest, ledger_document, INT_MAX,
+    _digest, _entry, ledger_document, INT_MAX,
 )
 
 
@@ -40,10 +40,11 @@ class CapacityEvidence:
     reservation_delta: int
 
     def permits(self, reserved_bytes: int) -> bool:
+        from .state_capacity import BUDGET_SETTLEMENT_ROW_DELTA
         return (type(self.headroom) is int and type(self.reservation_delta) is int
                 and self.headroom >= 0 and self.reservation_delta >= 0
                 and type(reserved_bytes) is int and reserved_bytes >= 0
-                and self.headroom >= self.reservation_delta + reserved_bytes)
+                and self.headroom >= self.reservation_delta + BUDGET_SETTLEMENT_ROW_DELTA + reserved_bytes)
 
 
 def _reject(code, ledger=None, at=None):
@@ -130,7 +131,10 @@ def _settled_operation_replay(ledger, entry, target, operation_id, fencing_epoch
 
 def admit(ledger, state, at, *, entry, target, operation_id, fencing_epoch,
           policy_timeout, reserved_bytes, candidate_digest, fallback_reason=None, capacity=None):
-    """Return an immutable reservation or a reason; do not mutate state."""
+    """Reserve kernel settlement bytes plus caller-supplied terminal reserved_bytes.
+
+    Entry-specific terminal minima are enforced by callers (F2a).
+    """
     if ledger.policy is None:
         return _reject('policy-absent')
     try:
@@ -138,8 +142,7 @@ def admit(ledger, state, at, *, entry, target, operation_id, fencing_epoch,
         # callers.  A regressed clock is rejected without producing a record.
         ledger = with_clock(ledger, at, active=ledger.clock.opened_at is not None)
         ledger = expire_reservations(ledger, at)
-        if capacity is not None and (not isinstance(capacity, CapacityEvidence) or not capacity.permits(reserved_bytes)):
-            return _reject('state-capacity-exhausted', ledger, at)
+        _entry(entry)
         _text(target)
         _text(operation_id)
         _int(fencing_epoch, 1)
@@ -149,10 +152,10 @@ def admit(ledger, state, at, *, entry, target, operation_id, fencing_epoch,
         if entry == 'system-recover':
             recovery = ledger.stop_slots.system_recovery
             if recovery.reservation is not None:
-                return _reject('recovery-open')
+                return _reject('recovery-open', ledger, at)
             held_class = _recovery_target(ledger, target)
             if held_class is None:
-                return _reject('recovery-target-missing')
+                return _reject('recovery-target-missing', ledger, at)
             normal_refused = exhaustion(ledger, at) is not None
             if not normal_refused:
                 if held_class == 'repair' and (ledger.stop_slots.final_latch is not None or at >= deadlines(ledger, at).repair):
@@ -164,6 +167,8 @@ def admit(ledger, state, at, *, entry, target, operation_id, fencing_epoch,
                         normal_refused = True
             if not normal_refused:
                 return _reject('system-recovery-not-fallback', ledger, at)
+            if capacity is not None and (not isinstance(capacity, CapacityEvidence) or not capacity.permits(reserved_bytes)):
+                return _reject('state-capacity-exhausted', ledger, at)
             child, settle_by, seconds = child_deadlines(ledger, at, entry, 'final', policy_timeout)
             row = DispatchReservation(_reservation_id(entry, target, operation_id, fencing_epoch,
                 recovery.reservation_count + 1), entry, 'final', target, operation_id, fencing_epoch,
@@ -178,12 +183,14 @@ def admit(ledger, state, at, *, entry, target, operation_id, fencing_epoch,
             return _reject('operation-replay-unverifiable', ledger, at)
         if settled_replay is not None:
             return Admission(None, ledger, replay=True, saved_settlement=settled_replay)
+        if capacity is not None and (not isinstance(capacity, CapacityEvidence) or not capacity.permits(reserved_bytes)):
+            return _reject('state-capacity-exhausted', ledger, at)
         if exhaustion(ledger, at) is not None and entry != 'system-recover':
             return _reject('exhausted', ledger, at)
         if entry == 'recover':
             budget = _recovery_target(ledger, target)
             if budget is None:
-                return _reject('recovery-target-missing')
+                return _reject('recovery-target-missing', ledger, at)
         else:
             budget = budget_class(entry, state, ledger, at)
         if isinstance(budget, Refusal):
@@ -202,12 +209,14 @@ def admit(ledger, state, at, *, entry, target, operation_id, fencing_epoch,
         return Admission(DispatchReservation(_reservation_id(entry, target, operation_id, fencing_epoch, ordinal),
             entry, budget, target, operation_id, fencing_epoch, at, child, settle, seconds, reserved_bytes), ledger)
     except BudgetError as exc:
-        return Refusal('budget-' + str(exc).removeprefix('budget-'), ledger)
+        return _reject(str(exc).removeprefix('budget-'), ledger, at)
 
 
 def expire_reservations(ledger, at):
     """Conservatively charge overdue unknown work; known kill holds stay open."""
-    for row in tuple(ledger.reservations):
+    recovery = ledger.stop_slots.system_recovery.reservation
+    rows = (*ledger.reservations, recovery) if recovery is not None else ledger.reservations
+    for row in rows:
         if row.settle_by >= at:
             continue
         known = next((item for item in ledger.settlements if item.reservation_id == row.reservation_id), None)
@@ -241,6 +250,18 @@ def reserve(ledger, admission):
     charges = list(ledger.phase_charges)
     charges[index] = replace(charge, reservation_count=charge.reservation_count + 1, open_count=charge.open_count + 1)
     return replace(ledger, reservations=(*ledger.reservations, row), phase_charges=tuple(charges))
+
+
+def _retain_settlement(ledger, record):
+    # At most eight dispatches plus one system recovery can be held. Pin their
+    # kill charges until confirmation; use the rest of the 32 slots for history.
+    rows = [s for s in ledger.settlements if s.reservation_id != record.reservation_id] + [record]
+    recovery = ledger.stop_slots.system_recovery.reservation
+    opened = {r.reservation_id for r in (*ledger.reservations, recovery) if r is not None}
+    while len(rows) > 32:
+        del rows[next(i for i, s in enumerate(rows)
+                      if s.outcome != 'kill-unconfirmed' or s.reservation_id not in opened)]
+    return tuple(rows)
 
 
 def settle(ledger, at, *, reservation_id, outcome, elapsed_sec, candidate_digest, result_digest,
@@ -303,21 +324,17 @@ def settle(ledger, at, *, reservation_id, outcome, elapsed_sec, candidate_digest
             index = PHASES.index(row.budget_class)
             charge = charges[index]
             charges[index] = replace(charge, charged_sec=charge.charged_sec + charged)
-            return replace(ledger, phase_charges=tuple(charges), settlements=(*ledger.settlements[-31:], record))
+            return replace(ledger, phase_charges=tuple(charges), settlements=_retain_settlement(ledger, record))
         recovery = ledger.stop_slots.system_recovery
         slots = replace(ledger.stop_slots, system_recovery=SystemRecovery(
             recovery.used_sec + charged, recovery.reservation_count, row))
-        return replace(ledger, phase_charges=tuple(charges), settlements=(*ledger.settlements[-31:], record),
+        return replace(ledger, phase_charges=tuple(charges), settlements=_retain_settlement(ledger, record),
                        stop_slots=slots)
     if row.entry == 'system-recover':
         recovery = ledger.stop_slots.system_recovery
         slots = replace(ledger.stop_slots, system_recovery=SystemRecovery(
             recovery.used_sec + (0 if prior_settlement is not None else charged), recovery.reservation_count, None))
-        settlements = tuple(record if item.reservation_id == reservation_id else item
-                            for item in ledger.settlements)
-        if prior_settlement is None:
-            settlements = (*settlements[-31:], record)
-        return replace(ledger, settlements=settlements, stop_slots=slots)
+        return replace(ledger, settlements=_retain_settlement(ledger, record), stop_slots=slots)
     index = PHASES.index(row.budget_class)
     charges = list(ledger.phase_charges)
     charge = charges[index]
@@ -330,12 +347,8 @@ def settle(ledger, at, *, reservation_id, outcome, elapsed_sec, candidate_digest
     slots = ledger.stop_slots
     if row.budget_class == 'final' and outcome == 'settled' and completed and slots.final_latch is not None and at >= row.reserved_at:
         slots = replace(slots, final_run=FinalRun(row.reservation_id, at))
-    settlements = tuple(record if item.reservation_id == reservation_id else item
-                        for item in ledger.settlements)
-    if prior_settlement is None:
-        settlements = (*settlements[-31:], record)
     return replace(ledger, reservations=tuple(r for r in ledger.reservations if r.reservation_id != reservation_id),
-                   phase_charges=tuple(charges), settlements=settlements, progress=tuple(progress),
+                   phase_charges=tuple(charges), settlements=_retain_settlement(ledger, record), progress=tuple(progress),
                    stop_slots=slots)
 
 

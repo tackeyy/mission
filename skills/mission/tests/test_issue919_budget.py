@@ -366,3 +366,78 @@ def test_policy_integers_are_bounded(key, maximum):
     if key.startswith('max_') or key == 'no_progress_limit':
         wire[key] = maximum
         assert getattr(decode_policy(wire), key) == maximum
+
+
+@pytest.mark.parametrize('schema', (4, 5))
+def test_direct_session_read_rejects_duplicate_keys_in_a_budget_document(tmp_path, schema):
+    import json
+    from mission_kernel.budget import decode_policy, default_policy_document, new_ledger, ledger_document
+    from mission_kernel.errors import MissionStateDecodeError
+    from mission_persistence.authoritative_reader import read_session_json
+    ledger = json.dumps(ledger_document(new_ledger(decode_policy(default_policy_document(1800)), '2026-01-01T00:00:00Z')))
+    if schema == 4:
+        source = '{"schema_version": 4, "budget_minutes": 1, "budget_minutes": 30, "budget_ledger": %s}' % ledger
+    else:
+        source = ('{"schema_version": 5, "extensions": {"budget_minutes": 1, "budget_minutes": 30, '
+                  '"budget_ledger": %s}}' % ledger)
+    path = tmp_path / 'state.json'
+    path.write_text(source)
+    with pytest.raises(MissionStateDecodeError, match='duplicate-json-key'):
+        read_session_json(path)
+    # Without a ledger the historical legacy tolerance is unchanged.
+    path.write_text('{"schema_version": 4, "phase": "planning", "phase": "executing"}')
+    assert read_session_json(path)['phase'] == 'executing'
+
+
+def test_ledger_placement_and_time_digits_are_closed():
+    from mission_kernel.budget import BudgetError, decode_ledger, decode_policy, default_policy_document, new_ledger, ledger_document
+    wire = ledger_document(new_ledger(decode_policy(default_policy_document(1800)), '2026-01-01T00:00:00Z'))
+    with pytest.raises(BudgetError, match='budget-ledger-location-invalid'):
+        decode_ledger({'schema_version': 5, 'budget_minutes': 30, 'budget_ledger': wire, 'extensions': {}})
+    # A v5 document without extensions has no ledger, like the fresh-review projection.
+    assert decode_ledger({'schema_version': 5, 'mission': 'x'}).policy is None
+    with pytest.raises(BudgetError, match='budget-ledger-shape-invalid'):
+        decode_ledger({'schema_version': 5, 'extensions': []})
+    wire['clock']['last_observed_at'] = '٢٠٢٦-01-01T00:00:00Z'
+    with pytest.raises(BudgetError):
+        decode_ledger({'budget_minutes': 30, 'budget_ledger': wire})
+
+
+def test_closeout_margin_exhausts_only_without_an_open_final_reservation():
+    from dataclasses import replace
+    from mission_kernel.budget import DispatchReservation, decode_policy, default_policy_document, exhaustion, new_ledger
+    ledger = new_ledger(decode_policy(default_policy_document(1800)), '2026-01-01T00:00:00Z')
+    at = '2026-01-01T00:29:45Z'  # inside the 30 s closeout margin, before the overall deadline
+    assert exhaustion(ledger, at).cause == 'closeout-margin'
+    final = DispatchReservation('reservation:1', 'verification-run', 'final', 'command:1', 'op:1', 1,
+                                '2026-01-01T00:29:40Z', '2026-01-01T00:29:50Z', '2026-01-01T00:29:58Z', 18, 0)
+    opened = replace(ledger, reservations=(final,))
+    result = exhaustion(opened, at)
+    assert result is None or result.cause != 'closeout-margin'
+
+
+@pytest.mark.parametrize('source, rejected', (
+    # The ledger sits in a shadowed duplicate extensions object.
+    ('{"schema_version":5,"extensions":{"budget_minutes":30,"budget_ledger":{}},"extensions":{}}', True),
+    # The same with a non-integer v5 spelling and a ledger that is not the last key.
+    ('{"schema_version":5.0,"extensions":{"budget_ledger":{},"budget_minutes":30},"extensions":{}}', True),
+    ('{"schema_version":5e0,"extensions":{"budget_ledger":{},"budget_minutes":30},"extensions":{}}', True),
+    # A shadowed duplicate top-level ledger.
+    ('{"schema_version":4,"budget_ledger":{},"budget_ledger":null}', True),
+    # The last schema_version decides the placement, as in the collapsed document.
+    ('{"schema_version":5.0,"schema_version":4,"mission":"x","phase":"planning","phase":"executing",'
+     '"extensions":{"budget_ledger":1}}', False),
+    ('{"schema_version":4,"schema_version":5,"extensions":{"budget_ledger":{}},"extensions":{}}', True),
+    # v4 extensions.budget_ledger is user data; legacy duplicate tolerance stays.
+    ('{"schema_version":4,"mission":"x","phase":"planning","phase":"executing","extensions":{"budget_ledger":1}}', False),
+))
+def test_budget_duplicate_detection_uses_the_uncollapsed_document(tmp_path, source, rejected):
+    from mission_kernel.errors import MissionStateDecodeError
+    from mission_persistence.authoritative_reader import read_session_json
+    path = tmp_path / 'state.json'
+    path.write_text(source)
+    if rejected:
+        with pytest.raises(MissionStateDecodeError, match='duplicate-json-key'):
+            read_session_json(path)
+    else:
+        assert read_session_json(path)['phase'] == 'executing'

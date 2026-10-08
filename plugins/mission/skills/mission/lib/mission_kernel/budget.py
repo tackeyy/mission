@@ -35,7 +35,7 @@ POLICY_COUNT_MAXIMA = MappingProxyType({'max_concurrent_dispatches': 8, 'max_dis
 POLICY_SECONDS_MAX = 86400
 _ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z')
 _DIGEST = re.compile(r'sha256:[0-9a-f]{64}\Z')
-_TIME = re.compile(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z')
+_TIME = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z')
 
 
 class BudgetError(CanonicalStateEncodingError):
@@ -427,7 +427,7 @@ def decode_ledger(document, *, embedded=False):
     if not embedded and document.get('schema_version') == 5:
         if 'budget_ledger' in document:
             _fail('ledger-location-invalid')
-        raw = document.get('extensions')
+        raw = document.get('extensions', {})
         if type(raw) is not dict:
             _fail('ledger-shape-invalid')
     if 'budget_ledger' not in raw:

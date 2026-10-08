@@ -48,6 +48,10 @@ from .commands import (
     RecordVerificationReceipt,
     ImportAcceptanceContract,
     PrepareFreshReview,
+    BeginFreshReviewDispatch,
+    WithdrawFreshReviewRequest,
+    RecordFreshReviewLaunch,
+    CommitFreshReviewResult,
     RejectExecutorHandoff,
     AbortExecutorHandoff,
     HandoffAbortReason,
@@ -105,7 +109,7 @@ from .model import (
     TerminalOutcome,
 )
 from .budget import BudgetError, Settlement, decode_ledger, ledger_document
-from .budget_decisions import (Admission, admit, completion_rejection, enter_final, record_exhaustion,
+from .budget_decisions import (Admission, admit, completion_rejection, enter_final, expire_reservations, record_exhaustion,
     reserve, settle, stop, with_clock)
 
 
@@ -200,7 +204,7 @@ def _observe_budget(state: MissionState, at: str, *, active: bool | None = None)
         if active is None:
             ledger = record_exhaustion(ledger, at)
         else:
-            ledger = record_exhaustion(with_clock(ledger, at, active=active), at)
+            ledger = record_exhaustion(expire_reservations(with_clock(ledger, at, active=active), at), at)
     except BudgetError as exc:
         raise _Rejected(str(exc)) from exc
     return _with_budget(state, ledger)
@@ -218,7 +222,7 @@ def _prepare_budget_admission(state: MissionState, command: ReserveDispatchBudge
     if state.control.loop_active is not True:
         raise _Rejected('budget-loop-inactive')
     try:
-        observed = with_clock(state.budget, command.at, active=state.control.loop_active)
+        observed = expire_reservations(with_clock(state.budget, command.at, active=state.control.loop_active), command.at)
         if observed.stop_slots.final_latch is None:
             from .budget import deadlines
             if command.at >= deadlines(observed, command.at).repair:
@@ -231,7 +235,7 @@ def _prepare_budget_admission(state: MissionState, command: ReserveDispatchBudge
     # actual persisted document and F's bounded reservation row delta.
     try:
         from .codec_v4 import project_legacy_document
-        from .state_capacity import BUDGET_RESERVATION_ROW_DELTA, StateEncoding, state_capacity_verdict
+        from .state_capacity import BUDGET_RESERVATION_ROW_DELTA, BUDGET_SETTLEMENT_ROW_DELTA, StateEncoding, state_capacity_verdict
         if state.schema_origin.value == 'v5':
             from .codec_v5 import encode_v5_state
             from .guidance import GuidanceFacts
@@ -249,10 +253,10 @@ def _prepare_budget_admission(state: MissionState, command: ReserveDispatchBudge
             encoding = StateEncoding.LEGACY_PRETTY
         verdict = state_capacity_verdict(None, payload, encoded, encoding=encoding)
         from .budget_decisions import CapacityEvidence
-        held = sum(row.reserved_bytes for row in observed.reservations)
+        held = sum(row.reserved_bytes + BUDGET_SETTLEMENT_ROW_DELTA for row in observed.reservations)
         recovery = observed.stop_slots.system_recovery.reservation
         if recovery is not None:
-            held += recovery.reserved_bytes
+            held += recovery.reserved_bytes + BUDGET_SETTLEMENT_ROW_DELTA
         capacity = CapacityEvidence(max(0, verdict.metrics.headroom - held), BUDGET_RESERVATION_ROW_DELTA)
     except _Rejected:
         raise
@@ -273,7 +277,7 @@ def _reserve_budget(state: MissionState, raw_command: object) -> Transition:
         raise _Rejected(admission.reason)
     try:
         ledger = reserve(observed, admission)
-        ledger = record_exhaustion(ledger, command.at)
+        ledger = record_exhaustion(expire_reservations(ledger, command.at), command.at)
     except BudgetError as exc:
         raise _Rejected(str(exc)) from exc
     if admission.replay:
@@ -312,7 +316,7 @@ def _settle_budget(state: MissionState, raw_command: object) -> Transition:
             outcome=command.outcome, elapsed_sec=command.elapsed_sec, candidate_digest=command.candidate_digest,
             result_digest=command.result_digest, tool_calls=command.tool_calls, replays=command.replays,
             output_bytes=command.output_bytes, completed=command.completed)
-        ledger = record_exhaustion(ledger, command.at)
+        ledger = record_exhaustion(expire_reservations(ledger, command.at), command.at)
     except BudgetError as exc:
         raise _Rejected(str(exc)) from exc
     return Transition(_with_budget(state, ledger), (KernelEvent('budget-dispatch-settled'),))
@@ -324,7 +328,7 @@ def _enter_final_budget(state: MissionState, raw_command: object) -> Transition:
     if state.budget.policy is None:
         raise _Rejected('budget-policy-absent')
     try:
-        ledger = enter_final(with_clock(state.budget, command.at, active=state.control.loop_active), command.at, command.reason)
+        ledger = enter_final(expire_reservations(with_clock(state.budget, command.at, active=state.control.loop_active), command.at), command.at, command.reason)
     except BudgetError as exc:
         raise _Rejected(str(exc)) from exc
     return Transition(_with_budget(state, ledger), (KernelEvent('budget-final-entered'),))
@@ -336,7 +340,7 @@ def _budget_stop(state: MissionState, raw_command: object) -> Transition:
     if state.budget.policy is None:
         raise _Rejected('budget-policy-absent')
     try:
-        ledger = stop(with_clock(state.budget, command.at, active=False), command.at, command.scope, command.reason_code)
+        ledger = stop(expire_reservations(with_clock(state.budget, command.at, active=False), command.at), command.at, command.scope, command.reason_code)
     except BudgetError as exc:
         raise _Rejected(str(exc)) from exc
     control = _active_control(state)
@@ -1737,6 +1741,16 @@ def _prepare_fresh_review(state: MissionState, command: object) -> Transition:
     return Transition(next_state, (KernelEvent("fresh-review-prepared"),))
 
 
+def _fresh_review_dispatch(state: MissionState, command: object) -> Transition:
+    from .fresh_review_dispatch import dispatch_state
+    from .fresh_review import FreshReviewError
+    try:
+        next_state = dispatch_state(state, command)
+    except FreshReviewError as rejected:
+        raise _Rejected(rejected.code)
+    return Transition(next_state, (KernelEvent("fresh-review-dispatch-recorded"),))
+
+
 def _generate_claims_ledger(state: MissionState, raw_command: object) -> Transition:
     command = raw_command
     assert isinstance(command, GenerateClaimsLedger)
@@ -2349,6 +2363,18 @@ TRANSITION_TABLE = build_transition_table(
             _prepare_fresh_review,
         ),
         TransitionRule(
+            "fresh-review-run", BeginFreshReviewDispatch, _command_type_guard(BeginFreshReviewDispatch), _fresh_review_dispatch,
+        ),
+        TransitionRule(
+            "fresh-review-launch", RecordFreshReviewLaunch, _command_type_guard(RecordFreshReviewLaunch), _fresh_review_dispatch,
+        ),
+        TransitionRule(
+            "fresh-review-withdraw", WithdrawFreshReviewRequest, _command_type_guard(WithdrawFreshReviewRequest), _fresh_review_dispatch,
+        ),
+        TransitionRule(
+            "fresh-review-result", CommitFreshReviewResult, _command_type_guard(CommitFreshReviewResult), _fresh_review_dispatch,
+        ),
+        TransitionRule(
             "acceptance-contract-import",
             ImportAcceptanceContract,
             _command_type_guard(ImportAcceptanceContract),
@@ -2570,7 +2596,8 @@ def bind_transition_effects(
         claims = (command.artifact_effect, command.export_effect)
     elif isinstance(command, (UpdateProgress, GenerateContextManifest, GenerateClaimsLedger)):
         claims = (command.effect,)
-    elif isinstance(command, (ClearProgress, RecordVerification, RecordVerificationReceipt, ImportAcceptanceContract)):
+    elif isinstance(command, (ClearProgress, RecordVerification, RecordVerificationReceipt, ImportAcceptanceContract,
+                              BeginFreshReviewDispatch, RecordFreshReviewLaunch, CommitFreshReviewResult, WithdrawFreshReviewRequest)):
         claims = ()
     if claims is not None and (
         len(effects) != len(claims)

@@ -403,7 +403,8 @@ def test_stage_delta_matches_the_measured_breakdown(stage):
     """Each stage Delta must equal the real growth from an
     accepted-but-not-yet-advanced record to the E0a-pinned maximum shape
     for that stage -- including ``operation_id``/``intent_digest``/
-    ``payload_digest`` going from null to their maximum identifiers and
+    ``payload_digest`` going from null to their maximum identifiers, plus the
+    bounded launch writer ``launch_operation_id``, and
     ``status`` advancing to its longest value for dispatch, not merely
     the ``dispatch``/``running``/``terminal_receipt``/``result`` payload
     -- plus the declared slack, exactly (not merely ``<=``, so a mutation
@@ -416,7 +417,7 @@ def test_stage_delta_matches_the_measured_breakdown(stage):
         maximal = _fresh_review_record_doc(
             operation_id="o" * 128, intent_digest="sha256:" + "0" * 64,
             payload_digest="sha256:" + "0" * 64, status="dispatch-unknown",
-            dispatch=maximum_intent(), running=maximum_running(),
+            dispatch=maximum_intent(), running=maximum_running(), launch_operation_id="l" * 128,
         )
         slack, delta_const = _DISPATCH_STAGE_SLACK, sc.FRESH_REVIEW_DISPATCH_STAGE_DELTA
     elif stage == "consume":
