@@ -11,7 +11,7 @@ def launch_document():
                 fencing_epoch=2, adapter_registration_digest=ADAPTER,
                 parent_identity='parent', child_identity='child', context_identity='context',
                 context_mode='fresh', received_input_digest=request.input_digest,
-                started_at='2026-01-01T00:00:00+00:00', enforced_tools=[],
+                started_at='2026-01-01T00:00:00.000000Z', enforced_tools=[],
                 enforced_budget={key: getattr(request, key) for key in (
                     'wall_time_sec', 'max_tool_calls', 'max_replays', 'max_output_bytes', 'max_packet_bytes')})
 
@@ -40,7 +40,7 @@ def terminal_document(outcome='completed', *, launched=True, output=True):
                                         'abandoned-unknown': 'child-unobservable'}[outcome],
                 candidate_digest=_pure_projection().requests[0].request.candidate_digest,
                 budget_used=dict(wall_time_sec=1, tool_calls=0, replays=0, output_bytes=19),
-                ended_at='2026-01-01T00:00:01+00:00')
+                ended_at='2026-01-01T00:00:01.000000Z')
     if outcome in ('completed', 'failed') or outcome == 'abandoned-unknown' and launched:
         from mission_kernel.fresh_review import canonical_digest
         base.update(launch_receipt=launch_document(), launch_digest=canonical_digest(launch_document()))
@@ -208,7 +208,7 @@ def test_outcome_reasons_are_closed_and_scoped_to_the_variant():
     # The terminal set is independently specified rather than copied from production.
     allowed = {
         'completed': ['none'],
-        'failed': ['child-failed', 'output-invalid', 'budget-exceeded', 'binding-mismatch', 'timeout', 'interrupted'],
+        'failed': ['output-over-import-limit', 'child-failed', 'output-invalid', 'budget-exceeded', 'binding-mismatch', 'timeout', 'interrupted'],
         'blocked': ['launch-unavailable', 'input-too-large', 'registration-mismatch', 'identity-unobservable',
                     'input-unobservable', 'capability-unenforceable', 'launch-invalid', 'binding-mismatch'],
         'abandoned-unknown': ['child-unobservable', 'output-unobservable', 'interrupted'],
@@ -324,19 +324,22 @@ def test_failed_receipt_keeps_empty_output_bytes_as_diagnostic_evidence():
 def test_completed_output_reference_obeys_enforced_byte_limit(excess):
     from mission_kernel.fresh_review_receipts import decode_terminal_receipt
     raw = terminal_document()
-    raw['output_ref']['size'] = raw['launch_receipt']['enforced_budget']['max_output_bytes'] + excess
+    from mission_kernel.fresh_review import canonical_digest
+    raw['launch_receipt']['enforced_budget']['max_output_bytes'] = 100
+    raw['launch_digest'] = canonical_digest(raw['launch_receipt'])
+    raw['output_ref']['size'] = 100 + excess
     if excess:
         with pytest.raises(ValueError, match='^fresh-review-budget-exceeded$'):
             decode_terminal_receipt(raw)
     else:
-        assert decode_terminal_receipt(raw).output_ref.size == 262144
+        assert decode_terminal_receipt(raw).output_ref.size == 100
 
 
 @pytest.mark.parametrize('outcome', ['completed', 'failed', 'abandoned-unknown'])
 def test_terminal_cannot_end_before_its_launch(outcome):
     from mission_kernel.fresh_review_receipts import decode_terminal_receipt
     raw = terminal_document(outcome)
-    raw['ended_at'] = '2025-12-31T23:59:59+00:00'
+    raw['ended_at'] = '2025-12-31T23:59:59.000000Z'
     with pytest.raises(ValueError, match='^fresh-review-timestamp-order-invalid$'):
         decode_terminal_receipt(raw)
 
@@ -425,24 +428,6 @@ def test_nested_null_reasons_are_exact(path, code):
 def test_delayed_terminal_publication_does_not_extend_measured_child_wall_time():
     from mission_kernel.fresh_review_receipts import decode_terminal_receipt
     raw = terminal_document()
-    raw['ended_at'] = '2026-01-01T00:10:00+00:00'
+    raw['ended_at'] = '2026-01-01T00:10:00.000000Z'
     raw['budget_used']['wall_time_sec'] = 300
     assert decode_terminal_receipt(raw).outcome == 'completed'
-
-
-@pytest.mark.parametrize('outcome', ['completed', 'failed', 'abandoned-unknown'])
-@pytest.mark.parametrize('ended,accepted', [
-    ('2026-01-01T00:00:00+00:00', True),
-    ('2025-12-31T19:00:01-05:00', True),
-    ('2026-01-01T09:00:00+09:00', True),
-    ('2026-01-01T01:00:00+02:00', False),
-])
-def test_terminal_timestamps_compare_instants_and_allow_zero_duration(outcome, ended, accepted):
-    from mission_kernel.fresh_review_receipts import decode_terminal_receipt
-    raw = terminal_document(outcome)
-    raw['ended_at'] = ended
-    if accepted:
-        assert decode_terminal_receipt(raw).ended_at == ended
-    else:
-        with pytest.raises(ValueError, match='^fresh-review-timestamp-order-invalid$'):
-            decode_terminal_receipt(raw)

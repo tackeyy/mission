@@ -44,6 +44,7 @@ from .commands import (
     ImportAcceptanceContract,
     PrepareFreshReview,
     BeginFreshReviewDispatch,
+    WithdrawFreshReviewRequest,
     RecordFreshReviewLaunch,
     CommitFreshReviewResult,
     RejectExecutorHandoff,
@@ -2123,6 +2124,9 @@ TRANSITION_TABLE = build_transition_table(
             "fresh-review-launch", RecordFreshReviewLaunch, _command_type_guard(RecordFreshReviewLaunch), _fresh_review_dispatch,
         ),
         TransitionRule(
+            "fresh-review-withdraw", WithdrawFreshReviewRequest, _command_type_guard(WithdrawFreshReviewRequest), _fresh_review_dispatch,
+        ),
+        TransitionRule(
             "fresh-review-result", CommitFreshReviewResult, _command_type_guard(CommitFreshReviewResult), _fresh_review_dispatch,
         ),
         TransitionRule(
@@ -2318,7 +2322,7 @@ def bind_transition_effects(
     elif isinstance(command, (UpdateProgress, GenerateContextManifest, GenerateClaimsLedger)):
         claims = (command.effect,)
     elif isinstance(command, (ClearProgress, RecordVerification, RecordVerificationReceipt, ImportAcceptanceContract,
-                              BeginFreshReviewDispatch, RecordFreshReviewLaunch, CommitFreshReviewResult)):
+                              BeginFreshReviewDispatch, RecordFreshReviewLaunch, CommitFreshReviewResult, WithdrawFreshReviewRequest)):
         claims = ()
     if claims is not None and (
         len(effects) != len(claims)

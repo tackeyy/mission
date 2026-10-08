@@ -1,0 +1,1536 @@
+"""E0b-2 (#936/#939/#933): pure kernel derivation and judgement of state
+capacity.
+
+- *Reservation* half (#936): Delta constants, lineage variable part,
+  halt-slot/lease-takeover system share, D request projection reader,
+  ``satisfies_capacity``/``is_over_capacity``.
+- *write_kind classification* half (#939/#940): ``classify_write_kind``,
+  never the caller's say-so. See the comment above ``WriteKind`` below for
+  the design (docs/design/880-repair-lineage.md L65) and its round-1/
+  round-2 history.
+- *Verdict* half (#933): legacy-full detection and ``state_capacity_verdict``
+  itself, the single gate every writer must call. It calls
+  ``classify_write_kind`` directly -- the Δ-overshoot cap an earlier draft
+  re-applied here is now that function's own job -- so this half never
+  re-derives or re-caps a write_kind it already trusts. No writer lives
+  here (D2c/#918).
+
+Pure function only: no ``os``/``pathlib``/clock/random (``datetime.
+fromisoformat`` only *parses* an already-present string, never reads the
+clock). Kernel deps: :mod:`mission_kernel.json_codec`,
+:mod:`mission_kernel.fresh_review`, and (write_kind half only)
+``_TIMING_ACTIVITY_FIELDS`` from :mod:`mission_kernel.transitions`.
+Deliberately does *not* import :mod:`mission_kernel.fresh_review_receipts`
+(D terminal shapes are duplicated as closed literals, import-light, pinned
+independent of that module's shapes; only the test suite cross-checks).
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
+import json
+from typing import Mapping, Optional
+
+from .identifiers import TOKEN128_RE
+from .json_codec import STATE_LIMIT, encode_json_value, freeze_json_value
+from . import fresh_review as _fresh_review
+from .fresh_review import (
+    FreshReviewError,
+    FreshReviewProjection,
+    FreshReviewRecord,
+    WithdrawnFreshReviewRecord,
+)
+#: The real halt writers' own timing/activity compatibility fields
+#: (``MarkHalt``'s entry in ``_COMPATIBILITY_FIELDS``, minus the metadata
+#: fields a halt never actually touches). Imported, not hand-copied, so
+#: this allow-list cannot drift from the kernel's own authoritative set;
+#: ``bin/mission-state.py``'s ``_transition_phase`` writes a v4 subset of
+#: the same three field *names* (``phase_started_at``/
+#: ``phase_durations_sec``/``resume_target_phase`` -- a test pins that a
+#: real v4 halt's written keys stay inside this set, since ``transitions``
+#: cannot be imported from ``bin``).
+from .transitions import _TIMING_ACTIVITY_FIELDS
+
+
+# ---------------------------------------------------------------------------
+# Shared state encoding (also used by the verdict half, #933).
+# ---------------------------------------------------------------------------
+
+
+class StateEncoding(str, Enum):
+    CANONICAL = "canonical"
+    LEGACY_PRETTY = "legacy-pretty"
+
+
+# ---------------------------------------------------------------------------
+# #918 obligations: writer-side enforcement this module assumes but does
+# not perform itself. Each bound has its own constant/docstring; this is
+# the one place listing them together.
+#
+# 1. Raw, stored halt reason (v5's ``legacy_reason``, mirrored into both
+#    ``control.halt_reason`` and ``extensions.halt_reason``; v4's flat
+#    ``halt_reason``) <= ``HALT_REASON_MAX_CHARS`` (2048). Today only the
+#    semantic, stripped ``reason`` is capped (``_reason``); the raw value
+#    can be padded past that cap (``.strip()`` treats C0 control chars
+#    U+001C-U+001F as whitespace) while still matching ``reason``.
+# 2. Each ``goal_dispatch_*`` field <= ``GOAL_DISPATCH_REASON_MAX_CHARS``
+#    (128). Unenforced today.
+# 3. A lease's ``owner_session_id``/``lease_id``/history ``reason`` must
+#    match ``LEASE_TOKEN_PATTERN``. v5's fenced-commit admission enforces
+#    this for *new* tokens; v4's ``acquire_or_verify_lease`` and both
+#    decoders (for already-persisted state) do not.
+# 4. A lease's ``fencing_epoch`` must be an ``int`` in
+#    ``[0, LEASE_EPOCH_MAX]``. v5's decoder only checks ``positive``; v4's
+#    writer normalizes via ``int(value)`` (``acquire_or_verify_lease``,
+#    around L1287) without capping the result.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# System share: halt + lease-takeover reservation (design doc "検査式").
+# ---------------------------------------------------------------------------
+
+#: One sixteenth of the physical state limit, reserved so that a session can
+#: always still record a halt and a bounded number of lease takeovers even
+#: while D request reservations consume the rest of the budget.
+STATE_CAPACITY_SYSTEM_SHARE = STATE_LIMIT // 16
+
+#: Kernel-level upper bound for the *raw, stored* halt reason: v5's
+#: ``legacy_reason`` (mirrored into both ``control.halt_reason`` *and*
+#: ``extensions.halt_reason``, see ``STATE_CAPACITY_HALT_DELTA``) and v4's
+#: flat ``halt_reason``.
+#:
+#: Not already enforced. ``transitions.py``'s ``_reason`` caps only the
+#: *semantic* ``reason`` (post-``.strip()``) at 2048 chars; ``_mark_halt``
+#: separately requires ``legacy_reason.strip() == reason``, but Python's
+#: ``.strip()`` treats the C0 control characters U+001C-U+001F as
+#: whitespace, so ``legacy_reason = "\x1c" * N + reason`` still strips
+#: down to ``reason`` for any ``N``. Measured:
+#: ``decide(MarkHalt(HaltCategory("other"), "\x01"*2048,
+#: legacy_reason="\x1c"*20000+"\x01"*2048))`` is accepted and grows the
+#: encoded v5 state by 264,635 bytes -- ~10x ``STATE_CAPACITY_HALT_DELTA``.
+#: This constant is measured *assuming* a future writer caps the raw
+#: stored reason at this many (control-character-worst-cased) characters;
+#: enforcing that for every caller is #918's job (see "#918 obligations").
+HALT_REASON_MAX_CHARS = 2048
+
+#: Conservative upper bound for each ``goal_dispatch_*`` string a
+#: ``routed-goal`` halt may add (``goal_dispatch_effective`` /
+#: ``goal_dispatch_host`` / ``goal_dispatch_fallback_reason``, written by
+#: ``bin/mission-state.py``'s ``_goal_dispatch_route_fields``). Like
+#: ``HALT_REASON_MAX_CHARS``, unenforced and charset-unrestricted today, so
+#: ``STATE_CAPACITY_HALT_DELTA`` worst-cases each with control characters.
+GOAL_DISPATCH_REASON_MAX_CHARS = 128
+
+#: ``[A-Za-z0-9][A-Za-z0-9._:-]{0,127}`` -- :mod:`mission_kernel.identifiers`'s
+#: ``TOKEN128_RE`` (shared with v5's fenced-commit admission,
+#: mission_persistence/fenced_commit.py's ``_token``/``_session_id``) and
+#: :mod:`mission_kernel.fresh_review`'s ``_ID``. A lease takeover's
+#: identifier fields -- ``owner_session_id``, ``lease_id``, a
+#: ``lease_history`` entry's ``reason`` -- are bound by this ASCII
+#: pattern, not merely a character count: v4's ``acquire_or_verify_lease``
+#: does not restrict a new token's charset, and 128 control characters
+#: (6-byte ``\uXXXX`` escapes) encode far larger than 128
+#: pattern-conformant ASCII characters (1 byte each) -- measured 1,830
+#: bytes vs. the 550-byte pattern-conformant worst case
+#: ``STATE_CAPACITY_TAKEOVER_DELTA`` is measured from. Enforcing this for
+#: every new token is #918's job; see ``next_takeover_cost`` for how an
+#: already-non-conformant persisted lease is handled until then.
+LEASE_TOKEN_PATTERN = TOKEN128_RE
+
+#: The pattern's own maximum length (``1 + 127``).
+LEASE_TOKEN_MAX_CHARS = 128
+
+#: 0 <= fencing_epoch <= this. v5's decoder only checks ``positive`` (see
+#: codec_v5.py's ``_decode_lease``), so a pre-existing state's epoch is not
+#: upper-bounded at decode time either; see ``next_takeover_cost``.
+LEASE_EPOCH_MAX = 2 ** 63 - 1
+
+#: Maximum encode-length increase of a single halt / mark-halt write.
+#: Measured (see test_issue936_state_capacity_reservation.py::
+#: test_halt_delta_is_bounded_by_the_real_production_writers) across
+#: *every* ``HaltCategory``, taking the max, by driving:
+#:
+#: - v4: the real ``_transition_phase`` (closes the open activity segment,
+#:   accrues ``phase_durations_sec``, sets ``resume_target_phase`` for
+#:   ``stale``) plus, for ``awaiting-approval``,
+#:   ``activity_segments.record_activity_event`` (opens and lets the
+#:   terminal close re-close a bare second segment).
+#: - v5: the same before/after v4 documents fed through the real
+#:   ``mission_application.compatibility.compatibility_delta`` (what
+#:   ``lifecycle.mark_halt`` itself uses) into
+#:   ``mission_kernel.transitions.decide`` with a real ``MarkHalt``
+#:   command (``legacy_reason``/``at`` set), encoded via
+#:   ``encode_v5_snapshot``.
+#:
+#: ``legacy_reason`` and each ``goal_dispatch_*`` field are worst-cased at
+#: their character bound (``HALT_REASON_MAX_CHARS`` /
+#: ``GOAL_DISPATCH_REASON_MAX_CHARS``) filled with the control character
+#: ``"\x01"`` (6 bytes as ``\u0001`` under both encoders, vs. 1 for ASCII).
+#:
+#: v5 dominates v4: ``_mark_halt`` mirrors ``legacy_reason`` into both
+#: ``control.halt_reason`` and (via ``_apply_compatibility``'s
+#: ``dedicated_upserts``, transitions.py L597-605) ``extensions.halt_reason``,
+#: paying for ``HALT_REASON_MAX_CHARS`` of control characters twice.
+#: ``routed-goal`` dominates every other category (activity close plus the
+#: three ``goal_dispatch_*`` fields).
+#:
+#: Measured maxima across all 9 categories: v5 canonical 28,118 bytes
+#: (``routed-goal``), v4 legacy-pretty 15,049 bytes (``routed-goal``). The
+#: literal below adds a documented 500-byte slack for fields this
+#: measurement may not bundle (a future ``HaltCategory`` branch, a
+#: compatibility field, or #918's own validation-rejection paths).
+STATE_CAPACITY_HALT_DELTA = 28618
+
+#: Maximum encode-length increase of a single lease takeover: one
+#: ``lease_history`` entry at maximum field lengths, from a *current*
+#: lease already at maximum, ``LEASE_TOKEN_PATTERN``-conformant field
+#: lengths (``owner_session_id``/``lease_id``/history ``reason`` at
+#: ``LEASE_TOKEN_MAX_CHARS``, ``fencing_epoch`` at ``LEASE_EPOCH_MAX``) to
+#: a *new* lease also at maximum, pattern-conformant lengths. Measured by
+#: driving v4's real ``acquire_or_verify_lease`` and v5's field values
+#: reshaped under the ``"lease"`` wrapper key (``admit_lease``'s
+#: "taken-over" branch writes identical field names/values; the wrapper
+#: key does not change the delta since it exists in both base and
+#: proposed) on an expired base lease with a foreign presented token.
+#:
+#: Pattern conformance matters, not just length: every
+#: ``LEASE_TOKEN_PATTERN`` character is single-byte ASCII, so this worst
+#: case costs the same in canonical or legacy-pretty encoding (550 bytes
+#: legacy-pretty / 497 canonical). A *non*-conformant new token (128
+#: control characters, which nothing stops ``acquire_or_verify_lease``
+#: from accepting today) costs far more -- measured 1,830 bytes -- which
+#: is why the pattern, not a bare character count, is what #918 must
+#: enforce (see ``next_takeover_cost`` for the already-persisted case).
+#:
+#: The literal adds a documented 50-byte slack (measured 550 + slack) for
+#: ``lease_history`` entry fields this measurement may not bundle (its
+#: schema is not fixed by any design table).
+STATE_CAPACITY_TAKEOVER_DELTA = 600
+
+#: Largest integer N_L such that
+#: ``STATE_CAPACITY_HALT_DELTA + N_L * STATE_CAPACITY_TAKEOVER_DELTA <=
+#: STATE_CAPACITY_SYSTEM_SHARE``.
+STATE_CAPACITY_TAKEOVER_LIMIT = (
+    STATE_CAPACITY_SYSTEM_SHARE - STATE_CAPACITY_HALT_DELTA
+) // STATE_CAPACITY_TAKEOVER_DELTA
+
+if STATE_CAPACITY_TAKEOVER_LIMIT < 1:
+    raise RuntimeError(
+        "state-capacity-takeover-limit-exhausted: STATE_CAPACITY_HALT_DELTA "
+        "and STATE_CAPACITY_TAKEOVER_DELTA leave no room for any lease "
+        "takeover inside STATE_CAPACITY_SYSTEM_SHARE; the Delta constants "
+        "or the 1/16 ratio must be revisited before this module may load."
+    )
+
+# ---------------------------------------------------------------------------
+# D request stage reservations ("D request の段の Δ").
+# ---------------------------------------------------------------------------
+
+#: One reserved record's key name slack (D2c has not fixed the field names
+#: yet; this bounds any single key growing by this many bytes per reserved
+#: slot name: ``dispatch`` / ``running`` / ``terminal_receipt``).
+_FRESH_REVIEW_KEY_SLACK = 32
+_FRESH_REVIEW_RESERVED_SLOT_COUNT = 3
+
+#: Envelope growth (``updated_at`` / ``last_activity_at`` / lease refresh)
+#: that rides along with any stage-advancing write.
+_FRESH_REVIEW_ENVELOPE_ALLOWANCE = 128
+
+#: dispatch (reserve): three null->value fields (operation_id 128 chars,
+#: two 71-char digests) + the E0a-pinned maximum intent (1,797 bytes) and
+#: maximum running record (3,455 bytes) + the request status value's
+#: longest delta + the reserved-slot key slack + the envelope allowance.
+FRESH_REVIEW_DISPATCH_STAGE_DELTA = (
+    (130 - 4) + 2 * ((71 + 2) - 4)
+    + 1797 + 3455
+    + 20
+    + _FRESH_REVIEW_KEY_SLACK * _FRESH_REVIEW_RESERVED_SLOT_COUNT
+    + _FRESH_REVIEW_ENVELOPE_ALLOWANCE
+)
+
+#: consume: the frozen ``result`` (bounded by ``request.max_output_bytes``,
+#: 256 KiB) plus fixed wrapper overhead.
+FRESH_REVIEW_CONSUME_STAGE_DELTA = 262144 + 64
+
+#: terminal: the larger of the four D2b terminal-variant maxima pinned by
+#: E0a (completed 17,925 is the largest) plus the reserved-slot key slack
+#: for ``terminal_receipt`` and the envelope allowance.
+FRESH_REVIEW_TERMINAL_STAGE_DELTA = (
+    17925 + _FRESH_REVIEW_KEY_SLACK + _FRESH_REVIEW_ENVELOPE_ALLOWANCE
+)
+
+#: lineage introduction: E1's ``FindingLineage`` type does not exist yet
+#: (docs/design/880-repair-lineage.md §2's type table, "FindingLineage"
+#: row). This pins a closed placeholder shape with one representative field
+#: per *named* sub-type the design table lists -- ``lineage_id``
+#: (digest-shaped, 71 chars), ``criterion_id`` (_ID, 128 chars),
+#: ``severity``/``lifecycle`` (closed enums), a ``FreshFindingRef``
+#: (mission/session/original-request/local-finding ids plus
+#: terminal/output digests), an original terminal receipt ref and an
+#: original replay evidence ref (each a ``ContentAddressedRef``, or that
+#: ref's theoretical-absent variant if larger -- see §2's "original replay
+#: ... 理由付き absent variant"), a ``ReproBinding`` (command id plus four
+#: digests), a ``CandidateBinding`` (four digests plus an iteration int),
+#: and empty ``observations``/``attempts`` lists (E0 introduces lineage
+#: with zero of either -- §9's E1 row: "導入時に置く件数...書かれていなければ
+#: 0件"). ``requirement_ids``/``prohibited_side_effect_ids`` and the
+#: command->snapshot map are the *variable* part (``lineage_variable_part``)
+#: and are excluded here. E2/E3's own disposition/duplicate-of cost is
+#: also excluded (stubbed to zero below; must not be folded into this
+#: constant without revisiting it).
+#:
+#: The design table does not fix exact field names for the nested
+#: sub-types yet (that is E1's job); this shape is this module's own
+#: conservative over-approximation, not a contract E1 must match
+#: byte-for-byte. Because it over-approximates (more fields, at longer
+#: bounds, than the eventual real type is likely to need), the resulting
+#: constant is safe to be *larger* than the real type's eventual fixed
+#: part, never smaller. Measured standalone (not inside an array) at its
+#: maximum field lengths (see test_issue936_state_capacity_reservation.py::
+#: test_lineage_fixed_part_matches_the_design_table_shape); the ``+16`` is
+#: a per-array-element separator/indentation allowance (the same
+#: "+separator" pattern the design doc applies to the finding ref shape:
+#: "最大形で 238 bytes。区切りを含め 239 bytes").
+FRESH_REVIEW_FINDING_LINEAGE_FIXED_MAX_BYTES = 2890 + 16
+
+#: Single "unimported-findings" lineage record's maximum encode length
+#: (standalone; it is never placed in a per-finding array). The design
+#: doc does not give this variant its own field table (§2 "D 終端の
+#: findings 上限" only names its state, "open | deferred | rejected" --
+#: §3 "取込み上限超過の終端の disposition"); this conservatively reuses
+#: ``FRESH_REVIEW_FINDING_LINEAGE_FIXED_MAX_BYTES``'s own shape as an
+#: upper bound rather than inventing a second, narrower one, since
+#: ``lineage_stage_delta`` takes ``max(F_MAX * per_finding, this)`` and
+#: ``F_MAX * per_finding`` already dominates by roughly 61x -- this value
+#: is not the binding term in practice, so under-measuring it here would
+#: not be noticed by that formula. A real single-finding record (without
+#: F_MAX replication) is very unlikely to exceed one lineage record's own
+#: fixed part, so reusing it is a safe, if generous, bound.
+FRESH_REVIEW_UNIMPORTED_LINEAGE_MAX_BYTES = 2890 + 16
+
+#: F_MAX: the D terminal findings-count limit (also K, the lineage count
+#: limit; see docs/design/880-repair-lineage.md "D 終端の findings 上限").
+FRESH_REVIEW_FINDINGS_LINEAGE_LIMIT = _fresh_review.FRESH_REVIEW_FINDINGS_LIMIT
+
+#: lineage Δ with a zero-length criterion variable part (no contract
+#: consulted). Kept for callers that only need a document-independent
+#: baseline; real residual-reservation computation calls
+#: ``lineage_stage_delta`` with the actual document and record instead,
+#: since the variable part depends on that request's own criteria.
+FRESH_REVIEW_LINEAGE_STAGE_DELTA = max(
+    FRESH_REVIEW_FINDINGS_LINEAGE_LIMIT * FRESH_REVIEW_FINDING_LINEAGE_FIXED_MAX_BYTES,
+    FRESH_REVIEW_UNIMPORTED_LINEAGE_MAX_BYTES,
+)
+
+#: Fail-closed sentinel used when the lineage variable part cannot be
+#: bounded at all (no contract document reachable; see
+#: ``lineage_variable_part``). Charging the full physical limit as the
+#: reserve forces ``satisfies_capacity`` to reject rather than silently
+#: under-reserve.
+_LINEAGE_VARIABLE_PART_UNBOUNDED = STATE_LIMIT
+
+#: Residual reservation by D request projection status *excluding*
+#: lineage (design doc "残りの予約"). The lineage addend is computed per
+#: record by ``lineage_stage_delta`` because its variable part depends on
+#: that request's own criteria. ``withdrawn`` reserves nothing at all.
+_FRESH_REVIEW_FIXED_RESERVE_BY_STATUS = {
+    "pending": FRESH_REVIEW_DISPATCH_STAGE_DELTA + FRESH_REVIEW_CONSUME_STAGE_DELTA
+    + FRESH_REVIEW_TERMINAL_STAGE_DELTA,
+    "reserved": FRESH_REVIEW_CONSUME_STAGE_DELTA + FRESH_REVIEW_TERMINAL_STAGE_DELTA,
+    "consumed": FRESH_REVIEW_TERMINAL_STAGE_DELTA,
+    "dispatch-unknown": 3455 + FRESH_REVIEW_CONSUME_STAGE_DELTA + FRESH_REVIEW_TERMINAL_STAGE_DELTA,
+    "running": FRESH_REVIEW_CONSUME_STAGE_DELTA + FRESH_REVIEW_TERMINAL_STAGE_DELTA,
+    "blocked": 0,
+    "abandoned-unknown": 0,
+}
+
+#: Baselines kept for backward-compatible direct comparison in tests; a
+#: real record's residual also adds its own ``lineage_stage_delta``.
+FRESH_REVIEW_PENDING_RESERVE = (
+    _FRESH_REVIEW_FIXED_RESERVE_BY_STATUS["pending"] + FRESH_REVIEW_LINEAGE_STAGE_DELTA
+)
+FRESH_REVIEW_RESERVED_RESERVE = (
+    _FRESH_REVIEW_FIXED_RESERVE_BY_STATUS["reserved"] + FRESH_REVIEW_LINEAGE_STAGE_DELTA
+)
+FRESH_REVIEW_CONSUMED_RESERVE = (
+    _FRESH_REVIEW_FIXED_RESERVE_BY_STATUS["consumed"] + FRESH_REVIEW_LINEAGE_STAGE_DELTA
+)
+FRESH_REVIEW_WITHDRAWN_RESERVE = 0
+
+
+def _command_snapshot_map(request) -> dict:
+    return {binding.command_id: binding.snapshot_digest for binding in request.candidate_bindings}
+
+
+def _contract_document(document: Mapping) -> Optional[Mapping]:
+    if _is_v5(document):
+        extensions = document.get("extensions")
+        contract = extensions.get("acceptance_contract") if isinstance(extensions, Mapping) else None
+    else:
+        contract = document.get("acceptance_contract")
+    return contract if isinstance(contract, Mapping) else None
+
+
+def _encode_len_safe(value: object) -> int:
+    """Encode-length of ``value``, or the fail-closed sentinel on error.
+
+    Returning 0 on error would silently *under*-reserve (the caller sums
+    this into a variable-part estimate it then trusts as an upper bound).
+    Returning ``STATE_LIMIT`` instead means an encode failure can only ever
+    push ``satisfies_capacity`` toward rejecting, never toward admitting a
+    mutation this function could not actually measure.
+    """
+    try:
+        return len(encode_json_value(freeze_json_value(value)))
+    except Exception:
+        return STATE_LIMIT
+
+
+def lineage_variable_part(document: Mapping, request) -> int:
+    """The per-criterion variable addend to the lineage Δ for ``request``.
+
+    ``requirement_ids``/``prohibited_side_effects`` of the request's own
+    criteria, plus the request's command->snapshot map (built from
+    ``candidate_bindings``), maximised across the request's criteria.
+    Falls back to the contract's own largest criterion if none of the
+    request's ``criterion_ids`` resolve, and to the fail-closed sentinel
+    if no contract document can be found at all (the contract is not
+    this module's responsibility to validate -- it is only read for a
+    conservative upper bound).
+    """
+    contract = _contract_document(document)
+    if contract is None:
+        return _LINEAGE_VARIABLE_PART_UNBOUNDED
+    criteria = contract.get("criteria")
+    if not isinstance(criteria, list):
+        return _LINEAGE_VARIABLE_PART_UNBOUNDED
+    command_map_bytes = _encode_len_safe(_command_snapshot_map(request))
+    by_id = {
+        item.get("id"): item
+        for item in criteria
+        if isinstance(item, Mapping) and isinstance(item.get("id"), str)
+    }
+    matched = [by_id[cid] for cid in getattr(request, "criterion_ids", ()) if cid in by_id]
+    candidates = matched or [item for item in criteria if isinstance(item, Mapping)]
+    if not candidates:
+        return command_map_bytes
+    best = 0
+    for criterion in candidates:
+        requirement_ids = criterion.get("requirement_ids")
+        prohibited = criterion.get("prohibited_side_effects")
+        payload = {
+            "requirement_ids": requirement_ids if isinstance(requirement_ids, list) else [],
+            "prohibited_side_effects": prohibited if isinstance(prohibited, list) else [],
+        }
+        size = _encode_len_safe(payload) + command_map_bytes
+        best = max(best, size)
+    return best
+
+
+def lineage_stage_delta(document: Mapping, request) -> int:
+    """``max(F_MAX * (FIXED_MAX + variable), UNIMPORTED_MAX)`` for one request."""
+    variable = lineage_variable_part(document, request)
+    per_finding = FRESH_REVIEW_FINDING_LINEAGE_FIXED_MAX_BYTES + variable
+    return max(
+        FRESH_REVIEW_FINDINGS_LINEAGE_LIMIT * per_finding,
+        FRESH_REVIEW_UNIMPORTED_LINEAGE_MAX_BYTES,
+    )
+
+
+def repair_attempt_reserve(_document: Mapping) -> int:
+    """E2 (#?) stub. Always zero until the repair-attempt writer exists."""
+    return 0
+
+
+def disposition_reserve(_document: Mapping) -> int:
+    """E3 (#?) stub. Always zero until the disposition writer exists."""
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Document layout helpers.
+# ---------------------------------------------------------------------------
+
+_ENVELOPE_KEYS = frozenset({"updated_at", "last_activity_at"})
+#: F's extension point (#881). No StopSlots field exists yet.
+STOP_SLOT_KEYS: frozenset[str] = frozenset()
+
+
+def _is_v5(document: object) -> bool:
+    return (
+        isinstance(document, Mapping)
+        and document.get("schema_version") == 5
+        and isinstance(document.get("control"), Mapping)
+    )
+
+
+def _halt_reason_value(document: Mapping) -> object:
+    if _is_v5(document):
+        control = document.get("control")
+        return control.get("halt_reason") if isinstance(control, Mapping) else None
+    return document.get("halt_reason")
+
+
+def halt_slot_written(document: Mapping) -> bool:
+    """True once the halt slot carries a real reason (not absent/None/"")."""
+    value = _halt_reason_value(document)
+    return value not in (None, "")
+
+
+def _lease_mapping(document: Mapping) -> Mapping:
+    if _is_v5(document):
+        lease = document.get("lease")
+        return lease if isinstance(lease, Mapping) else {}
+    return document
+
+
+def lease_history_length(document: Mapping) -> int:
+    history = _lease_mapping(document).get("lease_history")
+    return len(history) if isinstance(history, list) else 0
+
+
+#: New owner/lease_id a simulated takeover assigns: the pattern's own
+#: maximum length (the bound #918 must enforce for *new* tokens -- see
+#: ``LEASE_TOKEN_PATTERN``).
+_TAKEOVER_SIM_TOKEN = "9" * LEASE_TOKEN_MAX_CHARS
+_TAKEOVER_SIM_AT = "9999-12-31T23:59:59Z"
+
+
+def next_takeover_cost(document: Mapping) -> int:
+    """Upper bound of the next single takeover's encode-length increase.
+
+    Simulates ``bin/mission-state.py``'s ``acquire_or_verify_lease``
+    "taken-over" branch itself (``str(owner)``/``str(lease_id)``/
+    ``int(epoch)`` normalized into a new ``lease_history`` entry; new
+    current fields at maximal pattern-conformant identifiers and
+    ``epoch + 1``) and measures the real encode-length increase, rather
+    than approximating per field: a per-field approximation undercounts
+    an oversized epoch, which costs bytes *both* in the new current field
+    and in the history entry the old value is copied into (see
+    test_issue936_state_capacity_reservation.py::
+    test_next_takeover_cost_bounds_the_real_writer, which reproduces the
+    Codex-found undercounts).
+
+    A lease that was never acquired (``fencing_epoch`` absent/empty, the
+    normal shape of a freshly ``init``ed session) has no takeover to
+    simulate, so this returns the bare constant. A present but
+    unparseable epoch, or any value this cannot encode at all, fails the
+    whole result closed to ``STATE_LIMIT`` -- matching the real writer's
+    own rejection of that write.
+    """
+    lease = _lease_mapping(document)
+    # Only the keys actually present: the writer creates ``lease_history``
+    # (``setdefault``) and rewrites ``lease_expires_at`` to a 20-char value.
+    before = {key: lease[key] for key in ("owner_session_id", "lease_id", "fencing_epoch",
+                                          "lease_expires_at", "lease_history") if key in lease}
+    history = before.get("lease_history") if isinstance(before.get("lease_history"), list) else []
+    if before.get("fencing_epoch") in (None, ""):
+        return STATE_CAPACITY_TAKEOVER_DELTA
+    try:
+        owner, lease_id = str(before["owner_session_id"]), str(before["lease_id"])
+        epoch = int(before["fencing_epoch"])
+        before_c = encode_json_value(freeze_json_value(before))
+        before_l = json.dumps(before, indent=2, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        after = dict(before, owner_session_id=_TAKEOVER_SIM_TOKEN, lease_id=_TAKEOVER_SIM_TOKEN,
+                     fencing_epoch=epoch + 1, lease_expires_at=_TAKEOVER_SIM_AT)
+        after["lease_history"] = history + [{
+            "owner_session_id": owner, "lease_id": lease_id, "fencing_epoch": epoch,
+            "reason": _TAKEOVER_SIM_TOKEN, "at": _TAKEOVER_SIM_AT,
+        }]
+        after_c = encode_json_value(freeze_json_value(after))
+        after_l = json.dumps(after, indent=2, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    except Exception:
+        return STATE_LIMIT
+    increase = max(len(after_c) - len(before_c), len(after_l) - len(before_l))
+    return max(STATE_CAPACITY_TAKEOVER_DELTA, increase)
+
+
+def remaining_takeovers(document: Mapping) -> int:
+    recorded = lease_history_length(document)
+    return max(0, STATE_CAPACITY_TAKEOVER_LIMIT - recorded)
+
+
+def takeover_reserve(document: Mapping) -> int:
+    remaining = remaining_takeovers(document)
+    if remaining <= 0:
+        return 0
+    return next_takeover_cost(document) + (remaining - 1) * STATE_CAPACITY_TAKEOVER_DELTA
+
+
+def system_remaining(document: Mapping) -> int:
+    """``S_sys_remaining``: halt share (if unwritten) + remaining takeovers."""
+    halt_share = 0 if halt_slot_written(document) else STATE_CAPACITY_HALT_DELTA
+    return halt_share + takeover_reserve(document)
+
+
+# ---------------------------------------------------------------------------
+# D request projection access.
+# ---------------------------------------------------------------------------
+
+
+def _fresh_review_raw(document: Mapping) -> object:
+    if _is_v5(document):
+        extensions = document.get("extensions")
+        return extensions.get("fresh_review") if isinstance(extensions, Mapping) else None
+    return document.get("fresh_review")
+
+
+def fresh_review_projection(document: Mapping) -> Optional[FreshReviewProjection]:
+    """Decode the D request projection out of a v5 or flat document.
+
+    Returns ``None`` if the embedded projection cannot be decoded (callers
+    must then treat the residual reservation as unknown, not as zero; see
+    ``_residual_reservation`` below, which folds that into a conservative
+    "cannot verify" rather than admitting the mutation).
+    """
+    raw = _fresh_review_raw(document)
+    if raw is None:
+        return FreshReviewProjection()
+    try:
+        return _fresh_review.decode_projection({"fresh_review": raw})
+    except FreshReviewError:
+        return None
+
+
+def residual_reservation(
+    document: Mapping, *, encoding: "StateEncoding" = None
+) -> int:
+    """``Σ残り予約``: sum of every outstanding item's remaining-stage Δ.
+
+    Under ``StateEncoding.LEGACY_PRETTY`` (a v4 flat on-disk document), D
+    requests reserve nothing at all. This is *not* because the design doc's
+    general reservation formula says so -- it is #918's own decision (issue
+    body, "決めたこと" / "分割" sections,
+    https://github.com/tackeyy/mission/issues/918): v4 is saved as
+    indent=2-formatted JSON and a consume write's increase has no fixed
+    upper bound there, so #918 rejects every D-stage advance (dispatch
+    onward) for v4 and therefore its D items never reserve past the
+    pending request's own already-counted bytes ("v4 の D item の予約は
+    0"). The caller's physical encode length already includes the pending
+    request's own bytes ("受付の段の Δ...受付時に確定している request の
+    実際の encode 長とする").
+    """
+    if encoding is StateEncoding.LEGACY_PRETTY:
+        return 0
+    projection = fresh_review_projection(document)
+    if projection is None:
+        # An undecodable embedded projection cannot be reasoned about at
+        # all (not even "how many pending requests"), so charge the full
+        # physical limit -- not one pending request's reserve -- so
+        # capacity admission fails closed rather than under-reserving.
+        return STATE_LIMIT
+    total = 0
+    for record in projection.requests:
+        if isinstance(record, WithdrawnFreshReviewRecord):
+            continue
+        fixed = _FRESH_REVIEW_FIXED_RESERVE_BY_STATUS.get(
+            record.status, _FRESH_REVIEW_FIXED_RESERVE_BY_STATUS["pending"]
+        )
+        total += fixed + lineage_stage_delta(document, record.request)
+    total += repair_attempt_reserve(document) + disposition_reserve(document)
+    return total
+
+
+def pending_withdraw_candidates(document: Mapping) -> tuple[str, ...]:
+    projection = fresh_review_projection(document)
+    if projection is None:
+        return ()
+    return tuple(
+        record.request.request_id
+        for record in projection.requests
+        if isinstance(record, FreshReviewRecord) and record.status == "pending"
+    )
+
+
+def satisfies_capacity(
+    document: Mapping, encoded_len: int, *, encoding: "StateEncoding" = None
+) -> bool:
+    """``len(encoded) + Σ残り予約 <= STATE_LIMIT - S_sys_remaining``."""
+    return (
+        encoded_len + residual_reservation(document, encoding=encoding)
+        <= STATE_LIMIT - system_remaining(document)
+    )
+
+
+def is_over_capacity(
+    document: Mapping, encoded_len: int, *, encoding: "StateEncoding" = None
+) -> bool:
+    return not satisfies_capacity(document, encoded_len, encoding=encoding)
+
+
+
+# ---------------------------------------------------------------------------
+# write_kind derivation (base/proposed diff, never the caller's say-so).
+#
+# classify_write_kind requires all three together (design doc
+# docs/design/880-repair-lineage.md L65, "停止系の判定": a diff is a
+# stop-kind only if it is "限られる" to the halt/lease fields):
+#
+#   1. Allow-list -- diff keys confined to the fields the real writer(s)
+#      touch. stop-halt: halt fields, ``_TIMING_ACTIVITY_FIELDS`` (imported
+#      from :mod:`mission_kernel.transitions`, not hand-copied -- a drift
+#      test below pins real writers stay inside it), ``goal_dispatch_*``, a
+#      lease at most a renewal, the envelope. ``reactivation_history`` is
+#      excluded (only ``Reactivate`` writes it). stop-takeover: lease
+#      fields + envelope only -- fresh_review/acceptance_contract/halt
+#      fields changing is never a takeover.
+#   2. Structural signature -- does the diff match a legitimate write's
+#      shape (halt slot's first write; history +1 with a writer-normalized
+#      entry or a first acquisition; the withdraw reducer's own tombstone).
+#   3. Increment cap -- the real encode-length increase (caller's
+#      ``encoding``) stays within the Δ the reservation scheme prices that
+#      write at (``STATE_CAPACITY_HALT_DELTA``/``next_takeover_cost``/a
+#      strict decrease for withdraw).
+#
+# History: #938 round 1 hand-enumerated (1) (``HALT_AUX_KEYS``) -- found
+# both too wide (unbounded field *values*) and too narrow (an unlisted real
+# field misclassified ``normal``). #939 round 1 dropped (1), relying on
+# (2)+(3) alone -- an ordinary mutation (dispatch/consume/new request/
+# contract replacement) riding a small lease extension or halt is itself
+# often smaller than Δ, so it slipped through (independent Checker's
+# probe). #939 round 2 restores (1), derived from the kernel's own
+# constant instead of hand-copied, so a test (not the list) catches drift.
+# ---------------------------------------------------------------------------
+
+class WriteKind(str, Enum):
+    GENESIS = "genesis"
+    WITHDRAW = "withdraw"
+    STOP_HALT = "stop-halt"
+    STOP_TAKEOVER = "stop-takeover"
+    STOP_SLOT = "stop-slot"
+    NORMAL = "normal"
+
+def _strict_equal(left: object, right: object) -> bool:
+    """Deep ``==`` except NaN==NaN; ``bool`` never equals a non-bool int/
+    float (plain ``==`` treats ``1 == True`` / ``1 == 1.0``); recurses into
+    mappings/lists/tuples so a swap buried in e.g. a history entry is
+    caught too.
+    """
+    if isinstance(left, bool) or isinstance(right, bool):
+        return isinstance(left, bool) and isinstance(right, bool) and left == right
+    if isinstance(left, float) and isinstance(right, float) and left != left and right != right:
+        return True
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return type(left) is type(right) and left == right
+    if isinstance(left, Mapping) and isinstance(right, Mapping):
+        if frozenset(left.keys()) != frozenset(right.keys()):
+            return False
+        return all(_strict_equal(left[key], right[key]) for key in left)
+    if isinstance(left, (list, tuple)) and isinstance(right, (list, tuple)):
+        if type(left) is not type(right) or len(left) != len(right):
+            return False
+        return all(_strict_equal(a, b) for a, b in zip(left, right))
+    return left == right
+
+def _diff_keys(base: Mapping, proposed: Mapping) -> frozenset:
+    """Top-level keys changed/added/removed; presence counts (a key added as ``None`` is a change)."""
+    changed = set()
+    for key in frozenset(base.keys()) | frozenset(proposed.keys()):
+        in_base, in_proposed = key in base, key in proposed
+        if in_base != in_proposed or not _strict_equal(base.get(key), proposed.get(key)):
+            changed.add(key)
+    return frozenset(changed)
+
+def _mapping_diff_keys(base_value: object, proposed_value: object) -> frozenset:
+    """Field-level diff of a nested mapping (v5's ``control``/``extensions``)."""
+    base_map = base_value if isinstance(base_value, Mapping) else {}
+    proposed_map = proposed_value if isinstance(proposed_value, Mapping) else {}
+    changed = set()
+    for key in set(base_map.keys()) | set(proposed_map.keys()):
+        in_base, in_proposed = key in base_map, key in proposed_map
+        if in_base != in_proposed or not _strict_equal(base_map.get(key), proposed_map.get(key)):
+            changed.add(key)
+    return frozenset(changed)
+
+def _lease_slot_keys(document: Mapping) -> frozenset:
+    return frozenset({"lease"}) if _is_v5(document) else frozenset(
+        {"owner_session_id", "lease_id", "fencing_epoch", "lease_expires_at", "lease_history"}
+    )
+
+#: v5's own closed lease shape (``codec_v5.py``'s ``_decode_lease``,
+#: ``_exact(raw, required, "$.lease")``), checked here too so a smuggled
+#: key cannot ride a diff that never reaches the decoder (legacy-full).
+_LEASE_DOCUMENT_KEYS = frozenset(
+    {"kind", "owner_session_id", "lease_id", "fencing_epoch", "lease_expires_at", "lease_history"}
+)
+
+#: codec_v4.py's ``_decode_history`` closed per-entry shape.
+_LEASE_HISTORY_ENTRY_KEYS = frozenset({"owner_session_id", "lease_id", "fencing_epoch", "reason", "at"})
+
+#: The lease's identity/expiry/history field names (isolates "did the lease
+#: change" from "did an unrelated top-level field change", since v4's
+#: ``_lease_mapping`` is the *whole* flat document).
+_LEASE_FIELD_NAMES = frozenset(
+    {"owner_session_id", "lease_id", "fencing_epoch", "lease_expires_at", "lease_history"}
+)
+
+#: The halt fields themselves (v5 ``control``/v4 flat). Excludes
+#: ``reactivation_history`` (only ``Reactivate`` writes it).
+_HALT_FIELD_NAMES = frozenset(
+    {"phase", "terminal_outcome", "loop_active", "halt_reason", "halt_category"}
+)
+
+#: v5 ``MarkHalt``'s ``dedicated_upserts`` mirror (transitions.py L597-605);
+#: ``halt_category``/``terminal_outcome`` stay in ``control`` only.
+_HALT_EXTENSIONS_DEDICATED_FIELDS = frozenset({"phase", "loop_active", "halt_reason"})
+
+#: Everything else a real halt write may touch: ``_TIMING_ACTIVITY_FIELDS``
+#: plus the ``goal_dispatch_*`` fields a ``routed-goal`` halt adds.
+_HALT_RIDE_ALONG_FIELDS = _TIMING_ACTIVITY_FIELDS | frozenset(
+    {"goal_dispatch_effective", "goal_dispatch_host", "goal_dispatch_fallback_reason"}
+)
+
+def _lease_top_level_keys_closed(base: Mapping, proposed: Mapping) -> bool:
+    """v5: ``lease`` sub-document keys, both sides, subset of its closed
+    shape. v4 has no nested sub-document to check.
+    """
+    if not _is_v5(base):
+        return True
+    for document in (base, proposed):
+        lease = document.get("lease")
+        keys = frozenset(lease.keys()) if isinstance(lease, Mapping) else frozenset()
+        if not (keys <= _LEASE_DOCUMENT_KEYS):
+            return False
+    return True
+
+def _lease_identity_absent(lease: Mapping) -> bool:
+    """Owner, lease id and epoch all absent/empty (a partial lease is neither absent nor present)."""
+    return (
+        lease.get("owner_session_id") in (None, "")
+        and lease.get("lease_id") in (None, "")
+        and lease.get("fencing_epoch") in (None, "")
+    )
+
+def _lease_identity_present(lease: Mapping) -> bool:
+    """All three identity fields present (a partial lease matches neither case)."""
+    return (
+        lease.get("owner_session_id") not in (None, "")
+        and lease.get("lease_id") not in (None, "")
+        and lease.get("fencing_epoch") not in (None, "")
+    )
+
+def _parse_lease_expiry(value: object) -> Optional[datetime]:
+    """Parse ``lease_expires_at`` as an aware instant, or ``None``. String-
+    lexicographic comparison mis-orders differing UTC offsets (Codex
+    round-2 High); a naive timestamp is rejected, not guessed at.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+def _lease_expiry_not_shortened(before_lease: Mapping, after_lease: Mapping) -> bool:
+    """Expiry never moves backward; compared as parsed instants, unparseable fails closed."""
+    key = "lease_expires_at"
+    before_exp = before_lease.get(key)
+    if (key in before_lease) == (key in after_lease) and _strict_equal(before_exp, after_lease.get(key)):
+        return True  # untouched; any change (value or presence) must yield a parseable expiry
+    after_dt = _parse_lease_expiry(after_lease.get(key))
+    if before_exp in (None, ""):
+        return after_dt is not None
+    before_dt = _parse_lease_expiry(before_exp)
+    if before_dt is None or after_dt is None:
+        return False
+    return after_dt >= before_dt
+
+def _lease_is_pure_renewal(base: Mapping, proposed: Mapping) -> bool:
+    """Lease differs at most in ``lease_expires_at`` (not shortened); epoch/
+    owner/lease id/history untouched. Used for stop-halt's lease guard and
+    the extension shape; stricter than :func:`_lease_is_fence_or_renewal`
+    so a halt+takeover diff cannot slip through as ``stop-halt``.
+    """
+    before, after = _lease_mapping(base), _lease_mapping(proposed)
+    keys = (set(before) | set(after)) if _is_v5(base) else _lease_slot_keys(base)
+    for key in keys:
+        if key == "lease_expires_at":
+            continue
+        if not _strict_equal(before.get(key), after.get(key)):
+            return False
+    return _lease_expiry_not_shortened(before, after)
+
+def _lease_is_fence_or_renewal(base: Mapping, proposed: Mapping) -> bool:
+    """Lease changes at most in ``fencing_epoch`` (non-decreasing -- the
+    commit's own fence bump, design doc L100) and/or ``lease_expires_at``
+    (not shortened); owner/lease id/history untouched. Withdraw only: the
+    same commit may bump the fence without it being a takeover.
+    """
+    before, after = _lease_mapping(base), _lease_mapping(proposed)
+    keys = (set(before) | set(after)) if _is_v5(base) else _lease_slot_keys(base)
+    for key in keys:
+        if key in ("fencing_epoch", "lease_expires_at"):
+            continue
+        if not _strict_equal(before.get(key), after.get(key)):
+            return False
+    before_epoch, after_epoch = before.get("fencing_epoch"), after.get("fencing_epoch")
+    before_ok = isinstance(before_epoch, int) and not isinstance(before_epoch, bool)
+    after_ok = isinstance(after_epoch, int) and not isinstance(after_epoch, bool)
+    if before_ok and after_ok:
+        if after_epoch < before_epoch:
+            return False
+    elif not _strict_equal(before_epoch, after_epoch):
+        return False
+    return _lease_expiry_not_shortened(before, after)
+
+def _fresh_review_withdraw_match(base: Mapping, proposed: Mapping) -> bool:
+    """One pending record replaced by its withdrawn tombstone, nothing else.
+    Reconstructs the expected tombstone via the real reducer
+    (:func:`mission_kernel.fresh_review.withdraw_request`) and requires the
+    *whole projection* to match byte-for-byte, so a forged tombstone fails
+    without each field needing a hand-written check here.
+    """
+    base_projection = fresh_review_projection(base)
+    proposed_projection = fresh_review_projection(proposed)
+    if base_projection is None or proposed_projection is None:
+        return False
+    if len(base_projection.requests) != len(proposed_projection.requests):
+        return False
+    changed = [
+        (before, after)
+        for before, after in zip(base_projection.requests, proposed_projection.requests)
+        if before != after
+    ]
+    if len(changed) != 1:
+        return False
+    before, after = changed[0]
+    if not (isinstance(before, FreshReviewRecord) and before.status == "pending"):
+        return False
+    if not isinstance(after, WithdrawnFreshReviewRecord):
+        return False
+    proposed_epoch = _lease_mapping(proposed).get("fencing_epoch")
+    try:
+        reconstructed = _fresh_review.withdraw_request(
+            base_projection, request_id=before.request.request_id,
+            operation_id=after.withdraw_operation_id, fencing_epoch=proposed_epoch,
+        )
+    except FreshReviewError:
+        return False
+    return reconstructed == proposed_projection
+
+def _halt_value_bounds_ok(base: Mapping, proposed: Mapping) -> bool:
+    """Only changed values consume the bounded halt allocation (#918)."""
+    before = (base.get('control', {}), base.get('extensions', {})) if _is_v5(base) else (base,)
+    after = (proposed.get('control', {}), proposed.get('extensions', {})) if _is_v5(proposed) else (proposed,)
+    for old, fields in zip(before, after):
+        for key, value in fields.items():
+            bound = HALT_REASON_MAX_CHARS if key == 'halt_reason' else (
+                GOAL_DISPATCH_REASON_MAX_CHARS if key.startswith('goal_dispatch_') else None)
+            if bound is not None and not _strict_equal(old.get(key), value):
+                if not isinstance(value, str) or len(value) > bound:
+                    return False
+    return True
+
+
+def _history_or_empty(value: object) -> Optional[list]:
+    """``[]`` for an absent key (design doc: 0 件とみなす), the list itself,
+    or ``None`` (fail-closed) for a malformed value.
+    """
+    if value is None:
+        return []
+    return value if isinstance(value, list) else None
+
+def _takeover_entry_matches_prior_lease(before_lease: Mapping, entry: object) -> bool:
+    """The appended entry must be the *writer's own normalization*
+    (``str(owner)``/``str(lease_id)``/``int(epoch)``, see
+    ``next_takeover_cost``) of the displaced lease, not any valid value.
+    """
+    if not isinstance(entry, Mapping):
+        return False
+    try:
+        expected_epoch = int(before_lease["fencing_epoch"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+    expected_owner = str(before_lease.get("owner_session_id"))
+    expected_lease_id = str(before_lease.get("lease_id"))
+    if entry.get("owner_session_id") != expected_owner:
+        return False
+    if entry.get("lease_id") != expected_lease_id:
+        return False
+    entry_epoch = entry.get("fencing_epoch")
+    return isinstance(entry_epoch, int) and not isinstance(entry_epoch, bool) and entry_epoch == expected_epoch
+
+def _takeover_case(base: Mapping, proposed: Mapping) -> Optional[str]:
+    """``"extension"`` (expiry only, zero growth, identity fully present),
+    ``"initial"`` (identity fully absent, history empty), ``"takeover"``
+    (history +1, entry mirrors displaced lease, epoch+1), or ``None``.
+    """
+    before_lease, after_lease = _lease_mapping(base), _lease_mapping(proposed)
+    before_history = _history_or_empty(before_lease.get("lease_history"))
+    after_history = _history_or_empty(after_lease.get("lease_history"))
+    if before_history is None or after_history is None:
+        return None
+
+    if len(after_history) == len(before_history):
+        if not _strict_equal(after_history, before_history):
+            return None
+        if _strict_equal(
+            {key: before_lease.get(key) for key in _LEASE_FIELD_NAMES},
+            {key: after_lease.get(key) for key in _LEASE_FIELD_NAMES},
+        ):
+            # Lease untouched: an unrelated change must not read as a zero-growth renewal.
+            return None
+        if _lease_identity_absent(before_lease) and not before_history:
+            return "initial" if _parse_lease_expiry(after_lease.get("lease_expires_at")) is not None else None
+        if _lease_identity_present(before_lease) and _lease_is_pure_renewal(base, proposed):
+            return "extension"
+        return None
+
+    if len(after_history) != len(before_history) + 1:
+        return None
+    if not _strict_equal(after_history[: len(before_history)], before_history):
+        return None
+    if not _lease_identity_present(before_lease):
+        return None  # cannot take over a lease whose identity is not fully present
+    if not _takeover_entry_matches_prior_lease(before_lease, after_history[-1]):
+        return None
+    if not _lease_expiry_not_shortened(before_lease, after_lease) or (
+            _parse_lease_expiry(after_lease.get("lease_expires_at")) is None):
+        return None
+    try:
+        expected_epoch = int(before_lease["fencing_epoch"])
+        new_epoch = after_lease.get("fencing_epoch")
+        if not (isinstance(new_epoch, int) and not isinstance(new_epoch, bool)):
+            return None
+        if new_epoch != expected_epoch + 1:
+            return None
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    from .errors import MissionStateDecodeError
+    try:
+        validate_lease_allocation(after_lease, v5=_is_v5(proposed))
+    except MissionStateDecodeError:
+        return None
+    return "takeover"
+
+
+def validate_lease_allocation(lease: Mapping, *, v5: bool = False) -> None:
+    """Reuse decoder contracts for a newly allocated lease and its history."""
+    from .codec_v4 import _decode_history, _decode_legacy_lease, legacy_lease_history
+    from .errors import MissionStateDecodeError
+    decoded = _decode_legacy_lease(dict(lease, lease_history=[]))
+    history = lease.get("lease_history", []) if v5 else legacy_lease_history(lease)
+    _decode_history(history, "$.lease_history", decoded.fencing_epoch,
+                    decoded.lease_id, v5=v5)
+    if v5 and lease.get("lease_expires_at") != decoded.lease_expires_at:
+        raise MissionStateDecodeError("invalid-value", "$.lease.lease_expires_at",
+                                      "timestamp must use canonical UTC Z form")
+
+def _lease_token_value_ok(value: object) -> bool:
+    return isinstance(value, str) and LEASE_TOKEN_PATTERN.fullmatch(value) is not None
+
+def _lease_epoch_value_ok(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= LEASE_EPOCH_MAX
+
+def _takeover_value_bounds_ok(base: Mapping, proposed: Mapping) -> bool:
+    """Mirrors ``_halt_value_bounds_ok`` for takeover: owner/lease_id/entry
+    reason match ``LEASE_TOKEN_PATTERN`` (exact prior token copies are
+    historical data), every epoch within
+    ``LEASE_EPOCH_MAX``, and the entry's key set is exactly
+    ``_LEASE_HISTORY_ENTRY_KEYS`` (about the *new* write only).
+    """
+    lease, previous = _lease_mapping(proposed), _lease_mapping(base)
+    for key in ("owner_session_id", "lease_id", "fencing_epoch"):
+        if _strict_equal(lease.get(key), previous.get(key)):
+            continue
+        valid = _lease_epoch_value_ok if key == "fencing_epoch" else _lease_token_value_ok
+        if not valid(lease.get(key)):
+            return False
+    history = lease.get("lease_history")
+    old_history = _history_or_empty(previous.get("lease_history"))
+    if isinstance(history, list) and old_history is not None and len(history) > len(old_history):
+        entry = history[-1]
+        if not isinstance(entry, Mapping):
+            return False
+        if frozenset(entry.keys()) - _LEASE_HISTORY_ENTRY_KEYS:
+            return False
+        copied = _takeover_entry_matches_prior_lease(_lease_mapping(base), entry)
+        if not copied and any(not _lease_token_value_ok(entry.get(key))
+                              for key in ("owner_session_id", "lease_id")):
+            return False
+        if not _lease_epoch_value_ok(entry.get("fencing_epoch")):
+            return False
+        reason = entry.get("reason")
+        if not (isinstance(reason, str) and LEASE_TOKEN_PATTERN.fullmatch(reason) is not None):
+            return False
+    return True
+
+def _encode_len_for(document: Mapping, encoding: "StateEncoding") -> Optional[int]:
+    """Byte length the real writer would persist ``document`` at, under
+    ``encoding``. Returns ``None`` (never a numeric sentinel) on encode
+    error: subtracting two sentinels would silently compute a zero
+    increase (Codex round-2 High). Callers must treat ``None`` as "cannot
+    classify as a stop-kind".
+    """
+    try:
+        if encoding is StateEncoding.LEGACY_PRETTY:
+            return len(json.dumps(document, indent=2, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+        return len(encode_json_value(freeze_json_value(document)))
+    except Exception:
+        return None
+
+def _encode_increase_within(
+    base: Mapping, proposed: Mapping, encoding: "StateEncoding", limit: int,
+) -> bool:
+    """``len(encode(proposed)) - len(encode(base)) <= limit``; ``False`` if
+    either side fails to encode.
+    """
+    base_len = _encode_len_for(base, encoding)
+    proposed_len = _encode_len_for(proposed, encoding)
+    if base_len is None or proposed_len is None:
+        return False
+    return proposed_len - base_len <= limit
+
+def _encode_strictly_smaller(base: Mapping, proposed: Mapping, encoding: "StateEncoding") -> bool:
+    """``len(encode(proposed)) < len(encode(base))``; ``False`` if either
+    side fails to encode.
+    """
+    base_len = _encode_len_for(base, encoding)
+    proposed_len = _encode_len_for(proposed, encoding)
+    if base_len is None or proposed_len is None:
+        return False
+    return proposed_len < base_len
+
+def _is_withdraw_diff(base: Mapping, proposed: Mapping, encoding: "StateEncoding") -> bool:
+    if not _fresh_review_withdraw_match(base, proposed):
+        return False
+    if not _lease_is_fence_or_renewal(base, proposed):
+        return False
+    top_diff = _diff_keys(base, proposed)
+    if _is_v5(base):
+        allowed_top = frozenset({"extensions"}) | _lease_slot_keys(base) | _ENVELOPE_KEYS
+        if not (top_diff <= allowed_top):
+            return False
+        extensions_diff = _mapping_diff_keys(base.get("extensions"), proposed.get("extensions"))
+        # v5 mirrors the envelope into ``extensions``, so it is allowed there too.
+        if extensions_diff - (frozenset({"fresh_review"}) | _ENVELOPE_KEYS):
+            return False
+    else:
+        allowed_top = frozenset({"fresh_review"}) | _lease_slot_keys(base) | _ENVELOPE_KEYS
+        if not (top_diff <= allowed_top):
+            return False
+    return _encode_strictly_smaller(base, proposed, encoding)
+
+def _is_stop_halt_diff(base: Mapping, proposed: Mapping, encoding: "StateEncoding") -> bool:
+    """A pure, first-write halt confined to the halt fields, ride-along
+    fields, a renewal-only lease and the envelope, within
+    ``STATE_CAPACITY_HALT_DELTA`` (see the ``WriteKind`` comment above).
+    """
+    if halt_slot_written(base) or not halt_slot_written(proposed):
+        return False
+    # Every command renews the lease: a halt may carry a renewal, never another lease change.
+    if not _lease_is_pure_renewal(base, proposed):
+        return False
+    if not _halt_value_bounds_ok(base, proposed):
+        return False
+    top_diff = _diff_keys(base, proposed)
+    if _is_v5(base):
+        top_allowed = frozenset({"control", "extensions", "lease"}) | _ENVELOPE_KEYS
+        if not (top_diff <= top_allowed):
+            return False
+        control_diff = _mapping_diff_keys(base.get("control"), proposed.get("control"))
+        if not control_diff or not (control_diff <= _HALT_FIELD_NAMES):
+            return False
+        extensions_diff = _mapping_diff_keys(base.get("extensions"), proposed.get("extensions"))
+        extensions_allowed = _HALT_EXTENSIONS_DEDICATED_FIELDS | _HALT_RIDE_ALONG_FIELDS | _ENVELOPE_KEYS
+        if not (extensions_diff <= extensions_allowed):
+            return False
+    else:
+        allowed = _HALT_FIELD_NAMES | _HALT_RIDE_ALONG_FIELDS | _ENVELOPE_KEYS | frozenset({"lease_expires_at"})
+        if not (top_diff & _HALT_FIELD_NAMES):
+            return False
+        if not (top_diff <= allowed):
+            return False
+    return _encode_increase_within(base, proposed, encoding, STATE_CAPACITY_HALT_DELTA)
+
+def _is_stop_takeover_diff(base: Mapping, proposed: Mapping, encoding: "StateEncoding") -> bool:
+    """A legitimate takeover/extension/initial-acquisition confined to the
+    lease fields and the envelope, within ``next_takeover_cost(base)``.
+    """
+    top_diff = _diff_keys(base, proposed)
+    allowed_top = _lease_slot_keys(base) | _ENVELOPE_KEYS
+    if _is_v5(base):
+        allowed_top = allowed_top | frozenset({"extensions"})
+    if not (top_diff <= allowed_top):
+        return False
+    if _is_v5(base):
+        if not _lease_top_level_keys_closed(base, proposed):
+            return False
+        # Only the envelope mirror may move inside ``extensions`` (e.g. no
+        # fresh_review/acceptance_contract/halt-mirror change may ride a
+        # takeover).
+        extensions_diff = _mapping_diff_keys(base.get("extensions"), proposed.get("extensions"))
+        if extensions_diff - _ENVELOPE_KEYS:
+            return False
+    if _takeover_case(base, proposed) is None:
+        return False
+    if not _takeover_value_bounds_ok(base, proposed):
+        return False
+    return _encode_increase_within(base, proposed, encoding, next_takeover_cost(base))
+
+def classify_write_kind(
+    base: Optional[Mapping], proposed: Mapping, *, encoding: "StateEncoding" = StateEncoding.CANONICAL,
+) -> WriteKind:
+    """Derive the write_kind from the base/proposed diff (see the
+    ``WriteKind`` comment above). ``encoding``: ``LEGACY_PRETTY`` for v4,
+    ``CANONICAL`` (default) for v5. Never raises: any classification error
+    is judged ``normal``.
+    """
+    if base is None:
+        return WriteKind.GENESIS
+    try:
+        if _is_withdraw_diff(base, proposed, encoding):
+            return WriteKind.WITHDRAW
+        if _is_stop_halt_diff(base, proposed, encoding):
+            return WriteKind.STOP_HALT
+        if _is_stop_takeover_diff(base, proposed, encoding):
+            return WriteKind.STOP_TAKEOVER
+        slot_diff = _diff_keys(base, proposed)
+        if slot_diff and slot_diff <= STOP_SLOT_KEYS:
+            return WriteKind.STOP_SLOT
+    except Exception:
+        return WriteKind.NORMAL
+    return WriteKind.NORMAL
+
+
+# ---------------------------------------------------------------------------
+# Legacy-full detection.
+# ---------------------------------------------------------------------------
+
+
+def _maximum_unused_operation_id(used: set) -> str:
+    """Reserve the full ID bound; the actual writer's ID is not yet known."""
+    for index in range(len(used) + 1):
+        candidate = str(index).zfill(_fresh_review.FRESH_REVIEW_ID_MAX_CHARS)
+        if candidate not in used:
+            return candidate
+
+
+def _withdraw_all_pending_len(document: Mapping, encoded_len: int, *, encode) -> int:
+    """Upper-bound length after withdrawal at the current epoch with maximum IDs.
+
+    Returns ``encoded_len`` unchanged (a conservative "no savings" estimate)
+    if the embedded projection cannot be decoded or no synthetic withdrawal
+    can be derived without colliding with an existing operation id.
+    """
+    projection = fresh_review_projection(document)
+    if projection is None:
+        return encoded_len
+    pending_ids = [
+        record.request.request_id
+        for record in projection.requests
+        if isinstance(record, FreshReviewRecord) and record.status == "pending"
+    ]
+    if not pending_ids:
+        return encoded_len
+    used_operations = {
+        (record.withdraw_operation_id if isinstance(record, WithdrawnFreshReviewRecord)
+         else record.prepare_operation_id)
+        for record in projection.requests
+    }
+    used_operations |= {
+        record.operation_id
+        for record in projection.requests
+        if isinstance(record, FreshReviewRecord) and record.operation_id is not None
+    }
+    used_operations |= {record.prepare_operation_id for record in projection.requests}
+    working = projection
+    epoch = _lease_mapping(document).get("fencing_epoch")
+    if not _lease_epoch_value_ok(epoch):
+        epoch = 1
+    for request_id in pending_ids:
+        operation_id = _maximum_unused_operation_id(used_operations)
+        used_operations.add(operation_id)
+        try:
+            working = _fresh_review.withdraw_request(
+                working, request_id=request_id, operation_id=operation_id, fencing_epoch=epoch
+            )
+        except FreshReviewError:
+            return encoded_len
+    rebuilt = dict(document)
+    projected = _fresh_review.projection_document(working)
+    if _is_v5(document):
+        extensions = dict(document.get("extensions") or {})
+        extensions["fresh_review"] = projected
+        rebuilt["extensions"] = extensions
+    else:
+        rebuilt["fresh_review"] = projected
+    return encode(rebuilt)
+
+
+def _is_legacy_full(
+    document: Mapping, encoded_len: int, *, encode
+) -> bool:
+    threshold = STATE_LIMIT - STATE_CAPACITY_HALT_DELTA
+    if encoded_len <= threshold:
+        return False
+    withdrawn_len = _withdraw_all_pending_len(document, encoded_len, encode=encode)
+    return withdrawn_len > threshold
+
+
+# ---------------------------------------------------------------------------
+# Public verdict contract.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CapacityBase:
+    document: Mapping
+    encoded_len: int
+
+
+@dataclass(frozen=True)
+class CapacityMetrics:
+    encoded_len: int
+    reserved: int
+    system_remaining: int
+    limit: int
+    headroom: int
+    excess_bytes: int
+    withdraw_candidates: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CapacityVerdict:
+    accepted: bool
+    code: Optional[str]
+    mode: str
+    write_kind: str
+    metrics: CapacityMetrics
+
+
+def _metrics(
+    document: Mapping, encoded_len: int, *, encoding: "StateEncoding" = None
+) -> CapacityMetrics:
+    reserved = residual_reservation(document, encoding=encoding)
+    remaining = system_remaining(document)
+    limit = STATE_LIMIT
+    budget = limit - remaining
+    headroom = max(0, budget - (encoded_len + reserved))
+    excess = max(0, (encoded_len + reserved) - budget)
+    return CapacityMetrics(
+        encoded_len=encoded_len,
+        reserved=reserved,
+        system_remaining=remaining,
+        limit=limit,
+        headroom=headroom,
+        excess_bytes=excess,
+        withdraw_candidates=pending_withdraw_candidates(document),
+    )
+
+
+def _rejected(
+    document: Mapping, encoded_len: int, *, code: str, mode: str, write_kind: WriteKind,
+    encoding: "StateEncoding" = None,
+) -> CapacityVerdict:
+    return CapacityVerdict(
+        accepted=False, code=code, mode=mode, write_kind=write_kind.value,
+        metrics=_metrics(document, encoded_len, encoding=encoding),
+    )
+
+
+def _accepted(
+    document: Mapping, encoded_len: int, *, mode: str, write_kind: WriteKind,
+    encoding: "StateEncoding" = None,
+) -> CapacityVerdict:
+    return CapacityVerdict(
+        accepted=True, code=None, mode=mode, write_kind=write_kind.value,
+        metrics=_metrics(document, encoded_len, encoding=encoding),
+    )
+
+
+def _encode_for(document: Mapping, *, encoding: "StateEncoding") -> int:
+    # Branch on ``encoding`` *before* computing anything: a v4 legacy
+    # document may contain non-finite floats (NaN/Infinity) that
+    # ``json.dumps`` tolerates (``allow_nan`` defaults to True) but the
+    # canonical codec's strict decoder rejects. Computing the canonical
+    # length unconditionally here used to raise out of the legacy-full
+    # probe even when only the legacy-pretty length was ever needed.
+    if encoding is StateEncoding.CANONICAL:
+        return len(encode_json_value(freeze_json_value(document)))
+    return len(json.dumps(document, indent=2, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+
+
+
+def state_capacity_verdict(
+    base: Optional[CapacityBase],
+    proposed: Mapping,
+    encoded_len: int,
+    *,
+    encoding: StateEncoding,
+) -> CapacityVerdict:
+    """The single capacity gate every writer must call before persisting.
+
+    ``base`` is ``None`` at genesis. ``proposed`` is the JSON document that
+    will be written; ``encoded_len`` is its already-computed encoded length
+    (canonical or legacy-pretty, per ``encoding`` -- this function does not
+    re-encode ``proposed`` itself).
+    """
+    if encoded_len > STATE_LIMIT:
+        write_kind = classify_write_kind(
+            base.document if base is not None else None, proposed, encoding=encoding,
+        )
+        return _rejected(
+            proposed, encoded_len, code="state-capacity-exhausted",
+            mode="excess", write_kind=write_kind, encoding=encoding,
+        )
+
+    if base is None:
+        if satisfies_capacity(proposed, encoded_len, encoding=encoding):
+            return _accepted(
+                proposed, encoded_len, mode="normal", write_kind=WriteKind.GENESIS,
+                encoding=encoding,
+            )
+        return _rejected(
+            proposed, encoded_len, code="state-capacity-exhausted",
+            mode="normal", write_kind=WriteKind.GENESIS, encoding=encoding,
+        )
+
+    base_document = base.document
+    base_over_capacity = is_over_capacity(base_document, base.encoded_len, encoding=encoding)
+    write_kind = classify_write_kind(base_document, proposed, encoding=encoding)
+
+    def encode_for(document: Mapping) -> int:
+        return _encode_for(document, encoding=encoding)
+
+    if base_over_capacity:
+        threshold = STATE_LIMIT - STATE_CAPACITY_HALT_DELTA
+        # Recover from the concrete withdrawal plus maximum IDs for remaining pending records.
+        if base.encoded_len > threshold and (
+            encoded_len < base.encoded_len and _is_legacy_full(proposed, encoded_len, encode=encode_for)
+            if write_kind is WriteKind.WITHDRAW
+            else _is_legacy_full(base_document, base.encoded_len, encode=encode_for)
+        ):
+            return _rejected(
+                proposed, encoded_len, code="state-capacity-legacy-full",
+                mode="legacy-full", write_kind=write_kind, encoding=encoding,
+            )
+
+    proposed_history_len = lease_history_length(proposed)
+    base_history_len = lease_history_length(base_document)
+    if proposed_history_len > base_history_len and base_history_len >= STATE_CAPACITY_TAKEOVER_LIMIT:
+        return _rejected(
+            proposed, encoded_len, code="state-capacity-exhausted",
+            mode="normal", write_kind=write_kind, encoding=encoding,
+        )
+
+    if write_kind is WriteKind.WITHDRAW:
+        if not base_over_capacity:
+            return _rejected(
+                proposed, encoded_len, code="state-capacity-withdraw-not-needed",
+                mode="normal", write_kind=write_kind, encoding=encoding,
+            )
+        if encoded_len >= base.encoded_len:
+            return _rejected(
+                proposed, encoded_len, code="state-capacity-invariant-broken",
+                mode="excess" if base_over_capacity else "normal", write_kind=write_kind,
+                encoding=encoding,
+            )
+        return _accepted(proposed, encoded_len, mode="excess", write_kind=write_kind, encoding=encoding)
+
+    if base_over_capacity:
+        threshold = (
+            STATE_LIMIT if write_kind is WriteKind.STOP_HALT
+            else STATE_LIMIT - STATE_CAPACITY_HALT_DELTA
+        )
+        if write_kind in (WriteKind.STOP_HALT, WriteKind.STOP_TAKEOVER, WriteKind.STOP_SLOT):
+            if encoded_len <= threshold:
+                return _accepted(
+                    proposed, encoded_len, mode="excess", write_kind=write_kind, encoding=encoding,
+                )
+            return _rejected(
+                proposed, encoded_len, code="state-capacity-exhausted",
+                mode="excess", write_kind=write_kind, encoding=encoding,
+            )
+        return _rejected(
+            proposed, encoded_len, code="state-capacity-exhausted",
+            mode="excess", write_kind=write_kind, encoding=encoding,
+        )
+
+    # 判定の順序 8 (LEGACY_PRETTY): v4 has no writer past ``pending``, so any
+    # D-stage advance is rejected outright (v4 D items reserve 0; see
+    # ``residual_reservation``).
+    if encoding is StateEncoding.LEGACY_PRETTY and _advances_a_d_stage(base_document, proposed):
+        return _rejected(
+            proposed, encoded_len, code="state-capacity-exhausted",
+            mode="normal", write_kind=write_kind, encoding=encoding,
+        )
+
+    if satisfies_capacity(proposed, encoded_len, encoding=encoding):
+        return _accepted(proposed, encoded_len, mode="normal", write_kind=write_kind, encoding=encoding)
+
+    if _diff_is_record_status_advance(base_document, proposed):
+        return _rejected(
+            proposed, encoded_len, code="state-capacity-invariant-broken",
+            mode="normal", write_kind=write_kind, encoding=encoding,
+        )
+    return _rejected(
+        proposed, encoded_len, code="state-capacity-exhausted",
+        mode="normal", write_kind=write_kind, encoding=encoding,
+    )
+
+
+def _advances_a_d_stage(base_document: Mapping, proposed: Mapping) -> bool:
+    """True when an *existing* D request moved past ``pending`` (a brand
+    new ``pending`` request appended at the end -- prepare / 受付 -- is not
+    an advance; it never existed before).
+
+    Fails closed (treats it as an advance, so the caller rejects) when
+    either side's embedded projection cannot be decoded: an undecodable
+    ``base`` means this function has no way to know whether something
+    already present advanced, and returning ``False`` there would let a
+    v4/LEGACY_PRETTY write through 判定の順序 8's unconditional-rejection
+    gate on the strength of a check that could not actually run.
+    """
+    base_projection = fresh_review_projection(base_document)
+    if base_projection is None:
+        return True
+    proposed_projection = fresh_review_projection(proposed)
+    if proposed_projection is None:
+        return True
+    base_requests = base_projection.requests
+    proposed_requests = proposed_projection.requests
+    if len(proposed_requests) < len(base_requests):
+        return True  # A deletion can hide another record's advance; fail closed.
+    for before, after in zip(base_requests, proposed_requests):
+        if isinstance(before, FreshReviewRecord) and isinstance(after, FreshReviewRecord):
+            if before.status != after.status:
+                return True
+        elif before != after:
+            return True
+    for appended in proposed_requests[len(base_requests):]:
+        if not (isinstance(appended, FreshReviewRecord) and appended.status == "pending"):
+            return True
+    return False
+
+
+def _diff_is_record_status_advance(base_document: Mapping, proposed: Mapping) -> bool:
+    """True when the only semantic difference is a record's status moving
+    forward (pending -> reserved -> consumed -> terminal), used to decide
+    whether an over-budget normal mutation is an invariant failure (a
+    pinned Δ turned out too small) rather than an ordinary rejection.
+    """
+    base_projection = fresh_review_projection(base_document)
+    proposed_projection = fresh_review_projection(proposed)
+    if base_projection is None or proposed_projection is None:
+        return False
+    if len(base_projection.requests) != len(proposed_projection.requests):
+        return False
+    _ADVANCE_ORDER = {"pending": 0, "reserved": 1, "consumed": 2,
+                      "dispatch-unknown": 1, "running": 2, "blocked": 3, "abandoned-unknown": 3}
+    advanced = False
+    for before, after in zip(base_projection.requests, proposed_projection.requests):
+        if before == after:
+            continue
+        if not (isinstance(before, FreshReviewRecord) and isinstance(after, FreshReviewRecord)):
+            return False
+        before_rank = _ADVANCE_ORDER.get(before.status)
+        after_rank = _ADVANCE_ORDER.get(after.status)
+        if before_rank is None or after_rank is None or after_rank <= before_rank:
+            return False
+        advanced = True
+    return advanced
+

@@ -52,7 +52,7 @@ import sys
 import tempfile
 import time
 import shutil
-from functools import lru_cache
+from functools import lru_cache, partial
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -61,6 +61,16 @@ from typing import NamedTuple, NoReturn, Optional, Protocol
 LIB_DIR = Path(__file__).resolve().parents[1] / "lib"
 if str(LIB_DIR) not in sys.path:
     sys.path.insert(0, str(LIB_DIR))
+
+from mission_persistence.capacity_gate import (  # noqa: E402
+    CapacityWriteError, state_capacity_status, GOAL_DISPATCH_REASON_MAX_CHARS,
+)
+
+from mission_persistence.legacy_capacity import (  # noqa: E402
+    acquire_legacy_lease, write_legacy_json, write_legacy_terminal, DeferredBackupRepository,
+)
+
+from mission_application.stale_cleanup import record_session_error
 
 from mission_common import (  # noqa: E402
     HALT_CATEGORIES,
@@ -232,6 +242,7 @@ from mission_application.evidence import (  # noqa: E402
     verify_published_evidence_effects,
 )
 from mission_application.fresh_review import run_fresh_review_prepare_cli, run_fresh_review_status_cli
+from mission_application.fresh_review_withdraw import run_fresh_review_withdraw_cli
 from mission_application.fresh_review_dispatch import run_fresh_review_dispatch_cli
 import fresh_review_host
 from mission_application.acceptance import (  # noqa: E402
@@ -319,6 +330,8 @@ from mission_application.legacy_initialization import (  # noqa: E402
     LegacyV4InitializationRequest,
     LegacyV4InitializationServices,
     run_initialize_legacy_v4,
+    initialize_v5_session as run_initialize_v5_session,
+    preflight_v5_session as run_preflight_v5_session,
 )
 from mission_application.worktree_archive_specs import (  # noqa: E402
     WorktreeArchiveSpecsRequest,
@@ -1269,73 +1282,13 @@ def acquire_or_verify_lease(
     legacy state may acquire without one. A foreign writer must wait for expiry
     and receives a new token with an incremented epoch.
     """
-    now = _lease_now()
-    presented_lease_id = lease_id if lease_id is not None else os.environ.get("MISSION_LEASE_ID")
-
-    lease_field_count = sum(state.get(key) not in (None, "") for key in LEASE_STATE_FIELDS)
-    if 0 < lease_field_count < len(LEASE_STATE_FIELDS):
-        raise LeaseRejectedError("malformed partial session lease")
-    if not _lease_fields_present(state):
-        lease_id = presented_lease_id or _new_lease_id()
-        state["owner_session_id"] = session_id
-        state["lease_id"] = lease_id
-        state["fencing_epoch"] = 1
-        state["lease_expires_at"] = _lease_expiry(now)
-        return LeaseDecision("acquired", lease_id, 1)
-
-    owner = str(state["owner_session_id"])
-    current_lease_id = str(state["lease_id"])
-    try:
-        epoch = int(state["fencing_epoch"])
-    except (TypeError, ValueError):
-        raise LeaseRejectedError(
-            f"lease held by {owner} until {state.get('lease_expires_at')} (invalid fencing epoch)"
-        )
-
-    same_owner = owner == session_id
-    token_matches = presented_lease_id == current_lease_id if same_owner else False
-    if same_owner and token_matches:
-        state["lease_expires_at"] = _renewed_lease_expiry(
-            str(state["lease_expires_at"]), now
-        )
-        return LeaseDecision("renewed", current_lease_id, epoch)
-
-    expires = parse_iso_datetime(str(state.get("lease_expires_at") or ""))
-    if expires is not None and expires.tzinfo is None:
-        expires = expires.replace(tzinfo=timezone.utc)
-    expired = expires is not None and now >= expires.astimezone(timezone.utc)
-    if not expired:
-        # Same-owner writers without the matching token wait like any foreign
-        # writer: after expiry they recover through the fenced takeover below.
-        raise LeaseRejectedError(
-            f"lease held by {owner} until {state.get('lease_expires_at')}"
-        )
-
-    retired_lease_ids = {
-        str(item.get("lease_id"))
-        for item in state.get("lease_history", [])
-        if isinstance(item, dict) and item.get("lease_id")
-    }
-    if presented_lease_id and (
-        presented_lease_id == current_lease_id
-        or presented_lease_id in retired_lease_ids
-    ):
-        raise LeaseRejectedError(
-            f"lease held by {owner} until {state.get('lease_expires_at')} (stale fencing token)"
-        )
-    new_lease_id = presented_lease_id or _new_lease_id()
-    state.setdefault("lease_history", []).append({
-        "owner_session_id": owner,
-        "lease_id": current_lease_id,
-        "fencing_epoch": epoch,
-        "reason": reason,
-        "at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-    })
-    state["owner_session_id"] = session_id
-    state["lease_id"] = new_lease_id
-    state["fencing_epoch"] = epoch + 1
-    state["lease_expires_at"] = _lease_expiry(now)
-    return LeaseDecision("taken-over", new_lease_id, epoch + 1)
+    return acquire_legacy_lease(
+        state, session_id, reason=reason,
+        presented_lease_id=lease_id if lease_id is not None else os.environ.get('MISSION_LEASE_ID'),
+        now=_lease_now(), new_token=_new_lease_id, fields_present=_lease_fields_present,
+        lease_fields=LEASE_STATE_FIELDS, expiry=_lease_expiry, renewed_expiry=_renewed_lease_expiry,
+        rejected_error=LeaseRejectedError, decision=LeaseDecision,
+    )
 
 
 def resolve_agent() -> str:
@@ -1362,7 +1315,7 @@ def _read_routing_config(path: Path, source: str, allowed_root: Path | None = No
     if allowed_root is not None and path.is_symlink():
         reason = f"routing config symlink rejected at {source}"
         print(f"WARN #355: {reason}; using inline", file=sys.stderr)
-        return {"mode": "inline", "source": source, "fallback_reason": reason}
+        return {"mode": "inline", "source": source, "fallback_reason": reason[:GOAL_DISPATCH_REASON_MAX_CHARS]}
     if allowed_root is not None:
         try:
             resolved_path = path.resolve(strict=False)
@@ -1371,11 +1324,11 @@ def _read_routing_config(path: Path, source: str, allowed_root: Path | None = No
         except ValueError:
             reason = f"routing config escapes project root at {source}"
             print(f"WARN #355: {reason}; using inline", file=sys.stderr)
-            return {"mode": "inline", "source": source, "fallback_reason": reason}
+            return {"mode": "inline", "source": source, "fallback_reason": reason[:GOAL_DISPATCH_REASON_MAX_CHARS]}
         except (OSError, RuntimeError) as exc:
             reason = f"routing config path unreadable at {source}: {exc.__class__.__name__}"
             print(f"WARN #355: {reason}; using inline", file=sys.stderr)
-            return {"mode": "inline", "source": source, "fallback_reason": reason}
+            return {"mode": "inline", "source": source, "fallback_reason": reason[:GOAL_DISPATCH_REASON_MAX_CHARS]}
     if not path.is_file():
         return None
     values: dict[str, str] = {}
@@ -1384,7 +1337,7 @@ def _read_routing_config(path: Path, source: str, allowed_root: Path | None = No
     except (OSError, UnicodeError) as exc:
         reason = f"routing config unreadable at {source}: {exc.__class__.__name__}"
         print(f"WARN #355: {reason}; using inline", file=sys.stderr)
-        return {"mode": "inline", "source": source, "fallback_reason": reason}
+        return {"mode": "inline", "source": source, "fallback_reason": reason[:GOAL_DISPATCH_REASON_MAX_CHARS]}
     for raw_line in lines:
         line = raw_line.split("#", 1)[0].strip()
         if not line:
@@ -1392,28 +1345,28 @@ def _read_routing_config(path: Path, source: str, allowed_root: Path | None = No
         if ":" not in line:
             reason = f"invalid routing config syntax at {source}"
             print(f"WARN #355: {reason}; using inline", file=sys.stderr)
-            return {"mode": "inline", "source": source, "fallback_reason": reason}
+            return {"mode": "inline", "source": source, "fallback_reason": reason[:GOAL_DISPATCH_REASON_MAX_CHARS]}
         key, raw_value = line.split(":", 1)
         key = key.strip()
         value = raw_value.strip().strip("'\"")
         if key not in {"version", "goal_dispatch"}:
             reason = f"unknown routing config key '{key}' at {source}"
             print(f"WARN #355: {reason}; using inline", file=sys.stderr)
-            return {"mode": "inline", "source": source, "fallback_reason": reason}
+            return {"mode": "inline", "source": source, "fallback_reason": reason[:GOAL_DISPATCH_REASON_MAX_CHARS]}
         if key in values:
             reason = f"duplicate routing config key '{key}' at {source}"
             print(f"WARN #355: {reason}; using inline", file=sys.stderr)
-            return {"mode": "inline", "source": source, "fallback_reason": reason}
+            return {"mode": "inline", "source": source, "fallback_reason": reason[:GOAL_DISPATCH_REASON_MAX_CHARS]}
         values[key] = value
     if values.get("version") != "1":
         reason = f"unsupported routing config version '{values.get('version')}' at {source}"
         print(f"WARN #355: {reason}; using inline", file=sys.stderr)
-        return {"mode": "inline", "source": source, "fallback_reason": reason}
+        return {"mode": "inline", "source": source, "fallback_reason": reason[:GOAL_DISPATCH_REASON_MAX_CHARS]}
     mode = values.get("goal_dispatch")
     if mode not in GOAL_DISPATCH_MODES:
         reason = f"invalid goal_dispatch '{mode}' at {source}"
         print(f"WARN #355: {reason}; using inline", file=sys.stderr)
-        return {"mode": "inline", "source": source, "fallback_reason": reason}
+        return {"mode": "inline", "source": source, "fallback_reason": reason[:GOAL_DISPATCH_REASON_MAX_CHARS]}
     return {"mode": mode, "source": source, "fallback_reason": None}
 
 
@@ -1480,12 +1433,12 @@ def _resolve_goal_dispatch(mission: str, cli_mode: str | None, cwd: Path) -> dic
                 + ", ".join(unique_values)
             )
             print(f"WARN #355: {reason}; using inline", file=sys.stderr)
-            return {"mode": "inline", "source": "mission:user-explicit", "fallback_reason": reason}
+            return {"mode": "inline", "source": "mission:user-explicit", "fallback_reason": reason[:GOAL_DISPATCH_REASON_MAX_CHARS]}
         mode = unique_values[0]
         if mode not in GOAL_DISPATCH_MODES:
             reason = f"invalid goal_dispatch '{mode}' in mission user instruction"
             print(f"WARN #355: {reason}; using inline", file=sys.stderr)
-            return {"mode": "inline", "source": "mission:user-explicit", "fallback_reason": reason}
+            return {"mode": "inline", "source": "mission:user-explicit", "fallback_reason": reason[:GOAL_DISPATCH_REASON_MAX_CHARS]}
         return {"mode": mode, "source": "mission:user-explicit", "fallback_reason": None}
     if cli_mode is not None:
         return {"mode": cli_mode, "source": "cli:--goal-dispatch", "fallback_reason": None}
@@ -1508,7 +1461,7 @@ def _goal_dispatch_route_fields(data: dict) -> dict:
         "goal_dispatch_host": host,
     }
     if fallback_reason:
-        fields["goal_dispatch_fallback_reason"] = fallback_reason
+        fields["goal_dispatch_fallback_reason"] = fallback_reason[:GOAL_DISPATCH_REASON_MAX_CHARS]
     return fields
 
 
@@ -1690,6 +1643,8 @@ def _enforce_session_lease_for_write(path: Path, data: dict) -> LeaseDecision | 
 
 
 _FENCED_CLI_EXPECTED_GATE_CODES = frozenset({
+    "state-capacity-exhausted", "state-capacity-legacy-full",
+    "state-capacity-invariant-broken", "state-capacity-withdraw-not-needed",
     # #747: the commit CAS reports from two places.  Both are concurrency,
     # not a defect; only the first is retried, but neither is an internal
     # error.
@@ -1797,7 +1752,11 @@ def atomic_write_json(
     administrative: bool = False,
     lease_decision: LeaseDecision | None | object = _LEASE_DECISION_UNSET,
     expected_identity=None,
-) -> None:
+    before_publish=None,
+    prepare_only=False,
+    replacement=False,
+    base_bytes=None,
+):
     """Phase B-2: fsync + os.replace で完全な前 or 後状態を保証.
 
     #310: session state 形状の書き込みは既定で `last_activity_at` を刻む (エージェント
@@ -1807,20 +1766,18 @@ def atomic_write_json(
     上書きされ壁時計が最大 500 倍膨張した実害があるため)。
 
     """
-    if _is_session_state_shape(data):
-        _validate_specialist_public_state(data)
-    if lease_decision is _LEASE_DECISION_UNSET:
-        lease_decision = _enforce_session_lease_for_write(path, data)
-    if not administrative and _is_session_state_shape(data):
-        data["last_activity_at"] = iso_now()
-    _atomic_write(
-        path,
-        lambda f: json.dump(data, f, indent=2, ensure_ascii=False),
-        expected_identity=expected_identity,
+    return write_legacy_json(
+        path, data, administrative=administrative, lease_decision=lease_decision,
+        expected_identity=expected_identity, before_publish=before_publish,
+        prepare_only=prepare_only, replacement=replacement, base_bytes=base_bytes,
+        services=SimpleNamespace(
+            is_state_shape=_is_session_state_shape, is_state_path=_is_session_state_path,
+            unset=_LEASE_DECISION_UNSET, enforce_lease=_enforce_session_lease_for_write,
+            now=iso_now, atomic_write=_atomic_write, decision_type=LeaseDecision,
+            process_leases=_PROCESS_LEASE_IDS, emit_lease=_emit_lease_carrier,
+        ),
     )
-    if isinstance(lease_decision, LeaseDecision):
-        _PROCESS_LEASE_IDS[str(path.resolve())] = lease_decision.lease_id
-    _emit_lease_carrier(data, lease_decision)
+
 
 
 def atomic_write_text(path: Path, content: str) -> None:
@@ -4854,8 +4811,7 @@ def _commit_specialist_state_with_archive(
             _publish_staged_specialist_archive(temp_path, dst)
             temp_path = None
             published = True
-        backup_state(sf)
-        atomic_write_json(sf, data)
+        atomic_write_json(sf, data, before_publish=backup_state)
     except BaseException:
         _rollback_specialist_archive(temp_path, dst, None, published)
         raise
@@ -5549,7 +5505,7 @@ def cmd_verify_provider_approval(args):
                 descriptor = _configured_approval_entry_point(cwd, args.approval_verifier)
                 if descriptor is None:
                     _provider_gate("verifier-untrusted")
-                evidence = _run_approval_verifier(descriptor, request)
+                evidence = _run_approval_verifier(descriptor, request, cwd=cwd)
                 if not isinstance(evidence, dict) or evidence.get("schema") != "approval-evidence/1":
                     _provider_gate("approval-evidence-invalid")
                 if evidence.get("verifier_id") != args.approval_verifier:
@@ -6618,7 +6574,7 @@ def _legacy_evidence_repository(cwd: Path, sf: Path, *, stamp: bool) -> LegacyV4
 
     def write_state(data: dict) -> None:
         proposed = stamp_metadata(data, cwd) if stamp else data
-        atomic_write_json(sf, proposed, lease_decision=lease["decision"])
+        atomic_write_json(sf, proposed, lease_decision=lease["decision"], before_publish=backup_state)
 
     return _select_legacy_repository_for_cli(
         sf.stem,
@@ -6627,7 +6583,7 @@ def _legacy_evidence_repository(cwd: Path, sf: Path, *, stamp: bool) -> LegacyV4
             lock=lambda: StateLock(lock_file(cwd)),
             read_state=read_state,
             write_state=write_state,
-            backup_state=lambda: backup_state(sf),
+            backup_state=lambda: None,
             effect_publisher=_publish_evidence_effects,
             effect_context=cwd,
             aggregate_recover=aggregate.recover,
@@ -6938,7 +6894,7 @@ def _read_init_peer_state(path: Path) -> dict:
         return _read_legacy_json_file(path)
 
 
-def _initialize_legacy_v4(args, *, write_state, lock_state: bool = True):
+def _initialize_legacy_v4(args, *, write_state, lock_state: bool = True, admission_writer=None, preflight_writer=None, genesis_lock=None, preflight_only=False):
     request = LegacyV4InitializationRequest(
         mission=args.mission,
         goal_dispatch=getattr(args, "goal_dispatch", None),
@@ -6964,6 +6920,7 @@ def _initialize_legacy_v4(args, *, write_state, lock_state: bool = True):
         new_mission=getattr(args, "new_mission", False),
         new_mission_assumptions_path=args._new_mission_assumptions_path,
         lock_state=lock_state,
+        preflight_only=preflight_only,
     )
     services = LegacyV4InitializationServices(
         current_directory=Path.cwd,
@@ -7011,6 +6968,10 @@ def _initialize_legacy_v4(args, *, write_state, lock_state: bool = True):
         atomic_write_json=atomic_write_json,
         permission_preflight=_permission_preflight,
         write_state=write_state,
+        capacity_writer=atomic_write_json,
+        admission_writer=admission_writer,
+        preflight_writer=preflight_writer,
+        genesis_lock=genesis_lock,
         exit_init_write_failure=_exit_init_write_failure,
         exit_init_evidence_write_failure=_exit_init_evidence_write_failure,
         exit_internal_invariant=_exit_internal_invariant,
@@ -7071,7 +7032,7 @@ def _canonical_init_command(args) -> tuple[object, bytes]:
     return _decode_strict_json_object(source), source
 
 
-def _initialize_v5_state(args, path: Path, initial: dict) -> None:
+def _initialize_v5_state(args, path: Path, initial: dict, *, prepare_only=False, preflight_only=False, capacity_base=None):
     """Commit the v4-shaped bootstrap payload through the v5 genesis API."""
     session_id = str(initial["session_id"])
     presented_lease_id = os.environ.get("MISSION_LEASE_ID") or _new_lease_id()
@@ -7121,22 +7082,20 @@ def _initialize_v5_state(args, path: Path, initial: dict) -> None:
         clock=lambda: now,
         lease_ttl_seconds=_lease_ttl_seconds(),
     )
-    try:
-        run_initialize_v5_repository(
-            repository,
-            request,
-            state_bytes,
-            terminal_head_digest,
-        )
-    except OSError:
-        _exit_init_write_failure(Path.cwd(), path)
-    except FencedCommitError as error:
-        print(f"ERROR: {error.code}: {error.detail}", file=sys.stderr)
-        raise SystemExit(2) from error
-    record_reinitialization_commit(args, terminal_head_digest)
-    decision = LeaseDecision("acquired", presented_lease_id, 1)
-    _PROCESS_LEASE_IDS[str(path.resolve())] = presented_lease_id
-    _emit_lease_carrier(initial, decision)
+    def after_commit():
+        record_reinitialization_commit(args, terminal_head_digest)
+        decision = LeaseDecision("acquired", presented_lease_id, 1)
+        _PROCESS_LEASE_IDS[str(path.resolve())] = presented_lease_id
+        _emit_lease_carrier(initial, decision)
+    return run_initialize_v5_repository(
+        repository, request, state_bytes, terminal_head_digest,
+        prepare_only=prepare_only, after_commit=after_commit,
+        write_failure=lambda: _exit_init_write_failure(Path.cwd(), path),
+        commit_error=(FencedCommitError, CapacityWriteError), printer=print, stderr=sys.stderr,
+        preflight_only=preflight_only,
+        capacity_preflight=lambda content: repository.preflight_initialization(request,
+            state_bytes=content, base_bytes=capacity_base),
+    )
 
 
 def cmd_init(args):
@@ -7165,6 +7124,7 @@ def cmd_init(args):
                     cwd,
                     sf,
                     _initialize_new_v5_session,
+                    _preflight_new_v5_session,
                 ),
             )
         else:
@@ -7202,14 +7162,14 @@ def cmd_init(args):
 def _initialize_new_v5_session(args, cwd: Path) -> None:
     """Serialize the complete genesis interval across session IDs."""
 
-    # Another process must not mistake a live private stage for crash residue;
-    # the same boundary also protects aggregate and review-generation choices.
-    with StateLock(state_dir(cwd) / ".init.lock"):
-        _initialize_legacy_v4(
-            args,
-            write_state=lambda path, state: _initialize_v5_state(args, path, state),
-            lock_state=False,
-        )
+    run_initialize_v5_session(args, cwd,
+        state_lock=StateLock, state_root=state_dir(cwd),
+        initialize_legacy=_initialize_legacy_v4, initialize_state=_initialize_v5_state)
+
+
+def _preflight_new_v5_session(args, cwd, base_bytes):
+    run_preflight_v5_session(args, cwd, base_bytes,
+        initialize_legacy=_initialize_legacy_v4, initialize_state=_initialize_v5_state)
 
 
 def cmd_pregate(args):
@@ -8170,7 +8130,7 @@ def _legacy_lifecycle_repository(
             bak.unlink(missing_ok=True)
         backup_published[0] = False
 
-    def guarded_backup() -> None:
+    def guarded_backup(_path=None) -> None:
         if not pre_admit_lease:
             backup_state(sf)
             return
@@ -8204,7 +8164,7 @@ def _legacy_lifecycle_repository(
             admitted_identity[0] = loaded_identity
         return data
 
-    def write_state(data: dict, *, administrative: bool = False) -> None:
+    def write_state(data: dict, *, administrative: bool = False, before_publish=None) -> None:
         proposed = stamp_metadata(data, cwd) if stamp else data
         with _lease_write_reason(lease_reason):
             lease_field_count = sum(
@@ -8226,6 +8186,7 @@ def _legacy_lifecycle_repository(
                         administrative=administrative,
                         lease_decision=admitted_lease[0],
                         expected_identity=admitted_identity[0],
+                        before_publish=before_publish,
                     )
                     backup_published[0] = False
                 except BaseException:
@@ -8237,11 +8198,12 @@ def _legacy_lifecycle_repository(
                     proposed,
                     administrative=administrative,
                     lease_decision=None,
+                    before_publish=before_publish,
                 )
             elif administrative:
-                atomic_write_json(sf, proposed, administrative=True)
+                atomic_write_json(sf, proposed, administrative=True, before_publish=before_publish)
             else:
-                atomic_write_json(sf, proposed)
+                atomic_write_json(sf, proposed, before_publish=before_publish)
 
     selected_session_id = session_id or sf.stem
 
@@ -8255,7 +8217,7 @@ def _legacy_lifecycle_repository(
 
     def legacy_factory(format_guard):
         coordinator = aggregate_coordinator("legacy-v4")
-        return LegacyV4Repository(
+        return DeferredBackupRepository(
             lock=lambda: StateLock(lock_file(cwd)),
             read_state=read_state,
             write_state=write_state,
@@ -8337,6 +8299,7 @@ _ACCEPTANCE_CONTRACT_CLI_SERVICES = AcceptanceContractCliServices(
     _compatibility_operation_arguments,
     _canonical_compatibility_operation,
     load_verifier_policy,
+    partial(state_capacity_status, load_snapshot=_load_authoritative_state),
 )
 
 
@@ -9683,7 +9646,7 @@ def _record_permission_probe_observation(
                 file=sys.stderr,
             )
         return result.halt_recorded, result.terminal_outcome
-    except (CanonicalStateEncodingError, FreshReviewError):
+    except (CanonicalStateEncodingError, FreshReviewError, CapacityWriteError):
         raise
     except UnsupportedSchemaVersionError:
         raise
@@ -10275,7 +10238,7 @@ def _configured_approval_entry_point(cwd: Path, verifier_name: str):
         raise ValueError("approval verifier entry point is not installed")
     entry_point = matches[0]
     try:
-        attached_distribution = entry_point.dist
+        attached_distribution = getattr(entry_point, "dist", None)
         distribution = attached_distribution
         if distribution is None:
             distribution = importlib.metadata.distribution(
@@ -10308,8 +10271,9 @@ def _configured_approval_entry_point(cwd: Path, verifier_name: str):
         configured_item,
         group=_APPROVAL_VERIFIER_ENTRY_POINT_GROUP,
     )
+    from mission_application.approval_verifier import valid_module_name
     module_name = getattr(entry_point, "module", "")
-    if not isinstance(module_name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", module_name):
+    if not valid_module_name(module_name):
         raise ValueError("approval verifier entry point is invalid")
     module_spec = importlib.util.find_spec(module_name)
     origin = getattr(module_spec, "origin", None)
@@ -10332,129 +10296,18 @@ def _configured_approval_entry_point(cwd: Path, verifier_name: str):
     return {**configured_item, "module": module_name, "entry_point_value": entry_point_value}
 
 
-def _approval_verifier_child(verifier, request: dict, channel) -> None:
-    try:
-        # A verifier may create descendants; make this child their process
-        # group leader so timeout cleanup has one bounded target.
-        with contextlib.suppress(OSError):
-            os.setsid()
-        callback = verifier
-        if isinstance(verifier, dict):
-            discovered = importlib.metadata.entry_points()
-            candidates = (discovered.select(group=_APPROVAL_VERIFIER_ENTRY_POINT_GROUP)
-                          if hasattr(discovered, "select") else discovered.get(_APPROVAL_VERIFIER_ENTRY_POINT_GROUP, ()))
-            matches = [item for item in candidates if item.name == verifier["entry_point"]]
-            if len(matches) != 1:
-                raise ValueError("approval verifier entry point is not installed")
-            entry_point = matches[0]
-            attached_distribution = entry_point.dist
-            distribution = attached_distribution
-            if distribution is None:
-                distribution = importlib.metadata.distribution(
-                    verifier["distribution"]
-                )
-            observed_distribution = RegisteredEntryPointDistributionObservation(
-                entry_point_name=entry_point.name,
-                entry_point_value=entry_point.value,
-                has_attached_distribution=attached_distribution is not None,
-                distribution_name=distribution.metadata["Name"],
-                distribution_version=distribution.version,
-                owned_entry_points=tuple(
-                    map(
-                        lambda item: (item.group, item.name, item.value),
-                        distribution.entry_points,
-                    )
-                ),
-            )
-            validate_registered_approval_entry_point_distribution(
-                observed_distribution,
-                verifier,
-                group=_APPROVAL_VERIFIER_ENTRY_POINT_GROUP,
-            )
-            module_name = getattr(entry_point, "module", "")
-            if (module_name != verifier["module"]
-                    or getattr(entry_point, "value", None) != verifier["entry_point_value"]):
-                raise ValueError("approval verifier entry point changed after pinning")
-            module_spec = importlib.util.find_spec(module_name)
-            origin = getattr(module_spec, "origin", None)
-            if not isinstance(origin, str) or "sha256:" + hashlib.sha256(Path(origin).read_bytes()).hexdigest() != verifier["source_digest"]:
-                raise ValueError("approval verifier source digest mismatch")
-            callback = entry_point.load()
-        if not callable(callback):
-            raise ValueError("approval verifier entry point is invalid")
-        channel.send((True, callback(request)))
-    except Exception:
-        channel.send((False, None))
-    finally:
-        channel.close()
+def _run_approval_verifier(verifier, request: dict, *, cwd: Path | None = None) -> dict:
+    from mission_application.approval_verifier import run_approval
+    return run_approval(verifier, request, timeout=_APPROVAL_VERIFIER_TIMEOUT_SEC,
+                        grace=_APPROVAL_VERIFIER_TERMINATE_GRACE_SEC, cwd=cwd)
 
 
-def _stop_approval_verifier_child(child) -> None:
-    """Bound timeout cleanup even when provider code absorbs SIGTERM."""
-    for signal_number, fallback in ((signal.SIGTERM, child.terminate), (signal.SIGKILL, child.kill)):
-        if not child.is_alive():
-            child.join()
-            return
-        with contextlib.suppress(OSError):
-            os.killpg(child.pid, signal_number)
-        if child.is_alive():
-            with contextlib.suppress(OSError):
-                fallback()
-        child.join(_APPROVAL_VERIFIER_TERMINATE_GRACE_SEC)
-    if not child.is_alive():
-        child.join()
-
-
-def _run_approval_verifier(verifier, request: dict) -> dict:
-    """Execute verifier in a reaped child; timeouts cannot leave it running."""
-    try:
-        context = multiprocessing.get_context("fork")
-    except ValueError as exc:
-        raise ValueError("isolated approval verifier execution is unavailable on this host") from exc
-    receiver, sender = context.Pipe(duplex=False)
-    child = context.Process(target=_approval_verifier_child, args=(verifier, request, sender))
-    try:
-        child.start()
-        sender.close()
-        child.join(_APPROVAL_VERIFIER_TIMEOUT_SEC)
-        if child.is_alive():
-            _stop_approval_verifier_child(child)
-            raise ValueError("approval verifier timed out")
-        if child.exitcode != 0 or not receiver.poll():
-            raise ValueError("approval verifier rejected the evidence")
-        success, result = receiver.recv()
-        if not success or not isinstance(result, dict):
-            raise ValueError("approval verifier rejected the evidence")
-        return result
-    finally:
-        sender.close()
-        receiver.close()
-        if child.is_alive():
-            _stop_approval_verifier_child(child)
-        if not child.is_alive():
-            child.close()
-
-
-def verify_force_approval(request: dict, verifier_name: object, *, cwd: Path | None = None) -> dict:
-    """Fail closed unless a registered callback returns a matching typed envelope."""
-    if not isinstance(verifier_name, str) or not _APPROVAL_VERIFIER_NAME_RE.fullmatch(verifier_name):
-        raise ValueError("approval verifier is invalid or not configured")
-    verifier = _APPROVAL_VERIFIERS.get(verifier_name)
-    descriptor = _configured_approval_entry_point(cwd, verifier_name) if verifier is None and cwd is not None else None
-    if verifier is None and descriptor is None:
-        raise ValueError("approval verifier is not configured")
-    try:
-        result = _run_approval_verifier(verifier if verifier is not None else descriptor, request)
-    except Exception as exc:
-        raise ValueError("approval verifier rejected the evidence") from exc
-    try:
-        envelope = {"request": request, "response": result, "receipt_ref": result.get("receipt_ref"), "consumed": True}
-        validated = validate_recorded_envelope(envelope)
-    except (AttributeError, ValueError) as exc:
-        raise ValueError("approval verifier did not return a verified envelope") from exc
-    if validated["response"]["verifier_id"] != verifier_name:
-        raise ValueError("approval verifier did not return a verified envelope")
-    return validated
+def verify_force_approval(request: dict, verifier_name: object, *, cwd: Path | None = None,
+                          budgeted: bool = False, state: dict | None = None) -> dict:
+    from mission_application.approval_verifier import verify_approval_request
+    return verify_approval_request(request, verifier_name, verifiers=_APPROVAL_VERIFIERS,
+                                   resolve=_configured_approval_entry_point, execute=_run_approval_verifier,
+                                   cwd=cwd, budgeted=budgeted, state=state)
 
 
 def _force_envelope_replayed(cwd: Path, envelope: dict) -> bool:
@@ -13964,6 +13817,10 @@ def cmd_fresh_review_reconcile(args):
     print(run_fresh_review_dispatch_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES, fresh_review_host))
 
 
+def cmd_fresh_review_withdraw(args):
+    print(run_fresh_review_withdraw_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES))
+
+
 def cmd_fresh_review_status(args):
     print(run_fresh_review_status_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES))
 
@@ -14131,7 +13988,8 @@ def _verify_force_pass_approval(data: dict, args, cwd: Path) -> dict:
         event_nonce=secrets.token_hex(32),
     )
     verification = verify_force_approval(
-        request, getattr(args, "approval_verifier", None), cwd=cwd
+        request, getattr(args, "approval_verifier", None), cwd=cwd,
+        state=data
     )
     if _force_envelope_replayed(cwd, verification):
         raise ValueError("approval request or receipt was already consumed")
@@ -14824,10 +14682,8 @@ def _terminalize_state_file(
         return sampled
 
     def write_terminal_state(data: dict, *, administrative: bool = False) -> None:
-        _validate_specialist_public_state(data)
-        # Legacy janitor CAS deliberately bypasses owner-token acquisition;
-        # the state was revalidated under StateLock by the repository.
-        _atomic_write(sf, lambda f: json.dump(data, f, indent=2, ensure_ascii=False))
+        # Janitor has already revalidated the state under the repository lock.
+        write_legacy_terminal(sf, data, atomic_write=_atomic_write, backup_state=backup_state)
 
     _selection_snapshot, selection_state = _load_authoritative_state(
         sf,
@@ -14855,7 +14711,7 @@ def _terminalize_state_file(
             lock=lambda: StateLock(lock_file(proj)),
             read_state=lambda: read_session_json(sf),
             write_state=write_terminal_state,
-            backup_state=lambda: backup_state(sf),
+            backup_state=lambda: None,
             aggregate_recover=coordinator.recover,
             aggregate_prepare=coordinator.prepare,
             aggregate_finalize=coordinator.finalize,
@@ -15186,6 +15042,7 @@ def cmd_halt(args):
         search_roots = [Path(args.root)] if getattr(args, "root", None) else _default_search_roots()
         category = _normalize_halt_category(getattr(args, "category", None))
         halted = []
+        errors = list()
         for sf in preflight_session_paths(search_roots, _iter_state_files):
             try:
                 data = _read_legacy_json_file(sf)
@@ -15197,11 +15054,13 @@ def cmd_halt(args):
                     )
                     if changed:
                         halted.append(str(proj))
+            except CapacityWriteError as error:
+                record_session_error(errors, sf, error)
             except (CanonicalStateEncodingError, FreshReviewError):
                 raise
             except Exception as e:
                 print(f"WARN: skip {sf}: {e}", file=sys.stderr)
-        print(json.dumps({"ok": True, "halted": halted, "halt_category": category}))
+        print(json.dumps({"ok": True, "halted": halted, "halt_category": category, "errors": errors}))
     else:
         if getattr(args, "root", None):
             print("WARN: --root は --all と併用時のみ有効です (無視されました)", file=sys.stderr)
@@ -16358,7 +16217,7 @@ def _add_review_parsers(subparsers) -> None:
 
     p_schema = sub.add_parser("schema", help="入力契約のスキーマを出力する (#683)")
     p_schema.add_argument("--contract", required=True,
-                          choices=("planning-adopt-core", "review-import", "acceptance-contract-import", "fresh-review-prepare", "fresh-review-run", "fresh-review-reconcile"),
+                          choices=("planning-adopt-core", "review-import", "acceptance-contract-import", "fresh-review-prepare", "fresh-review-run", "fresh-review-reconcile", "fresh-review-withdraw"),
                           help="出力する契約")
     p_schema.set_defaults(func=cmd_schema)
     p_score = sub.add_parser("push-score", help="score_history に採点結果を append (orchestrator が Phase 5 直後に呼ぶ)")
@@ -16502,6 +16361,10 @@ def _add_review_parsers(subparsers) -> None:
     p_reconcile.add_argument("--request", required=True)
     p_reconcile.add_argument("--adapter", required=True)
     p_reconcile.set_defaults(func=cmd_fresh_review_reconcile, command_outcome_tracking=True)
+
+    p_withdraw = p_fresh_sub.add_parser("withdraw", help="容量超過時に pending request を取り下げる")
+    p_withdraw.add_argument("--request", required=True)
+    p_withdraw.set_defaults(func=cmd_fresh_review_withdraw, command_outcome_tracking=True)
 
     p_acceptance = sub.add_parser("acceptance-contract", help="immutable acceptance contract を管理")
     p_acceptance_sub = p_acceptance.add_subparsers(dest="acceptance_contract_command", required=True)
@@ -17034,7 +16897,8 @@ def _build_parser():
 
 
 def main():
-    args = _build_parser().parse_args()
+    from budgeted_exec import parse_cli
+    args = parse_cli(_build_parser())
     try:
         try:
             args.func(args)
@@ -17091,7 +16955,7 @@ def main():
     except CommandOutcomeInputError:
         print('{"ok": false, "outcome_kind": "invalid-input"}')
         raise SystemExit(2)
-    except FreshReviewError as error:
+    except (FreshReviewError, CapacityWriteError) as error:
         print(f"ERROR: {error.code}", file=sys.stderr)
         sys.exit(2)
     except SpecialistPublicContractError as error:

@@ -20,6 +20,13 @@ REQUEST_SCHEMA = 'mission-fresh-review-request/1'
 PROJECTION_SCHEMA = 'mission-fresh-review/1'
 BUDGET_LIMITS = {'wall_time_sec': 300, 'max_tool_calls': 64, 'max_replays': 16,
                  'max_output_bytes': 256 * 1024, 'max_packet_bytes': 1024 * 1024}
+FRESH_REVIEW_INT_MAX = 2**63 - 1
+FRESH_REVIEW_ID_MAX_CHARS = 128
+FRESH_REVIEW_DIGEST_CHARS = 71
+FRESH_REVIEW_TIMESTAMP_CHARS = 27
+FRESH_REVIEW_FINDINGS_LIMIT = 61
+FRESH_REVIEW_EVIDENCE_MAX_BYTES = BUDGET_LIMITS['max_output_bytes']
+FRESH_REVIEW_CAPACITY_WITHDRAWN_REASON = 'capacity-withdrawn'
 _ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z')
 _DIGEST = re.compile(r'sha256:[0-9a-f]{64}\Z')
 
@@ -41,26 +48,113 @@ def canonical_digest(value):
     return 'sha256:' + hashlib.sha256(canonical_bytes(value)).hexdigest()
 
 
+def _json_builtins(value, code, fields=None):
+    """Check the wire tree before trusting any overridable operation.
+
+    Only what a JSON decoder cannot produce is rejected here: subclasses and
+    foreign types, non-str keys, cycles and nesting too deep to walk. Every
+    exact JSON value passes, so plain JSON keeps the reason codes of the
+    closed-shape and field checks that follow (typed fields reject floats
+    there). Descriptors retain field reasons through objects and list items
+    (None key) for the values this walk does reject.
+    """
+    ancestors = set()
+
+    def visit(item, reason, children):
+        if type(item) not in (dict, list, str, int, float, bool, type(None)):
+            raise FreshReviewError('fresh-review-' + reason)
+        if type(item) not in (dict, list):
+            return
+        if id(item) in ancestors:
+            raise FreshReviewError('fresh-review-' + reason)
+        ancestors.add(id(item))
+        try:
+            if type(item) is dict:
+                for key, child in item.items():
+                    if type(key) is not str:
+                        raise FreshReviewError('fresh-review-' + reason)
+                    descriptor = children.get(key, children.get(None, (reason, {})))
+                    visit(child, descriptor[0], descriptor[1])
+            else:
+                child_code, child_fields = children.get(None, (reason, children))
+                for child in item:
+                    visit(child, child_code, child_fields)
+        finally:
+            ancestors.remove(id(item))
+
+    try:
+        visit(value, code, fields or {})
+    except RecursionError as exc:
+        raise FreshReviewError('fresh-review-' + code) from exc
+
+
+def _field_codes(code, names):
+    return {name: (code, {}) for name in names.split()}
+
+
+_ID_JSON_CODES = _field_codes('identity-invalid',
+    'request_id nonce mission_id session_id operation_id prepare_operation_id '
+    'dispatch_operation_id commit_operation_id withdraw_operation_id parent_identity '
+    'child_identity context_identity invocation_id adapter_id reservation_id criterion_id command_id')
+_DIGEST_JSON_CODES = _field_codes('digest-invalid',
+    'requirement_digest contract_digest verifier_policy_digest candidate_digest input_digest '
+    'adapter_registration_digest request_digest received_input_digest launch_digest output_digest '
+    'prepare_intent_digest prepare_payload_digest intent_digest payload_digest '
+    'outbound_packet_digest definition_digest snapshot_digest digest')
+_CANDIDATE_JSON_CODES = {**_ID_JSON_CODES, **_DIGEST_JSON_CODES}
+_REQUEST_JSON_CODES = {
+    **_ID_JSON_CODES, **_DIGEST_JSON_CODES,
+    **_field_codes('budget-invalid', ' '.join(BUDGET_LIMITS)),
+    **_field_codes('control-invalid', 'allowed_tools created_at'),
+    **_field_codes('request-schema-invalid', 'schema'),
+    **_field_codes('iteration-invalid', 'iteration'),
+    **_field_codes('perspective-invalid', 'perspective'),
+    'criterion_ids': ('list-invalid', {None: ('identity-invalid', {})}),
+    'candidate_bindings': ('candidate-invalid', _CANDIDATE_JSON_CODES),
+    'input_ref': ('input-ref-invalid', {}),
+}
+_RECORD_JSON_CODES = {
+    **_ID_JSON_CODES, **_DIGEST_JSON_CODES,
+    'request': ('request-shape-invalid', _REQUEST_JSON_CODES),
+    'result': ('result-invalid', {}),
+    'criterion_ids': ('list-invalid', {None: ('identity-invalid', {})}),
+    'reason': ('reason-invalid', {}),
+    'withdraw_fencing_epoch': ('fence-invalid', {}),
+}
+_PROJECTION_JSON_CODES = {
+    'fresh_review': ('projection-shape-invalid', {
+        'schema': ('projection-schema-invalid', {}),
+        'requests': ('projection-shape-invalid', {None: ('record-invalid', _RECORD_JSON_CODES)}),
+    }),
+}
+
+
 def _closed(value, fields, code):
-    if not isinstance(value, dict) or set(value) != set(fields):
+    if type(value) is not dict or set(value) != set(fields):
         raise FreshReviewError(code)
     return value
 
 
 def _identifier(value):
-    if not isinstance(value, str) or not _ID.fullmatch(value):
+    if type(value) is not str or not _ID.fullmatch(value):
         raise FreshReviewError('fresh-review-identity-invalid')
     return value
 
 
 def _digest(value):
-    if not isinstance(value, str) or not _DIGEST.fullmatch(value):
+    if type(value) is not str or not _DIGEST.fullmatch(value):
         raise FreshReviewError('fresh-review-digest-invalid')
     return value
 
 
+def _integer(value, code):
+    if type(value) is not int or not 0 <= value <= FRESH_REVIEW_INT_MAX:
+        raise FreshReviewError(code)
+    return value
+
+
 def _unique_strings(value, validator, *, nonempty=True):
-    if not isinstance(value, list) or nonempty and not value:
+    if type(value) is not list or nonempty and not value:
         raise FreshReviewError('fresh-review-list-invalid')
     items = tuple(validator(item) for item in value)
     if len(set(items)) != len(items):
@@ -69,6 +163,7 @@ def _unique_strings(value, validator, *, nonempty=True):
 
 
 def validate_budgets(values):
+    _json_builtins(values, 'budget-invalid')
     _closed(values, BUDGET_LIMITS, 'fresh-review-budget-invalid')
     if any(type(values[key]) is not int or not 1 <= values[key] <= maximum
            for key, maximum in BUDGET_LIMITS.items()):
@@ -118,6 +213,7 @@ class FreshReviewRequest:
 
 
 def candidate_identity(snapshots):
+    _json_builtins(snapshots, 'candidate-invalid', {None: ('digest-invalid', {})})
     if not isinstance(snapshots, dict) or not snapshots:
         raise FreshReviewError('fresh-review-candidate-invalid')
     validated = {_identifier(key): _digest(value) for key, value in snapshots.items()}
@@ -138,6 +234,7 @@ def request_document(request):
 
 
 def decode_request(value):
+    _json_builtins(value, 'request-shape-invalid', _REQUEST_JSON_CODES)
     _closed(value, FreshReviewRequest.__dataclass_fields__, 'fresh-review-request-shape-invalid')
     if value['schema'] != REQUEST_SCHEMA:
         raise FreshReviewError('fresh-review-request-schema-invalid')
@@ -151,7 +248,7 @@ def decode_request(value):
     if type(fields['iteration']) is not int or fields['iteration'] < 0:
         raise FreshReviewError('fresh-review-iteration-invalid')
     perspective = fields['perspective']
-    if not isinstance(perspective, str) or not perspective or perspective != perspective.strip() or len(perspective) > 128 or '\x00' in perspective:
+    if type(perspective) is not str or not perspective or perspective != perspective.strip() or len(perspective) > 128 or '\x00' in perspective:
         raise FreshReviewError('fresh-review-perspective-invalid')
     canonical_bytes(perspective)
     validate_budgets({key: fields[key] for key in BUDGET_LIMITS})
@@ -163,7 +260,7 @@ def decode_request(value):
     except (ValueError, TypeError, AttributeError) as exc:
         raise FreshReviewError('fresh-review-control-invalid') from exc
     bindings = fields['candidate_bindings']
-    if not isinstance(bindings, list) or not bindings:
+    if type(bindings) is not list or not bindings:
         raise FreshReviewError('fresh-review-candidate-invalid')
     decoded, snapshots, definitions, roles = [], {}, {}, set()
     for item in bindings:
@@ -172,7 +269,7 @@ def decode_request(value):
             _identifier(item[key])
         for key in ('definition_digest', 'snapshot_digest'):
             _digest(item[key])
-        if not isinstance(item['role'], str) or item['role'] not in ('verification', 'replay'):
+        if type(item['role']) is not str or item['role'] not in ('verification', 'replay'):
             raise FreshReviewError('fresh-review-candidate-invalid')
         pair = (item['criterion_id'], item['role'])
         if pair in roles or item['criterion_id'] not in fields['criterion_ids']:
@@ -212,21 +309,51 @@ class FreshReviewRecord:
 
 
 @dataclass(frozen=True)
+class WithdrawnFreshReviewRecord:
+    """A pending request taken out of capacity without launching D.
+
+    The tombstone replaces the pending record in place; it keeps the
+    one-use identities (request_id/nonce/prepare_operation_id) so neither
+    can be reused, but drops the request body so the encoded form is always
+    strictly smaller than the pending record it replaces.
+    """
+
+    request_id: str
+    nonce: str
+    prepare_operation_id: str
+    request_digest: str
+    criterion_ids: tuple[str, ...]
+    withdraw_operation_id: str
+    withdraw_fencing_epoch: int
+    status: str = 'withdrawn'
+    reason: str = FRESH_REVIEW_CAPACITY_WITHDRAWN_REASON
+
+
+@dataclass(frozen=True)
 class FreshReviewProjection:
-    requests: tuple[FreshReviewRecord, ...] = ()
+    requests: tuple[FreshReviewRecord | WithdrawnFreshReviewRecord, ...] = ()
 
 
 def record_operation_ids(record):
+    if isinstance(record, WithdrawnFreshReviewRecord):
+        return (record.prepare_operation_id, record.withdraw_operation_id)
     commit = (record.result.thaw()['commit_operation_id']
               if record.status in ('blocked', 'abandoned-unknown') else None)
     return (record.prepare_operation_id, record.operation_id, commit)
 
 
 def projection_document(projection):
-    if not isinstance(projection, FreshReviewProjection) or type(projection.requests) is not tuple or any(not isinstance(item, FreshReviewRecord) for item in projection.requests):
+    if not isinstance(projection, FreshReviewProjection) or type(projection.requests) is not tuple:
         raise FreshReviewError('fresh-review-projection-shape-invalid')
     records = []
     for record in projection.requests:
+        if isinstance(record, WithdrawnFreshReviewRecord):
+            fields = {key: getattr(record, key) for key in WithdrawnFreshReviewRecord.__dataclass_fields__}
+            fields['criterion_ids'] = list(record.criterion_ids)
+            records.append(fields)
+            continue
+        if not isinstance(record, FreshReviewRecord):
+            raise FreshReviewError('fresh-review-projection-shape-invalid')
         fields = {key: getattr(record, key) for key in FreshReviewRecord.__dataclass_fields__}
         fields['request'] = request_document(record.request)
         if record.result is not None and not isinstance(record.result, FrozenJsonObject):
@@ -239,6 +366,7 @@ def projection_document(projection):
 
 
 def decode_projection(document):
+    _json_builtins(document, 'projection-shape-invalid', _PROJECTION_JSON_CODES)
     if not isinstance(document, dict):
         raise FreshReviewError('fresh-review-projection-shape-invalid')
     if 'fresh_review' not in document:
@@ -246,11 +374,33 @@ def decode_projection(document):
     value = _closed(document['fresh_review'], ('schema', 'requests'), 'fresh-review-projection-shape-invalid')
     if value['schema'] != PROJECTION_SCHEMA:
         raise FreshReviewError('fresh-review-projection-schema-invalid')
-    if not isinstance(value['requests'], list):
+    if type(value['requests']) is not list:
         raise FreshReviewError('fresh-review-projection-shape-invalid')
     records, ids, nonces, operations = [], set(), set(), set()
     for item in value['requests']:
-        fields = {'dispatch': None, 'launch': None, 'independent': None, **item} if isinstance(item, dict) else item
+        if not isinstance(item, dict):
+            raise FreshReviewError('fresh-review-record-invalid')
+        if item.get('status') == 'withdrawn':
+            _closed(item, WithdrawnFreshReviewRecord.__dataclass_fields__, 'fresh-review-record-invalid')
+            fields = dict(item)
+            request_id = _identifier(fields['request_id']); nonce = _identifier(fields['nonce'])
+            prepare_operation_id = _identifier(fields['prepare_operation_id'])
+            _digest(fields['request_digest'])
+            fields['criterion_ids'] = _unique_strings(fields['criterion_ids'], _identifier)
+            if fields['reason'] != FRESH_REVIEW_CAPACITY_WITHDRAWN_REASON:
+                raise FreshReviewError('fresh-review-reason-invalid')
+            withdraw_operation_id = _identifier(fields['withdraw_operation_id'])
+            _integer(fields['withdraw_fencing_epoch'], 'fresh-review-fence-invalid')
+            if request_id in ids or nonce in nonces or prepare_operation_id in operations:
+                raise FreshReviewError('fresh-review-identity-reused')
+            ids.add(request_id); nonces.add(nonce); operations.add(prepare_operation_id)
+            # Checked after this record's own prepare id, as reserved records do.
+            if withdraw_operation_id in operations:
+                raise FreshReviewError('fresh-review-operation-conflict')
+            operations.add(withdraw_operation_id)
+            records.append(WithdrawnFreshReviewRecord(**fields))
+            continue
+        fields = {'dispatch': None, 'launch': None, 'independent': None, **item}
         _closed(fields, FreshReviewRecord.__dataclass_fields__, 'fresh-review-record-invalid')
         fields = dict(fields)
         fields['request'] = request = decode_request(fields['request'])
@@ -271,7 +421,7 @@ def decode_projection(document):
             if fields['status'] == 'reserved' and fields['result'] is not None:
                 raise FreshReviewError('fresh-review-record-invalid')
             if fields['status'] == 'consumed':
-                if not isinstance(fields['result'], dict) or len(canonical_bytes(fields['result'])) > request.max_output_bytes:
+                if type(fields['result']) is not dict or len(canonical_bytes(fields['result'])) > request.max_output_bytes:
                     raise FreshReviewError('fresh-review-result-invalid')
                 fields['result'] = freeze_json_value(fields['result'])
         elif fields['status'] in ('dispatch-unknown', 'running', 'blocked', 'abandoned-unknown'):
@@ -306,12 +456,19 @@ def validate_projection_backing(document, projection):
 def _record(projection, request, operation_id, intent_digest, payload_digest):
     _identifier(operation_id); _digest(intent_digest); _digest(payload_digest)
     for record in projection.requests:
+        if isinstance(record, WithdrawnFreshReviewRecord):
+            if operation_id in (record.prepare_operation_id, record.withdraw_operation_id):
+                raise FreshReviewError('fresh-review-operation-conflict')
+            continue
         if record.prepare_operation_id == operation_id or operation_id in record_operation_ids(record) and record.request.nonce != request.nonce:
             raise FreshReviewError('fresh-review-operation-conflict')
-    matches = [record for record in projection.requests if record.request.nonce == request.nonce]
+    matches = [record for record in projection.requests
+               if (record.nonce if isinstance(record, WithdrawnFreshReviewRecord) else record.request.nonce) == request.nonce]
     if len(matches) != 1:
         raise FreshReviewError('fresh-review-request-unavailable')
     record = matches[0]
+    if isinstance(record, WithdrawnFreshReviewRecord):
+        raise FreshReviewError('fresh-review-request-withdrawn')
     if canonical_bytes(request_document(record.request)) != canonical_bytes(request_document(request)):
         raise FreshReviewError('fresh-review-stale')
     if record.operation_id is not None:
@@ -324,6 +481,45 @@ def _record(projection, request, operation_id, intent_digest, payload_digest):
 
 def _replace_record(projection, old, new):
     return FreshReviewProjection(tuple(new if item == old else item for item in projection.requests))
+
+
+def withdraw_request(projection, *, request_id, operation_id, fencing_epoch):
+    """Pure replacement of one pending record with its withdrawn tombstone.
+
+    Capacity admission (whether a withdrawal is needed, and that the base is
+    over capacity) is the caller's concern (D2c); this reducer only enforces
+    the pending -> withdrawn transition, idempotent resend, and the identity
+    rules that keep nonce/request_id/operation ids one-use.
+    """
+    _identifier(request_id); _identifier(operation_id)
+    _integer(fencing_epoch, 'fresh-review-fence-invalid')
+    matches = [record for record in projection.requests
+               if (record.request_id if isinstance(record, WithdrawnFreshReviewRecord)
+                   else record.request.request_id) == request_id]
+    if len(matches) != 1:
+        raise FreshReviewError('fresh-review-request-unavailable')
+    target = matches[0]
+    if isinstance(target, WithdrawnFreshReviewRecord):
+        if target.withdraw_operation_id == operation_id:
+            if target.withdraw_fencing_epoch != fencing_epoch:
+                raise FreshReviewError('fresh-review-operation-conflict')
+            return projection
+        raise FreshReviewError('fresh-review-request-withdrawn')
+    if target.status != 'pending':
+        raise FreshReviewError('fresh-review-request-not-pending')
+    for record in projection.requests:
+        other_operations = ((record.prepare_operation_id, record.withdraw_operation_id)
+                            if isinstance(record, WithdrawnFreshReviewRecord)
+                            else record_operation_ids(record))
+        if operation_id in other_operations:
+            raise FreshReviewError('fresh-review-operation-conflict')
+    tombstone = WithdrawnFreshReviewRecord(
+        request_id=target.request.request_id, nonce=target.request.nonce,
+        prepare_operation_id=target.prepare_operation_id,
+        request_digest=canonical_digest(request_document(target.request)),
+        criterion_ids=tuple(target.request.criterion_ids),
+        withdraw_operation_id=operation_id, withdraw_fencing_epoch=fencing_epoch)
+    return _replace_record(projection, target, tombstone)
 
 
 def reserve_request(projection, request, *, operation_id, intent_digest, payload_digest):
@@ -355,6 +551,14 @@ def prepare_request_state(state, command):
     request = decode_request(request_document(command.request))
     _identifier(command.operation_id); _digest(command.intent_digest); _digest(command.payload_digest)
     for record in state.fresh_review.requests:
+        if isinstance(record, WithdrawnFreshReviewRecord):
+            if command.operation_id == record.prepare_operation_id:
+                raise FreshReviewError('fresh-review-request-withdrawn')
+            if command.operation_id == record.withdraw_operation_id:
+                raise FreshReviewError('fresh-review-operation-conflict')
+            if record.nonce == request.nonce or record.request_id == request.request_id:
+                raise FreshReviewError('fresh-review-nonce-reused')
+            continue
         if command.operation_id in record_operation_ids(record):
             if (record.prepare_operation_id, record.prepare_intent_digest, record.prepare_payload_digest, record.request) != (command.operation_id, command.intent_digest, command.payload_digest, request):
                 raise FreshReviewError('fresh-review-operation-conflict')

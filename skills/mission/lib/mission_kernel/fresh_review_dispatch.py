@@ -3,20 +3,21 @@ from __future__ import annotations
 from dataclasses import replace
 
 from acceptance_contract import canonical_contract_digest
-from .commands import BeginFreshReviewDispatch, RecordFreshReviewLaunch
+from .commands import BeginFreshReviewDispatch, RecordFreshReviewLaunch, WithdrawFreshReviewRequest
 from .fresh_review import (
     FreshReviewError, _closed, _identifier, _digest, canonical_digest, request_document,
     projection_document, _replace_record, validate_projection_backing, record_operation_ids,
+    FreshReviewRecord, WithdrawnFreshReviewRecord, withdraw_request,
 )
 from .fresh_review_receipts import (
     decode_launch_receipt, decode_terminal_receipt, receipt_document, ContextMode,
-    BlockedFreshReview, AbandonedFreshReview, _integer,
+    BlockedFreshReview, AbandonedFreshReview, _integer, validate_dispatch_intent,
+    FRESH_REVIEW_DISPATCH_SHAPE,
 )
 from .json_codec import freeze_json_value
 from .model import FrozenJsonObject
 
-DISPATCH_FIELDS = ('invocation_id', 'operation_id', 'outbound_packet_digest', 'iteration',
-                   'fencing_epoch', 'status', 'lifecycle_state', 'parent_identity', 'adapter_id')
+DISPATCH_FIELDS = tuple(FRESH_REVIEW_DISPATCH_SHAPE)
 
 
 def validate_launch(request, dispatch, raw):
@@ -41,7 +42,7 @@ def validate_launch(request, dispatch, raw):
 
 def decode_dispatch_record(fields):
     request = fields['request']
-    dispatch = _closed(fields['dispatch'], DISPATCH_FIELDS, 'fresh-review-dispatch-invalid')
+    dispatch = validate_dispatch_intent(fields['dispatch'])
     for key in ('operation_id', 'parent_identity', 'adapter_id'):
         _identifier(dispatch[key])
     _integer(dispatch['fencing_epoch'], 'fresh-review-fence-invalid')
@@ -70,7 +71,9 @@ def decode_dispatch_record(fields):
                 fields['status'], request.request_id, canonical_digest(request_document(request)), request.nonce,
                 dispatch['operation_id'], dispatch['fencing_epoch'], request.candidate_digest):
             raise FreshReviewError('fresh-review-terminal-binding-mismatch')
-        if getattr(receipt, 'launch_receipt', None) is not None and receipt_document(receipt.launch_receipt) != launch:
+        terminal_launch = getattr(receipt, 'launch_receipt', None)
+        if (isinstance(receipt, BlockedFreshReview) and launch is not None
+                or (receipt_document(terminal_launch) if terminal_launch is not None else None) != launch):
             raise FreshReviewError('fresh-review-terminal-binding-mismatch')
         fields['result'] = freeze_json_value(receipt_document(receipt))
     elif result is not None:
@@ -86,10 +89,17 @@ def dispatch_state(state, command):
     _integer(command.fencing_epoch, 'fresh-review-fence-invalid')
     if command.fencing_epoch != getattr(state.lease, 'fencing_epoch', 0):
         raise FreshReviewError('fresh-review-stale-fence')
-    matches = [record for record in state.fresh_review.requests if record.request.request_id == command.request_id]
+    matches = [record for record in state.fresh_review.requests if (record.request_id if isinstance(record, WithdrawnFreshReviewRecord)
+                   else record.request.request_id) == command.request_id]
     if len(matches) != 1:
         raise FreshReviewError('fresh-review-request-unavailable')
     record = matches[0]
+    if isinstance(command, WithdrawFreshReviewRequest):
+        projection = withdraw_request(state.fresh_review, request_id=command.request_id,
+            operation_id=command.operation_id, fencing_epoch=command.fencing_epoch)
+        return _publish_projection(state, document, projection)
+    if isinstance(record, WithdrawnFreshReviewRecord):
+        raise FreshReviewError('fresh-review-request-withdrawn')
     request = record.request
     if any(command.operation_id in record_operation_ids(item)
            for item in state.fresh_review.requests if item != record) or command.operation_id == record.prepare_operation_id:
@@ -114,7 +124,7 @@ def dispatch_state(state, command):
         if record.status != 'dispatch-unknown' or not isinstance(command.launch, FrozenJsonObject):
             raise FreshReviewError('fresh-review-not-dispatch-unknown')
         launch, independent = validate_launch(request, record.dispatch.thaw(), command.launch.thaw())
-        if any(item.launch is not None and item.launch.thaw()['child_identity'] == launch.child_identity
+        if any(isinstance(item, FreshReviewRecord) and item.launch is not None and item.launch.thaw()['child_identity'] == launch.child_identity
                for item in state.fresh_review.requests):
             raise FreshReviewError('fresh-review-child-reused')
         new = replace(record, status='running', launch=command.launch, independent=independent)
@@ -128,6 +138,10 @@ def dispatch_state(state, command):
             raise FreshReviewError('fresh-review-stale-fence')
         new = replace(record, status=receipt.outcome.value, result=command.receipt)
     projection = _replace_record(state.fresh_review, record, new)
+    return _publish_projection(state, document, projection)
+
+
+def _publish_projection(state, document, projection):
     document['fresh_review'] = projection_document(projection)
     validate_projection_backing(document, projection)
     key = 'legacy_passthrough' if state.legacy_passthrough is not None else 'extensions'

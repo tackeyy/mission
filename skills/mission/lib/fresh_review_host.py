@@ -9,8 +9,11 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import os
+import time
+from budgeted_exec import spawn_exec, observe_exit, cleanup_group, strict_json
 
-from fresh_review_runtime import resolve_adapter as resolve, load_adapter, AdapterPin, AdapterRegistration
+from fresh_review_runtime import AdapterPin, AdapterRegistration, validate_registry, REGISTRY_SCHEMA
 from mission_kernel.fresh_review import FreshReviewError, canonical_bytes, canonical_digest, request_document
 from mission_kernel.json_codec import freeze_json_value
 from mission_kernel.model import ContentAddressedRef
@@ -18,18 +21,56 @@ from mission_persistence.strict_reader import read_stable_bytes_beneath
 
 
 def _call(pin, action, payload, *, cwd=None, timeout=10):
-    envelope = {'pin': asdict(pin), 'action': action, **payload}
+    """The only adapter exec seam; no callback or pre-exec Python in the parent.
+
+    File-backed transport cannot deadlock on a descendant's inherited pipe.
+    Cleanup precedes reap on every exit, including callback failure and timeout.
+    F can replace admission around this seam without changing adapter calls.
+    """
+    envelope = {'pin': asdict(pin) if pin is not None else None, 'action': action, **payload}
+    child, timed_out, confirmed = None, False, True
     try:
-        result = subprocess.run([sys.executable, str(Path(__file__).resolve())],
-            input=canonical_bytes(envelope), capture_output=True, cwd=cwd, timeout=timeout)
-        if result.returncode or len(result.stdout) > 512 * 1024:
-            return {'unknown': True}
-        value = json.loads(result.stdout)
-        if not isinstance(value, dict):
-            return {'unknown': True}
-        return value
-    except (OSError, subprocess.TimeoutExpired, ValueError):
+        with tempfile.TemporaryFile() as incoming, tempfile.TemporaryFile() as outgoing:
+            incoming.write(canonical_bytes(envelope))
+            incoming.seek(0)
+            deadline = time.monotonic() + timeout
+            try:
+                child = spawn_exec([sys.executable, str(Path(__file__).resolve())],
+                    stdin=incoming, stdout=outgoing, stderr=subprocess.DEVNULL, cwd=cwd)
+                while not observe_exit(child.pid):
+                    if time.monotonic() >= deadline or os.fstat(outgoing.fileno()).st_size > 512 * 1024:
+                        timed_out = True
+                        break
+                    time.sleep(min(.01, max(0, deadline - time.monotonic())))
+            finally:
+                if child is not None:
+                    confirmed = cleanup_group(child, timed_out=timed_out)
+            if not confirmed or timed_out or child.returncode != 0:
+                return {'unknown': True}
+            outgoing.seek(0)
+            raw = outgoing.read(512 * 1024 + 1)
+            if len(raw) > 512 * 1024:
+                return {'unknown': True}
+            value = strict_json(raw)
+            return value if isinstance(value, dict) else {'unknown': True}
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         return {'unknown': True}
+
+
+
+def resolve(identifier):
+    value = _call(None, 'resolve', {'identifier': identifier}).get('pin')
+    invalid = 'fresh-review-adapter-pin-changed'
+    if not isinstance(value, dict) or set(value) != {'registration', 'entry_point_value', 'module'}:
+        raise FreshReviewError(invalid)
+    registrations = validate_registry({'schema': REGISTRY_SCHEMA, 'adapters': [value['registration']]})
+    if identifier not in registrations or any(not isinstance(value[key], str) or not 0 < len(value[key]) <= 1024
+                                              for key in ('entry_point_value', 'module')):
+        raise FreshReviewError(invalid)
+    if (any(not part.isidentifier() for part in value['module'].split('.'))
+            or not value['entry_point_value'].startswith(value['module'] + ':')):
+        raise FreshReviewError(invalid)
+    return AdapterPin(registrations[identifier], value['entry_point_value'], value['module'])
 
 
 def observe(pin):
@@ -80,11 +121,15 @@ def recover(pin, dispatch):
 
 def cancel(pin, dispatch):
     result = _call(pin, 'cancel', {'dispatch': dispatch})
-    status = result.get('cancel', {}).get('status')
+    observation = result.get('cancel')
+    status = observation.get('status') if isinstance(observation, dict) else None
     return status if status in ('cancelled', 'failed', 'unknown') else 'unknown'
 
 
 def _callback(value):
+    from fresh_review_runtime import load_adapter, resolve_adapter
+    if value['action'] == 'resolve':
+        return {'pin': asdict(resolve_adapter(value['identifier']))}
     pin = AdapterPin(AdapterRegistration(**value['pin']['registration']),
                      value['pin']['entry_point_value'], value['pin']['module'])
     adapter = load_adapter(pin)
@@ -103,7 +148,7 @@ def _callback(value):
                 return {'blocked': 'launch-unavailable', 'attempted': False}
             return {'blocked': 'launch-invalid', 'attempted': True}
         try:
-            if resolve(pin.registration.id) != pin:
+            if resolve_adapter(pin.registration.id) != pin:
                 raise FreshReviewError('fresh-review-adapter-pin-changed')
         except FreshReviewError:
             return {'blocked': 'registration-mismatch', 'attempted': True}
@@ -112,7 +157,7 @@ def _callback(value):
         collected = adapter.recover(freeze_json_value(value['dispatch']))
         result = {'observation': collected.observation.thaw(),
                   'output': None if collected.output_bytes is None else base64.b64encode(collected.output_bytes).decode('ascii')}
-        if resolve(pin.registration.id) != pin:
+        if resolve_adapter(pin.registration.id) != pin:
             return {'unknown': True}
         return result
     if action == 'cancel':
@@ -123,6 +168,7 @@ def _callback(value):
 if __name__ == '__main__':
     try:
         reply = _callback(json.loads(sys.stdin.buffer.read(2 * 1024 * 1024)))
-    except FreshReviewError:
-        reply = {'blocked': 'registration-mismatch', 'attempted': False}
+    except FreshReviewError as exc:
+        reply = ({'unknown': True} if exc.code == 'fresh-review-host-action-invalid'
+                 else {'blocked': 'registration-mismatch', 'attempted': False})
     sys.stdout.buffer.write(canonical_bytes(reply))

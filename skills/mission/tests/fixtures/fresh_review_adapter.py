@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from datetime import datetime, timezone
 
 from fresh_review_runtime import CollectedReview
 from mission_kernel.fresh_review import canonical_digest
@@ -17,6 +18,16 @@ def _journal():
 
 class Adapter:
     def observe_parent(self):
+        if os.environ.get('FIXTURE_REVIEW_MODE') == 'callback-timeout':
+            import time
+            subprocess.Popen([sys.executable, '-c',
+                'import time,sys; from pathlib import Path; '
+                'p=Path(sys.argv[1]); i=0\n'
+                'while True: p.write_text(str(i)); i+=1; time.sleep(.01)',
+                str(_journal().with_suffix('.heartbeat'))],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            while True:
+                time.sleep(1)
         return freeze_json_value({'parent_identity': 'fixture-parent'})
 
     def launch(self, request_bytes, input_handle, snapshot_handles, dispatch):
@@ -31,7 +42,9 @@ class Adapter:
         assert record['status'] == 'dispatch-unknown' and record['dispatch'] == envelope
         if os.environ.get('FIXTURE_REVIEW_MODE') == 'intent-crash':
             os._exit(7)
-        if os.environ.get('FIXTURE_REVIEW_MODE') == 'unavailable':
+        if os.environ.get('FIXTURE_REVIEW_MODE') == 'stale-unavailable':
+            (state_root.parent / 'app.txt').write_text('candidate changed')
+        if os.environ.get('FIXTURE_REVIEW_MODE') in ('unavailable', 'stale-unavailable'):
             from mission_kernel.fresh_review import FreshReviewError
             raise FreshReviewError('fresh-review-launch-unavailable')
         # Real child reads the immutable materialization, never an echoed digest.
@@ -44,7 +57,7 @@ class Adapter:
             fencing_epoch=envelope['fencing_epoch'], adapter_registration_digest=request['adapter_registration_digest'],
             parent_identity='fixture-parent', child_identity='fixture-child:' + request['nonce'],
             context_identity='fixture-context:' + request['nonce'], context_mode='fresh',
-            received_input_digest=json.loads(child.stdout)['digest'], started_at=request['created_at'],
+            received_input_digest=json.loads(child.stdout)['digest'], started_at=datetime.fromisoformat(request['created_at'].replace('Z', '+00:00')).astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ'),
             enforced_tools=request['allowed_tools'], enforced_budget={key: request[key] for key in (
                 'wall_time_sec', 'max_tool_calls', 'max_replays', 'max_output_bytes', 'max_packet_bytes')})
         mode = os.environ.get('FIXTURE_REVIEW_MODE', '')
@@ -63,11 +76,14 @@ class Adapter:
         return freeze_json_value(launch)
 
     def recover(self, dispatch):
+        if os.environ.get('FIXTURE_REVIEW_MODE') == 'malformed-observation':
+            from types import SimpleNamespace
+            return CollectedReview(SimpleNamespace(thaw=lambda: None), None)
         if not _journal().exists():
             return CollectedReview(freeze_json_value({}), None)
         journal = json.loads(_journal().read_text())
         return CollectedReview(freeze_json_value({'launch_receipt': journal['launch']}),
-                               journal['output'].encode())
+                               None if journal['output'] is None else journal['output'].encode())
 
     def collect(self, launch):
         return self.recover(launch)

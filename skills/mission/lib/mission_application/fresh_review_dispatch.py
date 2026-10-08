@@ -4,6 +4,10 @@ from pathlib import Path
 import json
 import secrets
 import base64
+import time
+import math
+from datetime import datetime, timedelta, timezone
+from mission_persistence.capacity_gate import CapacityWriteError
 
 from mission_application.cli_operation import prepare_cli_operation, CliOperationRejected
 from mission_application.planning import record_dispatch_intent, record_provider_receipt, reconcile_dispatch_unknown, PlanningFailure
@@ -12,6 +16,7 @@ from mission_application.verifier_policy import validate, VerifierPolicyError, S
 from mission_kernel.commands import BeginFreshReviewDispatch, CommitFreshReviewResult, RecordFreshReviewLaunch
 from mission_kernel.fresh_review import (
     FreshReviewError, canonical_digest, decode_projection, candidate_identity, request_document,
+    WithdrawnFreshReviewRecord,
 )
 from mission_kernel.fresh_review_receipts import decode_terminal_receipt, receipt_document, TERMINAL_SCHEMA
 from mission_kernel.fresh_review_dispatch import validate_launch
@@ -19,7 +24,8 @@ from mission_kernel.json_codec import freeze_json_value
 
 
 def _record(state, request_id):
-    matches = [item for item in decode_projection(state).requests if item.request.request_id == request_id]
+    matches = [item for item in decode_projection(state).requests if (item.request_id if isinstance(item, WithdrawnFreshReviewRecord)
+                   else item.request.request_id) == request_id]
     if len(matches) != 1:
         raise FreshReviewError('fresh-review-request-unavailable')
     return matches[0]
@@ -67,14 +73,22 @@ def _execute(repository, build):
         return _record(result.projection, command.request_id)
 
 
-def _terminal(record, operation, epoch, outcome, reason, now, *, attempted=False, cancel='not-requested'):
+def _utc(value):
+    return datetime.fromisoformat(value.replace('Z', '+00:00')).astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+
+
+def _terminal(record, operation, epoch, outcome, reason, now, *, attempted=False, cancel='not-requested', wall_time_sec=0):
     request, dispatch = record.request, record.dispatch.thaw()
+    # A recovered host clock can be ahead, or the local clock can roll back.
+    # Keep the known launch timestamp as a lower bound on this unknown terminal;
+    # this does not assert child completion or invent successful output.
+    ended_at = max(_utc(now), record.launch.thaw()['started_at'] if record.launch is not None else _utc(now))
     raw = dict(schema=TERMINAL_SCHEMA, request_id=request.request_id,
                request_digest=canonical_digest(request_document(request)), nonce=request.nonce,
                dispatch_operation_id=dispatch['operation_id'], dispatch_fencing_epoch=dispatch['fencing_epoch'],
                commit_operation_id=operation, commit_fencing_epoch=epoch, outcome=outcome, reason=reason,
-               candidate_digest=request.candidate_digest, ended_at=now,
-               budget_used=dict(wall_time_sec=0, tool_calls=0, replays=0, output_bytes=0))
+               candidate_digest=request.candidate_digest, ended_at=ended_at,
+               budget_used=dict(wall_time_sec=wall_time_sec, tool_calls=0, replays=0, output_bytes=0))
     if outcome == 'blocked':
         raw.update(launch_attempted=attempted, cancel_result=cancel)
     elif record.launch is not None:
@@ -99,7 +113,8 @@ def run_fresh_review_dispatch_cli(args, services, host):
 
         def repo(suffix, stamp=True):
             return services.repository(root, sf, stamp=stamp, strict_read=True, pre_admit_lease=stamp,
-                session_id=sf.stem, operation_id=operation + suffix,
+                session_id=sf.stem, operation_id=('stage:' + canonical_digest({'domain': 'fresh-review-stage',
+                    'operation_id': operation, 'stage': suffix})[7:] if identity.operation_id is not None else None),
                 operation_command=identity.operation_command, operation_command_type=command_type)
 
         reader = repo(':read', False)
@@ -107,16 +122,23 @@ def run_fresh_review_dispatch_cli(args, services, host):
             record = _record(reader.load(), args.request)
         if args.fresh_review_command == 'reconcile':
             return _reconcile(record, args, operation, repo, root, services, host)
+        if isinstance(record, WithdrawnFreshReviewRecord):
+            raise FreshReviewError('fresh-review-request-withdrawn')
         if record.status != 'pending':
             if (record.operation_id, record.intent_digest, record.payload_digest) != (operation, intent, payload):
                 raise FreshReviewError('fresh-review-operation-conflict')
             return json.dumps({'ok': True, 'record': _wire(record)})
+        capacity = services.capacity_status(sf)
+        if capacity['code'] is not None:
+            raise FreshReviewError(capacity['code'])
         reason = 'registration-mismatch'
         parent = 'unobservable'
+        callback_start, adapter_called = time.monotonic(), False
         try:
             pin = host.resolve(args.adapter)
             if pin.registration.digest != record.request.adapter_registration_digest:
                 raise FreshReviewError('fresh-review-adapter-pin-changed')
+            adapter_called = True
             parent = host.observe(pin)['parent_identity']
         except (FreshReviewError, OSError) as exc:
             reason = 'identity-unobservable' if getattr(exc, 'code', '') == 'fresh-review-identity-unobservable' else 'registration-mismatch'
@@ -127,7 +149,10 @@ def run_fresh_review_dispatch_cli(args, services, host):
             epoch = state.get('fencing_epoch', 0)
             dispatch = record_dispatch_intent([], dict(invocation_id='inv_' + canonical_digest(args.request)[7:39], operation_id=operation,
                 outbound_packet_digest=current.request.input_digest, iteration=current.request.iteration, fencing_epoch=epoch))
-            dispatch.update(parent_identity=parent, adapter_id=args.adapter)
+            deadline = datetime.fromisoformat(services.now().replace('Z', '+00:00')) + timedelta(seconds=current.request.wall_time_sec)
+            dispatch.update(parent_identity=parent, adapter_id=args.adapter, deadline_at=_utc(deadline.isoformat()),
+                reservation_id='reservation:' + canonical_digest({'domain': 'fresh-review-dispatch', 'operation_id': operation})[7:],
+                budget_class='review')
             return BeginFreshReviewDispatch(args.request, operation, epoch, intent, payload,
                 freeze_json_value(dispatch), _candidate(state, root, current.request, services))
 
@@ -166,15 +191,22 @@ def run_fresh_review_dispatch_cli(args, services, host):
         # A launch writer retains its dispatch fence. It cannot publish under a
         # takeover writer's epoch just because repository admission observed it.
         epoch = record.dispatch.thaw()['fencing_epoch']
-        record = _execute(repo(':terminal'), lambda state: CommitFreshReviewResult(args.request, operation,
-            epoch, _terminal(_record(state, args.request), operation, epoch,
-                             'blocked', reason, services.now(), attempted=attempted, cancel=cancel)))
+        def finish(state):
+            current = _record(state, args.request)
+            _candidate(state, root, current.request, services)
+            return CommitFreshReviewResult(args.request, operation, epoch,
+                _terminal(current, operation, epoch, 'blocked', reason, services.now(),
+                          attempted=attempted, cancel=cancel,
+                          wall_time_sec=math.ceil(time.monotonic() - callback_start) if adapter_called else 0))
+        record = _execute(repo(':terminal'), finish)
         return json.dumps({'ok': True, 'record': _wire(record)})
-    except (FreshReviewError, CliOperationRejected, VerifierPolicyError, PlanningFailure) as exc:
+    except (FreshReviewError, CliOperationRejected, VerifierPolicyError, PlanningFailure, CapacityWriteError) as exc:
         services.fail(getattr(exc, 'code', str(exc)), 2)
 
 
 def _reconcile(record, args, operation, repo, root, services, host):
+    if isinstance(record, WithdrawnFreshReviewRecord):
+        raise FreshReviewError('fresh-review-request-withdrawn')
     if operation == record.operation_id:
         raise FreshReviewError('fresh-review-operation-conflict')
     if record.dispatch is None or record.dispatch.thaw()['adapter_id'] != args.adapter:
@@ -187,20 +219,30 @@ def _reconcile(record, args, operation, repo, root, services, host):
         raise FreshReviewError('fresh-review-not-dispatch-unknown')
     observed = {}
     reason = 'child-unobservable'
+    callback_start, adapter_called = time.monotonic(), False
     try:
         pin = host.resolve(args.adapter)
         if pin.registration.digest != record.request.adapter_registration_digest:
             raise FreshReviewError('fresh-review-adapter-pin-changed')
+        adapter_called = True
         observed = host.recover(pin, record.dispatch.thaw())
     except (FreshReviewError, OSError):
         pass
-    raw = observed.get('observation', {}).get('launch_receipt')
+    observation = observed.get('observation')
+    raw = observation.get('launch_receipt') if isinstance(observation, dict) else None
     if raw is not None:
-        # The stored dispatch epoch belongs to the exact child; the current
-        # commit epoch belongs to this reconciler. Neither substitutes for the other.
-        launch, _ = validate_launch(record.request, record.dispatch.thaw(), raw)
-        if record.launch is not None and raw != record.launch.thaw():
-            raise FreshReviewError('fresh-review-launch-binding-mismatch')
+        # Foreign reports are command rejections; an unobservable receipt can
+        # only close our own saga as unknown.
+        try:
+            launch, _ = validate_launch(record.request, record.dispatch.thaw(), raw)
+            if record.launch is not None and raw != record.launch.thaw():
+                raise FreshReviewError('fresh-review-launch-binding-mismatch')
+        except FreshReviewError as exc:
+            if exc.code == 'fresh-review-launch-binding-mismatch':
+                raise
+            raw = None
+    if raw is not None:
+        # Dispatch epoch identifies the child; the current epoch is the writer.
         reason = 'output-unobservable'
         try:
             output = base64.b64decode(observed['output'], validate=True)
@@ -222,7 +264,12 @@ def _reconcile(record, args, operation, repo, root, services, host):
             return json.dumps({'ok': True, 'record': _wire(record)})
     if record.status == 'dispatch-unknown':
         reconcile_dispatch_unknown([record.dispatch.thaw()], _saga_intent(record), observed_receipt=None)
-    record = _execute(repo(':terminal'), lambda state: CommitFreshReviewResult(args.request, operation,
-        state['fencing_epoch'], _terminal(_record(state, args.request), operation, state['fencing_epoch'],
-                                          'abandoned-unknown', reason, services.now())))
+    def finish(state):
+        current = _record(state, args.request)
+        _candidate(state, root, current.request, services)
+        epoch = state['fencing_epoch']
+        return CommitFreshReviewResult(args.request, operation, epoch,
+            _terminal(current, operation, epoch, 'abandoned-unknown', reason, services.now(),
+                      wall_time_sec=math.ceil(time.monotonic() - callback_start) if adapter_called else 0))
+    record = _execute(repo(':terminal'), finish)
     return json.dumps({'ok': True, 'record': _wire(record)})

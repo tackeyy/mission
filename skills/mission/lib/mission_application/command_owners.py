@@ -35,6 +35,7 @@ COMMAND_OWNER_REGISTRY = {
         "fresh-review prepare",
         "fresh-review run",
         "fresh-review reconcile",
+        "fresh-review withdraw",
         "supersede-reviews",
     ),
     **_owned(

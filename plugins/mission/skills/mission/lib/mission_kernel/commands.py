@@ -287,6 +287,13 @@ class PrepareFreshReview:
 
 
 @dataclass(frozen=True)
+class WithdrawFreshReviewRequest:
+    request_id: str
+    operation_id: str
+    fencing_epoch: int
+
+
+@dataclass(frozen=True)
 class BeginFreshReviewDispatch:
     request_id: str
     operation_id: str
@@ -503,6 +510,7 @@ Command = Union[
     ImportAcceptanceContract,
     PrepareFreshReview,
     BeginFreshReviewDispatch,
+    WithdrawFreshReviewRequest,
     RecordFreshReviewLaunch,
     CommitFreshReviewResult,
     RecordExecutorStep,
@@ -537,6 +545,7 @@ _COMMAND_TYPES = {
     ImportAcceptanceContract: "acceptance-contract-import",
     PrepareFreshReview: "fresh-review-prepare",
     BeginFreshReviewDispatch: "fresh-review-run",
+    WithdrawFreshReviewRequest: "fresh-review-withdraw",
     RecordFreshReviewLaunch: "fresh-review-launch",
     CommitFreshReviewResult: "fresh-review-result",
     RecordExecutorStep: "executor-handoff-record-step",

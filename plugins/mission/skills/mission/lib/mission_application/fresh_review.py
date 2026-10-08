@@ -9,8 +9,9 @@ import secrets
 from acceptance_contract import canonical_contract_digest
 from mission_kernel.commands import PrepareFreshReview, FreshReviewInputEffectClaim
 from mission_kernel.fresh_review import (
-    BUDGET_LIMITS, REQUEST_SCHEMA, FreshReviewError, canonical_bytes, canonical_digest,
-    candidate_identity, decode_projection, decode_request, request_document, validate_budgets, record_operation_ids,
+    BUDGET_LIMITS, REQUEST_SCHEMA, FreshReviewError, WithdrawnFreshReviewRecord, canonical_bytes,
+    canonical_digest, candidate_identity, decode_projection, decode_request, request_document,
+    validate_budgets, record_operation_ids,
 )
 from mission_kernel.json_codec import freeze_json_value
 from mission_application.artifact import EvidenceFailure, make_evidence_effect
@@ -33,6 +34,12 @@ def _options(args):
 
 def _historical(state, operation_id, intent_digest, payload_digest):
     for item in decode_projection(state).requests:
+        if isinstance(item, WithdrawnFreshReviewRecord):
+            if operation_id == item.prepare_operation_id:
+                raise FreshReviewError('fresh-review-request-withdrawn')
+            if operation_id == item.withdraw_operation_id:
+                raise FreshReviewError('fresh-review-operation-conflict')
+            continue
         if operation_id in record_operation_ids(item):
             if (item.prepare_operation_id, item.prepare_intent_digest, item.prepare_payload_digest) != (operation_id, intent_digest, payload_digest):
                 raise FreshReviewError('fresh-review-operation-conflict')
@@ -170,12 +177,19 @@ def run_fresh_review_status_cli(args, services):
     try:
         with repository.transaction():
             projection = decode_projection(repository.load())
-        return json.dumps({'requests': [{'request': request_document(item.request), 'status': item.status,
-                                        'operation_id': item.operation_id,
-                                        'dispatch': item.dispatch.thaw() if item.dispatch is not None else None,
-                                        'launch': item.launch.thaw() if item.launch is not None else None,
-                                        'independent': item.independent,
-                                        'result': item.result.thaw() if item.result is not None else None}
-                                       for item in projection.requests]}, ensure_ascii=False, indent=2)
+            capacity = services.capacity_status(state_file)
+        requests = []
+        for item in projection.requests:
+            if isinstance(item, WithdrawnFreshReviewRecord):
+                requests.append({'request_id': item.request_id, 'status': item.status,
+                                 'reason': item.reason, 'criterion_ids': list(item.criterion_ids)})
+            else:
+                requests.append({'request': request_document(item.request), 'status': item.status,
+                                 'operation_id': item.operation_id,
+                                 'dispatch': item.dispatch.thaw() if item.dispatch is not None else None,
+                                 'launch': item.launch.thaw() if item.launch is not None else None,
+                                 'independent': item.independent,
+                                 'result': item.result.thaw() if item.result is not None else None})
+        return json.dumps({'requests': requests, 'capacity': capacity}, ensure_ascii=False, indent=2)
     except FreshReviewError as exc:
         services.fail(exc.code, 2)

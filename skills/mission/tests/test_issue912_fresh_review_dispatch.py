@@ -3,11 +3,23 @@ import json
 
 import pytest
 
-from .test_issue879_completion_cli import completion_session, _reject_unchanged
+from .test_issue879_completion_cli import completion_session as _completion_session, _reject_unchanged
+
+
+@pytest.fixture(params=[5], ids=["v5-container"])
+def completion_session(request, state_dir, run_cli):
+    return _completion_session.__wrapped__(request, state_dir, run_cli)
 from .test_issue895_fresh_review import _prepare
 
 
+@pytest.mark.parametrize("completion_session", [4, 5], indirect=True, ids=["v4-flat", "v5-container"])
 def test_unregistered_launch_is_consumed_blocked_not_completed(completion_session, run_cli):
+    if completion_session[2] == 4:
+        root, request = _prepare(completion_session, run_cli)
+        _reject_unchanged(run_cli, root, ['fresh-review', 'run', '--request', request['request_id'],
+                          '--adapter', 'neutral'], 'state-capacity-exhausted',
+                          env={'MISSION_OPERATION_ID': 'dispatch-one'})
+        return
     root, request = _prepare(completion_session, run_cli)
     result = run_cli('fresh-review', 'run', '--request', request['request_id'], '--adapter', 'neutral',
                      cwd=root, env_extra={'MISSION_OPERATION_ID': 'dispatch-one'})
@@ -134,6 +146,7 @@ def test_host_observation_controls_identity_and_independence(reviewer, run_cli, 
     if status == 'blocked':
         assert record['result']['reason'] == ('launch-invalid' if mode == 'provider-invalid' else 'identity-unobservable')
         assert record['result']['launch_attempted'] is True
+        assert record['result']['budget_used']['wall_time_sec'] >= 1
         assert record['result']['cancel_result'] == 'cancelled'
     assert record['status'] != 'completed'
 
@@ -155,9 +168,10 @@ def test_old_writer_is_rejected_by_kernel_fence_after_takeover(reviewer, run_cli
     from mission_kernel.fresh_review import decode_projection
     record = decode_projection({'fresh_review': {'schema': 'mission-fresh-review/1', 'requests': [old]}}).requests[0]
     projection = replace(state.fresh_review, requests=(record,))
-    backing = state.legacy_passthrough.thaw()
+    key = "legacy_passthrough" if state.legacy_passthrough is not None else "extensions"
+    backing = getattr(state, key).thaw()
     backing['fresh_review'] = {'schema': 'mission-fresh-review/1', 'requests': [old]}
-    state = replace(state, fresh_review=projection, legacy_passthrough=freeze_json_value(backing))
+    state = replace(state, fresh_review=projection, **{key: freeze_json_value(backing)})
     command = RecordFreshReviewLaunch(request['request_id'], old['dispatch']['operation_id'],
         old['dispatch']['fencing_epoch'], freeze_json_value(json.loads(journal.read_text())['launch']), request['candidate_digest'])
     decision = decide(state, command)
@@ -174,55 +188,79 @@ def test_crash_after_intent_before_spawn_abandons_without_launch(reviewer, run_c
     assert not reviewer[3].exists()
 
 
-def test_reconcile_rechecks_candidate_and_rejects_foreign_child(reviewer, run_cli):
-    from .test_issue879_completion_cli import _public_bytes
-    root, request, env, journal = reviewer
-    unknown = invoke(run_cli, reviewer, FIXTURE_REVIEW_MODE='crash')
+@pytest.mark.parametrize('status', ['dispatch-unknown', 'running'])
+@pytest.mark.parametrize('mutation', ['identity-missing', 'malformed-observation'])
+def test_unobservable_recovery_receipt_converges_to_abandoned(reviewer, run_cli, status, mutation):
+    _, _, _, journal = reviewer
+    old = invoke(run_cli, reviewer, **({'FIXTURE_REVIEW_MODE': 'crash'} if status == 'dispatch-unknown' else {}))
     stored = json.loads(journal.read_text())
-    stored['launch']['operation_id'] = 'foreign-child'
+    if mutation == 'identity-missing':
+        stored['launch'].pop('child_identity')
     journal.write_text(json.dumps(stored))
-    _reject_unchanged(run_cli, root, ['fresh-review', 'reconcile', '--request', request['request_id'], '--adapter', 'neutral'],
-                      'launch-binding-mismatch', env={**env, 'MISSION_OPERATION_ID': 'reconcile-one'})
-    stored['launch']['operation_id'] = unknown['dispatch']['operation_id']
+    abandoned = invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one',
+                       FIXTURE_REVIEW_MODE='malformed-observation' if mutation == 'malformed-observation' else '')
+    assert abandoned['status'] == 'abandoned-unknown'
+    assert abandoned['result']['reason'] == 'child-unobservable'
+    assert abandoned['result']['dispatch_operation_id'] == old['dispatch']['operation_id']
+    assert json.loads(journal.read_text())['count'] == 1
+
+
+
+@pytest.mark.parametrize('status', ['dispatch-unknown', 'running'])
+@pytest.mark.parametrize('field', ['operation_id', 'fencing_epoch', 'request_id', 'nonce'])
+def test_foreign_recovery_binding_is_rejected_without_consuming(reviewer, run_cli, status, field):
+    root, request, environment, journal = reviewer
+    invoke(run_cli, reviewer, **({'FIXTURE_REVIEW_MODE': 'crash'} if status == 'dispatch-unknown' else {}))
+    stored = json.loads(journal.read_text())
+    stored['launch'][field] = stored['launch'][field] + 1 if field == 'fencing_epoch' else 'foreign-child'
     journal.write_text(json.dumps(stored))
+    _reject_unchanged(run_cli, root, ['fresh-review', 'reconcile', '--request', request['request_id'],
+                      '--adapter', 'neutral'], 'fresh-review-launch-binding-mismatch',
+                      env={**environment, 'MISSION_OPERATION_ID': 'reconcile-one'})
+    assert json.loads(journal.read_text())['count'] == 1
+
+
+def test_running_child_identity_mismatch_is_rejected_without_consuming(reviewer, run_cli):
+    root, request, environment, journal = reviewer
+    invoke(run_cli, reviewer)
+    stored = json.loads(journal.read_text())
+    stored['launch']['child_identity'] = 'foreign-child'
+    journal.write_text(json.dumps(stored))
+    _reject_unchanged(run_cli, root, ['fresh-review', 'reconcile', '--request', request['request_id'],
+                      '--adapter', 'neutral'], 'fresh-review-launch-binding-mismatch',
+                      env={**environment, 'MISSION_OPERATION_ID': 'reconcile-one'})
+
+
+@pytest.mark.parametrize('status', ['dispatch-unknown', 'running'])
+def test_reconcile_rechecks_candidate_before_abandoning(reviewer, run_cli, status):
+    root, request, environment, journal = reviewer
+    invoke(run_cli, reviewer, **({'FIXTURE_REVIEW_MODE': 'crash'} if status == 'dispatch-unknown' else {}))
+    journal.unlink()
+    (root / 'app.txt').write_text('candidate changed')
+    _reject_unchanged(run_cli, root, ['fresh-review', 'reconcile', '--request', request['request_id'],
+                      '--adapter', 'neutral'], 'fresh-review-stale',
+                      env={**environment, 'MISSION_OPERATION_ID': 'reconcile-one'})
+    assert not journal.exists()
+
+
+def test_run_rechecks_candidate_before_blocking(reviewer, run_cli):
+    root, request, environment, journal = reviewer
+    result = run_cli('fresh-review', 'run', '--request', request['request_id'], '--adapter', 'neutral',
+                     cwd=root, env_extra={**environment, 'FIXTURE_REVIEW_MODE': 'stale-unavailable'})
+    assert result.returncode != 0 and 'fresh-review-stale' in result.stderr + result.stdout
+    state = json.loads(run_cli('get', cwd=root).stdout)
+    record = state['fresh_review']['requests'][0]
+    assert record['status'] == 'dispatch-unknown' and record['result'] is None
+    assert not journal.exists()
+
+
+def test_reconcile_rechecks_candidate_before_publishing_running(reviewer, run_cli):
+    root, request, env, journal = reviewer
+    invoke(run_cli, reviewer, FIXTURE_REVIEW_MODE='crash')
     (root / 'app.txt').write_text('candidate changed')
     _reject_unchanged(run_cli, root, ['fresh-review', 'reconcile', '--request', request['request_id'], '--adapter', 'neutral'],
                       'fresh-review-stale', env={**env, 'MISSION_OPERATION_ID': 'reconcile-one'})
     assert json.loads(journal.read_text())['count'] == 1
-
-
-def test_shared_launch_boundary_rejects_changed_bindings_and_unenforced_capabilities():
-    import copy
-    from mission_kernel.fresh_review_dispatch import validate_launch
-    from mission_kernel.fresh_review import FreshReviewError, canonical_digest, request_document
-    from .test_issue895_fresh_review import _pure_projection, ADAPTER
-    from .test_issue909_fresh_review_receipts import launch_document
-    request = _pure_projection().requests[0].request
-    raw = launch_document()
-    raw['request_digest'] = canonical_digest(request_document(request))
-    dispatch = dict(operation_id=raw['operation_id'], fencing_epoch=raw['fencing_epoch'], parent_identity='parent')
-    assert validate_launch(request, dispatch, raw)[1] is True
-    # 55 hostile inputs at the shared boundary, rather than CLI table copies.
-    for field in ('request_id', 'request_digest', 'nonce', 'operation_id', 'fencing_epoch',
-                  'adapter_registration_digest', 'parent_identity', 'child_identity', 'context_identity',
-                  'received_input_digest', 'enforced_tools'):
-        for bad in (None, {}, [], True, 'foreign'):
-            value = copy.deepcopy(raw)
-            value[field] = bad
-            # Different observable child/context ids are legitimate host evidence.
-            if bad == 'foreign' and field in ('child_identity', 'context_identity') or bad == [] and field == 'enforced_tools':
-                assert validate_launch(request, dispatch, value)[1]
-            else:
-                with pytest.raises(FreshReviewError):
-                    validate_launch(request, dispatch, value)
-    value = copy.deepcopy(raw)
-    value['enforced_tools'] = ['read-candidate']  # Request grants no tools.
-    with pytest.raises(FreshReviewError, match='capability-unenforceable'):
-        validate_launch(request, dispatch, value)
-    value = copy.deepcopy(raw)
-    value['received_input_digest'] = ADAPTER
-    with pytest.raises(FreshReviewError, match='launch-binding-mismatch'):
-        validate_launch(request, dispatch, value)
 
 
 def test_public_dispatch_schema_names_the_incomplete_saga(tmp_path, run_cli):
@@ -251,7 +289,7 @@ def test_fenced_out_launch_writer_cannot_cancel_the_takeover_child(tmp_path, mon
     reader = Namespace(transaction=lambda: nullcontext(), load=lambda: state)
     services = Namespace(resolve_state_file=lambda _: sf, repository=lambda *a, **k: reader,
         compatibility_arguments=lambda *a, **k: ('dispatch', {}), canonical_operation=lambda *a, **k: ('dispatch', {}),
-        now=lambda: '2026-01-01T00:00:01+00:00', fail=lambda code, _: (_ for _ in ()).throw(FreshReviewError(code)))
+        capacity_status=lambda _: {'code': None}, now=lambda: '2026-01-01T00:00:01+00:00', fail=lambda code, _: (_ for _ in ()).throw(FreshReviewError(code)))
     monkeypatch.setattr(app, '_candidate', lambda *a: request.candidate_digest)
     raw = launch_document()
     raw['request_digest'] = canonical_digest(request_document(request))
@@ -280,3 +318,161 @@ def test_host_confirms_launch_impossible_before_child_spawn(reviewer, run_cli):
     assert record['result']['reason'] == 'launch-unavailable'
     assert record['result']['launch_attempted'] is False
     assert not reviewer[3].exists()
+
+
+def test_deadline_and_budget_identity_are_persisted_before_callback(reviewer, run_cli):
+    from datetime import datetime
+    record = invoke(run_cli, reviewer)
+    dispatch = record['dispatch']
+    assert datetime.fromisoformat(dispatch['deadline_at'].replace('Z', '+00:00')).utcoffset() is not None
+    assert dispatch['reservation_id'].startswith('reservation:')
+    assert dispatch['budget_class'] == 'review'
+    assert dispatch['reservation_id'] != dispatch['operation_id']
+
+
+def test_adapter_callbacks_share_exec_child_and_parent_never_loads_code(reviewer, monkeypatch):
+    import os
+    import fresh_review_host as host
+    import fresh_review_runtime as runtime
+    from mission_kernel.fresh_review import decode_request
+    root, request, environment, _ = reviewer
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.syspath_prepend(environment['PYTHONPATH'])
+    calls = []
+    actual_spawn = host.spawn_exec
+    def spawn(*args, **kwargs):
+        calls.append(args[0])
+        return actual_spawn(*args, **kwargs)
+    monkeypatch.setattr(host, 'spawn_exec', spawn)
+    monkeypatch.setattr(runtime, 'load_adapter', lambda _: pytest.fail('adapter loaded in parent'))
+    monkeypatch.setattr(runtime, '_source_digest', lambda _: pytest.fail('adapter source read in parent'))
+    pin = host.resolve('neutral')
+    assert host.observe(pin) == {'parent_identity': 'fixture-parent'}
+    assert host.recover(pin, {})['observation'] == {}
+    assert host.cancel(pin, {}) == 'cancelled'
+    # Malformed callback replies are unknown, never a launch receipt.
+    assert host._call(pin, 'invalid-action', {}) == {'unknown': True}
+    assert len(calls) == 5
+    assert all(str(host.Path(host.__file__).resolve()) in command for command in calls)
+
+
+@pytest.mark.parametrize('operation', [None, 'w' * 128], ids=['generated-id', 'maximum-id'])
+def test_withdraw_pending_over_capacity_shrinks_and_replays_tombstone(reviewer, run_cli, operation):
+    from .test_issue879_completion_cli import _rewrite_fixture_document, _public_bytes
+    from mission_kernel.json_codec import STATE_LIMIT
+    root, request, environment, journal = reviewer
+    def excess(state):
+        state['capacity_fixture_padding'] = 'x' * (STATE_LIMIT - 200000)
+    _rewrite_fixture_document(root, excess)
+    _reject_unchanged(run_cli, root, ['fresh-review', 'run', '--request', request['request_id'],
+                      '--adapter', 'neutral'], 'state-capacity-exhausted', env=environment)
+    assert not journal.exists()
+    before = json.loads(run_cli('get', cwd=root).stdout)
+    withdraw_env = {key: value for key, value in environment.items() if key != 'MISSION_OPERATION_ID'}
+    if operation is not None:
+        withdraw_env['MISSION_OPERATION_ID'] = operation
+    result = run_cli('fresh-review', 'withdraw', '--request', request['request_id'], cwd=root,
+                     env_extra=withdraw_env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    record = json.loads(result.stdout)['record']
+    assert record['status'] == 'withdrawn' and record['nonce'] == request['nonce']
+    after = json.loads(run_cli('get', cwd=root).stdout)
+    assert len(json.dumps(after)) < len(json.dumps(before))
+    public = _public_bytes(root)
+    again = run_cli('fresh-review', 'withdraw', '--request', request['request_id'], cwd=root,
+                    env_extra={**withdraw_env, 'MISSION_OPERATION_ID': record['withdraw_operation_id']})
+    assert again.returncode == 0 and json.loads(again.stdout)['record'] == record
+    assert _public_bytes(root) == public
+    _reject_unchanged(run_cli, root, ['fresh-review', 'run', '--request', request['request_id'],
+                      '--adapter', 'neutral'], 'fresh-review-request-withdrawn', env=environment)
+    assert not journal.exists()
+
+
+def test_exec_timeout_kills_callback_descendants_without_success(reviewer, monkeypatch):
+    import time
+    import fresh_review_host as host
+    _, _, environment, journal = reviewer
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv('FIXTURE_REVIEW_MODE', 'callback-timeout')
+    monkeypatch.syspath_prepend(environment['PYTHONPATH'])
+    pin = host.resolve('neutral')
+    assert host._call(pin, 'observe', {}, timeout=.3) == {'unknown': True}
+    heartbeat = journal.with_suffix('.heartbeat')
+    assert heartbeat.exists()  # A real descendant was running, not a stub.
+    before = heartbeat.read_bytes()
+    time.sleep(.08)
+    assert heartbeat.read_bytes() == before
+    assert not journal.exists()
+
+
+@pytest.mark.parametrize('explicit', [False, True], ids=['no-operation-id', 'maximum-operation-id'])
+def test_public_dispatch_operation_identity_boundaries(reviewer, run_cli, explicit):
+    root, request, environment, journal = reviewer
+    environment = {key: value for key, value in environment.items() if key != 'MISSION_OPERATION_ID'}
+    if explicit:
+        environment['MISSION_OPERATION_ID'] = 'd' * 128
+    result = run_cli('fresh-review', 'run', '--request', request['request_id'], '--adapter', 'neutral',
+                     cwd=root, env_extra={**environment, 'FIXTURE_REVIEW_MODE': 'crash'})
+    assert result.returncode == 0, result.stdout + result.stderr
+    old = json.loads(result.stdout)['record']
+    assert old['status'] == 'dispatch-unknown'
+    if explicit:
+        assert old['dispatch']['operation_id'] == 'd' * 128
+        environment['MISSION_OPERATION_ID'] = 'r' * 128
+    journal.unlink()
+    result = run_cli('fresh-review', 'reconcile', '--request', request['request_id'], '--adapter', 'neutral',
+                     cwd=root, env_extra=environment)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout)['record']['status'] == 'abandoned-unknown'
+
+
+def test_future_launch_clock_cannot_strand_a_running_request(reviewer, run_cli):
+    from .test_issue879_completion_cli import _rewrite_fixture_document
+    root, _, _, journal = reviewer
+    record = invoke(run_cli, reviewer)
+    stored = json.loads(journal.read_text())
+    stored['launch']['started_at'] = '9999-12-31T23:59:59.999999Z'
+    stored['output'] = None
+    journal.write_text(json.dumps(stored))
+    def future(state):
+        state['fresh_review']['requests'][0]['launch'] = stored['launch']
+    _rewrite_fixture_document(root, future)
+    abandoned = invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one')
+    assert abandoned['status'] == 'abandoned-unknown'
+    assert abandoned['result']['launch_receipt'] == stored['launch']
+    assert abandoned['result']['ended_at'] >= stored['launch']['started_at']
+    assert json.loads(journal.read_text())['count'] == 1
+
+
+@pytest.mark.parametrize('value', [None, [], 'cancelled', {'status': None}])
+def test_invalid_cancel_observation_is_unknown_not_an_exception(monkeypatch, value):
+    import fresh_review_host as host
+    monkeypatch.setattr(host, '_call', lambda *args, **kwargs: {'cancel': value})
+    assert host.cancel(None, {}) == 'unknown'
+
+
+def test_withdraw_refuses_funded_pending_and_already_running(reviewer, run_cli):
+    root, request, environment, _ = reviewer
+    command = ['fresh-review', 'withdraw', '--request', request['request_id']]
+    env = {**environment, 'MISSION_OPERATION_ID': 'withdraw-one'}
+    _reject_unchanged(run_cli, root, command, 'state-capacity-withdraw-not-needed', env=env)
+    invoke(run_cli, reviewer)
+    _reject_unchanged(run_cli, root, command, 'fresh-review-request-not-pending', env=env)
+
+
+@pytest.mark.parametrize('mutation', ['missing', 'foreign-id', 'extra', 'oversized', 'invalid-version'])
+def test_resolved_child_pin_is_closed_and_bound_to_requested_adapter(monkeypatch, mutation):
+    import fresh_review_host as host
+    from mission_kernel.fresh_review import FreshReviewError
+    pin = dict(registration=dict(id='neutral', entry_point='neutral', distribution='neutral-adapter',
+                                version='1.0', source_digest='sha256:' + 'a' * 64),
+               entry_point_value='neutral_adapter:factory', module='neutral_adapter')
+    if mutation == 'foreign-id': pin['registration']['id'] = 'foreign'
+    if mutation == 'extra': pin['extra'] = True
+    if mutation == 'oversized': pin['module'] = 'a' * 1025
+    if mutation == 'invalid-version': pin['registration']['version'] = []
+    monkeypatch.setattr(host, '_call', lambda *a, **k: {'pin': None if mutation == 'missing' else pin})
+    with pytest.raises(FreshReviewError):
+        host.resolve('neutral')

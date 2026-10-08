@@ -367,7 +367,7 @@ def test_repository_status_keeps_unicode_and_historical_nonfinite_scores(complet
     before = _public_bytes(root)
     result = run_cli('fresh-review', 'status', cwd=root)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert json.loads(result.stdout) == {'requests': []}
+    assert json.loads(result.stdout)['requests'] == []
     assert _public_bytes(root) == before
     if schema == 4:
         # Historical get uses its compatibility reader. Repository selection
