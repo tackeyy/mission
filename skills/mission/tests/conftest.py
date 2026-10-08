@@ -305,7 +305,7 @@ def legacy_run_cli(raw_run_cli):
 
 
 @pytest.fixture
-def prepare_approved_invocation(run_cli):
+def prepare_approved_invocation(run_cli, isolated_provider_python):
     """Prepare and host-approve a command provider for canonical invocation tests."""
     def _prepare(*, cwd, provider, iteration, phase, env_extra=None, registry=None,
                  input_file=None, json_output=False):
@@ -333,6 +333,7 @@ def prepare_approved_invocation(run_cli):
             "[mission.approval_verifiers]\ntest-entry = test_approval_provider:verify\n",
             encoding="utf-8",
         )
+        isolated_provider_python(provider_root)
         config = root / ".test-host-config" / "mission"
         config.mkdir(parents=True, exist_ok=True)
         (config / "approval-verifiers.json").write_text(json.dumps({
@@ -405,3 +406,19 @@ def push_provenance_score(run_cli):
         scoring.write_text(json.dumps(payload))
         return run_cli("push-score", "--iteration", str(iteration), "--scoring-json", str(scoring), cwd=root, env_extra=env_extra, check=True)
     return _push
+
+
+@pytest.fixture
+def isolated_provider_python(tmp_path, monkeypatch):
+    """A temporary installed-site fixture visible to -I, never the user's site."""
+    import venv
+    environment = tmp_path / 'isolated-provider-python'
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(environment)
+    executable = environment / 'bin' / 'python'
+    site = environment / 'lib' / f'python{sys.version_info.major}.{sys.version_info.minor}' / 'site-packages'
+
+    def install(package):
+        (site / 'fixture-provider.pth').write_text(str(package.resolve()) + '\n')
+        monkeypatch.setattr(sys, 'executable', str(executable))
+        return executable, site
+    return install

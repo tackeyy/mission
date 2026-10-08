@@ -694,12 +694,13 @@ def _force_provider(root):
 
 
 @pytest.mark.parametrize("contract_enabled", [True, False], ids=["contract", "legacy"])
-def test_valid_force_approval_cannot_override_acceptance(completion_session, run_cli, contract_enabled):
+def test_valid_force_approval_cannot_override_acceptance(completion_session, run_cli, contract_enabled, isolated_provider_python):
     root, state, schema = completion_session
     if not contract_enabled:
         state.pop("acceptance_contract")
     _persist_fixture(root, state, schema)
     args, env = _force_provider(root)
+    isolated_provider_python(Path(env["PYTHONPATH"]))
     if contract_enabled:
         _reject_unchanged(run_cli, root, args, "acceptance-coverage-pending", env=env)
     else:

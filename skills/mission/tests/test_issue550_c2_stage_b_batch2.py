@@ -548,7 +548,7 @@ def test_specialists_log_invocation_retained_v4_unchanged(legacy_run_cli, tmp_pa
 
 
 def test_specialists_verify_approval_v5_preserves_head_and_replays(
-    run_cli, tmp_path, prepare_approved_invocation
+    run_cli, tmp_path, prepare_approved_invocation, isolated_provider_python
 ):
     session_id = "batch2-verify-approval"
     _init_v5(run_cli, tmp_path, session_id)
@@ -557,6 +557,7 @@ def test_specialists_verify_approval_v5_preserves_head_and_replays(
     env = _env(session_id)
     env["PATH"] = f"{cmd_dir}{os.pathsep}{os.environ.get('PATH', '')}"
     env.update(_make_approval_verifier(tmp_path, "approval"))
+    isolated_provider_python(Path(env["PYTHONPATH"].split(os.pathsep)[0]))
 
     _recommend(run_cli, tmp_path, session_id, registry, provider_id="approval-provider")
 
@@ -776,7 +777,7 @@ def test_specialists_prepare_invocation_v5_requires_operation_id(
 # ---------------------------------------------------------------------------
 
 
-def test_specialists_invoke_command_no_double_dispatch_on_replay(run_cli, tmp_path):
+def test_specialists_invoke_command_no_double_dispatch_on_replay(run_cli, tmp_path, isolated_provider_python):
     """同一 operation_id の再実行で外部 provider が二重呼び出しされないこと。"""
     session_id = "batch2-invoke-cmd"
     _init_v5(run_cli, tmp_path, session_id)
@@ -787,6 +788,7 @@ def test_specialists_invoke_command_no_double_dispatch_on_replay(run_cli, tmp_pa
     env = _env(session_id)
     env["PATH"] = f"{cmd_dir}{os.pathsep}{os.environ.get('PATH', '')}"
     env.update(_make_approval_verifier(tmp_path, "invoke-cmd"))
+    isolated_provider_python(Path(env["PYTHONPATH"].split(os.pathsep)[0]))
 
     _recommend(run_cli, tmp_path, session_id, registry, provider_id=provider_id)
 
@@ -880,7 +882,7 @@ def test_specialists_invoke_command_no_double_dispatch_on_replay(run_cli, tmp_pa
     assert _head(tmp_path, session_id) == committed
 
 
-def test_specialists_invoke_command_v5_requires_operation_id(run_cli, tmp_path):
+def test_specialists_invoke_command_v5_requires_operation_id(run_cli, tmp_path, isolated_provider_python):
     session_id = "batch2-invoke-cmd-noid"
     _init_v5(run_cli, tmp_path, session_id)
     provider_id = "invoke-cmd-noid-provider"
@@ -889,6 +891,7 @@ def test_specialists_invoke_command_v5_requires_operation_id(run_cli, tmp_path):
     env = _env(session_id)
     env["PATH"] = f"{cmd_dir}{os.pathsep}{os.environ.get('PATH', '')}"
     env.update(_make_approval_verifier(tmp_path, "invoke-cmd-noid"))
+    isolated_provider_python(Path(env["PYTHONPATH"].split(os.pathsep)[0]))
 
     _recommend(run_cli, tmp_path, session_id, registry, provider_id=provider_id)
 
