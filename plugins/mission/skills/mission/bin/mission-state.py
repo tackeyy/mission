@@ -327,6 +327,8 @@ from mission_application.legacy_initialization import (  # noqa: E402
     LegacyV4InitializationRequest,
     LegacyV4InitializationServices,
     run_initialize_legacy_v4,
+    initialize_v5_session as run_initialize_v5_session,
+    preflight_v5_session as run_preflight_v5_session,
 )
 from mission_application.worktree_archive_specs import (  # noqa: E402
     WorktreeArchiveSpecsRequest,
@@ -1750,6 +1752,7 @@ def atomic_write_json(
     before_publish=None,
     prepare_only=False,
     replacement=False,
+    base_bytes=None,
 ):
     """Phase B-2: fsync + os.replace で完全な前 or 後状態を保証.
 
@@ -1763,7 +1766,7 @@ def atomic_write_json(
     return write_legacy_json(
         path, data, administrative=administrative, lease_decision=lease_decision,
         expected_identity=expected_identity, before_publish=before_publish,
-        prepare_only=prepare_only, replacement=replacement,
+        prepare_only=prepare_only, replacement=replacement, base_bytes=base_bytes,
         services=SimpleNamespace(
             is_state_shape=_is_session_state_shape, is_state_path=_is_session_state_path,
             unset=_LEASE_DECISION_UNSET, enforce_lease=_enforce_session_lease_for_write,
@@ -6888,7 +6891,7 @@ def _read_init_peer_state(path: Path) -> dict:
         return _read_legacy_json_file(path)
 
 
-def _initialize_legacy_v4(args, *, write_state, lock_state: bool = True):
+def _initialize_legacy_v4(args, *, write_state, lock_state: bool = True, admission_writer=None, preflight_writer=None, genesis_lock=None, preflight_only=False):
     request = LegacyV4InitializationRequest(
         mission=args.mission,
         goal_dispatch=getattr(args, "goal_dispatch", None),
@@ -6914,6 +6917,7 @@ def _initialize_legacy_v4(args, *, write_state, lock_state: bool = True):
         new_mission=getattr(args, "new_mission", False),
         new_mission_assumptions_path=args._new_mission_assumptions_path,
         lock_state=lock_state,
+        preflight_only=preflight_only,
     )
     services = LegacyV4InitializationServices(
         current_directory=Path.cwd,
@@ -6962,6 +6966,9 @@ def _initialize_legacy_v4(args, *, write_state, lock_state: bool = True):
         permission_preflight=_permission_preflight,
         write_state=write_state,
         capacity_writer=atomic_write_json,
+        admission_writer=admission_writer,
+        preflight_writer=preflight_writer,
+        genesis_lock=genesis_lock,
         exit_init_write_failure=_exit_init_write_failure,
         exit_init_evidence_write_failure=_exit_init_evidence_write_failure,
         exit_internal_invariant=_exit_internal_invariant,
@@ -7022,7 +7029,7 @@ def _canonical_init_command(args) -> tuple[object, bytes]:
     return _decode_strict_json_object(source), source
 
 
-def _initialize_v5_state(args, path: Path, initial: dict) -> None:
+def _initialize_v5_state(args, path: Path, initial: dict, *, prepare_only=False, preflight_only=False, capacity_base=None):
     """Commit the v4-shaped bootstrap payload through the v5 genesis API."""
     session_id = str(initial["session_id"])
     presented_lease_id = os.environ.get("MISSION_LEASE_ID") or _new_lease_id()
@@ -7072,22 +7079,20 @@ def _initialize_v5_state(args, path: Path, initial: dict) -> None:
         clock=lambda: now,
         lease_ttl_seconds=_lease_ttl_seconds(),
     )
-    try:
-        run_initialize_v5_repository(
-            repository,
-            request,
-            state_bytes,
-            terminal_head_digest,
-        )
-    except OSError:
-        _exit_init_write_failure(Path.cwd(), path)
-    except FencedCommitError as error:
-        print(f"ERROR: {error.code}: {error.detail}", file=sys.stderr)
-        raise SystemExit(2) from error
-    record_reinitialization_commit(args, terminal_head_digest)
-    decision = LeaseDecision("acquired", presented_lease_id, 1)
-    _PROCESS_LEASE_IDS[str(path.resolve())] = presented_lease_id
-    _emit_lease_carrier(initial, decision)
+    def after_commit():
+        record_reinitialization_commit(args, terminal_head_digest)
+        decision = LeaseDecision("acquired", presented_lease_id, 1)
+        _PROCESS_LEASE_IDS[str(path.resolve())] = presented_lease_id
+        _emit_lease_carrier(initial, decision)
+    return run_initialize_v5_repository(
+        repository, request, state_bytes, terminal_head_digest,
+        prepare_only=prepare_only, after_commit=after_commit,
+        write_failure=lambda: _exit_init_write_failure(Path.cwd(), path),
+        commit_error=(FencedCommitError, CapacityWriteError), printer=print, stderr=sys.stderr,
+        preflight_only=preflight_only,
+        capacity_preflight=lambda content: repository.preflight_initialization(request,
+            state_bytes=content, base_bytes=capacity_base),
+    )
 
 
 def cmd_init(args):
@@ -7116,6 +7121,7 @@ def cmd_init(args):
                     cwd,
                     sf,
                     _initialize_new_v5_session,
+                    _preflight_new_v5_session,
                 ),
             )
         else:
@@ -7153,14 +7159,14 @@ def cmd_init(args):
 def _initialize_new_v5_session(args, cwd: Path) -> None:
     """Serialize the complete genesis interval across session IDs."""
 
-    # Another process must not mistake a live private stage for crash residue;
-    # the same boundary also protects aggregate and review-generation choices.
-    with StateLock(state_dir(cwd) / ".init.lock"):
-        _initialize_legacy_v4(
-            args,
-            write_state=lambda path, state: _initialize_v5_state(args, path, state),
-            lock_state=False,
-        )
+    run_initialize_v5_session(args, cwd,
+        state_lock=StateLock, state_root=state_dir(cwd),
+        initialize_legacy=_initialize_legacy_v4, initialize_state=_initialize_v5_state)
+
+
+def _preflight_new_v5_session(args, cwd, base_bytes):
+    run_preflight_v5_session(args, cwd, base_bytes,
+        initialize_legacy=_initialize_legacy_v4, initialize_state=_initialize_v5_state)
 
 
 def cmd_pregate(args):

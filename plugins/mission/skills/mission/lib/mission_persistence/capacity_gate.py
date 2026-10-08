@@ -20,7 +20,7 @@ class CapacityWriteError(StateBoundaryError):
         super().__init__(code, code)
 
 
-def validate_capacity_fields(document, base=None):
+def validate_capacity_fields(document, base=None, *, encoding=StateEncoding.CANONICAL):
     """Bound stored values, including raw compatibility copies of halt reasons."""
     v5 = document.get('schema_version') == 5 and isinstance(document.get('control'), dict)
     def unchanged(value, old):
@@ -63,11 +63,18 @@ def validate_capacity_fields(document, base=None):
         old_epoch = int(previous.get('fencing_epoch'))
     except (TypeError, ValueError, OverflowError):
         old_epoch = None
-    migrating = (not inherited and old_epoch is not None
-                 and lease.get('fencing_epoch') == old_epoch + 1
-                 and lease.get('lease_id') != previous.get('lease_id')
-                 and len(history) == len(old_history) + 1
-                 and unchanged(history[:-1], old_history))
+    def lease_document(fields):
+        if v5:
+            return {'schema_version': 5, 'control': {}, 'lease': fields}
+        return {key: fields[key] for key in ('owner_session_id', 'lease_id', 'fencing_epoch',
+                'lease_expires_at', 'lease_history') if key in fields}
+    # Isolate the lease delta so an unrelated normal mutation cannot mask
+    # a malformed history/expiry that the kernel would reject as takeover.
+    migrating = (not inherited and lease.get('lease_id') != previous.get('lease_id')
+                 and classify_write_kind(lease_document(previous), lease_document(lease),
+                     encoding=encoding) is WriteKind.STOP_TAKEOVER)
+    if not migrating:
+        raise CapacityWriteError('state-capacity-invariant-broken')
     for index, entry in enumerate(history):
         if index < len(old_history) and unchanged(entry, old_history[index]):
             continue
@@ -99,7 +106,7 @@ def check_state_capacity(base_bytes, proposed_bytes, *, encoding, replacement=Fa
     if not isinstance(proposed, dict):
         raise StateBoundaryError('root-not-object', 'root-not-object')
     base = None if base_bytes is None else CapacityBase(json.loads(base_bytes), len(base_bytes))
-    validate_capacity_fields(proposed, None if base is None else base.document)
+    validate_capacity_fields(proposed, None if base is None else base.document, encoding=encoding)
     # Reinitialization replaces only terminal legacy state; the new session
     # must independently fund every reservation, including its halt slot.
     admission_base = None if (replacement and encoding is StateEncoding.LEGACY_PRETTY and base is not None

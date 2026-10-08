@@ -29,10 +29,16 @@ def acquire_legacy_lease(state, session_id, *, reason, presented_lease_id, now,
     owner = str(state["owner_session_id"])
     current_lease_id = str(state["lease_id"])
 
+    def parsed_epoch():
+        try:
+            return int(state["fencing_epoch"])
+        except (ValueError, TypeError, OverflowError) as error:
+            raise rejected_error(f"lease held by {owner} until {state.get('lease_expires_at')} (invalid fencing epoch)") from error
+
     same_owner = owner == session_id
     token_matches = presented_lease_id == current_lease_id if same_owner else False
     if same_owner and token_matches:
-        epoch = int(state["fencing_epoch"])
+        epoch = parsed_epoch()
         state["lease_expires_at"] = renewed_expiry(
             str(state["lease_expires_at"]), now
         )
@@ -61,7 +67,7 @@ def acquire_legacy_lease(state, session_id, *, reason, presented_lease_id, now,
         raise rejected_error(
             f"lease held by {owner} until {state.get('lease_expires_at')} (stale fencing token)"
         )
-    epoch = int(state["fencing_epoch"])
+    epoch = parsed_epoch()
     if session_id != state["owner_session_id"]:
         validate_lease_token(session_id)
     validate_lease_token(reason)
@@ -83,16 +89,17 @@ def acquire_legacy_lease(state, session_id, *, reason, presented_lease_id, now,
     return decision("taken-over", new_lease_id, epoch + 1)
 
 
-def checked_legacy_state_content(path, data, *, replacement=False):
+def checked_legacy_state_content(path, data, *, replacement=False, base_bytes=None):
     validate_specialist_public_state(data)
     content = json.dumps(data, indent=2, ensure_ascii=False)
-    base_bytes = path.read_bytes() if path.exists() else None
+    if base_bytes is None:
+        base_bytes = path.read_bytes() if path.exists() else None
     check_state_capacity(base_bytes, content.encode('utf-8'), encoding=StateEncoding.LEGACY_PRETTY, replacement=replacement)
     return content
 
 
 def prepare_legacy_json(path, data, *, administrative, lease_decision, expected_identity, services,
-                        before_publish=None, replacement=False):
+                        before_publish=None, replacement=False, base_bytes=None):
     is_state = services.is_state_shape(data) or services.is_state_path(path)
     if services.is_state_shape(data):
         validate_specialist_public_state(data)
@@ -101,7 +108,7 @@ def prepare_legacy_json(path, data, *, administrative, lease_decision, expected_
     if not administrative and services.is_state_shape(data):
         data['last_activity_at'] = services.now()
     if is_state:
-        content = checked_legacy_state_content(path, data, replacement=replacement)
+        content = checked_legacy_state_content(path, data, replacement=replacement, base_bytes=base_bytes)
     else:
         content = json.dumps(data, indent=2, ensure_ascii=False)
     def publish():

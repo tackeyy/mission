@@ -33,6 +33,7 @@ class LegacyV4InitializationRequest:
     new_mission: bool
     new_mission_assumptions_path: object
     lock_state: bool
+    preflight_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -99,11 +100,14 @@ class LegacyV4InitializationServices:
     fenced_commit_error: object
     permission_halt_rejected: object
     capacity_writer: object = None
+    admission_writer: object = None
+    preflight_writer: object = None
+    genesis_lock: object = None
 
     @property
     def prepare_write(self):
         # Injected two-argument writers keep their existing callback contract.
-        return self.capacity_writer if self.write_state is self.capacity_writer else None
+        return self.admission_writer or (self.capacity_writer if self.write_state is self.capacity_writer else None)
 
 
 def initialize_legacy_v4(request, services):
@@ -118,7 +122,8 @@ def initialize_legacy_v4(request, services):
         mission_state_root = services.ensure_regular_directory_path(
             cwd, (".mission-state",)
         )
-        mission_state_root.mkdir(parents=True, exist_ok=True)
+        if services.preflight_writer is None:
+            mission_state_root.mkdir(parents=True, exist_ok=True)
     except (OSError, services.worktree_archive_error):
         services.exit_init_write_failure(cwd)
     planned_files = services.parse_files_arg(request.files)
@@ -325,13 +330,18 @@ def initialize_legacy_v4(request, services):
     )
     session_directory = services.session_dir(cwd)
     state_target = services.session_file(cwd, sid)
+    if services.preflight_writer is not None:
+        services.preflight_writer(state_target, initial)
+    if request.preflight_only:
+        return
     try:
+        mission_state_root.mkdir(parents=True, exist_ok=True)
         services.ensure_regular_directory_path(cwd, (".mission-state", "sessions"))
         session_directory.mkdir(parents=True, exist_ok=True)
     except (OSError, services.worktree_archive_error):
         services.exit_init_write_failure(cwd, state_target)
     aggregate = services.aggregate_file(cwd)
-    init_lock = (
+    init_lock = services.genesis_lock() if services.genesis_lock is not None else (
         services.guarded_init_state_lock(cwd, state_target)
         if request.lock_state
         else services.nullcontext()
@@ -576,3 +586,19 @@ def initialize_legacy_v4(request, services):
 
 
 run_initialize_legacy_v4 = initialize_legacy_v4
+
+
+def initialize_v5_session(arguments, cwd, *, state_lock,
+                          state_root, initialize_legacy, initialize_state):
+    initialize_legacy(arguments,
+        write_state=lambda path, state: initialize_state(arguments, path, state),
+        lock_state=False, genesis_lock=lambda: state_lock(state_root / '.init.lock'),
+        preflight_writer=lambda path, state: initialize_state(arguments, path, state, preflight_only=True,
+            capacity_base=getattr(arguments, '_new_mission_capacity_base', None)),
+        admission_writer=lambda path, state, **_options: initialize_state(arguments, path, state, prepare_only=True))
+
+
+def preflight_v5_session(arguments, cwd, base_bytes, *, initialize_legacy, initialize_state):
+    initialize_legacy(arguments, write_state=initialize_state, lock_state=False, preflight_only=True,
+        preflight_writer=lambda path, state: initialize_state(arguments, path, state,
+            preflight_only=True, capacity_base=base_bytes))

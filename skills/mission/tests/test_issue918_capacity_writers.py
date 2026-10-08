@@ -487,16 +487,37 @@ def test_changing_partial_historical_lease_does_not_inherit_missing_epoch():
         check_state_capacity(encode(base), encode(proposed), encoding=sc.StateEncoding.LEGACY_PRETTY)
 
 
-def test_legacy_token_copy_requires_a_real_takeover():
+@pytest.mark.parametrize('layout', ['v4', 'v5'])
+@pytest.mark.parametrize('mutation', ['append', 'delete', 'replace', 'wrong-retired', 'multiple', 'malformed-history', 'invalid-expiry', 'short-expiry'])
+def test_lease_history_requires_append_of_exact_retired_lease(layout, mutation):
     from mission_persistence.capacity_gate import check_state_capacity, CapacityWriteError
-    base = {'schema_version': 4, 'mission_id': 'm', 'owner_session_id': 'old owner',
-            'lease_id': 'old token', 'fencing_epoch': 1, 'lease_history': []}
+    from .test_issue933_state_capacity_verdict import _base
+    base, encoding = _base(layout)
+    lease = base if layout == 'v4' else base['lease']
+    row = dict(owner_session_id='other', lease_id='other-token', fencing_epoch=1, reason='takeover')
+    lease['lease_history'] = 'corrupt' if mutation == 'malformed-history' else [dict(row)]
     proposed = copy.deepcopy(base)
-    proposed['lease_history'].append({'owner_session_id': 'old owner', 'lease_id': 'old token',
-                                     'fencing_epoch': 1, 'reason': 'takeover'})
-    encode = lambda d: json.dumps(d, indent=2).encode()
+    target = proposed if layout == 'v4' else proposed['lease']
+    if mutation in ('malformed-history', 'invalid-expiry', 'short-expiry'):
+        target['lease_history'] = ([] if mutation == 'malformed-history' else lease['lease_history']) + [
+            dict(owner_session_id=lease['owner_session_id'], lease_id=lease['lease_id'],
+                 fencing_epoch=lease['fencing_epoch'], reason='takeover')]
+        target.update(lease_id='new-token', fencing_epoch=lease['fencing_epoch'] + 1)
+        if mutation != 'malformed-history':
+            target['lease_expires_at'] = 'invalid' if mutation == 'invalid-expiry' else '2000-01-01T00:00:00Z'
+    elif mutation == 'delete':
+        target['lease_history'] = []
+    elif mutation == 'replace':
+        target['lease_history'][0]['lease_id'] = 'replacement'
+    else:
+        target['lease_history'].append(dict(row))
+        if mutation != 'append':
+            target.update(lease_id='new-token', fencing_epoch=lease['fencing_epoch'] + 1)
+        if mutation == 'multiple':
+            target['lease_history'].append(dict(row))
+    encode = _canonical if layout == 'v5' else lambda d: json.dumps(d, indent=2).encode()
     with pytest.raises(CapacityWriteError, match='state-capacity-invariant-broken'):
-        check_state_capacity(encode(base), encode(proposed), encoding=sc.StateEncoding.LEGACY_PRETTY)
+        check_state_capacity(encode(base), encode(proposed), encoding=encoding)
 
 
 @pytest.mark.parametrize('token,expired,accepted', [
@@ -631,3 +652,60 @@ def test_excess_takeover_halt_archives_only_the_exact_old_lease(layout, old_toke
             check_state_capacity(encode(base), encode(proposed), encoding=encoding)
     else:
         assert check_state_capacity(encode(base), encode(proposed), encoding=encoding).accepted
+
+
+@pytest.mark.parametrize('epoch', ['abc', [1]])
+@pytest.mark.parametrize('expired', [False, True])
+def test_invalid_legacy_epoch_is_a_lease_refusal(tmp_path, legacy_run_cli, epoch, expired):
+    legacy_run_cli('init', 'epoch refusal', '--force-mission', cwd=tmp_path, check=True)
+    path = tmp_path / '.mission-state/sessions/test.json'
+    state = json.loads(path.read_bytes())
+    state.update(fencing_epoch=epoch, lease_expires_at='2000-01-01T00:00:00Z' if expired else '2099-01-01T00:00:00Z')
+    path.write_text(json.dumps(state))
+    before = _public_bytes(tmp_path)
+    result = legacy_run_cli('refresh-pid', cwd=tmp_path,
+        env_extra={'MISSION_LEASE_ID': 'new-token' if expired else state['lease_id']})
+    assert result.returncode == 2 and 'lease held' in result.stderr, result.stdout + result.stderr
+    assert 'invalid fencing epoch' in result.stderr and 'MISSION_LEASE_ID' in result.stderr
+    assert _public_bytes(tmp_path) == before
+
+
+@pytest.mark.parametrize('existing', [False, True])
+@pytest.mark.parametrize('token', ['bad token', 'x' * 129, 'test-lease'])
+def test_v5_init_refusal_precedes_evidence_and_directories(tmp_path, run_cli, existing, token):
+    if existing:
+        run_cli('init', 'old mission', '--force-mission', cwd=tmp_path, check=True)
+        run_cli('mark-halt', '--reason', 'stop', cwd=tmp_path, check=True)
+    before = _public_bytes(tmp_path)
+    directories = {str(p.relative_to(tmp_path)) for p in tmp_path.rglob('*') if p.is_dir()}
+    result = run_cli('init', 'new mission', '--force-mission', *(['--new-mission'] if existing else []),
+                     cwd=tmp_path, env_extra={'MISSION_LEASE_ID': token})
+    assert result.returncode == (0 if token == 'test-lease' else 2), result.stdout + result.stderr
+    if token == 'test-lease':
+        cli = _load_cli_module('issue918_initialized')
+        assert cli.read_session_json(tmp_path / '.mission-state/sessions/test.json')['mission'] == 'new mission'
+    else:
+        assert _public_bytes(tmp_path) == before
+        assert {str(p.relative_to(tmp_path)) for p in tmp_path.rglob('*') if p.is_dir()} == directories
+
+
+@pytest.mark.parametrize('existing', [False, True])
+def test_v5_init_capacity_refusal_precedes_assumptions(tmp_path, monkeypatch, run_cli, existing):
+    from mission_persistence import capacity_gate as gate
+    cli = _load_cli_module('issue918_genesis_refusal')
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('MISSION_SESSION_ID', 'test')
+    monkeypatch.setenv('MISSION_LEASE_ID', 'test-lease')
+    if existing:
+        run_cli('init', 'old mission', '--force-mission', cwd=tmp_path, check=True)
+        run_cli('mark-halt', '--reason', 'stop', cwd=tmp_path, check=True)
+    before = _public_bytes(tmp_path)
+    directories = {str(p.relative_to(tmp_path)) for p in tmp_path.rglob('*') if p.is_dir()}
+    real = gate.state_capacity_verdict
+    monkeypatch.setattr(gate, 'state_capacity_verdict',
+        lambda *a, **kw: replace(real(*a, **kw), accepted=False, code='state-capacity-exhausted'))
+    with pytest.raises(SystemExit) as error:
+        cli.cmd_init(cli._build_parser().parse_args(['init', 'new mission', '--force-mission'] +
+            (['--new-mission'] if existing else [])))
+    assert error.value.code == 2 and _public_bytes(tmp_path) == before
+    assert {str(p.relative_to(tmp_path)) for p in tmp_path.rglob('*') if p.is_dir()} == directories

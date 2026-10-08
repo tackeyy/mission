@@ -2685,13 +2685,26 @@ class LocalFencedRepository:
             precondition = CommitPrecondition(base_generation, head_digest, pending.digest)
             return AdmittedSnapshot(request, base, pending, base_generation + 1, precondition)
 
+    def preflight_initialization(self, request, *, state_bytes, base_bytes=None):
+        """Check the candidate and pending reinit lease without filesystem writes."""
+        from .capacity_gate import StateEncoding, check_state_capacity, validate_capacity_fields
+        validate_capacity_fields(json.loads(state_bytes))
+        validate_execution_request(request, repository_root_name=self.root.name)
+        if base_bytes is not None:
+            base_state = decode_mission_state(base_bytes)
+            pending = admit_lease(request, base_state.lease, self.clock(), self.lease_ttl_seconds)
+            state_bytes = project_legacy_document(replace(decode_mission_state(state_bytes),
+                lease=pending.target, snapshot_provenance=None))
+        return check_state_capacity(base_bytes, state_bytes, encoding=StateEncoding.CANONICAL)
+
     def initialize(
         self,
         request: ExecutionRequest,
         *,
         state_bytes: bytes,
         terminal_reinitialization_head_digest: Optional[str] = None,
-    ) -> CommitResult:
+        prepare_only: bool = False,
+    ):
         """Publish the sole admitted genesis path for a v5 session.
 
         Genesis deliberately accepts validated v4 projection bytes.  The v5
@@ -2700,7 +2713,7 @@ class LocalFencedRepository:
         """
         admitted = self.begin(request)
         if isinstance(admitted, OperationReplay):
-            return admitted.result
+            return (lambda: admitted.result) if prepare_only else admitted.result
         if admitted.base is not None:
             if terminal_reinitialization_head_digest is None:
                 raise FencedCommitError(
@@ -2738,7 +2751,8 @@ class LocalFencedRepository:
             state_bytes=state_bytes,
             effects=(),
         )
-        return self.commit(prepared, prepared.precondition)
+        publish = lambda: self.commit(prepared, prepared.precondition)
+        return publish if prepare_only else publish()
 
     def stage(
         self,

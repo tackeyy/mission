@@ -403,6 +403,7 @@
     "_write_temp:write": 1,
     "execute:replace": 1,
     "initialize:replace": 1,
+    "preflight_initialization:replace": 1,
     "read_pinned_head:open-write": 1,
     "stage:replace": 2
   },
@@ -453,6 +454,7 @@
     "_cleanup_reserved_assumptions:unlink": 1,
     "_reserve_new_assumptions:open-write": 3,
     "_reserve_new_assumptions:unlink": 2,
+    "start_new_mission:dynamic": 1,
     "start_new_mission:write": 1,
     "write_exclusive:fdopen-write": 1,
     "write_exclusive:open-write": 1,

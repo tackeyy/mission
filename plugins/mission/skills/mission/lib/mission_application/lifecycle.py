@@ -271,16 +271,32 @@ def initialize_v5_repository(
     request: object,
     state_bytes: bytes,
     terminal_reinitialization_head_digest: str | None,
-) -> None:
-    """Preserve the genesis call contract; opt into reinitialization explicitly."""
-    if terminal_reinitialization_head_digest is None:
-        repository.initialize(request, state_bytes=state_bytes)
-        return
-    repository.initialize(
-        request,
-        state_bytes=state_bytes,
-        terminal_reinitialization_head_digest=terminal_reinitialization_head_digest,
-    )
+    *, prepare_only: bool = False, after_commit=None, write_failure=None,
+    commit_error=(), printer=None, stderr=None, preflight_only=False, capacity_preflight=None,
+):
+    """Admit genesis before evidence, then publish and report its commit."""
+    options = {"prepare_only": True} if prepare_only or after_commit is not None else {}
+    if terminal_reinitialization_head_digest is not None:
+        options['terminal_reinitialization_head_digest'] = terminal_reinitialization_head_digest
+    def guarded(action):
+        try:
+            return action()
+        except OSError:
+            if write_failure is None:
+                raise
+            write_failure()
+        except commit_error as error:
+            printer(f"ERROR: {error.code}: {error.detail}", file=stderr)
+            raise SystemExit(2) from error
+    if preflight_only:
+        return guarded(lambda: capacity_preflight(state_bytes))
+    prepared = guarded(lambda: repository.initialize(request, state_bytes=state_bytes, **options))
+    if after_commit is None:
+        return prepared
+    def publish():
+        guarded(prepared)
+        after_commit()
+    return publish if prepare_only else publish()
 
 
 def bind_reinitialized_mission_identity(
