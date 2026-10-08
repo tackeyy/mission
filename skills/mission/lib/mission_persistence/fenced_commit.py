@@ -2685,6 +2685,23 @@ class LocalFencedRepository:
             precondition = CommitPrecondition(base_generation, head_digest, pending.digest)
             return AdmittedSnapshot(request, base, pending, base_generation + 1, precondition)
 
+    def _check_replacement_capacity(self, base_bytes, state_bytes):
+        """Preserve inherited lease validation while funding a new mission independently."""
+        from .capacity_gate import (CapacityWriteError, StateEncoding,
+                                    state_capacity_verdict, validate_capacity_fields)
+        from mission_kernel.state_capacity import lease_history_length, remaining_takeovers
+        base, proposed = json.loads(base_bytes), json.loads(state_bytes)
+        inherited = base
+        if base.get('schema_version') == 5 and proposed.get('schema_version') != 5:
+            inherited = {**base.get('extensions', {}), **base.get('control', {}), **base.get('lease', {})}
+        validate_capacity_fields(proposed, inherited, encoding=StateEncoding.CANONICAL)
+        if lease_history_length(proposed) > lease_history_length(base) and remaining_takeovers(base) == 0:
+            raise CapacityWriteError('state-capacity-exhausted')
+        verdict = state_capacity_verdict(None, proposed, len(state_bytes), encoding=StateEncoding.CANONICAL)
+        if not verdict.accepted:
+            raise CapacityWriteError(verdict.code)
+        return verdict
+
     def preflight_initialization(self, request, *, state_bytes, base_bytes=None):
         """Check the candidate and pending reinit lease without filesystem writes."""
         from .capacity_gate import StateEncoding, check_state_capacity, validate_capacity_fields
@@ -2695,7 +2712,8 @@ class LocalFencedRepository:
             pending = admit_lease(request, base_state.lease, self.clock(), self.lease_ttl_seconds)
             state_bytes = project_legacy_document(replace(decode_mission_state(state_bytes),
                 lease=pending.target, snapshot_provenance=None))
-        return check_state_capacity(base_bytes, state_bytes, encoding=StateEncoding.CANONICAL)
+            return self._check_replacement_capacity(base_bytes, state_bytes)
+        return check_state_capacity(None, state_bytes, encoding=StateEncoding.CANONICAL)
 
     def initialize(
         self,
@@ -2750,6 +2768,7 @@ class LocalFencedRepository:
             admitted,
             state_bytes=state_bytes,
             effects=(),
+            capacity_replacement=admitted.base is not None,
         )
         publish = lambda: self.commit(prepared, prepared.precondition)
         return publish if prepare_only else publish()
@@ -3523,6 +3542,7 @@ class LocalFencedRepository:
         *,
         state_bytes: bytes,
         effects: tuple[BlobBinding, ...],
+        capacity_replacement: bool = False,
     ) -> PreparedCommit:
         if not isinstance(admitted, AdmittedSnapshot):
             raise FencedCommitError("request-invalid", "admitted snapshot type is invalid")
@@ -3530,11 +3550,14 @@ class LocalFencedRepository:
             raise FencedCommitError("request-invalid", "stage inputs must be immutable")
         from .capacity_gate import StateEncoding, check_state_capacity
         try:
-            check_state_capacity(
-                admitted.base.state_bytes if admitted.base is not None else None,
-                state_bytes,
-                encoding=StateEncoding.CANONICAL,
-            )
+            if capacity_replacement:
+                self._check_replacement_capacity(admitted.base.state_bytes, state_bytes)
+            else:
+                check_state_capacity(
+                    admitted.base.state_bytes if admitted.base is not None else None,
+                    state_bytes,
+                    encoding=StateEncoding.CANONICAL,
+                )
         except Exception as exc:
             raise FencedCommitError(getattr(exc, 'code', 'record-invalid'),
                                     getattr(exc, 'detail', 'target state is invalid')) from exc

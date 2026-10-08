@@ -559,3 +559,69 @@ def test_v5_init_capacity_refusal_precedes_assumptions(tmp_path, monkeypatch, ru
             (['--new-mission'] if existing else [])))
     assert error.value.code == 2 and _public_bytes(tmp_path) == before
     assert {str(p.relative_to(tmp_path)) for p in tmp_path.rglob('*') if p.is_dir()} == directories
+
+
+@pytest.mark.parametrize('native_v5', [False, True])
+@pytest.mark.parametrize('token,expired,history_count,accepted', [('test-lease', False, 0, True),
+    ('foreign-token', False, 0, False), ('new-token', True, 0, True),
+    ('new-token', True, sc.STATE_CAPACITY_TAKEOVER_LIMIT - 1, True),
+    ('new-token', True, sc.STATE_CAPACITY_TAKEOVER_LIMIT, False),
+    ('new-token', True, sc.STATE_CAPACITY_TAKEOVER_LIMIT + 1, False),
+    ('test-lease', False, sc.STATE_CAPACITY_TAKEOVER_LIMIT + 1, True)])
+def test_full_terminal_v5_replacement_funds_new_capacity_and_keeps_lease_guard(tmp_path, run_cli, token, expired, history_count, accepted, native_v5):
+    from .test_issue879_completion_cli import _rewrite_fixture_document
+    cli = _load_cli_module('issue918_full_replacement')
+    run_cli('init', 'old mission', '--force-mission', cwd=tmp_path, check=True)
+    run_cli('mark-halt', '--reason', 'stop', cwd=tmp_path, check=True)
+    def fill(document):
+        if history_count:
+            from .test_issue933_state_capacity_verdict import _history
+            document['lease_history'] = [dict(row, at='2026-01-01T00:00:00Z')
+                                         for row in _history(history_count)]
+            document['fencing_epoch'] = history_count + 1
+        if expired:
+            document['lease_expires_at'] = '2000-01-01T00:00:00Z'
+        if native_v5:
+            from mission_kernel import decode_snapshot
+            from mission_kernel.codec_v5 import encode_v5_state
+            from mission_kernel.model import SchemaOrigin, MaterializedFindings
+            snapshot = decode_snapshot(_canonical(document))
+            typed = replace(snapshot.state, schema_origin=SchemaOrigin.V5, legacy_passthrough=None,
+                            snapshot_provenance=None, extensions=freeze_json_value(document),
+                            findings=MaterializedFindings((), ()))
+            native = json.loads(encode_v5_state(typed, snapshot.guidance))
+            document.clear()
+            document.update(native)
+        target = document['extensions'] if native_v5 else document
+        target['padding'] = ''
+        target['padding'] = 'p' * (sc.STATE_LIMIT - len(_canonical(document)) - 1024)
+    _rewrite_fixture_document(tmp_path, fill)
+    path = tmp_path / '.mission-state/sessions/test.json'
+    if history_count:
+        root = tmp_path / '.mission-state'
+        head = json.loads(path.read_bytes())
+        commit = json.loads((root / head['commit']['path']).read_bytes())
+        commit['fencing_epoch'] = history_count + 1
+        raw = _canonical(commit)
+        digest = hashlib.sha256(raw).hexdigest()
+        relative = 'commits/' + digest + '.json'
+        (root / relative).write_bytes(raw)
+        head['commit'] = {'path': relative, 'digest': 'sha256:' + digest, 'size': len(raw)}
+        path.write_bytes(_canonical(head))
+    old_state = cli.LocalFencedRepository(tmp_path / '.mission-state').read('test').state_bytes
+    assert len(old_state) > sc.STATE_LIMIT - sc.STATE_CAPACITY_HALT_DELTA
+    before = _public_bytes(tmp_path)
+    result = run_cli('init', 'short mission', '--force-mission', '--new-mission', cwd=tmp_path,
+                     env_extra={'MISSION_LEASE_ID': token})
+    assert result.returncode == (0 if accepted else 2), result.stdout + result.stderr
+    if accepted:
+        state = cli.read_session_json(path)
+        assert state['mission'] == 'short mission' and state['lease_id'] == token
+        assert len(state.get('lease_history', [])) == history_count + int(expired)
+        new_state = cli.LocalFencedRepository(tmp_path / '.mission-state').read('test').state_bytes
+        assert len(new_state) < len(old_state)
+        assert sc.satisfies_capacity(json.loads(new_state), len(new_state))
+        assert old_state in _public_bytes(tmp_path).values()
+    else:
+        assert ('state-capacity-exhausted' if expired else 'lease-rejected') in result.stderr
+        assert _public_bytes(tmp_path) == before
