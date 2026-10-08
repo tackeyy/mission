@@ -9,6 +9,7 @@ def _state():
     from .mission_state_fixture_corpus import current_v5_open_state
     import json
     raw = current_v5_open_state()
+    raw['extensions']['budget_minutes'] = 30
     raw['extensions']['budget_ledger'] = ledger_document(
         new_ledger(decode_policy(default_policy_document(1800)), '2026-01-01T00:00:00Z'))
     global _GUIDANCE
@@ -153,11 +154,12 @@ def test_all_budget_mutations_roundtrip(schema):
     import json
     if schema == 5:
         raw = current_v5_open_state()
+        raw['extensions']['budget_minutes'] = 30
         raw['extensions']['budget_ledger'] = ledger_document(new_ledger(decode_policy(default_policy_document(1800)), '2026-01-01T00:00:00Z'))
         snapshot = decode_snapshot(json.dumps(raw).encode())
         state, guidance = snapshot.state, snapshot.guidance
     else:
-        raw = {'schema_version': 4, 'phase': 'planning', 'loop_active': True,
+        raw = {'schema_version': 4, 'phase': 'planning', 'loop_active': True, 'budget_minutes': 30,
                'budget_ledger': ledger_document(new_ledger(decode_policy(default_policy_document(1800)), '2026-01-01T00:00:00Z'))}
         state, guidance = decode_mission_state(json.dumps(raw).encode()), None
     def reload(value):
@@ -321,7 +323,7 @@ def test_direct_refusals_keep_a_closed_projection_and_clock_regression_keeps_inp
         target='target:one', operation_id='op:one', fencing_epoch=1, policy_timeout=60,
         reserved_bytes=0, candidate_digest='sha256:' + 'a' * 64)
     assert expired.reason == 'budget-exhausted'
-    assert decode_ledger({'budget_ledger': ledger_document(expired.ledger)}) == expired.ledger
+    assert decode_ledger({'budget_minutes': 30, 'budget_ledger': ledger_document(expired.ledger)}) == expired.ledger
     regressed = admit(state.budget, state, '2025-12-31T23:59:59Z', entry='verification-run',
         target='target:one', operation_id='op:one', fencing_epoch=1, policy_timeout=60,
         reserved_bytes=0, candidate_digest='sha256:' + 'a' * 64)
@@ -478,3 +480,44 @@ def test_admission_rejects_invalid_closed_request_scalars(target, operation, epo
         operation_id=operation, fencing_epoch=epoch, policy_timeout=timeout, reserved_bytes=bytes_,
         candidate_digest='sha256:' + 'a' * 64)
     assert refused.reason.startswith('budget-')
+
+
+def test_late_settlement_is_never_charged_below_the_reservation():
+    # design 881 §4.2: lateness is recorded; the charge does not drop below the reserved seconds.
+    from mission_kernel.commands import SettleDispatchBudget
+    from mission_kernel.transitions import decide
+    state = decide(_state(), _reserve('2026-01-01T00:01:00Z', 'verification-run', 'target:one', 'op:one')).transition.new_state
+    row = state.budget.reservations[0]
+    on_time = decide(state, SettleDispatchBudget('2026-01-01T00:01:05Z', row.reservation_id, 'settled', 1,
+                                                 'sha256:' + 'a' * 64, 'sha256:' + 'b' * 64))
+    assert on_time.transition.new_state.budget.settlements[-1].charged_sec == 1
+    late = decide(state, SettleDispatchBudget('2026-01-01T00:10:00Z', row.reservation_id, 'settled', 1,
+                                              'sha256:' + 'a' * 64, 'sha256:' + 'b' * 64))
+    assert late.accepted
+    record = late.transition.new_state.budget.settlements[-1]
+    assert record.charged_sec == row.reserved_sec and record.late_settlement_sec > 0
+
+
+@pytest.mark.parametrize('make', (
+    lambda c: c.EnterFinalPhase('2026-01-01T00:01:00Z', ''),
+    lambda c: c.EnterFinalPhase('2026-01-01T00:01:00Z', 'a\nb'),
+    lambda c: c.EnterFinalPhase('2026-01-01T00:01:00Z', 'x' * 100000),
+    lambda c: c.MarkPass(force=True, force_approval_verified=True, artifact_gate_satisfied=True, at='garbage'),
+    lambda c: c.MarkPass(force=True, force_approval_verified=True, artifact_gate_satisfied=True,
+                         at='2026-01-01T09:00:00+09:00'),
+))
+def test_malformed_budget_command_input_is_a_rejection_not_an_exception(make):
+    from mission_kernel import commands
+    from mission_kernel.transitions import decide
+    decision = decide(_state(), make(commands))
+    assert not decision.accepted and decision.rejection.code.startswith('budget-')
+
+
+def test_reactivate_before_the_halt_time_is_a_rejection():
+    from mission_kernel.commands import MarkHalt, Reactivate
+    from mission_kernel.model import HaltCategory, Phase
+    from mission_kernel.transitions import decide
+    halted = decide(_state(), MarkHalt(HaltCategory.PARTIAL_DONE, 'pause', at='2026-01-01T00:05:00Z')).transition.new_state
+    decision = decide(halted, Reactivate(HaltCategory.PARTIAL_DONE, 'continue', True, Phase.PLANNING,
+                                         at='2026-01-01T00:04:00Z'))
+    assert not decision.accepted and decision.rejection.code == 'budget-clock-regressed'

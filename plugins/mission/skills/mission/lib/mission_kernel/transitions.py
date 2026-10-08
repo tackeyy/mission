@@ -148,9 +148,16 @@ def _unbound_state(state: MissionState, **changes: Any) -> MissionState:
 
 def _with_budget(state: MissionState, ledger: object) -> MissionState:
     """Update the typed projection and every authoritative wire backing together."""
-    document = ledger_document(ledger)
-    if decode_ledger({'budget_ledger': document}) != ledger:
-        raise _Rejected('budget-projection-backing-invalid')
+    # The ledger is bound to the session's budget_minutes; check the round trip with it.
+    source = state.legacy_passthrough if state.legacy_passthrough is not None else state.extensions
+    minutes = source.thaw().get('budget_minutes')
+    try:
+        # Encoding validates caller text (reasons, scopes); a bad value is a rejection.
+        document = ledger_document(ledger)
+        if decode_ledger({'budget_minutes': minutes, 'budget_ledger': document}) != ledger:
+            raise _Rejected('budget-projection-backing-invalid')
+    except BudgetError as exc:
+        raise _Rejected(str(exc)) from exc
     extensions = state.extensions.thaw()
     extensions['budget_ledger'] = document
     frozen_extensions = freeze_json_value(extensions)
@@ -168,6 +175,14 @@ def _with_budget(state: MissionState, ledger: object) -> MissionState:
             raise _Rejected('budget-projection-backing-invalid')
         changes['legacy_passthrough'] = frozen_legacy
     return _unbound_state(state, **changes)
+
+
+def _budget_guard(function, *args):
+    """Evaluate a budget guard; malformed command input is a rejection, not a crash."""
+    try:
+        return function(*args)
+    except BudgetError as exc:
+        raise _Rejected(str(exc)) from exc
 
 
 def _budget_at(command: object) -> str:
@@ -1090,7 +1105,7 @@ def _reactivate(state: MissionState, raw_command: object) -> Transition:
     if state.budget.policy is not None:
         at = _budget_at(command)
         from .budget import exhaustion
-        if exhaustion(state.budget, at) is not None:
+        if _budget_guard(exhaustion, state.budget, at) is not None:
             raise _Rejected('budget-exhausted')
     if command.approved_by_user is not True:
         raise _Rejected("approval-required")
@@ -1293,7 +1308,7 @@ def _mark_pass(state: MissionState, raw_command: object) -> Transition:
     command = raw_command
     assert isinstance(command, MarkPass)
     if state.budget.policy is not None:
-        reason = completion_rejection(state.budget, _budget_at(command))
+        reason = _budget_guard(completion_rejection, state.budget, _budget_at(command))
         if reason is not None:
             raise _Rejected(reason)
     control = _active_control(state)
