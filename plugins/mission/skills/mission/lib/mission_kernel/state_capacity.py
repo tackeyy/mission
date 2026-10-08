@@ -339,6 +339,10 @@ _FRESH_REVIEW_FIXED_RESERVE_BY_STATUS = {
     + FRESH_REVIEW_TERMINAL_STAGE_DELTA,
     "reserved": FRESH_REVIEW_CONSUME_STAGE_DELTA + FRESH_REVIEW_TERMINAL_STAGE_DELTA,
     "consumed": FRESH_REVIEW_TERMINAL_STAGE_DELTA,
+    "dispatch-unknown": 3455 + FRESH_REVIEW_CONSUME_STAGE_DELTA + FRESH_REVIEW_TERMINAL_STAGE_DELTA,
+    "running": FRESH_REVIEW_CONSUME_STAGE_DELTA + FRESH_REVIEW_TERMINAL_STAGE_DELTA,
+    "blocked": 0,
+    "abandoned-unknown": 0,
 }
 
 #: Baselines kept for backward-compatible direct comparison in tests; a
@@ -1515,7 +1519,8 @@ def _diff_is_record_status_advance(base_document: Mapping, proposed: Mapping) ->
         return False
     if len(base_projection.requests) != len(proposed_projection.requests):
         return False
-    _ADVANCE_ORDER = {"pending": 0, "reserved": 1, "consumed": 2}
+    _ADVANCE_ORDER = {"pending": 0, "reserved": 1, "consumed": 2,
+                      "dispatch-unknown": 1, "running": 2, "blocked": 3, "abandoned-unknown": 3}
     advanced = False
     for before, after in zip(base_projection.requests, proposed_projection.requests):
         if before == after:
