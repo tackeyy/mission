@@ -449,15 +449,16 @@ def test_physical_limit_check_does_not_misfire_at_exactly_state_limit():
 
 @pytest.mark.parametrize("layout", ["v4", "v5"])
 @pytest.mark.parametrize("excess", [0, 1])
-def test_legacy_full_withdraw_boundary_uses_current_epoch_and_maximum_id(layout, excess):
+@pytest.mark.parametrize("operation_id", ["w", "w" * 128], ids=["short-id", "maximum-id"])
+def test_legacy_full_withdraw_boundary_uses_current_epoch_and_maximum_id(layout, excess, operation_id):
     pending = _v5_pending_record()
     doc, encoding = _base(layout)
     doc = _set_lease(_set_fresh_review(doc, layout, _project(pending)), layout, epoch=10**17)
     size = lambda value: encode(value, encoding)
     threshold = sc.STATE_LIMIT - sc.STATE_CAPACITY_HALT_DELTA
-    # Independent oracle: the real reducer, at the current epoch and ID bound.
+    # Independent oracle: the real reducer, with the current epoch and concrete ID.
     withdrawn = withdraw_request(_project(pending), request_id=pending.request.request_id,
-                                  operation_id="w" * 128, fencing_epoch=_fencing_epoch(doc, layout))
+                                  operation_id=operation_id, fencing_epoch=_fencing_epoch(doc, layout))
     reference_doc = _set_fresh_review(doc, layout, withdrawn)
     savings = size(doc) - size(reference_doc)
     assert savings > 0
@@ -465,11 +466,33 @@ def test_legacy_full_withdraw_boundary_uses_current_epoch_and_maximum_id(layout,
     proposed = _set_fresh_review(padded, layout, withdrawn)
     assert size(proposed) == threshold + excess
     assert sc._withdraw_all_pending_len(padded, size(padded), encode=size) >= size(proposed)
-    assert sc._is_legacy_full(padded, size(padded), encode=size) is bool(excess)
+    legacy_full = bool(excess or len(operation_id) < 128)
+    assert sc._is_legacy_full(padded, size(padded), encode=size) is legacy_full
+    halted = _apply_control(padded, layout, halt_reason="stagnation", phase="halted")
+    halt_verdict = sc.state_capacity_verdict(sc.CapacityBase(padded, size(padded)), halted,
+                                            size(halted), encoding=encoding)
+    assert halt_verdict.accepted is not legacy_full, halt_verdict
+    assert halt_verdict.code == ("state-capacity-legacy-full" if legacy_full else None)
     verdict = sc.state_capacity_verdict(sc.CapacityBase(padded, size(padded)), proposed,
                                         size(proposed), encoding=encoding)
     assert verdict.accepted is (excess == 0), verdict
     assert verdict.code == ("state-capacity-legacy-full" if excess else None)
+
+@pytest.mark.parametrize("layout", ["v4", "v5"])
+@pytest.mark.parametrize("epoch", [None, "invalid", False])
+def test_legacy_full_probe_uses_epoch_one_for_missing_or_non_integer_epoch(layout, epoch):
+    pending = _v5_pending_record()
+    doc, encoding = _base(layout)
+    doc = _set_fresh_review(doc, layout, _project(pending))
+    lease = doc if layout == "v4" else doc["lease"]
+    lease["fencing_epoch"] = epoch
+    if epoch is None:
+        del lease["fencing_epoch"]
+    withdrawn = withdraw_request(_project(pending), request_id=pending.request.request_id,
+                                  operation_id="w" * 128, fencing_epoch=1)
+    expected = _set_fresh_review(doc, layout, withdrawn)
+    size = lambda d: encode(d, encoding)
+    assert sc._withdraw_all_pending_len(doc, size(doc), encode=size) == size(expected)
 
 
 def test_dispatch_and_consume_still_advance_after_halt_and_full_takeovers():

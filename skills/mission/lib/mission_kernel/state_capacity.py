@@ -1223,6 +1223,8 @@ def _withdraw_all_pending_len(document: Mapping, encoded_len: int, *, encode) ->
     used_operations |= {record.prepare_operation_id for record in projection.requests}
     working = projection
     epoch = _lease_mapping(document).get("fencing_epoch")
+    if type(epoch) is not int:
+        epoch = 1
     for request_id in pending_ids:
         operation_id = _maximum_unused_operation_id(used_operations)
         used_operations.add(operation_id)
@@ -1373,14 +1375,18 @@ def state_capacity_verdict(
 
     base_document = base.document
     base_over_capacity = is_over_capacity(base_document, base.encoded_len, encoding=encoding)
+    write_kind = classify_write_kind(base_document, proposed, encoding=encoding)
 
     def encode_for(document: Mapping) -> int:
         return _encode_for(document, encoding=encoding)
 
     if base_over_capacity:
         threshold = STATE_LIMIT - STATE_CAPACITY_HALT_DELTA
-        if base.encoded_len > threshold and _is_legacy_full(base_document, base.encoded_len, encode=encode_for):
-            write_kind = classify_write_kind(base_document, proposed, encoding=encoding)
+        # A concrete withdrawal can recover even when maximum unknown IDs cannot.
+        if base.encoded_len > threshold and (
+            threshold < encoded_len < base.encoded_len if write_kind is WriteKind.WITHDRAW
+            else _is_legacy_full(base_document, base.encoded_len, encode=encode_for)
+        ):
             return _rejected(
                 proposed, encoded_len, code="state-capacity-legacy-full",
                 mode="legacy-full", write_kind=write_kind, encoding=encoding,
@@ -1389,13 +1395,10 @@ def state_capacity_verdict(
     proposed_history_len = lease_history_length(proposed)
     base_history_len = lease_history_length(base_document)
     if proposed_history_len > base_history_len and base_history_len >= STATE_CAPACITY_TAKEOVER_LIMIT:
-        write_kind = classify_write_kind(base_document, proposed, encoding=encoding)
         return _rejected(
             proposed, encoded_len, code="state-capacity-exhausted",
             mode="normal", write_kind=write_kind, encoding=encoding,
         )
-
-    write_kind = classify_write_kind(base_document, proposed, encoding=encoding)
 
     if write_kind is WriteKind.WITHDRAW:
         if not base_over_capacity:
