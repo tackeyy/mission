@@ -2,7 +2,7 @@
 
 Issue: [probe の識別・構成照合 #924](https://github.com/tackeyy/mission/issues/924)
 
-状態: record 永続化の修正に続き、独立探索で指摘された shell 走査の字句・構文境界と baseline の走査不能の診断を修正し、ローカル対象検証済み。今回の追加修正は未コミット。コミット、PR、正式レビュー、独立 Checker、full suite、CI は親が行う。基点は `2749e1831f263193a7aaf4c31816203288a80554`、追加修正前の head は `654c761a2df301f8e14f5c47c67f678f7e04c05e`。設計書は変更していない。
+状態: record 永続化の修正に続き、独立探索で指摘された shell 走査の字句・構文境界と baseline の走査不能の診断を修正し、ローカル対象検証済み。修正済みコードを前提に、scanner 単体テストの配置だけを変更。今回のテスト移動は未コミット。コミット、PR、正式レビュー、独立 Checker、full suite、CI は親が行う。基点は `2749e1831f263193a7aaf4c31816203288a80554`、テスト移動前の head は `4fa4c8dc2ec1dee37846e43e9e67692ab6f2061d`。設計書は変更していない。
 
 ## 変更と完了条件
 
@@ -34,7 +34,7 @@ Issue: [probe の識別・構成照合 #924](https://github.com/tackeyy/mission/
 
 ## 検証とテストの検出価値
 
-- 対象 425 件通過（3.58 秒）: `test_issue924_probe_integrity.py` 232 件、`test_issue924_shell_scan.py` 149 件、既存 probe 44 件。fixture/fake とローカル state CLI のみ。実 provider・smoke・pilot は実行していない。
+- 対象 425 件通過（3.58 秒）: `test_issue924_probe_integrity.py` 154 件、`test_issue924_shell_scan.py` 227 件、既存 probe 44 件。fixture/fake とローカル state CLI のみ。実 provider・smoke・pilot は実行していない。
 - 関連ガード 99 件通過（26.82 秒）: wrapper/plugin 同期、artifact hygiene、neutral vocabulary、thin-adapter、persistence/kernel の import 境界。
 - reviewed area は未追跡の新規ファイルを含めて約 1,710 行（1,400 超）。`git diff origin/main --stat` と working tree の numstat に未追跡ファイルの行数を加えて測定（生成物除外 0）。commit 間だけを数える `pr_size.py --head HEAD` は今回の未コミット修正を含まない。分割案は末尾。
 - thin-adapter ratchet と `git diff --check` は通過。現時点の ratchet 出力は `base=current-only`（CI の PR base 比較ではない）。
@@ -55,14 +55,27 @@ Issue: [probe の識別・構成照合 #924](https://github.com/tackeyy/mission/
 
 ## コミット / PR 分割案
 
-今回の追加修正のコミットは、次の 1 論理単位にする。
+scanner 単体の 7 テスト関数（78 ケース）を移動済み。移動前は shell 149 件 + probe 232 件、移動後は shell 227 件 + probe 154 件で、合計 381 件を維持。test 名と全 parameter ID の multiset が一致し、移動した test 本体の AST も不変。両ファイルは 381 件通過（1.90 秒）。scanner 側の import は `exec_event_scan` と標準 library / pytest のみ。正常/拒否入力 table は、後続の record 正規化の結合テストにも必要なため両側で保持し、先行から後続 module への依存を作らない。
 
-- `fix: exec event の shell 構文境界と走査不能の診断を保つ`
-- 対象: `benchmarks/mission-vs-goal/{shell_syntax,exec_event_scan,evaluation_integrity}.py`、`skills/mission/tests/{test_issue924_shell_scan,test_issue924_probe_integrity}.py`、この引き継ぎ。
+今回のコミット案:
 
-PR 全体は 1,400 行を超えるため、親 CC に以下の分割を推奨する。凍結した設計の判定規則・値は変更しない。1 子 Issue = 1 PR を維持するため、子 Issue の作業単位を分ける判断と GitHub 操作は親が行う。
+- `refactor(test): scanner 単体テストを先行 PR 用に分離する`
+- 対象: `skills/mission/tests/{test_issue924_shell_scan,test_issue924_probe_integrity}.py`、この引き継ぎ。production code の変更はない。
 
-1. 先行: shell lexer/parser、exec scanner と走査の table tests（約 700 行）。既存の `scan_exec_events` 公開 signature を維持し、probe の変更へ依存させない。
-2. 後続: probe evidence、deadline/hooks、state reader、構成照合、record 正規化と関連 tests（約 1,000 行）。先行 scanner を取り込み、既存 entry point の結合 tests を後続に含める。
+先行 PR（scanner）:
 
-既存 `test_issue924_probe_integrity.py` 内の scanner 単体 table は先行の test file へ移し、checker/probe の結合 cases は後続へ残す。移動による reviewed area は親の実際の分割後に再計測する。
+- `benchmarks/mission-vs-goal/shell_syntax.py`
+- `benchmarks/mission-vs-goal/exec_event_scan.py`
+- `skills/mission/tests/test_issue924_shell_scan.py`
+
+後続 PR（probe・照合・永続化。先行 PR を基点にする）:
+
+- `benchmarks/mission-vs-goal/run_native_goal_probe.py`
+- `benchmarks/mission-vs-goal/evaluation_integrity.py`
+- `benchmarks/mission-vs-goal/record_paths.py`
+- `benchmarks/mission-vs-goal/native_goal_benchmark.py`
+- `skills/mission/tests/test_issue924_probe_integrity.py`
+- `skills/mission/tests/test_issue882_native_goal_benchmark.py`
+- `docs/reports/924-probe-integrity.md`
+
+1 子 Issue = 1 PR の作業単位の判断と GitHub/Git 操作は親が行う。凍結した設計の判定規則・値は変更しない。実際の branch 分割後に reviewed area を再計測する。
