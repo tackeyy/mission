@@ -1,45 +1,28 @@
 """E0b-2 (#936/#939/#933): pure kernel derivation and judgement of state
 capacity.
 
-This module holds all three parts of the capacity scheme decided in
-``docs/design/880-repair-lineage.md`` sections "決定（容量予約の再設計...）"
-through "決定（pending request の取下げ...）":
+- *Reservation* half (#936): Delta constants, lineage variable part,
+  halt-slot/lease-takeover system share, D request projection reader,
+  ``satisfies_capacity``/``is_over_capacity``.
+- *write_kind classification* half (#939/#940): ``classify_write_kind``,
+  never the caller's say-so. See the comment above ``WriteKind`` below for
+  the design (docs/design/880-repair-lineage.md L65) and its round-1/
+  round-2 history.
+- *Verdict* half (#933): legacy-full detection and ``state_capacity_verdict``
+  itself, the single gate every writer must call. It calls
+  ``classify_write_kind`` directly -- the Δ-overshoot cap an earlier draft
+  re-applied here is now that function's own job -- so this half never
+  re-derives or re-caps a write_kind it already trusts. No writer lives
+  here (D2c/#918).
 
-- The *reservation* half (#936): the Delta constants, the lineage variable
-  part, the halt-slot and lease-takeover system share, the D request
-  projection reader, and the two boolean capacity predicates
-  (``satisfies_capacity`` / ``is_over_capacity``).
-- The *write_kind classification* half (#939/#940): ``classify_write_kind``,
-  never the caller's say-so -- always the base/proposed diff, and never the
-  caller's declared encoding either (``encoding`` picks CANONICAL vs.
-  LEGACY_PRETTY byte-length comparisons, nothing else). See the comment
-  above ``WriteKind`` below for the design (docs/design/880-repair-lineage.md
-  L65) and its round-1/round-2 history.
-- The *verdict* half (#933): legacy-full detection, and
-  ``state_capacity_verdict`` itself, the single gate every writer must call.
-  It calls ``classify_write_kind`` directly; the Δ-overshoot cap that an
-  earlier draft re-applied here (``_capped_write_kind``) is now
-  ``classify_write_kind``'s own job (its ``_encode_increase_within`` check),
-  so the verdict half never re-derives or re-caps a write_kind it already
-  trusts.
-
-No writer lives here (that is D2c/#918). This module only answers, given a
-``base`` document (or ``None`` for genesis), a ``proposed`` document and its
-already-encoded length, whether the mutation that produced ``proposed`` may
-be admitted.
-
-Pure function only: no ``os``/``pathlib``/clock/random imports (``datetime.
+Pure function only: no ``os``/``pathlib``/clock/random (``datetime.
 fromisoformat`` only *parses* an already-present string, never reads the
-clock). The only kernel dependency this module itself imports is
-:mod:`mission_kernel.json_codec`, :mod:`mission_kernel.fresh_review`, and
-(write_kind half only) ``_TIMING_ACTIVITY_FIELDS`` from
-:mod:`mission_kernel.transitions`. It deliberately does *not* import
-:mod:`mission_kernel.fresh_review_receipts`: the D terminal shapes below are
-duplicated as closed literals so this module stays import-light and so the
-Delta constants stay pinned to *this* module's own measurement, independent
-of any future change to the receipts module's shapes. (Only the test suite
-imports ``fresh_review_receipts``, to cross-check those literals against its
-``FRESH_REVIEW_MAX_ENCODED_BYTES``.)
+clock). Kernel deps: :mod:`mission_kernel.json_codec`,
+:mod:`mission_kernel.fresh_review`, and (write_kind half only)
+``_TIMING_ACTIVITY_FIELDS`` from :mod:`mission_kernel.transitions`.
+Deliberately does *not* import :mod:`mission_kernel.fresh_review_receipts`
+(D terminal shapes are duplicated as closed literals, import-light, pinned
+independent of that module's shapes; only the test suite cross-checks).
 """
 from __future__ import annotations
 
