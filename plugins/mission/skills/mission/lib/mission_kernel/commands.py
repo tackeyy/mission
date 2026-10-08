@@ -450,6 +450,7 @@ GENERIC_SET_DEDICATED_FIELDS = frozenset(
         "verification_receipts",
         "acceptance_contract",
         "fresh_review",
+        "budget_ledger",
     }
 )
 

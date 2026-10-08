@@ -267,6 +267,11 @@
     "_document:copy-ref": 1,
     "normalized_artifact_section:replace": 1
   },
+  "lib/mission_kernel/budget.py": {
+    "_at:replace": 1,
+    "_iso:replace": 1,
+    "_reservation:dynamic": 1
+  },
   "lib/mission_kernel/codec_v4.py": {
     "_aggregate_ref_json:dynamic": 1,
     "_aware_time:replace": 1

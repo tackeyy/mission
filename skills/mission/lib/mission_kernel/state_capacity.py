@@ -355,6 +355,22 @@ FRESH_REVIEW_CONSUMED_RESERVE = (
 FRESH_REVIEW_WITHDRAWN_RESERVE = 0
 
 
+# F1 extension declarations only. Existing E0b reservation/classification and
+# verdict functions deliberately do not consume these until F2a wires writers.
+# Bounds cover canonical and indent=2 v4/v5 placements. The settlement bound
+# includes one PhaseCharge update and one new ProgressSignature row.
+BUDGET_RESERVATION_ROW_DELTA = 2048
+BUDGET_SETTLEMENT_ROW_DELTA = 4096
+BUDGET_STOP_SLOTS_CREATE_DELTA = 17 * 1024
+BUDGET_STOP_SLOTS_UPDATE_DELTA = 0
+BUDGET_WRITE_DELTAS = {
+    "reservation-row": BUDGET_RESERVATION_ROW_DELTA,
+    "settlement-row": BUDGET_SETTLEMENT_ROW_DELTA,
+    "stop-slots-create": BUDGET_STOP_SLOTS_CREATE_DELTA,
+    "stop-slots-update": BUDGET_STOP_SLOTS_UPDATE_DELTA,
+}
+
+
 def _command_snapshot_map(request) -> dict:
     return {binding.command_id: binding.snapshot_digest for binding in request.candidate_bindings}
 

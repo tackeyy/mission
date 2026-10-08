@@ -136,7 +136,7 @@ def test_parity_exclusions_are_an_exact_named_dependency_inventory():
         (
             "application.clock-budget-override",
             "outside-parity",
-            ("$.budget_minutes", "$.started_at", "iso_now()"),
+            ("$.budget_minutes", "$.started_at", "$.budget_ledger", "iso_now()"),
         ),
         (
             "legacy.goal-dispatch",

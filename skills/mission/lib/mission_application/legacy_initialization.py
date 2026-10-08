@@ -359,6 +359,9 @@ def initialize_legacy_v4(request, services):
             try:
                 existing_data = services.read_legacy_json_file(state_target)
                 services.validate_specialist_public_state(existing_data)
+                if "budget_ledger" in existing_data:
+                    services.printer("ERROR: budget-reinitialization-forbidden", file=services.stderr)
+                    services.system_exit(2)
                 if "fresh_review" in existing_data:
                     services.printer("ERROR: fresh-review-reinitialization-forbidden", file=services.stderr)
                     services.system_exit(2)

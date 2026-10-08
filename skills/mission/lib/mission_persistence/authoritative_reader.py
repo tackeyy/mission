@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Optional, Tuple, Union
 
 from mission_kernel import MissionState, decode_mission_state
+from mission_kernel.budget import decode_ledger
 from mission_kernel.fresh_review import FreshReviewError, decode_projection
 from mission_kernel.codec_v4 import MissionStateDecodeError
 from mission_kernel.json_codec import (
@@ -295,6 +296,7 @@ def _legacy_compatibility_snapshot(
     if "schema" in document or {"commit", "state_generation"} & set(document):
         raise ValueError("legacy compatibility input uses an unsupported format")
     decode_projection(document)
+    decode_ledger(document)
     schema_origin = read_schema_version(document, max_reader_version=4)
     identity_values = (document.get("mission"), document.get("mission_id"))
     has_identity = any(isinstance(value, str) and value for value in identity_values)
@@ -493,6 +495,7 @@ def _snapshot_from_document(
         encode_json_value(document)
     values = thaw_json_object(document)
     decode_projection(values)
+    decode_ledger(values)
     loop_active = values.get("loop_active", False)
     passes = values.get("passes", False)
     awaiting_user = values.get("awaiting_user", False)
@@ -971,6 +974,7 @@ def read_session_json(session_path: Union[Path, str], *, source: Union[str, byte
         return snapshot.document_copy()
     if isinstance(document, dict):
         decode_projection(document.get("extensions", {}) if document.get("schema_version") == 5 else document)
+        decode_ledger(document)
     return document
 
 
