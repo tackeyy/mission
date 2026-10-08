@@ -5547,7 +5547,7 @@ def cmd_verify_provider_approval(args):
                 descriptor = _configured_approval_entry_point(cwd, args.approval_verifier)
                 if descriptor is None:
                     _provider_gate("verifier-untrusted")
-                evidence = _run_approval_verifier(descriptor, request)
+                evidence = _run_approval_verifier(descriptor, request, cwd=cwd)
                 if not isinstance(evidence, dict) or evidence.get("schema") != "approval-evidence/1":
                     _provider_gate("approval-evidence-invalid")
                 if evidence.get("verifier_id") != args.approval_verifier:
@@ -10330,129 +10330,18 @@ def _configured_approval_entry_point(cwd: Path, verifier_name: str):
     return {**configured_item, "module": module_name, "entry_point_value": entry_point_value}
 
 
-def _approval_verifier_child(verifier, request: dict, channel) -> None:
-    try:
-        # A verifier may create descendants; make this child their process
-        # group leader so timeout cleanup has one bounded target.
-        with contextlib.suppress(OSError):
-            os.setsid()
-        callback = verifier
-        if isinstance(verifier, dict):
-            discovered = importlib.metadata.entry_points()
-            candidates = (discovered.select(group=_APPROVAL_VERIFIER_ENTRY_POINT_GROUP)
-                          if hasattr(discovered, "select") else discovered.get(_APPROVAL_VERIFIER_ENTRY_POINT_GROUP, ()))
-            matches = [item for item in candidates if item.name == verifier["entry_point"]]
-            if len(matches) != 1:
-                raise ValueError("approval verifier entry point is not installed")
-            entry_point = matches[0]
-            attached_distribution = entry_point.dist
-            distribution = attached_distribution
-            if distribution is None:
-                distribution = importlib.metadata.distribution(
-                    verifier["distribution"]
-                )
-            observed_distribution = RegisteredEntryPointDistributionObservation(
-                entry_point_name=entry_point.name,
-                entry_point_value=entry_point.value,
-                has_attached_distribution=attached_distribution is not None,
-                distribution_name=distribution.metadata["Name"],
-                distribution_version=distribution.version,
-                owned_entry_points=tuple(
-                    map(
-                        lambda item: (item.group, item.name, item.value),
-                        distribution.entry_points,
-                    )
-                ),
-            )
-            validate_registered_approval_entry_point_distribution(
-                observed_distribution,
-                verifier,
-                group=_APPROVAL_VERIFIER_ENTRY_POINT_GROUP,
-            )
-            module_name = getattr(entry_point, "module", "")
-            if (module_name != verifier["module"]
-                    or getattr(entry_point, "value", None) != verifier["entry_point_value"]):
-                raise ValueError("approval verifier entry point changed after pinning")
-            module_spec = importlib.util.find_spec(module_name)
-            origin = getattr(module_spec, "origin", None)
-            if not isinstance(origin, str) or "sha256:" + hashlib.sha256(Path(origin).read_bytes()).hexdigest() != verifier["source_digest"]:
-                raise ValueError("approval verifier source digest mismatch")
-            callback = entry_point.load()
-        if not callable(callback):
-            raise ValueError("approval verifier entry point is invalid")
-        channel.send((True, callback(request)))
-    except Exception:
-        channel.send((False, None))
-    finally:
-        channel.close()
+def _run_approval_verifier(verifier, request: dict, *, cwd: Path | None = None) -> dict:
+    from mission_application.approval_verifier import run_approval
+    return run_approval(verifier, request, timeout=_APPROVAL_VERIFIER_TIMEOUT_SEC,
+                        grace=_APPROVAL_VERIFIER_TERMINATE_GRACE_SEC, cwd=cwd)
 
 
-def _stop_approval_verifier_child(child) -> None:
-    """Bound timeout cleanup even when provider code absorbs SIGTERM."""
-    for signal_number, fallback in ((signal.SIGTERM, child.terminate), (signal.SIGKILL, child.kill)):
-        if not child.is_alive():
-            child.join()
-            return
-        with contextlib.suppress(OSError):
-            os.killpg(child.pid, signal_number)
-        if child.is_alive():
-            with contextlib.suppress(OSError):
-                fallback()
-        child.join(_APPROVAL_VERIFIER_TERMINATE_GRACE_SEC)
-    if not child.is_alive():
-        child.join()
-
-
-def _run_approval_verifier(verifier, request: dict) -> dict:
-    """Execute verifier in a reaped child; timeouts cannot leave it running."""
-    try:
-        context = multiprocessing.get_context("fork")
-    except ValueError as exc:
-        raise ValueError("isolated approval verifier execution is unavailable on this host") from exc
-    receiver, sender = context.Pipe(duplex=False)
-    child = context.Process(target=_approval_verifier_child, args=(verifier, request, sender))
-    try:
-        child.start()
-        sender.close()
-        child.join(_APPROVAL_VERIFIER_TIMEOUT_SEC)
-        if child.is_alive():
-            _stop_approval_verifier_child(child)
-            raise ValueError("approval verifier timed out")
-        if child.exitcode != 0 or not receiver.poll():
-            raise ValueError("approval verifier rejected the evidence")
-        success, result = receiver.recv()
-        if not success or not isinstance(result, dict):
-            raise ValueError("approval verifier rejected the evidence")
-        return result
-    finally:
-        sender.close()
-        receiver.close()
-        if child.is_alive():
-            _stop_approval_verifier_child(child)
-        if not child.is_alive():
-            child.close()
-
-
-def verify_force_approval(request: dict, verifier_name: object, *, cwd: Path | None = None) -> dict:
-    """Fail closed unless a registered callback returns a matching typed envelope."""
-    if not isinstance(verifier_name, str) or not _APPROVAL_VERIFIER_NAME_RE.fullmatch(verifier_name):
-        raise ValueError("approval verifier is invalid or not configured")
-    verifier = _APPROVAL_VERIFIERS.get(verifier_name)
-    descriptor = _configured_approval_entry_point(cwd, verifier_name) if verifier is None and cwd is not None else None
-    if verifier is None and descriptor is None:
-        raise ValueError("approval verifier is not configured")
-    try:
-        result = _run_approval_verifier(verifier if verifier is not None else descriptor, request)
-    except Exception as exc:
-        raise ValueError("approval verifier rejected the evidence") from exc
-    try:
-        envelope = {"request": request, "response": result, "receipt_ref": result.get("receipt_ref"), "consumed": True}
-        validated = validate_recorded_envelope(envelope)
-    except (AttributeError, ValueError) as exc:
-        raise ValueError("approval verifier did not return a verified envelope") from exc
-    if validated["response"]["verifier_id"] != verifier_name:
-        raise ValueError("approval verifier did not return a verified envelope")
-    return validated
+def verify_force_approval(request: dict, verifier_name: object, *, cwd: Path | None = None,
+                          budgeted: bool = False, state: dict | None = None) -> dict:
+    from mission_application.approval_verifier import verify_approval_request
+    return verify_approval_request(request, verifier_name, verifiers=_APPROVAL_VERIFIERS,
+                                   resolve=_configured_approval_entry_point, execute=_run_approval_verifier,
+                                   cwd=cwd, budgeted=budgeted, state=state)
 
 
 def _force_envelope_replayed(cwd: Path, envelope: dict) -> bool:
@@ -14121,7 +14010,8 @@ def _verify_force_pass_approval(data: dict, args, cwd: Path) -> dict:
         event_nonce=secrets.token_hex(32),
     )
     verification = verify_force_approval(
-        request, getattr(args, "approval_verifier", None), cwd=cwd
+        request, getattr(args, "approval_verifier", None), cwd=cwd,
+        state=data
     )
     if _force_envelope_replayed(cwd, verification):
         raise ValueError("approval request or receipt was already consumed")
@@ -17014,7 +16904,8 @@ def _build_parser():
 
 
 def main():
-    args = _build_parser().parse_args()
+    from budgeted_exec import parse_cli
+    args = parse_cli(_build_parser())
     try:
         try:
             args.func(args)

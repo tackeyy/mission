@@ -405,3 +405,19 @@ def push_provenance_score(run_cli):
         scoring.write_text(json.dumps(payload))
         return run_cli("push-score", "--iteration", str(iteration), "--scoring-json", str(scoring), cwd=root, env_extra=env_extra, check=True)
     return _push
+
+
+@pytest.fixture
+def isolated_provider_python(tmp_path, monkeypatch):
+    """A temporary installed-site fixture visible to -I, never the user's site."""
+    import venv
+    environment = tmp_path / 'isolated-provider-python'
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(environment)
+    executable = environment / 'bin' / 'python'
+    site = environment / 'lib' / f'python{sys.version_info.major}.{sys.version_info.minor}' / 'site-packages'
+
+    def install(package):
+        (site / 'fixture-provider.pth').write_text(str(package.resolve()) + '\n')
+        monkeypatch.setattr(sys, 'executable', str(executable))
+        return executable, site
+    return install
