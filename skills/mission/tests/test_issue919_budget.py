@@ -324,3 +324,24 @@ def test_policy_integers_are_bounded(key, maximum):
     if key.startswith('max_') or key == 'no_progress_limit':
         wire[key] = maximum
         assert getattr(decode_policy(wire), key) == maximum
+
+
+@pytest.mark.parametrize('schema', (4, 5))
+def test_direct_session_read_rejects_duplicate_keys_in_a_budget_document(tmp_path, schema):
+    import json
+    from mission_kernel.budget import decode_policy, default_policy_document, new_ledger, ledger_document
+    from mission_kernel.errors import MissionStateDecodeError
+    from mission_persistence.authoritative_reader import read_session_json
+    ledger = json.dumps(ledger_document(new_ledger(decode_policy(default_policy_document(1800)), '2026-01-01T00:00:00Z')))
+    if schema == 4:
+        source = '{"schema_version": 4, "budget_minutes": 1, "budget_minutes": 30, "budget_ledger": %s}' % ledger
+    else:
+        source = ('{"schema_version": 5, "extensions": {"budget_minutes": 1, "budget_minutes": 30, '
+                  '"budget_ledger": %s}}' % ledger)
+    path = tmp_path / 'state.json'
+    path.write_text(source)
+    with pytest.raises(MissionStateDecodeError, match='duplicate-json-key'):
+        read_session_json(path)
+    # Without a ledger the historical legacy tolerance is unchanged.
+    path.write_text('{"schema_version": 4, "phase": "planning", "phase": "executing"}')
+    assert read_session_json(path)['phase'] == 'executing'
