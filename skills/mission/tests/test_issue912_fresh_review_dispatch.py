@@ -312,7 +312,9 @@ def test_public_dispatch_schema_names_the_incomplete_saga(tmp_path, run_cli):
         assert result.returncode == 0, result.stdout + result.stderr
         schema = json.loads(result.stdout)
         assert schema['closed'] is True
-        assert schema['terminal_outcomes'] == ['blocked', 'abandoned-unknown']
+        assert schema['terminal_outcomes'] == (['blocked', 'abandoned-unknown', 'failed']
+                                               if command == 'fresh-review-reconcile' else
+                                               ['blocked', 'abandoned-unknown'])
 
 
 @pytest.mark.parametrize('mode', ['launch-fence', 'blocked-fence', 'candidate-error'])

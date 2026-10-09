@@ -339,7 +339,7 @@ def record_operation_ids(record):
     if isinstance(record, WithdrawnFreshReviewRecord):
         return (record.prepare_operation_id, record.withdraw_operation_id)
     commit = (record.result.thaw()['commit_operation_id']
-              if record.status in ('blocked', 'abandoned-unknown') else None)
+              if record.status in ('blocked', 'abandoned-unknown', 'failed') else None)
     return (record.prepare_operation_id, record.operation_id, record.launch_operation_id, commit)
 
 
@@ -428,7 +428,7 @@ def decode_projection(document):
                 if type(fields['result']) is not dict or len(canonical_bytes(fields['result'])) > request.max_output_bytes:
                     raise FreshReviewError('fresh-review-result-invalid')
                 fields['result'] = freeze_json_value(fields['result'])
-        elif fields['status'] in ('dispatch-unknown', 'running', 'blocked', 'abandoned-unknown'):
+        elif fields['status'] in ('dispatch-unknown', 'running', 'blocked', 'abandoned-unknown', 'failed'):
             from .fresh_review_dispatch import decode_dispatch_record
             fields = decode_dispatch_record(fields)
             operation = fields['operation_id']
@@ -442,7 +442,7 @@ def decode_projection(document):
                 operations.add(launch_operation)
         else:
             raise FreshReviewError('fresh-review-record-invalid')
-        if fields['status'] in ('blocked', 'abandoned-unknown'):
+        if fields['status'] in ('blocked', 'abandoned-unknown', 'failed'):
             commit = fields['result'].thaw()['commit_operation_id']
             if commit not in (fields['operation_id'], fields['launch_operation_id']):
                 if commit in operations:

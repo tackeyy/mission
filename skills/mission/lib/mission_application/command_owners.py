@@ -34,6 +34,7 @@ COMMAND_OWNER_REGISTRY = {
         "review-import",
         "fresh-review prepare",
         "fresh-review run",
+        "fresh-review import",
         "fresh-review reconcile",
         "fresh-review withdraw",
         "supersede-reviews",

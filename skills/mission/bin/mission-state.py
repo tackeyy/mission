@@ -243,6 +243,7 @@ from mission_application.evidence import (  # noqa: E402
 )
 from mission_application.fresh_review import run_fresh_review_prepare_cli, run_fresh_review_status_cli
 from mission_application.fresh_review_withdraw import run_fresh_review_withdraw_cli
+from mission_application.fresh_review_publish import run_fresh_review_import_cli
 from mission_application.fresh_review_dispatch import run_fresh_review_dispatch_cli
 import fresh_review_host
 from mission_application.acceptance import (  # noqa: E402
@@ -13822,6 +13823,10 @@ def cmd_fresh_review_withdraw(args):
     print(run_fresh_review_withdraw_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES))
 
 
+def cmd_fresh_review_import(args):
+    print(run_fresh_review_import_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES, fresh_review_host))
+
+
 def cmd_fresh_review_status(args):
     print(run_fresh_review_status_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES))
 
@@ -16218,7 +16223,7 @@ def _add_review_parsers(subparsers) -> None:
 
     p_schema = sub.add_parser("schema", help="入力契約のスキーマを出力する (#683)")
     p_schema.add_argument("--contract", required=True,
-                          choices=("planning-adopt-core", "review-import", "acceptance-contract-import", "fresh-review-prepare", "fresh-review-run", "fresh-review-reconcile", "fresh-review-withdraw"),
+                          choices=("planning-adopt-core", "review-import", "acceptance-contract-import", "fresh-review-prepare", "fresh-review-run", "fresh-review-reconcile", "fresh-review-import", "fresh-review-withdraw"),
                           help="出力する契約")
     p_schema.set_defaults(func=cmd_schema)
     p_score = sub.add_parser("push-score", help="score_history に採点結果を append (orchestrator が Phase 5 直後に呼ぶ)")
@@ -16362,6 +16367,11 @@ def _add_review_parsers(subparsers) -> None:
     p_reconcile.add_argument("--request", required=True)
     p_reconcile.add_argument("--adapter", required=True)
     p_reconcile.set_defaults(func=cmd_fresh_review_reconcile, command_outcome_tracking=True)
+
+    p_import = p_fresh_sub.add_parser("import", help="照合済み child の不合格 output と failed 終端を同時公開")
+    p_import.add_argument("--request", required=True)
+    p_import.add_argument("--adapter", required=True)
+    p_import.set_defaults(func=cmd_fresh_review_import, command_outcome_tracking=True)
 
     p_withdraw = p_fresh_sub.add_parser("withdraw", help="容量超過時に pending request を取り下げる")
     p_withdraw.add_argument("--request", required=True)

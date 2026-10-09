@@ -108,7 +108,13 @@ class Adapter:
         if not _journal().exists():
             return CollectedReview(freeze_json_value({}), None)
         journal = json.loads(_journal().read_text())
-        return CollectedReview(freeze_json_value({'launch_receipt': journal['launch'], 'process_exited': journal.get('process_exited')}),
+        launch = journal['launch']
+        observation = {'launch_receipt': launch, 'process_exited': journal.get('process_exited')}
+        if journal.get('process_exited') is True:
+            observation.update({key: launch[key] for key in
+                                ('operation_id', 'fencing_epoch', 'request_id', 'nonce', 'child_identity')})
+            observation.update(exit_code=journal.get('exit_code'), budget_used=journal.get('budget_used'))
+        return CollectedReview(freeze_json_value(observation),
                                None if journal['output'] is None else journal['output'].encode())
 
     def collect(self, launch):

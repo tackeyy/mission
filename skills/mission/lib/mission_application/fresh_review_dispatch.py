@@ -31,7 +31,7 @@ def _record(state, request_id):
     return matches[0]
 
 
-def _candidate(state, root, request, services):
+def _candidate(state, root, request, services, *, allow_changed=False):
     from acceptance_contract import canonical_contract_digest
     contract = state.get('acceptance_contract')
     if (not isinstance(contract, dict) or canonical_contract_digest(contract) != request.contract_digest
@@ -43,7 +43,7 @@ def _candidate(state, root, request, services):
         raise FreshReviewError('fresh-review-stale')
     commands = {item.command_id: policy['commands'][item.command_id] for item in request.candidate_bindings}
     digest = candidate_identity({key: value.digest for key, value in _capture(root, commands).items()})
-    if digest != request.candidate_digest:
+    if digest != request.candidate_digest and not allow_changed:
         raise FreshReviewError('fresh-review-stale')
     return digest
 
@@ -216,7 +216,7 @@ def _reconcile(record, args, operation, repo, root, services, host):
         raise FreshReviewError('fresh-review-operation-conflict')
     if record.dispatch is None or record.dispatch.thaw()['adapter_id'] != args.adapter:
         raise FreshReviewError('fresh-review-adapter-pin-changed')
-    if record.status in ('blocked', 'abandoned-unknown'):
+    if record.status in ('blocked', 'abandoned-unknown', 'failed'):
         if record.result.thaw()['commit_operation_id'] != operation:
             raise FreshReviewError('fresh-review-operation-conflict')
         return json.dumps({'ok': True, 'record': _wire(record)})
@@ -256,8 +256,6 @@ def _reconcile(record, args, operation, repo, root, services, host):
         reason = 'output-unobservable'
         try:
             output = base64.b64decode(observed['output'], validate=True)
-            if len(output) > record.request.max_output_bytes:
-                raise ValueError('oversized')
         except (KeyError, TypeError, ValueError):
             output = None
         if record.status == 'dispatch-unknown':
@@ -266,6 +264,17 @@ def _reconcile(record, args, operation, repo, root, services, host):
             record = _execute(repo(':running'), lambda state: RecordFreshReviewLaunch(
                 args.request, operation, state['fencing_epoch'], freeze_json_value(raw),
                 _candidate(state, root, record.request, services)))
+        if output is not None and observation.get('process_exited') is True:
+            from mission_application.fresh_review_publish import publish_failed_output
+            # Child-facing identity remains the saved dispatch. The writer's
+            # epoch comes from an independent current lease admission.
+            reader = repo(':output-fence')
+            with reader.transaction():
+                epoch = reader.load()['fencing_epoch']
+            record = publish_failed_output(repo(':output'), request_id=args.request,
+                operation=operation, epoch=epoch, observation=observation, raw=output,
+                root=root, services=services)
+            return json.dumps({'ok': True, 'record': _wire(record)})
         if output is not None:
             reader = repo(':candidate', False)
             with reader.transaction():

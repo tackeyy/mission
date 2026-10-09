@@ -453,6 +453,7 @@ def publication_blob_shapes_by_command_type():
 # command schema, and with it every operation identity already recorded.
 PUBLICATION_PATH_FIELD_BY_COMMAND_TYPE = {
     "fresh-review-prepare": "target",
+    "fresh-review-output-import": "target",
     "generate-claims-ledger": "publication_path",
     "generate-context-manifest": "publication_path",
     "update-progress": "target",
@@ -463,6 +464,7 @@ PUBLICATION_PATH_FIELD_BY_COMMAND_TYPE = {
 }
 EFFECT_FIELDS_BY_COMMAND_TYPE = {
     "fresh-review-prepare": ("effect",),
+    "fresh-review-output-import": ("effect",),
     "export-artifact": ("artifact_effect", "export_effect"),
     "generate-claims-ledger": ("effect",),
     "generate-context-manifest": ("effect",),
