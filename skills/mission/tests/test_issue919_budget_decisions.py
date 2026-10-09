@@ -590,3 +590,12 @@ def test_other_writers_cannot_spend_open_budget_terminal_bytes(layout, system):
     assert not verdict.accepted
     with pytest.raises(CapacityWriteError, match='state-capacity-exhausted'):
         check_state_capacity(before, encode(), encoding=encoding)
+
+
+def test_only_verification_supervisor_can_reserve_before_candidate_observation():
+    state = _state()
+    # Inventory needs a child itself. Its reserved supervisor applies the real
+    # candidate gate before starting the verifier; other entries must know it.
+    assert _admit(state.budget, state, candidate_digest=None).reservation is not None
+    refusal = _admit(state.budget, state, entry='invoke-command', candidate_digest=None)
+    assert refusal.reason == 'budget-text-invalid'

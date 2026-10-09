@@ -75,7 +75,7 @@ def test_budget_verification_deadline_retains_output_exit_and_cleans_group(run_c
     monkeypatch.setattr(budgeted_exec, 'spawn_exec', guarded)
     started = time.monotonic()
     invoke_here(['verification', 'run', '--criterion', 'AC1'], {})
-    assert time.monotonic() - started < 9
+    assert time.monotonic() - started < 20  # child + reserved post-run and group cleanup
     state = json.loads(_state_path(tmp_path).read_text())
     receipt = state['verification_receipts'][-1]
     assert receipt['timed_out'] and receipt['exit_code'] == -signal.SIGKILL
@@ -91,7 +91,7 @@ def test_budget_verification_deadline_retains_output_exit_and_cleans_group(run_c
 def test_budget_reconcile_charges_crash_reservation_then_deletes_dead_owner_job(run_cli, tmp_path):
     from datetime import datetime, timedelta, timezone
     from mission_application.verification_budget import reserve_verification
-    from mission_persistence.spawn_jobs import create_job
+    from mission_persistence.spawn_jobs import create_job, session_token
     import os
     _prepare_public_runner(tmp_path, run_cli)
     _budget(tmp_path)
@@ -104,11 +104,11 @@ def test_budget_reconcile_charges_crash_reservation_then_deletes_dead_owner_job(
     assert refusal is None
     path.write_text(json.dumps(document))
     directory = tmp_path / '.mission-state/exec-jobs'
-    job, _ = create_job(directory, b'{}', reservation_id=budget.reservation.reservation_id.replace(':', '_'))
+    job, _ = create_job(directory, b'{}', reservation_id=budget.reservation.reservation_id.replace(':', '_'), session_id=path.stem)
     # Current PID with an obsolete start identity models PID reuse without
     # creating or signalling an unrelated process.
     token = budget.reservation.reservation_id.replace(':', '_')
-    stale = directory / f'job-{os.getpid()}-1-r{token}-'
+    stale = directory / f'job-{os.getpid()}-1-s{session_token(path.stem)}-r{token}-'
     stale = directory / (stale.name + 'a' * 32 + '.json')
     job.rename(stale)
     result = run_cli('budget', 'reconcile', cwd=tmp_path)
@@ -163,7 +163,7 @@ def test_verification_refusal_legacy_and_supervisor_failures(
         assert rejected.value.code == 2
     else:
         invoke_here(args, {})
-    assert time.monotonic() - started < 9
+    assert time.monotonic() - started < 20  # capture stall includes the reserved post-run allowance
     state = json.loads(_state_path(tmp_path).read_text())
     if fault == 'no-policy':
         assert 'budget_ledger' not in state and state['verification_receipts'][-1]['status'] == 'passed'
@@ -172,11 +172,11 @@ def test_verification_refusal_legacy_and_supervisor_failures(
     else:
         receipt = state['verification_receipts'][-1]
         assert receipt['status'] == 'blocked'
-        assert receipt['block_reason'] == {'capture-stall': 'budget-child-timeout',
-            'spawn-error': 'budget-verification-unstarted', 'kill-unconfirmed': 'kill-unconfirmed'}[fault]
+        assert receipt['block_reason'] == {'capture-stall': 'kill-unconfirmed',
+            'spawn-error': 'budget-deadline-unenforceable', 'kill-unconfirmed': 'kill-unconfirmed'}[fault]
         if fault == 'spawn-error':
             assert state['budget_ledger']['settlements'][-1]['charged_sec'] == 0
-        assert bool(state['budget_ledger']['reservations']) == (fault == 'kill-unconfirmed')
+        assert bool(state['budget_ledger']['reservations']) == (fault in ('capture-stall', 'kill-unconfirmed'))
         assert not list((tmp_path / '.mission-state/exec-jobs').glob('*.json'))
 
 
@@ -278,7 +278,7 @@ def test_reconcile_preserves_live_jobs_and_unconfirmed_kill_holds(run_cli, tmp_p
     from datetime import datetime, timedelta, timezone
     from mission_application.verification_budget import reserve_verification
     from mission_application.provider_budget import settle_provider
-    from mission_persistence.spawn_jobs import create_job
+    from mission_persistence.spawn_jobs import create_job, session_token
     import os
     _prepare_public_runner(tmp_path, run_cli)
     _budget(tmp_path)
@@ -293,10 +293,10 @@ def test_reconcile_preserves_live_jobs_and_unconfirmed_kill_holds(run_cli, tmp_p
         settle_provider(document, budget, at, 'sha256:' + 'b' * 64, confirmed=False)
     path.write_text(json.dumps(document))
     job, _ = create_job(tmp_path / '.mission-state/exec-jobs', b'{}',
-        reservation_id=budget.reservation.reservation_id.replace(':', '_') if hold != 'live-owner' else None)
+        reservation_id=budget.reservation.reservation_id.replace(':', '_') if hold != 'live-owner' else None, session_id=path.stem)
     if hold != 'live-owner':
         token = budget.reservation.reservation_id.replace(':', '_')
-        stale = job.parent / (f'job-{os.getpid()}-1-r{token}-' + 'b' * 32 + '.json')
+        stale = job.parent / (f'job-{os.getpid()}-1-s{session_token(path.stem)}-r{token}-' + 'b' * 32 + '.json')
         job.rename(stale)
         job = stale
     result = run_cli('budget', 'reconcile', cwd=tmp_path)
@@ -402,3 +402,278 @@ def test_large_verification_receipt_keeps_real_output_and_exit(run_cli, tmp_path
     assert receipt['status'] == 'passed' and receipt['exit_code'] == 0
     assert receipt['output_digest'] == 'sha256:' + hashlib.sha256(b'ok\n').hexdigest()
     assert receipt['observed_output_bytes'] == 3 and not state['budget_ledger']['reservations']
+
+
+@pytest.mark.parametrize('reserved', [True, False])
+def test_reconcile_does_not_delete_another_sessions_unread_job(run_cli, tmp_path, monkeypatch, reserved):
+    from mission_persistence import spawn_jobs
+    from budgeted_exec import parse_cli
+    import argparse
+    _prepare_public_runner(tmp_path, run_cli)
+    _budget(tmp_path)
+    directory = tmp_path / '.mission-state/exec-jobs'
+    job, digest = spawn_jobs.create_job(directory, b'{"unread":"session-A"}', reservation_id='session_A_reservation' if reserved else None)
+    import os
+    token = '-rsession_A_reservation' if reserved else ''
+    stale = directory / (f'job-{os.getpid()}-1{token}-' + 'c' * 32 + '.json')
+    job.rename(stale)
+    job = stale
+    monkeypatch.setattr(spawn_jobs, 'process_start', lambda pid: 'dead-owner')
+    # B has no A reservation. Parent death does not prove A's child read the file.
+    result = run_cli('budget', 'reconcile', cwd=tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert spawn_jobs.read_job(job, digest) == b'{"unread":"session-A"}'
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr('sys.argv', ['neutral'])
+    parse_cli(argparse.ArgumentParser())
+    assert job.exists()
+
+
+def test_deadline_preserves_large_candidate_result_and_kills_grandchildren(run_cli, tmp_path):
+    import hashlib
+    import signal
+    from .test_issue878_verification_runner import _policy
+    policy = _policy()
+    policy['commands'][0].update(timeout_sec=5, argv=[policy['commands'][0]['argv'][0], '-c',
+        'import subprocess,sys,time; print("prefix",flush=True); '
+        'subprocess.Popen([sys.executable,"-c","import time; time.sleep(60)"]); time.sleep(60)'])
+    _prepare_public_runner(tmp_path, run_cli, policy=policy,
+        tracked_files={f'files/{n}.txt': 'x' * 4096 for n in range(3000)})
+    _budget(tmp_path)
+    result = run_cli('verification', 'run', '--criterion', 'AC1', cwd=tmp_path)
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads(_state_path(tmp_path).read_text())['verification_receipts'][-1]
+    assert receipt['exit_code'] == -signal.SIGKILL and receipt['timed_out']
+    assert receipt['block_reason'] == 'budget-deadline'
+    assert receipt['output_digest'] == 'sha256:' + hashlib.sha256(b'prefix\n').hexdigest()
+    assert receipt['observed_output_bytes'] == 7
+
+
+@pytest.mark.parametrize('fault,reason', [('job', 'budget-job-write-failed'), ('exec', 'budget-deadline-unenforceable'), ('deadline', 'budget-deadline')])
+def test_unstarted_verification_records_refusal_reason_and_zero_charge(run_cli, tmp_path, invoke_here, monkeypatch, fault, reason):
+    import budgeted_exec
+    from mission_persistence.spawn_jobs import JobWriteError
+    _prepare_public_runner(tmp_path, run_cli)
+    _budget(tmp_path)
+    observed_monotonic = budgeted_exec.time.monotonic
+    def fail(*a, **kw):
+        monkeypatch.setattr(budgeted_exec.time, 'monotonic', lambda: observed_monotonic()+2)
+        raise JobWriteError(None) if fault == 'job' else TimeoutError('budget-child-timeout') if fault == 'deadline' else OSError('exec failed')
+    monkeypatch.setattr(budgeted_exec, 'create_job' if fault == 'job' else 'spawn_exec', fail)
+    invoke_here(['verification', 'run', '--criterion', 'AC1'], {})
+    state = json.loads(_state_path(tmp_path).read_text())
+    assert state['verification_receipts'][-1]['block_reason'] == reason
+    ledger = state['budget_ledger']
+    assert not ledger['reservations'] and ledger['settlements'][-1]['charged_sec'] == 0
+    assert ledger['stop_slots']['last_refusal'] == reason
+
+
+def test_failed_completed_verifier_records_final_run(run_cli, tmp_path):
+    from mission_application.provider_budget import _apply
+    from mission_kernel.commands import EnterFinalPhase
+    from datetime import datetime, timezone
+    from .test_issue878_verification_runner import _policy
+    policy = _policy()
+    policy['commands'][0]['argv'] = [policy['commands'][0]['argv'][0], '-c', 'import sys; sys.exit(1)']
+    _prepare_public_runner(tmp_path, run_cli, policy=policy)
+    _budget(tmp_path)
+    path = _state_path(tmp_path)
+    document = json.loads(path.read_text())
+    at = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    assert _apply(document, EnterFinalPhase(at, 'verification')).accepted
+    path.write_text(json.dumps(document))
+    result = run_cli('verification', 'run', '--criterion', 'AC1', cwd=tmp_path)
+    assert result.returncode == 0, result.stderr
+    document = json.loads(path.read_text())
+    assert document['verification_receipts'][-1]['status'] == 'failed'
+    assert document['verification_receipts'][-1]['exit_code'] == 1
+    assert document['budget_ledger']['stop_slots']['final_run'] is not None
+
+
+def test_real_candidate_change_reopens_no_progress_but_identical_tree_does_not(run_cli, tmp_path):
+    from .test_issue878_verification_runner import _policy
+    policy = _policy()
+    counter = tmp_path / 'verification-count'
+    policy['commands'][0]['argv'] = [policy['commands'][0]['argv'][0], '-c',
+        f'from pathlib import Path; p=Path({str(counter)!r}); p.write_text(str(int(p.read_text() if p.exists() else "0")+1)); print("same")']
+    _prepare_public_runner(tmp_path, run_cli, policy=policy)
+    _budget(tmp_path)
+    limit = json.loads(_state_path(tmp_path).read_text())['budget_ledger']['policy']['no_progress_limit']
+    for _ in range(limit):
+        result = run_cli('verification', 'run', '--criterion', 'AC1', cwd=tmp_path)
+        assert result.returncode == 0, result.stderr
+    before = json.loads(_state_path(tmp_path).read_text())['budget_ledger']['progress'][0]
+    for _ in range(2):
+        result = run_cli('verification', 'run', '--criterion', 'AC1', cwd=tmp_path)
+        assert counter.read_text() == str(limit)
+        assert json.loads(_state_path(tmp_path).read_text())['budget_ledger']['progress'][0] == before
+    (tmp_path / 'tracked.txt').write_text('changed actual candidate')
+    result = run_cli('verification', 'run', '--criterion', 'AC1', cwd=tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert counter.read_text() == str(limit + 1)
+    state = json.loads(_state_path(tmp_path).read_text())
+    signature = state['budget_ledger']['progress'][0]
+    assert signature['candidate_digest'] == state['verification_receipts'][-1]['candidate_digest']
+    assert signature['candidate_digest'] != before['candidate_digest'] and signature['consecutive_count'] == 1
+
+
+def test_progress_result_signature_includes_exit_status_count_and_output(run_cli, tmp_path):
+    from dataclasses import replace
+    from datetime import datetime, timezone
+    from mission_application.verification_budget import reserve_verification, verification_settlement
+    from mission_application.verification_execution import _blocked_receipt
+    _prepare_public_runner(tmp_path, run_cli)
+    _budget(tmp_path)
+    document = json.loads(_state_path(tmp_path).read_text())
+    at = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    budget, reason = reserve_verification(document, 'AC1', 5, at, 'sha256:' + 'a' * 64)
+    assert reason is None
+    contract = document['acceptance_contract']
+    receipt = _blocked_receipt(contract, contract['verifier_policy'], 'AC1', contract['verifier_policy']['commands']['project-test'], 'test')
+    receipt.update(candidate_digest='sha256:'+'b'*64, status='passed', block_reason=None, exit_code=0, executed_count=1)
+    variants = [receipt, {**receipt, 'exit_code': 1}, {**receipt, 'status': 'failed'},
+                {**receipt, 'executed_count': 2}, {**receipt, 'output_digest': 'sha256:'+'c'*64}]
+    settlements = [verification_settlement(budget, at, value) for value in variants]
+    assert len({s.result_digest for s in settlements}) == len(variants)
+    assert all(s.candidate_digest == receipt['candidate_digest'] for s in settlements)
+
+
+def test_budget_mode_still_reports_a_shorter_frozen_timeout(tmp_path):
+    import time
+    from mission_application.verification_runner import execute_candidate
+    from .test_issue878_verification_runner import _policy
+    from mission_application.verifier_policy import validate
+    policy = _policy()
+    policy['commands'][0].update(timeout_sec=1, argv=[policy['commands'][0]['argv'][0], '-c', 'import time; time.sleep(60)'])
+    command = validate(policy)['project-test']
+    from mission_application.verification_runner import CandidateSnapshot, _digest
+    candidate = CandidateSnapshot((), _digest(()))
+    result = execute_candidate(candidate, command, relative_cwd='.', budget_deadline=time.monotonic() + 10)
+    assert result['timed_out'] and result['block_reason'] == 'timeout'
+
+
+def test_verifier_grandchild_is_gone_before_post_run_observation(run_cli, tmp_path, monkeypatch):
+    import os
+    import time
+    from mission_application import verification_runner as runner
+    from mission_application.verifier_policy import validate
+    from .test_issue878_verification_runner import _policy
+    marker = tmp_path / 'grandchild-pid'
+    policy = _policy()
+    policy['commands'][0].update(timeout_sec=2, argv=[policy['commands'][0]['argv'][0], '-c',
+        'import subprocess,sys,time; from pathlib import Path; '
+        'p=subprocess.Popen([sys.executable,"-c","import time; time.sleep(60)"]); '
+        f'Path({str(marker)!r}).write_text(str(p.pid)); print("prefix",flush=True); time.sleep(60)'])
+    command = validate(policy)['project-test']
+    snapshot = runner.CandidateSnapshot((runner.CandidateFile('input', 0o644, b'input'),), '')
+    from dataclasses import replace
+    snapshot = replace(snapshot, digest=runner._digest(snapshot.files))
+    read = runner._read
+    checked = []
+    def observe(*a, **kw):
+        pid = int(marker.read_text())
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+        checked.append(pid)
+        return read(*a, **kw)
+    monkeypatch.setattr(runner, '_read', observe)
+    import budgeted_exec
+    cleanup = budgeted_exec.cleanup_group
+    def before_cleanup(child, **kw):
+        # SIGKILL at the child deadline must include grandchildren, before
+        # normal terminal cleanup or potentially slow candidate observation.
+        end = time.monotonic() + .2
+        try:
+            while time.monotonic() < end:
+                try:
+                    os.kill(int(marker.read_text()), 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(.01)
+            with pytest.raises(ProcessLookupError):
+                os.kill(int(marker.read_text()), 0)
+        finally:
+            reclaimed = cleanup(child, **kw)  # always reclaim only our group
+        return reclaimed
+    monkeypatch.setattr(budgeted_exec, 'cleanup_group', before_cleanup)
+    deadline = time.monotonic() + 2
+    result = runner.execute_candidate(snapshot, command, relative_cwd='.', budget_deadline=deadline)
+    assert time.monotonic() >= deadline  # never cut the admitted execution short
+    assert result['block_reason'] == 'budget-deadline' and checked
+
+
+def test_cleanup_requires_session_identity_even_when_reservation_ids_overlap(tmp_path, monkeypatch):
+    from mission_persistence import spawn_jobs as jobs
+    directory = tmp_path / 'jobs'
+    a, digest = jobs.create_job(directory, b'{"unread":true}', reservation_id='same_reservation', session_id='A')
+    monkeypatch.setattr(jobs, 'process_start', lambda pid: 'absent')
+    assert jobs.cleanup_jobs(directory, open_reservations=set(), closed_reservations={'same_reservation'}, session_id='B') == []
+    assert jobs.read_job(a, digest) == b'{"unread":true}'
+    assert jobs.cleanup_jobs(directory, open_reservations=set(), closed_reservations={'same_reservation'}, session_id='A') == [a]
+
+
+def test_verification_job_rejects_deadline_that_cannot_be_enforced():
+    from mission_application.spawn_trampoline import decode_job
+    from .test_issue878_verification_runner import _contract, _policy
+    from mission_application.verifier_policy import validate
+    contract = _contract('mission-neutral')
+    contract['verifier_policy'] = {'digest': 'sha256:'+'a'*64, 'commands': validate(_policy())}
+    raw = json.dumps(dict(schema='mission-exec-job/1', kind='verification', result_fd=3,
+        contract=contract, criterion='AC1', repro_input=None, deadline=10**400)).encode()
+    with pytest.raises(ValueError):
+        decode_job(raw)
+
+
+@pytest.mark.parametrize('unavailable', [True, False])
+def test_verifier_exec_failure_is_distinct_from_registered_exit_126(tmp_path, unavailable):
+    import time
+    from mission_application.verification_runner import execute_candidate, CandidateSnapshot, _digest
+    from .test_issue878_verification_runner import _policy
+    from mission_application.verifier_policy import validate
+    command = validate(_policy())['project-test']
+    command.update(argv=['missing-neutral-verifier'] if unavailable else
+        [command['argv'][0], '-c', 'import sys; sys.exit(126)'], toolchain=None)
+    result = execute_candidate(CandidateSnapshot((), _digest(())), command,
+        relative_cwd='.', budget_deadline=time.monotonic()+5)
+    assert result['status'] == ('blocked' if unavailable else 'failed')
+    assert result['block_reason'] == ('process-unavailable' if unavailable else None)
+    assert result['exit_code'] == (None if unavailable else 126)
+
+
+def test_deadline_watchdog_start_failure_cannot_report_a_completed_verifier(monkeypatch):
+    import os, time
+    from mission_application import verification_exec as bootstrap
+    receiver, sender = os.pipe()
+    monkeypatch.setattr(bootstrap.sys, 'argv', ['bootstrap', str(time.monotonic()+10), str(sender), 'neutral-verifier'])
+    def unavailable(*a, **kw):
+        raise OSError('watchdog unavailable')
+    def stop_owned_group(*a):
+        raise SystemExit(2)
+    monkeypatch.setattr(bootstrap.subprocess, 'Popen', unavailable)
+    monkeypatch.setattr(bootstrap.os, 'killpg', stop_owned_group)
+    try:
+        with pytest.raises(SystemExit):
+            bootstrap.main()
+        assert os.read(receiver, 1) == b'E'
+    finally:
+        os.close(receiver); os.close(sender)
+
+
+def test_completed_failed_verifier_does_not_wait_for_grandchild_stdout(tmp_path):
+    import time, hashlib, os
+    from mission_application.verification_runner import execute_candidate, CandidateSnapshot, _digest
+    from .test_issue878_verification_runner import _policy
+    from mission_application.verifier_policy import validate
+    marker = tmp_path / 'grandchild-pid'
+    command = validate(_policy())['project-test']
+    command['argv'] = [command['argv'][0], '-c',
+        'import subprocess,sys; from pathlib import Path; '
+        'p=subprocess.Popen([sys.executable,"-c","import time; time.sleep(60)"]); '
+        f'Path({str(marker)!r}).write_text(str(p.pid)); print("prefix",flush=True); sys.exit(1)']
+    started = time.monotonic()
+    result = execute_candidate(CandidateSnapshot((), _digest(())), command,
+        relative_cwd='.', budget_deadline=started+5)
+    assert result['status'] == 'failed' and result['exit_code'] == 1 and not result['timed_out']
+    assert result['output_digest'] == 'sha256:' + hashlib.sha256(b'prefix\n').hexdigest()
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(marker.read_text()), 0)

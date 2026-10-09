@@ -170,9 +170,11 @@ def read_frame(child, fd, deadline, *, exit_probe=observe_exit, frame_limit=FRAM
     return result
 
 
-def run_job(kind, payload, directory, *, timeout=5, term_grace=.2, kill_wait=.2, cwd=None, deadline=None, reservation_id=None):
+def run_job(kind, payload, directory, *, timeout=5, term_grace=.2, kill_wait=.2, cwd=None, deadline=None, reservation_id=None, collect_deadline=None, session_id=None):
     absolute_deadline = deadline is not None
     deadline = time.monotonic() + timeout if deadline is None else deadline
+    if collect_deadline is not None and (kind != 'verification' or not math.isfinite(collect_deadline) or collect_deadline < deadline):
+        raise ValueError('invalid verification collection deadline')
     if time.monotonic() >= deadline:
         error = TimeoutError('budget-child-timeout')
         error.exec_unstarted = True
@@ -180,12 +182,13 @@ def run_job(kind, payload, directory, *, timeout=5, term_grace=.2, kill_wait=.2,
     receiver, sender = os.pipe()
     child, path, timed_out = None, None, False
     try:
-        job = {'schema': 'mission-exec-job/1', 'kind': kind, 'result_fd': sender, **payload}
+        job = {'schema': 'mission-exec-job/1', 'kind': kind, 'result_fd': sender, **payload,
+               'expires_at': time.time() + max(0, deadline - time.monotonic())}
         raw = json.dumps(job, allow_nan=False, separators=(',', ':')).encode()
         # Decode before writing as well as in the child (no arbitrary fields).
         from mission_application.spawn_trampoline import decode_job
         decode_job(raw)
-        path, digest = create_job(Path(directory), raw, reservation_id=reservation_id)
+        path, digest = create_job(Path(directory), raw, reservation_id=reservation_id, session_id=session_id)
         try:
             if absolute_deadline and time.monotonic() >= deadline:
                 raise TimeoutError('budget-child-timeout')
@@ -193,7 +196,8 @@ def run_job(kind, payload, directory, *, timeout=5, term_grace=.2, kill_wait=.2,
                                 str(path), digest], pass_fds=(sender,), cwd=cwd)
             os.close(sender)
             sender = None
-            result = read_frame(child, receiver, deadline, **({'frame_limit': JOB_LIMIT} if kind == 'verification' else {}))
+            result = read_frame(child, receiver, deadline if collect_deadline is None else collect_deadline,
+                                **({'frame_limit': JOB_LIMIT} if kind == 'verification' else {}))
         except TimeoutError:
             timed_out = True
             raise

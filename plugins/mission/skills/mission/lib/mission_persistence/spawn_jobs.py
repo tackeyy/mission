@@ -4,15 +4,17 @@ from __future__ import annotations
 import ctypes
 import errno
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
 import secrets
 import stat
 import sys
+import time
 
 JOB_LIMIT = 4 * 1024 * 1024
-_NAME = re.compile(r'job-([1-9][0-9]*)-([0-9]+)(?:-r([a-zA-Z0-9_]+))?-([0-9a-f]{32})\.json')
+_NAME = re.compile(r'job-([1-9][0-9]*)-([0-9]+)(?:-s([0-9a-f]{64}))?(?:-r([a-zA-Z0-9_]+))?-([0-9a-f]{32})\.json')
 
 
 class JobWriteError(ValueError):
@@ -113,7 +115,13 @@ def process_start(pid: int) -> str | None:
     return None
 
 
-def create_job(directory: Path, raw: bytes, *, reservation_id: str | None = None):
+def session_token(session_id):
+    if not isinstance(session_id, str) or not session_id:
+        raise ValueError('session identity invalid')
+    return hashlib.sha256(session_id.encode()).hexdigest()
+
+
+def create_job(directory: Path, raw: bytes, *, reservation_id: str | None = None, session_id=None):
     path = None
     try:
         if not raw or len(raw) > JOB_LIMIT:
@@ -127,7 +135,8 @@ def create_job(directory: Path, raw: bytes, *, reservation_id: str | None = None
             if not re.fullmatch(r'[a-zA-Z0-9_]+', reservation_id):
                 raise ValueError('reservation identity invalid')
             reservation = '-r' + reservation_id
-        path = directory / f'job-{os.getpid()}-{start}{reservation}-{secrets.token_hex(16)}.json'
+        session = '' if session_id is None else '-s' + session_token(session_id)
+        path = directory / f'job-{os.getpid()}-{start}{session}{reservation}-{secrets.token_hex(16)}.json'
         write_private_file(path, raw)
         return path.absolute(), hashlib.sha256(raw).hexdigest()
     except Exception as exc:
@@ -141,7 +150,19 @@ def create_job(directory: Path, raw: bytes, *, reservation_id: str | None = None
         raise JobWriteError(path, cleanup_errno) from exc
 
 
-def cleanup_jobs(directory: Path, *, open_reservations=None) -> list[Path]:
+def _expired_job(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        raw = os.read(fd, JOB_LIMIT + 1)
+    finally:
+        os.close(fd)
+    # Reuse the bounded inode/mode/content check before trusting an expiry.
+    value = json.loads(read_job(path, hashlib.sha256(raw).hexdigest()))
+    expires = value.get('expires_at') if isinstance(value, dict) else None
+    return type(expires) in (int, float) and 0 < expires <= time.time()
+
+
+def cleanup_jobs(directory: Path, *, open_reservations=None, closed_reservations=(), session_id=None) -> list[Path]:
     """Unknown reservation/owner identity is preserved, including legacy jobs."""
     if not directory.exists():
         return []
@@ -151,8 +172,12 @@ def cleanup_jobs(directory: Path, *, open_reservations=None) -> list[Path]:
         match = _NAME.fullmatch(path.name)
         if match is None:
             continue
-        pid, start, reservation, _ = match.groups()
-        if reservation and (open_reservations is None or reservation in open_reservations):
+        pid, start, session, reservation, _ = match.groups()
+        # Absence from one session's ledger says nothing about another session.
+        # Only a positively identified terminal reservation authorizes removal.
+        if reservation and (session is None or session_id is None or session != session_token(session_id)
+                            or reservation not in closed_reservations
+                            or open_reservations is None or reservation in open_reservations):
             continue
         try:
             observed = process_start(int(pid))
@@ -161,11 +186,13 @@ def cleanup_jobs(directory: Path, *, open_reservations=None) -> list[Path]:
         if observed is None or observed == start:
             continue
         try:
+            if not reservation and not _expired_job(path):
+                continue  # dead parent alone does not prove its child read the job
             info = path.lstat()
             if (stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
                     and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600):
                 path.unlink()
                 removed.append(path)
-        except FileNotFoundError:
+        except (OSError, ValueError):
             pass
     return removed

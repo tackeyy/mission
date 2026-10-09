@@ -70,12 +70,15 @@ def run_verification_receipt_cli(request, services) -> str:
         budget, admitted = admit_verification(services.repository(
             cwd, state_file, stamp=True, strict_read=True, pre_admit_lease=True,
             session_id=state_file.stem), request.criterion_id, command['timeout_sec'],
-            services.now(), canonical_contract_digest(contract), command)
+            # Candidate inventory itself spawns git. Reserve its supervisor
+            # before observation; the supervisor applies the real-tree gate
+            # before spawning the verifier. No digest is claimed before capture.
+            services.now(), None, command)
         if admitted.get('acceptance_contract') != contract:
             from .verification_budget import settle_failed_verification
             settle_failed_verification(services, cwd, state_file, budget, 'verification-contract-stale')
             raise EvidenceFailure('verification-contract-stale')
-        receipt = execute_verification(state, cwd, request.criterion_id, repro_input, budget, command)
+        receipt = execute_verification(admitted, cwd, request.criterion_id, repro_input, budget, command, session_id=state_file.stem)
     else:
         receipt = run_contract_verifier(
             state, project_root=cwd, criterion_id=request.criterion_id,
@@ -120,7 +123,7 @@ def _publish_receipt(request, services, cwd, state_file, receipt, budget):
     return json.dumps({"ok": True, **result}, ensure_ascii=False, indent=2)
 
 
-def run_contract_verifier(state, *, project_root, criterion_id, repro_input=None, budget_deadline=None):
+def run_contract_verifier(state, *, project_root, criterion_id, repro_input=None, budget_deadline=None, no_progress_candidate=None):
     """Execute one contract criterion without accepting caller-declared results."""
     if not isinstance(state, dict):
         raise EvidenceFailure("verification-state-invalid")
@@ -155,6 +158,10 @@ def run_contract_verifier(state, *, project_root, criterion_id, repro_input=None
         command = replay_command
     try:
         candidate = capture_candidate(project_root, declared_untracked=command["declared_untracked"], external_inputs=command["external_inputs"])
+        if candidate.digest == no_progress_candidate:
+            receipt = _blocked_receipt(contract, policy, criterion_id, command, 'budget-no-new-evidence')
+            receipt['candidate_digest'] = candidate.digest
+            return receipt
         replay_file = None if repro_input is None else (repro_input["artifact_kind"], replay["relative_path"], replay_content)
         if replay_file is not None and any(
             replay_file[1] == item.path or replay_file[1].startswith(item.path + "/") or item.path.startswith(replay_file[1] + "/")

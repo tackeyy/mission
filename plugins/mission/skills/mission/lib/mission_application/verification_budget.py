@@ -39,20 +39,25 @@ def admit_verification(repository, criterion, timeout, at, candidate_digest, com
     return budget, document
 
 
-def execute_verification(document, root, criterion, repro_input, budget, command):
+def execute_verification(document, root, criterion, repro_input, budget, command, *, session_id):
     from budgeted_exec import run_job
+    from mission_kernel.budget_decisions import stalled_candidate
     from .verification_execution import _blocked_receipt
     try:
         return run_job('verification', {'contract': document['acceptance_contract'],
-            'criterion': criterion, 'repro_input': repro_input, 'deadline': budget.deadline},
+            'criterion': criterion, 'repro_input': repro_input, 'deadline': budget.deadline,
+            'no_progress_candidate': stalled_candidate(decode_ledger(document), 'verification-run', criterion)},
             root / '.mission-state' / 'exec-jobs', deadline=budget.deadline,
+            collect_deadline=budget.deadline + 1 + budget.policy.post_run_sec,
             term_grace=budget.policy.term_grace_sec, kill_wait=budget.policy.kill_wait_sec,
-            reservation_id=budget.reservation.reservation_id.replace(':', '_'), cwd=root)
+            reservation_id=budget.reservation.reservation_id.replace(':', '_'), cwd=root, session_id=session_id)
     except Exception as exc:
-        reason = 'kill-unconfirmed' if str(exc) == 'kill-unconfirmed' else 'budget-child-timeout' if isinstance(exc, TimeoutError) else 'budget-verification-failed'
+        # Without a supervisor frame we cannot prove its nested verifier group
+        # was reclaimed, even when the outer supervisor group was reclaimed.
+        reason = 'kill-unconfirmed'
         contract = document['acceptance_contract']
         if getattr(exc, 'exec_unstarted', False):
-            reason = 'budget-verification-unstarted'
+            reason = 'budget-deadline' if isinstance(exc, TimeoutError) else getattr(exc, 'reason_code', 'budget-deadline-unenforceable')
         receipt = _blocked_receipt(contract, contract['verifier_policy'], criterion, command, reason)
         receipt.update(started_at=budget.reservation.reserved_at,
             finished_at=datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
@@ -62,12 +67,15 @@ def execute_verification(document, root, criterion, repro_input, budget, command
 
 def verification_settlement(budget, at, receipt):
     from mission_kernel.commands import SettleDispatchBudget
+    from mission_kernel.budget_decisions import verification_result_digest, verification_refusal_reason
     confirmed = receipt['block_reason'] != 'kill-unconfirmed'
+    refusal = verification_refusal_reason(receipt)
     return SettleDispatchBudget(at, budget.reservation.reservation_id,
         'settled' if confirmed else 'kill-unconfirmed',
-        (0 if receipt['block_reason'] == 'budget-verification-unstarted' else max(0, int(time.monotonic() - budget.started))) if confirmed else None,
-        budget.candidate_digest, receipt['output_digest'],
-        output_bytes=receipt['observed_output_bytes'], completed=receipt['status'] == 'passed')
+        (0 if refusal is not None and refusal != 'budget-no-new-evidence' else max(0, int(time.monotonic() - budget.started))) if confirmed else None,
+        receipt['candidate_digest'], verification_result_digest(receipt),
+        output_bytes=receipt['observed_output_bytes'], completed=receipt['status'] in ('passed', 'failed'),
+        refusal_reason=refusal)
 
 
 def settle_failed_verification(services, root, state_file, budget, reason):

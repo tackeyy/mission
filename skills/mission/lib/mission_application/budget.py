@@ -83,5 +83,8 @@ def run_budget_reconcile_cli(args, services):
         recovery = ledger.stop_slots.system_recovery.reservation
         if recovery is not None:
             opened.add(recovery.reservation_id.replace(':', '_'))
-        removed = cleanup_jobs(root / '.mission-state' / 'exec-jobs', open_reservations=opened)
+        closed = {s.reservation_id.replace(':', '_') for s in ledger.settlements
+                  if s.outcome != 'kill-unconfirmed'}
+        removed = cleanup_jobs(root / '.mission-state' / 'exec-jobs',
+                               open_reservations=opened, closed_reservations=closed, session_id=state_file.stem)
     return json.dumps({'ok': True, 'open_reservations': len(opened), 'removed_jobs': len(removed)})

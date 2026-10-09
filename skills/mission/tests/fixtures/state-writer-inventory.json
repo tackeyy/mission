@@ -172,7 +172,7 @@
     "prepare_artifact_render:copy-ref": 1
   },
   "lib/mission_application/budget.py": {
-    "run_budget_reconcile_cli:replace": 2
+    "run_budget_reconcile_cli:replace": 3
   },
   "lib/mission_application/claims_ledger.py": {
     "project_claims_ledger:copy-ref": 1
@@ -273,6 +273,9 @@
     "reserve_verification:replace": 1,
     "settle_collected_verification:replace": 1
   },
+  "lib/mission_application/verification_exec.py": {
+    "main:write": 2
+  },
   "lib/mission_application/verification_runner.py": {
     "_read:open-write": 1,
     "execute_candidate:replace": 3,
@@ -302,7 +305,7 @@
     "enter_final:replace": 2,
     "record_exhaustion:replace": 2,
     "reserve:replace": 4,
-    "settle:replace": 11,
+    "settle:replace": 13,
     "stop:replace": 2,
     "with_clock:replace": 1
   },
@@ -511,6 +514,7 @@
     "write_exclusive:write": 1
   },
   "lib/mission_persistence/spawn_jobs.py": {
+    "_expired_job:open-write": 1,
     "cleanup_jobs:unlink": 1,
     "create_job:unlink": 1,
     "read_job:open-write": 1,

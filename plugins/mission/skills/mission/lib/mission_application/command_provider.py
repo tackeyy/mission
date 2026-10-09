@@ -574,10 +574,11 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
         except (OSError, ValueError) as exc:
             if budget is None and not isinstance(exc, OSError):
                 raise
-            spawn_failed_reason = "spawn-failed"; exit_code = None; stdout = ""; stderr = execution.redact(str(exc))
+            spawn_failed_reason = "budget-deadline-unenforceable" if budget is not None else "spawn-failed"
+            exit_code = None; stdout = ""; stderr = execution.redact(str(exc))
             completed_at = execution.clock()
             entry.update({"status": "failed-before-start", "lifecycle_state": "terminal", "transitioned_at": completed_at,
-                          "completed_at": completed_at, "reason_code": "spawn-failed",
+                          "completed_at": completed_at, "reason_code": spawn_failed_reason,
                           "proven_no_dispatch": True})
         else:
             if budget is not None:
@@ -756,7 +757,8 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
             state_effects.append_command_outcome(data, outcome)
             settle_provider(data, budget, completed_at, execution.value_digest({"outbound_packet_digest": entry["outbound_packet_digest"], "exit_code": exit_code}),
                             confirmed=kill_confirmed, output_bytes=exchange.output_bytes if exchange else None,
-                            completed=status == "completed", unstarted=spawn_failed_reason is not None)
+                            completed=status == "completed", unstarted=spawn_failed_reason is not None,
+                            refusal_reason=spawn_failed_reason if budget is not None and spawn_failed_reason is not None else None)
             state_effects.commit_specialist_state_with_save(
                 cwd, data, entry, request.iteration, evidence,
                 save_state=_repo_invoke_result.save,

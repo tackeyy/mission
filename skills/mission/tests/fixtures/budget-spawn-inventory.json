@@ -3,10 +3,13 @@
     "candidates": {
       "lib/mission_application/spawn_trampoline.py:main:run_contract_verifier": 1,
       "lib/mission_application/verification_budget.py:execute_verification:run_job": 1,
+      "lib/mission_application/verification_exec.py:main:Popen": 1,
+      "lib/mission_application/verification_exec.py:main:execvpe": 1,
       "lib/mission_application/verification_execution.py:run_contract_verifier:execute_candidate": 1,
       "lib/mission_application/verification_execution.py:run_verification_receipt_cli:run_contract_verifier": 1,
       "lib/mission_application/verification_runner.py:_tracked:run": 1,
-      "lib/mission_application/verification_runner.py:execute_candidate:Popen": 1
+      "lib/mission_application/verification_runner.py:execute_candidate:Popen": 1,
+      "lib/mission_application/verification_runner.py:execute_candidate:spawn_exec": 1
     },
     "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
     "rows": [
@@ -114,7 +117,7 @@
       "lib/mission_application/command_provider.py:_invoke_command_provider:execution": 42,
       "lib/mission_application/command_provider.py:_invoke_command_provider:execution_context": 3,
       "lib/mission_application/command_provider.py:_invoke_command_provider:execution_isolator": 2,
-      "lib/mission_application/command_provider.py:_invoke_command_provider:spawn_failed_reason": 2,
+      "lib/mission_application/command_provider.py:_invoke_command_provider:spawn_failed_reason": 5,
       "lib/mission_application/command_provider.py:invoke_command_provider:execution": 1,
       "lib/mission_application/command_provider.py:pre_spawn_guard:execution": 1,
       "lib/mission_application/evidence.py:__init__:execute_retry_safe_evidence_plan": 1,
@@ -165,8 +168,11 @@
       "lib/mission_application/stale_cleanup.py:run_cleanup_stale:execute": 6,
       "lib/mission_application/supersede_reviews.py:_publish_review_group:execute": 1,
       "lib/mission_application/verification_budget.py:execute_verification:exec_unstarted": 1,
+      "lib/mission_application/verification_exec.py:main:executable": 1,
       "lib/mission_application/verification_execution.py:run_contract_verifier:executed_count": 1,
       "lib/mission_application/verification_execution.py:run_verification_receipt_cli:execute_verification": 1,
+      "lib/mission_application/verification_runner.py:execute_candidate:exec_failed": 4,
+      "lib/mission_application/verification_runner.py:execute_candidate:executable": 1,
       "lib/mission_application/verifier_policy.py:inline_python_source:executable": 1,
       "lib/mission_kernel/budget.py:_reservation:system": 1,
       "lib/mission_kernel/budget_decisions.py:settle:system": 3,

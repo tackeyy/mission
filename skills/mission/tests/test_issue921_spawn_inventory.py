@@ -26,7 +26,7 @@ FIXTURE = Path(__file__).parent / 'fixtures/budget-spawn-inventory.json'
 SAFE = set("""os.O_CLOEXEC os.O_CREAT os.O_DIRECTORY os.O_EXCL os.O_NOFOLLOW os.O_NONBLOCK
 os.O_RDONLY os.O_RDWR os.O_WRONLY os.P_PID os.PathLike os.WEXITED os.WNOHANG
 os.WNOWAIT os.X_OK os.access os.chmod os.close os.defpath os.dup os.environ
-os.environ.get os.fchmod os.fdopen os.fspath os.fstat os.fsync os.getpid os.getppid
+os.environ.get os.fchmod os.fdopen os.fspath os.fstat os.fsync os.getpid os.getppid os.getpgrp
 os.getuid os.kill os.killpg os.link os.listdir os.lstat os.mkdir os.open os.path
 os.path.abspath os.path.basename os.path.lexists os.path.normpath os.pathsep
 os.pathsep.join os.pipe os.read os.readlink os.rename os.replace os.rmdir os.scandir

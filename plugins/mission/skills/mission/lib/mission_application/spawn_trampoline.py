@@ -6,6 +6,7 @@ from importlib.metadata import EntryPoint
 from pathlib import Path
 import re
 import sys
+import time
 
 # -I excludes the script directory and PYTHONPATH. Only the shipped lib is added.
 if __name__ == '__main__':
@@ -19,12 +20,20 @@ def decode_job(raw):
     if not raw or len(raw) > JOB_LIMIT:
         raise ValueError('invalid job size')
     job = strict_json(raw)
+    if isinstance(job, dict) and 'expires_at' in job:
+        expires = job.pop('expires_at')
+        if (type(expires) not in (int, float) or not 0 < expires <= sys.float_info.max
+                or expires <= time.time()):
+            raise ValueError('exec job expired')
     if isinstance(job, dict) and job.get('kind') == 'verification':
-        if (set(job) != {'schema', 'kind', 'result_fd', 'contract', 'criterion', 'repro_input', 'deadline'}
+        fields = {'schema', 'kind', 'result_fd', 'contract', 'criterion', 'repro_input', 'deadline'}
+        if (set(job) not in (fields, fields | {'no_progress_candidate'})
                 or job['schema'] != 'mission-exec-job/1' or type(job['result_fd']) is not int or job['result_fd'] < 3
                 or not isinstance(job['criterion'], str) or not job['criterion']
-                or type(job['deadline']) not in (int, float) or job['deadline'] <= 0
-                or job['repro_input'] is not None and not isinstance(job['repro_input'], dict)):
+                or type(job['deadline']) not in (int, float) or not 0 < job['deadline'] <= sys.float_info.max
+                or job['repro_input'] is not None and not isinstance(job['repro_input'], dict)
+                or job.get('no_progress_candidate') is not None and (not isinstance(job['no_progress_candidate'], str)
+                    or not re.fullmatch(r'sha256:[0-9a-f]{64}', job['no_progress_candidate']))):
             raise ValueError('invalid verification job')
         from acceptance_contract import frozen_verifier_commands
         commands = frozen_verifier_commands(job['contract'])
@@ -84,7 +93,8 @@ def main():
         if job['kind'] == 'verification':
             from mission_application.verification_execution import run_contract_verifier
             result = run_contract_verifier({'acceptance_contract': job['contract']}, project_root=Path.cwd(),
-                criterion_id=job['criterion'], repro_input=job['repro_input'], budget_deadline=job['deadline'])
+                criterion_id=job['criterion'], repro_input=job['repro_input'], budget_deadline=job['deadline'],
+                no_progress_candidate=job.get('no_progress_candidate'))
         else:
             result = invoke_registered(job['verifier'], job['request'])
         if not isinstance(result, dict):
