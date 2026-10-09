@@ -34,6 +34,7 @@ def test_expired_budget_refuses_provider_before_spawn(run_cli, tmp_path, prepare
     assert not marker.exists()
     state = json.loads(_state_path(tmp_path).read_text())
     assert state['budget_ledger']['stop_slots']['last_refusal'] == 'budget-exhausted'
+    assert state['specialist_invocations'] == []
     assert state['provider_preflights'][args[args.index('--preflight-id') + 1]]['status'] == 'approved'
 
 
@@ -258,3 +259,165 @@ def test_strict_entry_never_calls_in_process_backend_with_budget(run_cli, tmp_pa
     assert stopped.value.code == 2 and 'budget-deadline-unenforceable' in capsys.readouterr().err
     assert not marker.exists()
     assert json.loads(path.read_text())['budget_ledger']['reservations'] == []
+
+
+@pytest.mark.parametrize('fault', ['input', 'context', 'intent', 'eligibility', 'public-state'])
+def test_definitive_pre_spawn_rejection_commits_terminal_and_zero_settlement(
+        run_cli, tmp_path, prepare_approved_invocation, invoke_here, monkeypatch, fault):
+    from mission_application import command_provider
+    from mission_persistence.legacy_v4 import LegacyV4Repository
+    marker, env = _prepare_command_provider(run_cli, tmp_path)
+    args, env, _ = prepare_approved_invocation(cwd=tmp_path, provider='guarded-command-provider',
+        iteration=1, phase='planning', env_extra=env)
+    _budget(tmp_path)
+    if fault == 'intent':
+        def refuse(*a, **kw):
+            import time
+            time.sleep(1.1)  # A refusal still owes zero executed seconds.
+            raise command_provider.PlanningFailure('dispatch-refused')
+        monkeypatch.setattr(command_provider, 'record_dispatch_intent', refuse)
+    else:
+        name = {'input': '_verified_preflight_packet', 'context': '_require_current_provider_application',
+                'eligibility': '_require_current_provider_application',
+                'public-state': '_validate_specialist_public_state'}[fault]
+        original = getattr(invoke_here.module, name)
+        def reject(data_or_cwd, *a, **kw):
+            data = a[0] if fault == 'input' else data_or_cwd
+            import inspect
+            application_call = inspect.currentframe().f_back.f_code.co_name == '_invoke_command_provider'
+            if data.get('budget_ledger', {}).get('reservations') and application_call:
+                if fault == 'context':
+                    return {**original(data_or_cwd, *a, **kw), '_application_context_digest': 'drift'}
+                invoke_here.module._provider_gate('payload-drift')
+            return original(data_or_cwd, *a, **kw)
+        monkeypatch.setattr(invoke_here.module, name, reject)
+    saves = []
+    original_save = LegacyV4Repository.save
+    def observe(repo, data, **kw):
+        if data.get('specialist_invocations', [{}])[-1].get('lifecycle_state') == 'terminal':
+            saves.append(data['budget_ledger']['settlements'][-1]['charged_sec'])
+            assert data['budget_ledger']['reservations'] == []
+        return original_save(repo, data, **kw)
+    monkeypatch.setattr(LegacyV4Repository, 'save', observe)
+    with pytest.raises((SystemExit, ValueError)):
+        invoke_here(args, env)
+    state = json.loads(_state_path(tmp_path).read_text())
+    assert not marker.exists() and state['specialist_invocations'][-1]['status'] == 'rejected'
+    assert state['budget_ledger']['reservations'] == [] and saves == [0]
+
+
+@pytest.mark.parametrize('probe', ['unavailable', 'self-signal', 'dispatch-stall', 'success'])
+def test_provider_terminal_probes_release_budget_and_deadline_prevents_late_spawn(
+        run_cli, tmp_path, prepare_approved_invocation, invoke_here, monkeypatch, probe):
+    import sys
+    import time
+    import signal
+    import budgeted_exec
+    from mission_persistence.legacy_v4 import LegacyV4Repository
+    from mission_application import command_provider
+    marker, env = _prepare_command_provider(run_cli, tmp_path)
+    if probe == 'success':
+        registry = tmp_path / 'provider-registry.json'
+        value = json.loads(registry.read_text())
+        value['specialists_v2'][0]['result_contract'] = {'min_non_template_chars': 0}
+        registry.write_text(json.dumps(value))
+        run_cli('specialists', 'recommend', '--no-default-skill-roots', '--task', 'Review the architecture',
+                '--registry', str(registry), '--complexity', 'Complex', '--record-state',
+                cwd=tmp_path, check=True, env_extra=env)
+    if probe == 'self-signal':
+        (tmp_path / 'commands/provider-command').write_text(f'#!{sys.executable}\n'
+            'import os,signal\nos.kill(os.getpid(),signal.SIGTERM)\n')
+    args, env, _ = prepare_approved_invocation(cwd=tmp_path, provider='guarded-command-provider',
+        iteration=1, phase='planning', env_extra=env)
+    _budget(tmp_path)
+    if probe == 'unavailable':
+        monkeypatch.setattr(invoke_here.module, '_command_is_available', lambda _: False)
+    if probe == 'dispatch-stall':
+        original = LegacyV4Repository.save
+        def stall(repo, data, **kw):
+            result = original(repo, data, **kw)
+            if data['specialist_invocations'][-1]['status'] == 'dispatch-unknown':
+                time.sleep(1.1)
+            return result
+        monkeypatch.setattr(LegacyV4Repository, 'save', stall)
+        monkeypatch.setattr(budgeted_exec, 'spawn_exec', lambda *a, **kw: pytest.fail('spawn after deadline'))
+        args = [*args, '--timeout', '1']
+    else:
+        spawn = budgeted_exec.spawn_exec
+        def inherited(*a, **kw):
+            assert 'cwd' not in kw  # Both provider routes inherit the invocation cwd.
+            return spawn(*a, **kw)
+        monkeypatch.setattr(budgeted_exec, 'spawn_exec', inherited)
+    settled = command_provider.settle_provider
+    def capture(*a, **kw):
+        if probe == 'success':
+            assert kw.get('completed') is True
+        return settled(*a, **kw)
+    monkeypatch.setattr(command_provider, 'settle_provider', capture)
+    invoke_here(args, env)
+    state = json.loads(_state_path(tmp_path).read_text())
+    entry = state['specialist_invocations'][-1]
+    assert entry['lifecycle_state'] == 'terminal' and state['budget_ledger']['reservations'] == []
+    if probe == 'self-signal':
+        assert entry['exit_code'] == -signal.SIGTERM and entry['status'] == 'failed'
+    if probe in ('unavailable', 'dispatch-stall'):
+        assert entry['status'] == 'failed-before-start' and not marker.exists()
+        assert state['budget_ledger']['settlements'][-1]['charged_sec'] == 0
+
+
+def test_completed_final_provider_sets_final_run():
+    from mission_application import provider_budget as pb
+    from mission_kernel.commands import EnterFinalPhase
+    from .mission_state_fixture_corpus import issue483_corpus
+    document = issue483_corpus()['v4']
+    document.update(loop_active=True, phase='reviewing', budget_minutes=30,
+        budget_ledger=ledger_document(new_ledger(decode_policy(default_policy_document(1800)),
+                                                '2026-01-01T00:00:00Z')))
+    assert pb._apply(document, EnterFinalPhase('2026-01-01T00:01:00Z', 'explicit')).accepted
+    entry = dict(invocation_id='inv_' + 'a' * 32, operation_id='op:final', fencing_epoch=1,
+                 outbound_packet_digest='sha256:' + 'b' * 64)
+    budget, refusal = pb.reserve_provider(document, entry, 60, '2026-01-01T00:01:01Z', prepared=True)
+    assert refusal is None and budget.reservation.budget_class == 'final'
+    pb.settle_provider(document, budget, '2026-01-01T00:01:02Z', 'sha256:' + 'c' * 64, completed=True)
+    assert document['budget_ledger']['stop_slots']['final_run']['reservation_id'] == budget.reservation.reservation_id
+
+
+@pytest.mark.parametrize('status,reason', [('awaiting-approval', 'approval-required'), ('consumed', 'receipt-replayed')])
+def test_approval_rejection_precedes_budget_admission(
+        run_cli, tmp_path, prepare_approved_invocation, invoke_here, monkeypatch, status, reason):
+    marker, env = _prepare_command_provider(run_cli, tmp_path)
+    args, env, _ = prepare_approved_invocation(cwd=tmp_path, provider='guarded-command-provider',
+        iteration=1, phase='planning', env_extra=env)
+    _budget(tmp_path, expired=True)
+    original = invoke_here.module._require_current_provider_application
+    def change_pointer(data, *a, **kw):
+        result = original(data, *a, **kw)
+        if kw.get('invocation_id'):
+            next(iter(data['provider_preflights'].values()))['status'] = status
+        return result
+    monkeypatch.setattr(invoke_here.module, '_require_current_provider_application', change_pointer)
+    with pytest.raises(SystemExit) as caught:
+        invoke_here(args, env)
+    assert caught.value.provider_reason_code == reason
+    state = json.loads(_state_path(tmp_path).read_text())
+    assert not marker.exists() and state['budget_ledger']['stop_slots']['last_refusal'] is None
+
+
+def test_process_receipt_commit_failure_retains_unknown_reservation_for_reconcile(
+        run_cli, tmp_path, prepare_approved_invocation, invoke_here, monkeypatch):
+    from mission_persistence.legacy_v4 import LegacyV4Repository
+    marker, env = _prepare_command_provider(run_cli, tmp_path)
+    args, env, _ = prepare_approved_invocation(cwd=tmp_path, provider='guarded-command-provider',
+        iteration=1, phase='planning', env_extra=env)
+    _budget(tmp_path)
+    original = LegacyV4Repository.save
+    def fail(repo, data, **kw):
+        if data['specialist_invocations'][-1]['status'] == 'running':
+            raise OSError('process receipt commit failed')
+        return original(repo, data, **kw)
+    monkeypatch.setattr(LegacyV4Repository, 'save', fail)
+    with pytest.raises(OSError, match='process receipt commit failed'):
+        invoke_here(args, env)
+    state = json.loads(_state_path(tmp_path).read_text())
+    assert marker.exists() and state['specialist_invocations'][-1]['status'] == 'dispatch-unknown'
+    assert len(state['budget_ledger']['reservations']) == 1 and not state['budget_ledger']['settlements']

@@ -1,6 +1,7 @@
 """Conservative AST spawn inventory bound to design 881 section 3.2.
 
 This freezes syntactic candidates, not arbitrary dynamically generated code.
+__import__, importlib and vars() are outside this syntactic boundary.
 Runtime entry tests establish reservation-before-spawn ordering separately.
 """
 import ast
@@ -31,6 +32,8 @@ def spawn_calls(source):
             return aliases.get(node.id, {node.id})
         if isinstance(node, ast.Attribute):
             return {name.split('.')[0] + '.' + node.attr for name in names(node.value)}
+        if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str):
+            return {name.split('.')[0] + '.' + node.slice.value for name in names(node.value)}
         if isinstance(node, ast.Call) and any(name.rsplit('.', 1)[-1] == 'getattr' for name in names(node.func)) and len(node.args) >= 2:
             attribute = node.args[1]
             if isinstance(attribute, ast.Constant) and isinstance(attribute.value, str):
@@ -63,16 +66,39 @@ def spawn_calls(source):
             self.generic_visit(node)
             self.function = previous
         visit_AsyncFunctionDef = visit_FunctionDef
-        def visit_Call(self, node):
-            for name in names(node.func):
+        def candidate(self, node, *, invoked=False):
+            for name in names(node):
                 tail = name.rsplit('.', 1)[-1]
+                if tail in {'dynamic-spawn', 'observe_parent', 'launch', 'collect', 'cancel', 'recover'} and not invoked:
+                    continue
                 if (name.startswith('subprocess.') and tail in {'Popen', 'run', 'call', 'check_call',
                         'check_output', 'getoutput', 'getstatusoutput'}
-                    or name in {'os.fork', 'os.system', 'os.posix_spawn', 'os.posix_spawnp', 'pty.fork', 'pty.spawn'}
+                    or name.startswith('os.') and (tail.startswith(('exec', 'spawn')) or tail in
+                        {'fork', 'forkpty', 'system', 'popen', 'posix_spawn', 'posix_spawnp'})
+                    or name.startswith('multiprocessing.')
+                    or name in {'pty.fork', 'pty.spawn'}
                     or name.startswith('asyncio.create_subprocess_')
-                    or tail in {'Popen', 'Process', 'get_context', 'spawn_exec', 'run_job',
-                                'launch', 'collect', 'cancel', 'recover', 'dispatch_prepared_packet', 'dynamic-spawn'}):
+                    or tail in {'Popen', 'Process', 'ProcessPoolExecutor', 'get_context', 'spawn_exec', 'run_job',
+                                'observe_parent', 'launch', 'collect', 'cancel', 'recover',
+                                'dispatch_prepared_packet', 'dynamic-spawn'}):
                     found[(self.function, tail)] += 1
+        def visit_Call(self, node):
+            self.candidate(node)
+            self.candidate(node.func, invoked=True)
+            # Count the callable once, while still visiting nested expressions
+            # (partial arguments and adapter.observe_parent().thaw(), for example).
+            for child in ast.iter_child_nodes(node.func):
+                self.visit(child)
+            for argument in [*node.args, *node.keywords]:
+                self.visit(argument)
+        def visit_Attribute(self, node):
+            self.candidate(node)
+            self.visit(node.value)
+        def visit_Name(self, node):
+            if isinstance(node.ctx, ast.Load):
+                self.candidate(node)
+        def visit_Subscript(self, node):
+            self.candidate(node)
             self.generic_visit(node)
     Inventory().visit(tree)
     return found
@@ -138,3 +164,25 @@ def test_unknown_fetched_callable_is_an_inventory_candidate():
 
 def test_self_referential_attribute_alias_reaches_a_finite_inventory():
     assert spawn_calls('import subprocess\nx = x.foo\nsubprocess.Popen([])') == {('<module>', 'Popen'): 1}
+
+
+@pytest.mark.parametrize('source,tail', [
+    ('subprocess.__dict__["Popen"]([])', 'Popen'),
+    ('os.__dict__["execv"]("cmd", [])', 'execv'),
+    ('getattr(os, "execv")("cmd", [])', 'execv'),
+    *[(f'os.{api}("cmd", [])', api) for api in
+      ('execv', 'execvp', 'execve', 'execl', 'execle', 'execlp', 'execlpe',
+       'execvpe', 'spawnv', 'spawnve', 'spawnvp', 'spawnvpe', 'spawnl',
+       'spawnle', 'spawnlp', 'spawnlpe', 'popen', 'forkpty')],
+    ('multiprocessing.Pool()', 'Pool'),
+    ('multiprocessing.context.SpawnProcess()', 'SpawnProcess'),
+    ('from concurrent.futures import ProcessPoolExecutor as pool\npool()', 'ProcessPoolExecutor'),
+    ('concurrent.futures.ProcessPoolExecutor()', 'ProcessPoolExecutor'),
+    ('functools.partial(subprocess.Popen, [])()', 'Popen'),
+    ('consume(subprocess.Popen)', 'Popen'),
+    ('consume(getattr(os, "execv"))', 'execv'),
+    ('consume(subprocess.__dict__["Popen"])', 'Popen'),
+    ('adapter.observe_parent()', 'observe_parent'),
+])
+def test_spawn_capability_calls_and_references_cannot_hide(source, tail):
+    assert any(call == tail for _, call in spawn_calls(source))

@@ -55,6 +55,13 @@
       13
     ]
   },
+  "bin/mission-state.py:cmd_invoke_command_provider:Popen": {
+    "count": 1,
+    "reason": "Injected legacy provider spawn capability; budgeted path uses spawn_exec",
+    "rows": [
+      3
+    ]
+  },
   "bin/mission-state.py:find_agent_pid:run": {
     "count": 2,
     "reason": "Short repository/process observation, not agent work",
@@ -111,6 +118,15 @@
   "lib/fresh_review_host.py:_callback:launch": {
     "count": 1,
     "reason": "Adapter call boundary; dispatch/recovery admission belongs to F2b",
+    "rows": [
+      7,
+      8,
+      9
+    ]
+  },
+  "lib/fresh_review_host.py:_callback:observe_parent": {
+    "count": 2,
+    "reason": "Adapter observation callback; F2b admission pending",
     "rows": [
       7,
       8,
@@ -175,6 +191,14 @@
   "lib/mission_application/approval_verifier.py:run_callable:get_context": {
     "count": 1,
     "reason": "Registered exec helper; fork Process only for legacy callable verifier; admission pending",
+    "rows": [
+      5,
+      6
+    ]
+  },
+  "lib/mission_application/approval_verifier.py:run_callable:wait": {
+    "count": 4,
+    "reason": "Multiprocessing wait reference in legacy callable verifier",
     "rows": [
       5,
       6

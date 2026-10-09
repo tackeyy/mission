@@ -1,6 +1,7 @@
 """Application use case for a legacy command provider invocation."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from mission_application.provider_budget import reserve_provider, settle_provider
 import hashlib
@@ -340,13 +341,7 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
             # the non-rollbackable provider dispatch saga.
             entry["operation_id"] = request.preflight_id
             entry["outbound_packet_digest"] = pointer["outbound_packet_digest"]
-            reserved_context = dispatch_state.get("provider_preflights", {}).get(request.preflight_id, {}).get("execution_context")
-            budget, refusal = reserve_provider(dispatch_state, entry, timeout, execution.clock(),
-                prepared=request.specialists_cmd == "invoke-prepared", provider=provider,
-                enforceable=not (isinstance(reserved_context, dict) and reserved_context.get("isolation") == "strict"))
-            if refusal:
-                _repo_invoke_reserve.save(dispatch_state)
-                raise CommandProviderFailure(refusal, refusal, 2)
+            budget_state = dispatch_state
             dispatch_state, entry, _ = state_effects.prepare_specialist_invocation_state(
                 dispatch_state,
                 entry,
@@ -361,6 +356,15 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
                 provider_policy.provider_gate("receipt-replayed")
             elif preflight_pointer.get("status") != "approved":
                 provider_policy.provider_gate("approval-required")
+            reserved_context = dispatch_state.get("provider_preflights", {}).get(request.preflight_id, {}).get("execution_context")
+            budget, refusal = reserve_provider(budget_state, entry, timeout, execution.clock(),
+                prepared=request.specialists_cmd == "invoke-prepared", provider=provider,
+                enforceable=not (isinstance(reserved_context, dict) and reserved_context.get("isolation") == "strict"))
+            if refusal:
+                _repo_invoke_reserve.save(budget_state)
+                raise CommandProviderFailure(refusal, refusal, 2)
+            if budget is not None:
+                dispatch_state["budget_ledger"] = budget_state["budget_ledger"]
             preflight_pointer["status"] = "consuming"
             preflight_pointer["consuming_invocation_id"] = entry["invocation_id"]
             state_effects.record_activity_event(dispatch_state, "specialist", now)
@@ -373,14 +377,39 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
                     entry.update({k: v for k, v in _inv.items() if k not in entry or k in ("invocation_id", "fencing_epoch", "reservation_owner_session_id", "application_context_digest", "operation_id", "outbound_packet_digest")})
                     break
 
+    @contextmanager
+    def pre_spawn_guard():
+        # Only definitive pre-spawn validation failures release the reservation.
+        # Repository load/commit failures remain unknown and need reconciliation.
+        try:
+            yield
+        except (ValueError, SystemExit) as exc:
+            if budget is None or not dispatch_loaded or dispatch_validated:
+                raise
+            if isinstance(exc, SystemExit) and not hasattr(exc, "provider_reason_code"):
+                raise
+            reason = getattr(exc, "provider_reason_code", getattr(exc, "code", "preflight-revalidation-failed"))
+            current = dict(provider_policy.invocation_by_id(dispatch_state, entry["invocation_id"]))
+            rejected = {**current, "status": "rejected", "lifecycle_state": "terminal",
+                        "reason_code": reason, "completed_at": running_at, "transitioned_at": running_at,
+                        "proven_no_dispatch": True}
+            provider_policy.validate_invocation_transition(current, rejected)
+            state_effects.replace_provider_invocation(dispatch_state, rejected)
+            dispatch_state["updated_at"] = running_at
+            settle_provider(dispatch_state, budget, running_at, execution.value_digest(rejected), unstarted=True)
+            _repo_invoke_dispatch.save(dispatch_state)
+            raise
+
     # ── Section 2: Dispatch intent (idempotency gate — if replayed, skip external dispatch) ──
     running_at = execution.clock()
     _repo_invoke_dispatch = _make_repo_invoke(":dispatch")
     already_dispatched = False
-    with _repo_invoke_dispatch.transaction():
+    dispatch_loaded = dispatch_validated = False
+    with _repo_invoke_dispatch.transaction(), pre_spawn_guard():
         dispatch_state = _repo_invoke_dispatch.load()
+        dispatch_loaded = True
         if getattr(_repo_invoke_dispatch, "operation_replayed", False):
-            already_dispatched = True
+            already_dispatched = dispatch_validated = True
         else:
             provider_policy.validate_specialist_public_state(dispatch_state)
             current_entry = dict(provider_policy.invocation_by_id(dispatch_state, entry["invocation_id"]))
@@ -401,6 +430,8 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
                 cwd, dispatch_state, provider, request, consuming_invocation_id=entry["invocation_id"]
             )
             if provider.pop("_application_context_digest") != current_entry.get("application_context_digest"):
+                if budget is not None:
+                    raise CommandProviderFailure("application-context-drift", "provider-ineligible: application-context-drift", 2)
                 rejected = {**current_entry, "status": "rejected", "lifecycle_state": "terminal",
                             "reason_code": "application-context-drift", "completed_at": running_at,
                             "transitioned_at": running_at}
@@ -430,6 +461,7 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
             provider_policy.validate_invocation_transition(current_entry, entry)
             state_effects.replace_provider_invocation(dispatch_state, entry)
             dispatch_state["updated_at"] = running_at
+            dispatch_validated = True
             _repo_invoke_dispatch.save(dispatch_state)
 
     # If dispatch was already committed (idempotent replay), skip external call
@@ -479,7 +511,7 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
                 provider_policy.validate_invocation_transition(current_entry, failed)
                 state_effects.replace_provider_invocation(dispatch_state, failed)
                 dispatch_state["updated_at"] = completed_at
-                settle_provider(dispatch_state, budget, completed_at, execution.value_digest(failed))
+                settle_provider(dispatch_state, budget, completed_at, execution.value_digest(failed), unstarted=True)
                 _repo_invoke_prefail.save(dispatch_state)
         return CommandProviderResult(
             json.dumps({"ok": False, "outcome_kind": "external", "entry": failed}, ensure_ascii=False)
@@ -538,7 +570,7 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
                 if time.monotonic() >= budget.deadline:
                     raise OSError("budget-child-deadline-expired")
                 process = spawn_exec(argv, stdin=execution.PIPE, stdout=execution.PIPE,
-                                     stderr=execution.PIPE, cwd=cwd, env=command_env)
+                                     stderr=execution.PIPE, env=command_env)
         except (OSError, ValueError) as exc:
             if budget is None and not isinstance(exc, OSError):
                 raise
@@ -573,6 +605,8 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
 
             entry["child_pid"] = process.pid
             entry["process_identity_digest"] = execution.value_digest({"invocation_id": entry["invocation_id"], "pid": process.pid, "running_at": running_at})
+            # A failed :proc commit retains dispatch-unknown and its reservation.
+            # The subsequent budget reconcile slice must settle this crash window.
             _repo_invoke_proc = _make_repo_invoke(":proc")
             with _repo_invoke_proc.transaction():
                 dispatch_state = _repo_invoke_proc.load()
@@ -721,7 +755,8 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
             provider_policy.validate_specialist_public_state(data)
             state_effects.append_command_outcome(data, outcome)
             settle_provider(data, budget, completed_at, execution.value_digest({"outbound_packet_digest": entry["outbound_packet_digest"], "exit_code": exit_code}),
-                            confirmed=kill_confirmed, output_bytes=exchange.output_bytes if exchange else None)
+                            confirmed=kill_confirmed, output_bytes=exchange.output_bytes if exchange else None,
+                            completed=status == "completed", unstarted=spawn_failed_reason is not None)
             state_effects.commit_specialist_state_with_save(
                 cwd, data, entry, request.iteration, evidence,
                 save_state=_repo_invoke_result.save,

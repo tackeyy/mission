@@ -59,12 +59,12 @@ def reserve_provider(document, entry, timeout, at, *, prepared, enforceable=True
     return ProviderBudget(row, held.policy, command.candidate_digest, start + remaining, start), None
 
 
-def settle_provider(document, budget, at, result_digest, *, confirmed=True, output_bytes=None):
+def settle_provider(document, budget, at, result_digest, *, confirmed=True, output_bytes=None, completed=False, unstarted=False):
     if budget is None:
         return
     result = _apply(document, SettleDispatchBudget(at, budget.reservation.reservation_id,
         'settled' if confirmed else 'kill-unconfirmed',
-        max(0, int(time.monotonic() - budget.started)) if confirmed else None,
-        budget.candidate_digest, result_digest, output_bytes=output_bytes))
+        (0 if unstarted else max(0, int(time.monotonic() - budget.started))) if confirmed else None,
+        budget.candidate_digest, result_digest, output_bytes=output_bytes, completed=completed))
     if not result.accepted:
         raise ValueError(result.rejection.code)
