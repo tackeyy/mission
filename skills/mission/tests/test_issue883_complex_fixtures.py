@@ -415,7 +415,7 @@ def test_bounded_runner_reaps_a_parent_exit_descendant_holding_a_pipe(tmp_path):
     pid_path = tmp_path / "descendant.pid"
     survivor_path = tmp_path / "descendant-survived"
     descendant = (
-        "import pathlib, time; time.sleep(.35); "
+        "import pathlib, time; time.sleep(4); "
         f"pathlib.Path({str(survivor_path)!r}).write_text('alive')"
     )
     command = [
@@ -428,12 +428,15 @@ def test_bounded_runner_reaps_a_parent_exit_descendant_holding_a_pipe(tmp_path):
         ),
     ]
     started = time.monotonic()
-    _, _, _, _, incomplete = module._run_bounded(command, timeout_seconds=0.15)
+    # The parent starts two interpreters before it exits; keep the timeout well
+    # above that under load. The descendant sleeps far beyond the elapsed bound,
+    # so finishing within the bound proves the runner did not wait for it.
+    _, _, _, _, incomplete = module._run_bounded(command, timeout_seconds=1.5)
 
     assert incomplete
-    assert time.monotonic() - started < 0.5
+    assert time.monotonic() - started < 3
     assert int(pid_path.read_text()) > 0
-    time.sleep(0.45)
+    time.sleep(4.5)
     assert not survivor_path.exists()
 
 
