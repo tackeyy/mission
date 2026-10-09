@@ -157,10 +157,11 @@ def spawn_calls(source):
 
 def inventory():
     result = {}
-    benchmark = ROOT / 'benchmarks/mission-vs-goal/public_benchmark.py'
-    for path in [MISSION / 'bin/mission-state.py', *(MISSION / 'lib').rglob('*.py'), benchmark]:
+    benchmarks = [ROOT / 'benchmarks/mission-vs-goal' / name
+                  for name in ('public_benchmark.py', 'bench_selection.py')]
+    for path in [MISSION / 'bin/mission-state.py', *(MISSION / 'lib').rglob('*.py'), *benchmarks]:
         for (function, call), count in spawn_calls(path.read_text()).items():
-            relative = path.relative_to(ROOT) if path == benchmark else path.relative_to(MISSION)
+            relative = path.relative_to(ROOT) if path in benchmarks else path.relative_to(MISSION)
             result[f'{relative}:{function}:{call}'] = count
     return result
 
@@ -321,8 +322,9 @@ def test_allowlist_boundary_rejects_unknown_capabilities_and_receivers(source):
 
 def test_safe_allowlist_contains_only_observed_runtime_names():
     observed = set()
-    benchmark = ROOT / 'benchmarks/mission-vs-goal/public_benchmark.py'
-    for path in [MISSION / 'bin/mission-state.py', *(MISSION / 'lib').rglob('*.py'), benchmark]:
+    benchmarks = [ROOT / 'benchmarks/mission-vs-goal' / name
+                  for name in ('public_benchmark.py', 'bench_selection.py')]
+    for path in [MISSION / 'bin/mission-state.py', *(MISSION / 'lib').rglob('*.py'), *benchmarks]:
         tree, aliases = ast.parse(path.read_text()), {}
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):

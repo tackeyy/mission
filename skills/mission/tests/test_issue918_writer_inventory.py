@@ -180,7 +180,7 @@ def test_writer_inventory_matches_baseline_manifest():
     # Public benchmark output/materialization is outside session state, but its
     # new raw I/O must also be explicitly inventoried.
     benchmarks = [mission.parents[1] / 'benchmarks/mission-vs-goal' / name
-                  for name in ('public_benchmark.py', 'native_goal_benchmark.py')]
+                  for name in ('public_benchmark.py', 'native_goal_benchmark.py', 'bench_selection.py')]
     for path in [*(mission / 'bin').rglob('*.py'), *(mission / 'lib').rglob('*.py'), *benchmarks]:
         calls = _writer_calls(path.read_text())
         if calls:
