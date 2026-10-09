@@ -230,6 +230,19 @@ output import は二段で判定する。第一段は送り手の照合で、ope
 （この二段の境界は設計レビュー 3 巡目の後に追加した決定であり、D2（#896）の実装着手前に改めて設計レビューにかける。）
 running の request に対する output import が検査で不合格になった場合は拒否で終わらせず、`failed` 終端として保存する。
 
+送り手照合が先に立つ場合の `reconcile` の分類は次のとおり。締切後も foreign report 自体を output として保存しない。
+
+| 観測 | 締切前 | 締切後（cancel を確認できた場合） |
+|---|---|---|
+| 送り手 field の型違い・不一致 | command 拒否、状態を維持 | 報告を無視し `abandoned-unknown / child-unobservable`。保存済み launch のみを保持 |
+| 送り手一致だが保存済み launch と報告の launch が異なる | command 拒否、状態を維持 | 報告を無視し `abandoned-unknown / child-unobservable`。保存済み launch のみを保持 |
+| launch 未保存で、送り手一致だが報告の launch が request/dispatch と異なる | `dispatch-unknown` を維持 | 起動後の `blocked / binding-mismatch` |
+| 送り手・launch 一致の終了 output | 中身の検査へ進む | 合格 output でも `failed / timeout`。締切までの観測を証明できないため completed にしない |
+
+cancel が未確認なら拒否し、terminal にしない。output の内容自体が不合格なら既存の schema・binding・予算の理由を優先する。
+replay の観測時刻は実 launch から終端までの範囲に束縛する（B の秒精度の開始時刻は launch の秒に丸めた下限で比較する）。
+
+
 pending→dispatch-unknown→running→terminal を採用する。spawn 前 durable intent、receipt 後 running、
 terminal 前 candidate recapture を守る。dispatch-unknown は既存 saga と同じく自動 redispatch しない。[S9]
 interrupt 後に output がなければ failed/abandoned-unknown。旧 writer の遅着は fence で拒否する。

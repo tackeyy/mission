@@ -440,6 +440,8 @@ def publication_blob_shapes_by_command_type():
             "internal_max": len(internal_fields),
             "rules": permitted,
         }
+    from mission_kernel.fresh_review import FRESH_REVIEW_FINDINGS_LIMIT
+    shapes["fresh-review-output-import"].update(blob_count=None, blob_max=FRESH_REVIEW_FINDINGS_LIMIT + 2)
     return shapes
 
 # Which attribute of a command's effect claim holds the path it publishes to.
@@ -464,7 +466,7 @@ PUBLICATION_PATH_FIELD_BY_COMMAND_TYPE = {
 }
 EFFECT_FIELDS_BY_COMMAND_TYPE = {
     "fresh-review-prepare": ("effect",),
-    "fresh-review-output-import": ("effect",),
+    "fresh-review-output-import": ("effect", "coverage_effect", "findings_effect"),
     "export-artifact": ("artifact_effect", "export_effect"),
     "generate-claims-ledger": ("effect",),
     "generate-context-manifest": ("effect",),
@@ -527,6 +529,13 @@ def project_semantic_command(
             raise EvidencePublicationError(
                 "command-invalid", "encoded command is missing " + field
             )
+        if command.get('type') == 'fresh-review-output-import' and value[field] is None:
+            projected_value[field] = None
+            continue
+        if command.get('type') == 'fresh-review-output-import' and field == 'findings_effect':
+            projected_value[field] = [project_semantic_claim(item, repository_root_name=repository_root_name,
+                expects_publication_path=False) for item in value[field]]
+            continue
         projected_value[field] = project_semantic_claim(
             value[field],
             repository_root_name=repository_root_name,

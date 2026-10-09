@@ -25,6 +25,30 @@ def _state():
     return state
 
 
+REVIEW_CHILD = """
+import hashlib,json,sys
+from pathlib import Path
+raw = Path(sys.argv[1]).read_bytes()
+packet = json.loads(raw)
+request = json.loads(sys.stdin.read())
+criterion = packet['criteria'][0]
+replay = packet['verifier_policy']['commands'][criterion['command_id']]['replay']
+keys = ('request_id','nonce','mission_id','session_id','requirement_digest','contract_digest',
+        'verifier_policy_digest','candidate_digest','input_digest','adapter_registration_digest','iteration')
+output = dict(schema='mission-fresh-review-output/1', request_digest=sys.argv[2],
+    **{key:request[key] for key in keys}, criterion_results=[dict(criterion_id=criterion['id'],
+    status='searched', reason_code='none', findings=[dict(finding_id='zero-input',
+    criterion_id=criterion['id'], requirement_ids=criterion['requirement_ids'],
+    prohibited_side_effect_ids=[], severity='Low', summary='Zero input fails the registered replay.',
+    command_id=replay['command_id'], repro_input=dict(artifact_kind='counterexample',content='0'),
+    actual=dict(exit_code=1), expected=dict(criterion_id=criterion['id']), replay_evidence_ref=None)])],
+    coverage=[dict(requirement_id=item['id'],classification_confirmed=True,
+    criterion_ids=[criterion['id']],status='valid',reason_code='none',reason='Registered criterion covers the span.')
+    for item in packet['requirements']])
+print(json.dumps(dict(digest='sha256:'+hashlib.sha256(raw).hexdigest(),output=output)))
+"""
+
+
 class Adapter:
     def observe_parent(self):
         if os.environ.get('FIXTURE_REVIEW_MODE') == 'callback-timeout':
@@ -75,6 +99,10 @@ class Adapter:
             'import hashlib,json,sys; from pathlib import Path; '
             'print(json.dumps({"digest":"sha256:"+hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest()}))',
             input_handle.relative_path], capture_output=True, text=True, check=True)
+        if os.environ.get('FIXTURE_REVIEW_MODE') == 'counterexample':
+            child = subprocess.run([sys.executable, '-c', REVIEW_CHILD, input_handle.relative_path,
+                                    canonical_digest(request)], input=request_bytes.decode(),
+                                   capture_output=True, text=True, check=True)
         launch = dict(schema='mission-fresh-review-launch/1', request_id=request['request_id'],
             request_digest=canonical_digest(request), nonce=request['nonce'], operation_id=envelope['operation_id'],
             fencing_epoch=envelope['fencing_epoch'], adapter_registration_digest=request['adapter_registration_digest'],
@@ -93,9 +121,12 @@ class Adapter:
         if mode == 'provider-invalid':
             launch['child_identity'] = 'file:opaque'
         output = b'{"diagnostic":"import is out of scope"}'
+        if mode == 'counterexample':
+            output = json.dumps(json.loads(child.stdout)['output'], sort_keys=True, separators=(',', ':')).encode()
         prior = json.loads(_journal().read_text()) if _journal().exists() else {'count': 0}
         _journal().write_text(json.dumps({'launch': launch, 'count': prior['count'] + 1,
-                                        'output': output.decode()}))
+                                        'output': output.decode(), **(dict(process_exited=True, exit_code=0,
+            budget_used=dict(wall_time_sec=1,tool_calls=0,replays=0,output_bytes=len(output))) if mode == 'counterexample' else {})}))
         if mode == 'crash':
             os._exit(7)
         return freeze_json_value(launch)

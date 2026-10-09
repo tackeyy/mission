@@ -977,8 +977,13 @@ def _real_command(command_type):
     ledger = kernel.ClaimsLedgerEffectClaim(
         "claims-ledger", "l.json", "build/l.json", "sha256:" + "0" * 64, 5
     )
+    fresh = kernel.FreshReviewInputEffectClaim("fresh-review-output", "evidence/fresh-review/" + "0" * 64 + ".json", "sha256:" + "0" * 64, 5)
+    from mission_kernel.json_codec import freeze_json_value
     at = "2026-01-01T00:00:00Z"
     built = {
+        "fresh-review-output-import": lambda: kernel.ImportFreshReviewOutput(
+            "request", "import", 1, freeze_json_value({}), freeze_json_value({}),
+            freeze_json_value({}), "sha256:" + "0" * 64, None, fresh, fresh, (fresh,)),
         "export-artifact": lambda: kernel.ExportArtifact(
             at, "drive", "reviewed", artifact, artifact
         ),
@@ -1005,6 +1010,7 @@ def _real_command(command_type):
 @pytest.mark.parametrize("command_type", sorted(
     {
         "export-artifact",
+        "fresh-review-output-import",
         "generate-claims-ledger",
         "generate-context-manifest",
         "initialize-artifact",
@@ -1022,9 +1028,10 @@ def test_every_declared_command_type_projects(command_type):
     document = _real_command(command_type)
     projected = project_semantic_command(document)
     for field in EFFECT_FIELDS_BY_COMMAND_TYPE[command_type]:
-        claim = projected["value"][field]
-        assert "digest" not in claim and "size" not in claim
-        assert claim["kind"] and claim["target"]
+        claims = projected["value"][field]
+        for claim in claims if isinstance(claims, list) else [claims]:
+            assert "digest" not in claim and "size" not in claim
+            assert claim["kind"] and claim["target"]
 
 PATH_BEARING_COMMAND_TYPES = ("generate-context-manifest", "generate-claims-ledger")
 NON_PATH_COMMAND_TYPES = (

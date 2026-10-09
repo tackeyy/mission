@@ -161,13 +161,13 @@ def contract_schema_for(contract: str) -> dict:
         return {"schema": "mission-contract-schema/1", "contract": contract, "closed": True,
                 "required": ["request", "adapter"], "launch_schema": LAUNCH_SCHEMA,
                 "terminal_schema": TERMINAL_SCHEMA,
-                "terminal_outcomes": (["failed"] if contract == "fresh-review-import" else
-                                      ["blocked", "abandoned-unknown", "failed"] if contract == "fresh-review-reconcile" else
+                "terminal_outcomes": (["failed", "completed"] if contract == "fresh-review-import" else
+                                      ["blocked", "abandoned-unknown", "failed", "completed"] if contract == "fresh-review-reconcile" else
                                       ["blocked", "abandoned-unknown"]),
                 "rules": ["durable dispatch intent precedes launch",
                           "reconcile never redispatches and requires exact host-observed child and output",
                           "dispatch identity and current commit fence are separate",
-                          "only failed output can be imported; replay and completed publication are not available"]}
+                          "output, bound replay findings and coverage publish atomically; completion remains gated"]}
     if contract == "acceptance-contract-import":
         return acceptance_contract_schema()
     raise ValueError("unknown contract: {}".format(contract))
