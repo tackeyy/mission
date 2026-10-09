@@ -2,7 +2,8 @@
 
 Findings and coverage evidence are content-addressed references; their output
 content, replay validation and atomic publication belong to the D2 importer.
-The D1 projection deliberately remains unchanged until that writer is added.
+The failed-output writer binds diagnostics to its terminal; completed output
+publication and replay validation remain separate.
 """
 from __future__ import annotations
 

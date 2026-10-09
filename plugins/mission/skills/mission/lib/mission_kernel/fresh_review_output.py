@@ -1,8 +1,9 @@
-"""Inert D2 output contracts and two-stage judgement; no state writer or IO.
+"""Pure D2 output contracts and two-stage judgement; no state writer or IO.
 
 An accepted output contains reviewer hypotheses, not verified findings. Replay
 execution and atomic evidence publication belong to the import writer; kernel
-checks ledger references. This module is deliberately not called by the CLI.
+checks ledger references. The failed-output writer uses this preflight;
+completed publication and replay execution remain separate.
 Host observation is separate from child-authored bytes. The child-facing fence
 is the saved dispatch fence; the publisher must also enforce its current lease.
 """
@@ -348,6 +349,10 @@ def replay_eligibility(request, hypothesis, frozen_policy):
         return 'replay-unsupported'
     commands = frozen_policy['commands']
     try:
+        for identifier, definition in commands.items():
+            validate_command(definition)
+            if definition['id'] != identifier:
+                return 'replay-unsupported'
         for item in (source, binding):
             definition = commands.get(item.command_id)
             validate_command(definition)

@@ -372,6 +372,19 @@ class CommitFreshReviewResult:
 
 
 @dataclass(frozen=True)
+class ImportFreshReviewOutput:
+    request_id: str
+    operation_id: str
+    fencing_epoch: int
+    receipt: FrozenJsonObject
+    observation: FrozenJsonObject
+    budget_used: FrozenJsonObject
+    candidate_digest: str
+    output_base64: Optional[str]
+    effect: Optional[FreshReviewInputEffectClaim]
+
+
+@dataclass(frozen=True)
 class CanonicalPlanObservation:
     path: str
     digest: str
@@ -569,6 +582,7 @@ Command = Union[
     WithdrawFreshReviewRequest,
     RecordFreshReviewLaunch,
     CommitFreshReviewResult,
+    ImportFreshReviewOutput,
     RecordExecutorStep,
     RecordSpecialistRecommendation,
     RejectExecutorHandoff,
@@ -609,6 +623,7 @@ _COMMAND_TYPES = {
     WithdrawFreshReviewRequest: "fresh-review-withdraw",
     RecordFreshReviewLaunch: "fresh-review-launch",
     CommitFreshReviewResult: "fresh-review-result",
+    ImportFreshReviewOutput: "fresh-review-output-import",
     RecordExecutorStep: "executor-handoff-record-step",
     RecordSpecialistRecommendation: "specialists-record-recommendation",
     RejectExecutorHandoff: "executor-handoff-reject-canonical-drift",
