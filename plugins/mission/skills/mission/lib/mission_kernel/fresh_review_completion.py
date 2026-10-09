@@ -219,8 +219,10 @@ def judge_completion(projection, evidence, bindings, contract, contract_digest, 
     Condition 5 checks unresolved bound findings from every attempt last.
     D1 reserved/consumed checkpoints have no terminal receipt and are judged as
     pending, after the same freshness check, without changing stored records.
+    Withdrawn tombstones retain prepare order and criterion scope; when selected,
+    they are missing before freshness and never contribute evidence or findings.
     """
-    from .fresh_review import FreshReviewRecord
+    from .fresh_review import FreshReviewRecord, WithdrawnFreshReviewRecord
     from .fresh_review_coverage import FreshReviewAttempt, judge_fresh_review, judge_criterion, FreshReviewReason, REASON_ORDER
     from .fresh_review_receipts import decode_terminal_receipt
     if bindings is None:
@@ -230,9 +232,10 @@ def judge_completion(projection, evidence, bindings, contract, contract_digest, 
     # D1 nonce checkpoints have no authenticated terminal receipt; even a
     # consumed result claiming success remains pending in the decision table.
     legacy_statuses = ('reserved', 'consumed')
-    attempts = tuple(FreshReviewAttempt(item.request, 'pending' if item.status in legacy_statuses else item.status,
-        None if item.status in legacy_statuses or item.result is None
-        else decode_terminal_receipt(item.result.thaw())) for item in records)
+    attempts = tuple(FreshReviewAttempt(item if isinstance(item, WithdrawnFreshReviewRecord) else item.request,
+        'pending' if item.status in legacy_statuses else item.status,
+        None if isinstance(item, WithdrawnFreshReviewRecord) or item.status in legacy_statuses or item.result is None
+        else decode_terminal_receipt(item.result.thaw())) for item in projection.requests)
     try:
         facts = tuple(_completion_facts(item, next(r.request for r in records if r.request.request_id == item.request_id),
                                         contract) for item in evidence)
