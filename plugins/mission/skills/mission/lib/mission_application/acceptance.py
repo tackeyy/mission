@@ -33,6 +33,7 @@ class AcceptanceContractCliServices:
     canonical_operation: object
     load_verifier_policy: object
     capacity_status: object = None
+    commit_errors: tuple = ()
     load_snapshot: object = None
 
 

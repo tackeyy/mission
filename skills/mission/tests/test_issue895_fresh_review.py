@@ -196,7 +196,7 @@ def test_packet_budget_and_runtime_commands_remain_closed(completion_session, ru
     _persist_fixture(root, state, schema)
     _reject_unchanged(run_cli, root, [*ARGS, '--max-packet-bytes', '1'], 'fresh-review-packet-too-large')
     _reject_unchanged(run_cli, root, [*ARGS, '--nonce', 'chosen'], 'unrecognized arguments')
-    _reject_unchanged(run_cli, root, ['fresh-review', 'run'], 'invalid choice')
+    _reject_unchanged(run_cli, root, ['fresh-review', 'run'], 'required')
     result = run_cli('schema', '--contract', 'fresh-review-prepare', cwd=root)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)['closed'] is True

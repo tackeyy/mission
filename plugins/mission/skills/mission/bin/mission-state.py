@@ -244,6 +244,9 @@ from mission_application.evidence import (  # noqa: E402
 from mission_application.budget import run_budget_status_cli, run_budget_next
 from mission_kernel.budget import BudgetError
 from mission_application.fresh_review import run_fresh_review_prepare_cli, run_fresh_review_status_cli
+from mission_application.fresh_review_withdraw import run_fresh_review_withdraw_cli
+from mission_application.fresh_review_dispatch import run_fresh_review_dispatch_cli
+import fresh_review_host
 from mission_application.acceptance import (  # noqa: E402
     AcceptanceContractCliServices,
     run_acceptance_contract_import_cli,
@@ -8299,7 +8302,8 @@ _ACCEPTANCE_CONTRACT_CLI_SERVICES = AcceptanceContractCliServices(
     _canonical_compatibility_operation,
     load_verifier_policy,
     partial(state_capacity_status, load_snapshot=_load_authoritative_state),
-    _load_authoritative_state,
+    commit_errors=(CapacityWriteError,),
+    load_snapshot=_load_authoritative_state,
 )
 
 
@@ -13793,6 +13797,18 @@ def cmd_budget_status(args):
     print(run_budget_status_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES))
 
 
+def cmd_fresh_review_run(args):
+    print(run_fresh_review_dispatch_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES, fresh_review_host))
+
+
+def cmd_fresh_review_reconcile(args):
+    print(run_fresh_review_dispatch_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES, fresh_review_host))
+
+
+def cmd_fresh_review_withdraw(args):
+    print(run_fresh_review_withdraw_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES))
+
+
 def cmd_fresh_review_status(args):
     print(run_fresh_review_status_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES))
 
@@ -16189,7 +16205,7 @@ def _add_review_parsers(subparsers) -> None:
 
     p_schema = sub.add_parser("schema", help="入力契約のスキーマを出力する (#683)")
     p_schema.add_argument("--contract", required=True,
-                          choices=("planning-adopt-core", "review-import", "acceptance-contract-import", "fresh-review-prepare"),
+                          choices=("planning-adopt-core", "review-import", "acceptance-contract-import", "fresh-review-prepare", "fresh-review-run", "fresh-review-reconcile", "fresh-review-withdraw"),
                           help="出力する契約")
     p_schema.set_defaults(func=cmd_schema)
     p_score = sub.add_parser("push-score", help="score_history に採点結果を append (orchestrator が Phase 5 直後に呼ぶ)")
@@ -16312,7 +16328,7 @@ def _add_review_parsers(subparsers) -> None:
     p_budget = sub.add_parser("budget", help="予算 ledger の読み取り専用表示")
     p_budget_sub = p_budget.add_subparsers(dest="budget_command", required=True)
     p_budget_sub.add_parser("status", help="予算 policy と ledger の状態").set_defaults(func=cmd_budget_status)
-    p_fresh = sub.add_parser("fresh-review", help="typed fresh-review request を管理（起動は未対応）")
+    p_fresh = sub.add_parser("fresh-review", help="typed fresh-review request と起動を管理")
     p_fresh_sub = p_fresh.add_subparsers(dest="fresh_review_command", required=True)
     p_prepare = p_fresh_sub.add_parser("prepare", help="候補と入力を凍結し、一回使用の request を保存")
     p_prepare.add_argument("--perspective", required=True)
@@ -16326,6 +16342,20 @@ def _add_review_parsers(subparsers) -> None:
     p_prepare.add_argument("--max-packet-bytes", type=int, default=1048576)
     p_prepare.set_defaults(func=cmd_fresh_review_prepare, command_outcome_tracking=True)
     p_fresh_sub.add_parser("status", help="保存済み request と消費状態を表示").set_defaults(func=cmd_fresh_review_status)
+
+    p_run = p_fresh_sub.add_parser("run", help="dispatch intent を保存して登録 adapter を起動")
+    p_run.add_argument("--request", required=True)
+    p_run.add_argument("--adapter", required=True)
+    p_run.set_defaults(func=cmd_fresh_review_run, command_outcome_tracking=True)
+
+    p_reconcile = p_fresh_sub.add_parser("reconcile", help="host 観測で既存 dispatch を照合（再起動しない）")
+    p_reconcile.add_argument("--request", required=True)
+    p_reconcile.add_argument("--adapter", required=True)
+    p_reconcile.set_defaults(func=cmd_fresh_review_reconcile, command_outcome_tracking=True)
+
+    p_withdraw = p_fresh_sub.add_parser("withdraw", help="容量超過時に pending request を取り下げる")
+    p_withdraw.add_argument("--request", required=True)
+    p_withdraw.set_defaults(func=cmd_fresh_review_withdraw, command_outcome_tracking=True)
 
     p_acceptance = sub.add_parser("acceptance-contract", help="immutable acceptance contract を管理")
     p_acceptance_sub = p_acceptance.add_subparsers(dest="acceptance_contract_command", required=True)

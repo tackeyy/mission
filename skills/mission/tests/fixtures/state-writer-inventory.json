@@ -132,6 +132,11 @@
     "publish:unlink": 2,
     "publish:write": 1
   },
+  "lib/fresh_review_host.py": {
+    "<module>:write": 1,
+    "_call:write": 1,
+    "materialize:write_bytes": 1
+  },
   "lib/fresh_review_runtime.py": {
     "_load_pinned_factory:dynamic": 1,
     "load_adapter:dynamic": 1
@@ -192,6 +197,10 @@
   },
   "lib/mission_application/fresh_review.py": {
     "_options:dynamic": 1
+  },
+  "lib/mission_application/fresh_review_dispatch.py": {
+    "_utc:replace": 1,
+    "begin:replace": 1
   },
   "lib/mission_application/guard_application.py": {
     "_command_subject:dynamic": 1,
