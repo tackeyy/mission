@@ -14,6 +14,7 @@ import hashlib
 import json
 from pathlib import PurePosixPath
 import re
+import posixpath
 from urllib.parse import urlsplit
 
 import public_benchmark as public
@@ -26,6 +27,11 @@ SHA = re.compile(r'[0-9a-f]{40}')
 
 
 def canonical(value):
+    try: return _canonical(value)
+    except RecursionError as exc: raise ValueError('canonical_schema_invalid') from exc
+
+
+def _canonical(value):
     """RFC 8785 for our integer-only data schema; reject floats and surrogates.
 
     Numbers outside the exact IEEE-754 integer domain are rejected rather than
@@ -36,10 +42,10 @@ def canonical(value):
     if type(value) is str:
         value.encode('utf-16-be')  # rejects unpaired surrogate code points
         return json.dumps(value, ensure_ascii=False).encode()
-    if type(value) is list: return b'[' + b','.join(canonical(v) for v in value) + b']'
+    if type(value) is list: return b'[' + b','.join(_canonical(v) for v in value) + b']'
     if type(value) is dict and all(type(k) is str for k in value):
         keys = sorted(value, key=lambda k: k.encode('utf-16-be'))
-        return b'{' + b','.join(canonical(k) + b':' + canonical(value[k]) for k in keys) + b'}'
+        return b'{' + b','.join(_canonical(k) + b':' + _canonical(value[k]) for k in keys) + b'}'
     raise ValueError('canonical_schema_invalid')
 
 
@@ -127,7 +133,7 @@ def source(change):
 def case_values(result, checks):
     cases = result['cases']
     if (result['reason'] not in (None, 'contract_mismatch') or result['status'] not in ('passed', 'failed')
-            or result['case_count'] != len(checks) or len(cases) != len(checks)
+            or type(result['case_count']) is not int or result['case_count'] != len(checks) or len(cases) != len(checks)
             or {v['name'] for v in cases} != {v['name'] for v in checks}
             or any(type(v['passed']) is not bool for v in cases)):
         raise ValueError('det_cases_invalid')
@@ -174,8 +180,9 @@ def criteria(task, config, scope, observation):
             for text in scopes:
                 existing = lines(text)
                 if any(existing[j:j + len(sequence)] == sequence for j in range(len(existing))): matching = True
-    con = not matching and not any(task['task_id'] in text or repo in text for text in scopes)
-    files = {c['path'] for c in task['changes'] if source(c)}
+    absent = not any(task['task_id'].casefold() in text.casefold() or repo.casefold() in text.casefold() for text in scopes)
+    con = not matching and absent
+    files = {posixpath.normpath(c['path']) for c in task['changes'] if source(c)}
     changed = sum(len(c['added']) + len(c['deleted']) for c in task['changes'] if source(c))
     checks = task['checks']
     cx_values = {'source_files': len(files), 'changed_lines': changed, 'checks': len(checks),
@@ -184,7 +191,7 @@ def criteria(task, config, scope, observation):
     cx = (len(files) >= config['cx_files'] and changed >= config['cx_lines']
           and len(checks) >= config['cx_checks'] and cx_values['fail_to_pass'] >= 1
           and task['natural_request'] is True)
-    return [('Lic', lic, licenses), ('Con', con, {'identifier_absent': con, 'source_match': matching}),
+    return [('Lic', lic, licenses), ('Con', con, {'identifier_absent': absent, 'source_match': matching}),
             ('Cx', cx, cx_values), ('Det', deterministic(task, observation), observation)]
 
 
@@ -204,7 +211,7 @@ def lineage(tasks, percent):
             smaller = min(len(fingerprints[a]), len(fingerprints[b]))
             shared = len(fingerprints[a] & fingerprints[b])
             flags = {'G1': repos[a] == repos[b], 'G2': bool(set(one['roots']) & set(two['roots'])),
-                     'G3': smaller == 0 or shared * 100 >= percent * smaller}
+                     'G3': smaller > 0 and shared * 100 >= percent * smaller}
             pairs.append({'tasks': [a, b], **flags, 'shared_files': shared, 'smaller_files': smaller})
             if any(flags.values()):
                 low, high = sorted((root(repos[a]), root(repos[b])))
@@ -230,11 +237,17 @@ def generate_pool(snapshot, config, scope, observations, *, commit_a):
                'task_digest': digest(canonical(task))}
         observation = observations.get(task['task_id'])
         for name, accepted, values in criteria(task, config, scope, observation):
+            if name == 'Det' and observation is not None:
+                try: canonical(observation)
+                except ValueError:
+                    accepted = False; values = observation = {'invalid_schema_digest': digest(json.dumps(observation, sort_keys=True, separators=(',', ':')).encode())}
             evidence = {'task': digest(canonical(task)), 'config': digest(canonical({k: config[k] for k in
                             ('licenses', 'store_contents', *thresholds, 'snapshot_digest', 'scope_digest')})),
                         'scope': config['scope_digest'], 'values': values}
             row['criteria'][name] = {'accepted': accepted, 'values': values, 'evidence_digest': digest(canonical(evidence))}
-            if name == 'Det': row['det'] = observation
+            if name == 'Det':
+                if observation is None: raise ValueError('det_observations_missing')
+                row['det'] = observation
             if not accepted:
                 row.update(accepted=False, reason=name)
                 break
@@ -266,7 +279,7 @@ def collect_det(snapshot, config, scope, number, replay):
 def audit_tasks(seed, manifest, selected):
     result = set(selected)
     for accepted in (True, False):
-        ids = [t['task_id'] for t in manifest['tasks'] if t['det'] is not None and t['accepted'] is accepted]
+        ids = [t['task_id'] for t in manifest['tasks'] if all(t['criteria'].get(c, {}).get('accepted') is True for c in ('Lic', 'Con', 'Cx')) and t['accepted'] is accepted]
         result.update(ranked(seed, 'det-audit', ids)[:59])
     return sorted(result, key=lambda v: v.encode())
 
@@ -299,7 +312,8 @@ def enumerate_attempts(history, proofs):
     accept them. Structural history defects invalidate the complete cohort.
     """
     prs, commits = history['prs'], history['commits']
-    if (len(prs) != history['total_prs'] or history['protection'] != {'force_push': False, 'deletion': False}
+    if (type(history['total_prs']) is not int or any(type(v) is not bool for v in history['protection'].values())
+            or len(prs) != history['total_prs'] or history['protection'] != {'force_push': False, 'deletion': False}
             or len({p['sha'] for p in prs}) != len(prs) or len({c['sha'] for c in commits}) != len(commits)
             or {p['sha'] for p in prs} != {c['sha'] for c in commits}):
         raise ValueError('history_incomplete')
@@ -324,9 +338,19 @@ def enumerate_attempts(history, proofs):
             seen[path] = raw
     if seen != history['current_files']: raise ValueError('history_files_incomplete')
     for attempt in attempts.values():
-        attempt['a'] = json.loads(attempt['stages']['A']['raw'], object_pairs_hook=public._unique_object)
-        if attempt['a']['number'] != attempt['number']: raise ValueError('attempt_number_invalid')
-    ordered = sorted(attempts.values(), key=lambda a: (a['stages']['A']['merged_at'], a['number']))
+        attempt['invalid_reason'] = None
+        try:
+            a = json.loads(attempt['stages']['A']['raw'], object_pairs_hook=public._unique_object)
+            if type(a) is not dict or not {'number', 'round', 'margin', 'chain'} <= a.keys() or type(a['number']) is not int or a['number'] != attempt['number']:
+                raise ValueError('V1_invalid_A')
+            attempt['a'] = a
+        except (KeyError, TypeError, ValueError):
+            attempt['invalid_reason'] = 'V1_invalid_A'; continue
+        if not {'A', 'P', 'B'} <= attempt['stages'].keys():
+            attempt['invalid_reason'] = 'V1_missing_stage'; continue
+        attempt['schedule'] = proofs.chain_schedule(a['chain']['hash'])
+        cutoff(attempt)
+    ordered = sorted(attempts.values(), key=lambda a: (min(s['merged_at'] for s in a['stages'].values()), a['number']))
     if [a['number'] for a in ordered] != sorted(attempts): raise ValueError('attempt_order_invalid')
     return ordered
 
@@ -339,7 +363,9 @@ def prior_digest(attempts, *, before=None):
 
 
 def cutoff(attempt):
-    a = attempt['a']; chain = a['chain']
+    a = attempt['a']; chain = attempt['schedule']
+    if any(type(a['chain'][k]) is not int or a['chain'][k] != chain[k] for k in ('genesis', 'period')):
+        raise ValueError('beacon_schedule_mismatch')
     if (any(type(v) is not int for v in (a['round'], a['margin'], chain['genesis'], chain['period']))
             or min(a['round'], a['margin'], chain['period']) <= 0): raise ValueError('beacon_schedule_invalid')
     return chain['genesis'] + (a['round'] - 1) * chain['period'] - a['margin']
@@ -352,7 +378,7 @@ def before(stage, limit):
 
 def withdrawn(attempt):
     stage = attempt['stages'].get('W')
-    return stage is not None and before(stage, cutoff(attempt))
+    return not attempt.get('invalid_reason') and stage is not None and before(stage, cutoff(attempt))
 
 
 def pool_identity(manifest):
@@ -360,25 +386,38 @@ def pool_identity(manifest):
                   for r in manifest['tasks'] if r['accepted'])
 
 
+class UnknownAttempt(ValueError): pass
+
+
 def canonical_attempt(attempts, materials):
+    valid = [a for a in attempts if not a.get('invalid_reason')]
+    for i, a in enumerate(valid):
+        for p in valid[:i]:
+            limit = max(p['stages']['W']['merged_at'], p['stages']['W']['time']) if withdrawn(p) else cutoff(p)
+            times = [a['stages']['A'][k] for k in ('merged_at', 'time')]
+            if a['a']['round'] <= p['a']['round'] or (all(type(t) is int for t in times) and min(times) <= limit):
+                raise ValueError('no_canonical_attempt: attempt_chain_invalid')
     candidates = []
     for index, attempt in enumerate(attempts):
         try:
+            if attempt.get('invalid_reason'): continue
             a, stages = attempt['a'], attempt['stages']
-            previous = attempts[:index]
+            previous = [p for p in attempts[:index] if not p.get('invalid_reason')]
             if withdrawn(attempt): continue
             if not all(before(stages[s], cutoff(attempt)) for s in ('A', 'P', 'B')): continue
             if stages['P']['sha'] != stages['A']['sha']: continue
-            if digest(stages['A']['raw']).encode() not in stages['P']['raw']: continue
+            if stages['P']['raw'].splitlines().count(b'attempt_digest: ' + digest(stages['A']['raw']).encode()) != 1: continue
             if stages['A']['merged_at'] >= stages['B']['merged_at']: continue
-            if a['prior_attempts_digest'] != prior_digest(previous, before=stages['A']['merged_at']): continue
+            if a['prior_attempts_digest'] != prior_digest(attempts[:index], before=stages['A']['merged_at']): continue
             if any(a['round'] <= p['a']['round'] for p in previous): continue
             limits = [max(p['stages']['W']['merged_at'], p['stages']['W']['time'])
                       if withdrawn(p) else cutoff(p) for p in previous]
             if any(min(stages['A']['merged_at'], stages['A']['time']) <= t for t in limits): continue
             if any((withdrawn(p) or p not in candidates) and a['snapshot_digest'] == p['a']['snapshot_digest']
                    for p in previous): continue
+            if attempt['number'] not in materials: raise UnknownAttempt('attempt_materials_unknown')
             material = materials[attempt['number']]
+            if type(material) is not dict or any(material.get(k) is None for k in ('snapshot', 'scope', 'generator_sha')): raise UnknownAttempt('attempt_materials_unknown')
             if a['generator_sha'] != material['generator_sha'] or not SHA.fullmatch(a['generator_sha']): continue
             manifest = json.loads(stages['B']['raw'], object_pairs_hook=public._unique_object)
             observations = {r['task_id']: r['det'] for r in manifest['tasks'] if r['det'] is not None}
@@ -393,11 +432,11 @@ def canonical_attempt(attempts, materials):
                     except (KeyError, TypeError, ValueError):
                         pass
             if reused: continue
-            candidates.append(attempt)
-        except (KeyError, TypeError, ValueError, UnicodeError):
+            return attempt
+        except (KeyError, TypeError, ValueError, UnicodeError) as exc:
+            if isinstance(exc, UnknownAttempt) or str(exc) == 'det_observations_missing': raise
             continue
-    if not candidates: raise ValueError('no_canonical_attempt')
-    return candidates[0]
+    raise ValueError('no_canonical_attempt')
 
 
 class BundleReplay:
@@ -418,6 +457,7 @@ class BundleReplay:
 def verify_cohort(history, materials, used_number, beacon, records, proofs, replay):
     result = {'status': 'invalid_cohort', 'canonical_attempt': None, 'checks': {'1': False, '2': False, '3': False}}
     try:
+        if type(used_number) is not int: raise ValueError('attempt_number_invalid')
         attempts = enumerate_attempts(history, proofs)
         attempt = canonical_attempt(attempts, materials)
         result['canonical_attempt'] = attempt['number']
@@ -428,8 +468,8 @@ def verify_cohort(history, materials, used_number, beacon, records, proofs, repl
             raise ValueError('beacon_randomness_mismatch')
         manifest = json.loads(stages['B']['raw'])
         selection = json.loads(stages['C']['raw'])
+        if not before(stages['C'] | {'time': stages['C']['merged_at']}, stages['D']['merged_at']): raise ValueError('selection_timestamp_invalid')
         if stages['C']['merged_at'] < cutoff(attempt) + a['margin']: raise ValueError('selection_before_beacon')
-        if stages['D']['merged_at'] <= stages['C']['merged_at']: raise ValueError('confirmation_before_selection')
         if canonical(select(seed, manifest, selection['arms'])) != stages['C']['raw']:
             raise ValueError('selection_mismatch')
         d = json.loads(stages['D']['raw'])
@@ -466,7 +506,8 @@ def verify_cohort(history, materials, used_number, beacon, records, proofs, repl
         mode = a['det_mode']
         if mode not in ('all', 'audit'): raise ValueError('det_mode_invalid')
         selected = (audit_tasks(seed, manifest, chosen) if mode == 'audit'
-                    else [r['task_id'] for r in manifest['tasks'] if r['det'] is not None])
+                    else [t['task_id'] for t in materials[used_number]['snapshot']
+                          if all(v for _, v, _ in criteria(t, a, materials[used_number]['scope'], None)[:3])])
         tasks = {t['task_id']: t for t in materials[used_number]['snapshot']}
         rows = {r['task_id']: r for r in manifest['tasks']}
         for task_id in selected:

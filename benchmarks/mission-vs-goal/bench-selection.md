@@ -32,7 +32,7 @@ completeness and license/natural-request provenance belong to the acquisition
 provider; supplied booleans alone do not establish their external truth.
 
 `observations[task_id]` has three I2c result dictionaries for each of `starter`
-and `reference`. `collect_det` captures these through an injected replay provider
+and `reference`. Invalid Det JSON schema is excluded with its sorted JSON digest. `collect_det` captures these through an injected replay provider
 only after the early filters pass. `BundleReplay` calls I2c's `freeze_candidate`
 and `evaluate_assignment`; reference jobs supply a reference-applied candidate.
 Calling it with real jobs can run containers and requires execution approval.
@@ -90,3 +90,17 @@ all three checks true is selection evidence. I1 must still establish run
 separation and execution order (checks 4–5), complete assignment accounting and
 statistical validity. K computation, execution approvals and actual acquisition
 are caller responsibilities; this module does not change §9's frozen choices.
+
+## 解釈（owner 確認待ち）
+
+CC 決定に従う暫定解釈。G3 は比較対象が 0 件なら結合しない。G1・G2 は適用する。
+`chain_schedule(chain_hash)` は hash に結び付けて認証した genesis・period を返す。
+宣言値との不一致は拒否し、`cutoff` は認証値だけから計算する。
+V1 不成立の試行は `invalid_reason` を記録し、既存の正準試行を変えない。
+round の再利用・非増加や試行の重なりは cohort 全体を拒否する。
+必要な materials が欠けた試行は `attempt_materials_unknown`（UNKNOWN）とし、後続へ繰り上げない。
+P の束縛は独立した宣言行 `attempt_digest: sha256:<A の bytes の SHA-256、64 桁小文字 hex>`
+がちょうど 1 行あることとする。本文中の部分一致や宣言行の重複は認めない。
+
+未定義（owner の決定事項）: 撤回 pool の部分集合・1 task 除去を再利用に含めるか。
+実装は snapshot digest と pool identity の完全一致による既存の拒否を維持し、拡張しない。

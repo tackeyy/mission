@@ -39,6 +39,10 @@ def sign(message):
 
 class Proofs:
     """Fake transport with cryptographic proof checks, not trusted booleans."""
+    def chain_schedule(self, chain_hash):
+        if chain_hash != 'neutral-chain': raise ValueError('chain_unknown')
+        return {'genesis': 10, 'period': 10}
+
     def verify_beacon(self, chain, round_number, beacon):
         assert chain['public_key'] == str(N)
         message = chain['hash'].encode() + round_number.to_bytes(8, 'big')
@@ -127,7 +131,7 @@ def put(m, history, number, stage, sha, content, when):
     commit = {'sha': sha, 'files': {path: content}}
     if stage == 'A':
         document = f'{m.ATTEMPT_PATH}/{number:04}/preregistration.md'
-        commit['files'][document] = b'# Frozen registration\n' + m.digest(content).encode()
+        commit['files'][document] = b'# Frozen registration\nattempt_digest: ' + m.digest(content).encode()
     history['commits'].append(commit)
     proofs = {p: {'time': when + 1, 'signature': sign((m.digest(raw) + ':' + str(when + 1)).encode())}
               for p, raw in commit['files'].items()}
@@ -157,7 +161,7 @@ def update_file(m, history, stage, value, number=1):
             pr['proofs'][path]['signature'] = sign((m.digest(raw) + ':' + str(time)).encode())
     if stage == 'A':
         document = f'{m.ATTEMPT_PATH}/{number:04}/preregistration.md'
-        document_raw = b'# Frozen registration\n' + m.digest(raw).encode()
+        document_raw = b'# Frozen registration\nattempt_digest: ' + m.digest(raw).encode()
         for c in history['commits'] + history['prs']:
             if document in c['files']: c['files'][document] = document_raw
         history['current_files'][document] = document_raw
@@ -242,12 +246,11 @@ def test_attempt_chain_rounds_and_nonoverlap_are_seed_independent(m, defect):
                       round_number=100 if defect == 'round-reuse' else 99 if defect == 'round-decrease' else 200)
     if defect == 'overlap':
         f = fixture(m); attempts = second(m, f, a_time=800)
+    if defect == 'round-reuse':
+        f = fixture(m); attempts = second(m, f, round_number=100)
     if defect == 'prior-digest': attempts[1]['a']['prior_attempts_digest'] = 'sha256:' + '0' * 64
-    if defect == 'overlap':
-        assert m.canonical_attempt(attempts, f[1])['number'] == 1
-    else:
-        with pytest.raises(ValueError, match='no_canonical_attempt'):
-            m.canonical_attempt(attempts, f[1])
+    with pytest.raises(ValueError, match='no_canonical_attempt'):
+        m.canonical_attempt(attempts, f[1])
 
 
 @pytest.mark.parametrize('when,merged', [(899, True), (900, True), (950, True), (600, False)])
@@ -280,7 +283,7 @@ def test_manifest_regeneration_detects_every_form_of_pool_edit(m, defect):
         path = next(iter(h['prs'][1]['files'])); raw += b'\n'
         h['prs'][1]['files'][path] = h['commits'][1]['files'][path] = h['current_files'][path] = raw
     else: update_file(m, h, 'B', b)
-    with pytest.raises(ValueError, match='no_canonical_attempt'):
+    with pytest.raises(ValueError, match='no_canonical_attempt|det_observations_missing'):
         m.canonical_attempt(m.enumerate_attempts(h, Proofs()), f[1])
     assert check(m, f)['status'] == 'invalid_cohort'
 
@@ -431,7 +434,7 @@ def test_frozen_inputs_and_preregistration_evidence_cannot_be_replaced(m, defect
             f[1][2] = copy.deepcopy(f[1][1])
             a = attempts[1]['a']
             attempts[1]['stages']['A']['raw'] = m.canonical(a)
-            attempts[1]['stages']['P']['raw'] = b'# Frozen registration\n' + m.digest(m.canonical(a)).encode()
+            attempts[1]['stages']['P']['raw'] = b'# Frozen registration\nattempt_digest: ' + m.digest(m.canonical(a)).encode()
             attempts[1]['stages']['B']['raw'] = m.generate_pool(f[1][1]['snapshot'], a, f[1][1]['scope'],
                 f[1][1]['observations'], commit_a=attempts[1]['stages']['A']['sha'])
         with pytest.raises(ValueError, match='no_canonical_attempt'): m.canonical_attempt(attempts, f[1])
@@ -638,7 +641,7 @@ def test_declared_metadata_cannot_replace_execution_or_pool_identity(m, defect):
         a = attempts[1]['a']; a['snapshot_digest'] = m.snapshot_digest(material['snapshot'])
         a['prior_attempts_digest'] = m.prior_digest(attempts[:1], before=700)
         attempts[1]['stages']['A']['raw'] = m.canonical(a)
-        attempts[1]['stages']['P']['raw'] = b'# Frozen registration\n' + m.digest(m.canonical(a)).encode()
+        attempts[1]['stages']['P']['raw'] = b'# Frozen registration\nattempt_digest: ' + m.digest(m.canonical(a)).encode()
         attempts[1]['stages']['B']['raw'] = m.generate_pool(material['snapshot'], a, material['scope'], material['observations'], commit_a='1' * 40)
         f[1][2] = material
         with pytest.raises(ValueError, match='no_canonical_attempt'): m.canonical_attempt(attempts, f[1])
@@ -650,4 +653,95 @@ def test_declared_metadata_cannot_replace_execution_or_pool_identity(m, defect):
     if defect == 'wrong-task': f[3][0]['task_id'] = 'unselected'
     if defect == 'unplanned-arm': f[3][0]['arm'] = 'other'
     if defect == 'float-start': f[3][0]['started_at'] = 1200.5
+    assert check(m, f)['status'] == 'invalid_cohort'
+
+
+@pytest.mark.parametrize('finding', ['H1', 'M1', 'M2', 'L1', 'L2', 'L3-case-count', 'L3-row', 'L5'])
+def test_exploration_pool_regressions(m, finding):
+    data = inputs(m); t = data[0][0]
+    if finding == 'H1':
+        data[3].pop(t['task_id'])
+        with pytest.raises(ValueError, match='det_observations_missing'): pool(m, data)
+        return
+    if finding == 'L3-row':
+        data[3][t['task_id']]['starter'][0]['case_count'] = 3.5
+        assert json.loads(pool(m, data))['tasks'][0]['reason'] == 'Det'
+        return
+    if finding == 'L5':
+        value = None
+        for _ in range(2000): value = [value]
+        with pytest.raises(ValueError, match='canonical_schema_invalid'): m.canonical(value)
+        return
+    if finding == 'M1': data[2]['mission']['README.md'] = 'Owner/Project-0'
+    if finding == 'M2': t['base_files'] = {'tiny': 'one line'}
+    if finding == 'L1': data[2]['mission']['README.md'] = '\n'.join(t['changes'][0]['added'][:3])
+    if finding == 'L2': t['changes'] += [t['changes'][0] | {'path': './src/a.py'}, t['changes'][0] | {'path': 'src//a.py'}]
+    if finding == 'L3-case-count':
+        t['checks'] = t['checks'][:1]
+        result = {'status': 'passed', 'reason': None, 'case_count': True, 'cases': [{'name': 'repair', 'passed': True}]}
+        with pytest.raises(ValueError, match='det_cases_invalid'): m.case_values(result, t['checks'])
+        return
+    data[1]['snapshot_digest'] = m.snapshot_digest(data[0]); data[1]['scope_digest'] = m.digest(m.canonical(data[2]))
+    b = json.loads(pool(m, data)); row = b['tasks'][0]
+    if finding == 'M1': assert row['reason'] == 'Con'
+    if finding == 'M2': assert len({r['unit_id'] for r in b['tasks']}) == 16 and not b['lineage'][0]['G3']
+    if finding == 'L1': assert row['criteria']['Con']['values'] == {'identifier_absent': True, 'source_match': True}
+    if finding == 'L2': assert row['criteria']['Cx']['values']['source_files'] == 2
+
+
+@pytest.mark.parametrize('finding', ['M4', 'L3-protection', 'L3-total', 'L3-used', 'L3-C', 'L4', 'L6a', 'H1-cohort'])
+def test_exploration_verification_regressions(m, finding):
+    f = fixture(m)
+    if finding == 'M4':
+        a = json.loads(f[0]['prs'][0]['files'][next(iter(f[0]['prs'][0]['files']))]); a['chain']['genesis'] += 1000
+        update_file(m, f[0], 'A', a)
+        f[0]['prs'][2]['merged_at'] = 2001; f[0]['prs'][3]['merged_at'] = 2100
+        for r in f[3]: r['started_at'] += 1000
+    if finding == 'L3-protection': f[0]['protection']['force_push'] = 0
+    if finding == 'L3-total': f[0]['prs'] = []; f[0]['commits'] = []; f[0]['total_prs'] = False; f[0]['current_files'] = {}
+    if finding == 'L3-total':
+        with pytest.raises(ValueError): m.enumerate_attempts(f[0], Proofs())
+        return
+    if finding == 'L3-C': f[0]['prs'][2]['merged_at'] = 1001.5
+    if finding == 'L4':
+        path = next(p for p in f[0]['current_files'] if p.endswith('preregistration.md'))
+        raw = b'# incidental digest\n' + m.digest(f[0]['prs'][0]['files'][next(iter(f[0]['prs'][0]['files']))]).encode()
+        for c in f[0]['commits'] + f[0]['prs']:
+            if path in c['files']: c['files'][path] = raw
+        f[0]['current_files'][path] = raw
+        f[0]['prs'][0]['proofs'][path]['signature'] = sign((m.digest(raw) + ':101').encode())
+    if finding in ('L6a', 'H1-cohort'):
+        attempts = second(m, f); material = f[1][2]; a = attempts[1]['a']
+        old = material['snapshot'][-1]['task_id']; material['snapshot'][-1] = task(999); material['observations']['task-999'] = material['observations'].pop(old)
+        a['snapshot_digest'] = m.snapshot_digest(material['snapshot']); attempts[1]['stages']['A']['raw'] = m.canonical(a)
+        attempts[1]['stages']['P']['raw'] = b'attempt_digest: ' + m.digest(m.canonical(a)).encode()
+        attempts[1]['stages']['B']['raw'] = m.generate_pool(material['snapshot'], a, material['scope'], material['observations'], commit_a='1' * 40)
+        if finding == 'L6a': f[1].pop(1)
+        else:
+            b = json.loads(attempts[0]['stages']['B']['raw']); b['tasks'][0]['det'] = None; attempts[0]['stages']['B']['raw'] = m.canonical(b)
+            a['prior_attempts_digest'] = m.prior_digest(attempts[:1], before=attempts[1]['stages']['A']['merged_at']); attempts[1]['stages']['A']['raw'] = m.canonical(a)
+            attempts[1]['stages']['P']['raw'] = b'attempt_digest: ' + m.digest(m.canonical(a)).encode()
+        with pytest.raises(ValueError, match='attempt_materials_unknown|det_observations_missing'): m.canonical_attempt(attempts, f[1])
+        return
+    assert check(m, f, used=True if finding == 'L3-used' else 1)['status'] == 'invalid_cohort'
+
+
+@pytest.mark.parametrize('defect', ['B-only', 'W-only', 'broken-A', 'duplicate-A', 'wrong-number'])
+def test_later_v1_invalid_attempt_does_not_poison_canonical_attempt(m, defect):
+    f = fixture(m)
+    stage = 'B' if defect == 'B-only' else 'W' if defect == 'W-only' else 'A'
+    raw = b'{' if defect == 'broken-A' else b'{"number":2,"number":2}' if defect == 'duplicate-A' else m.canonical({'number': 9})
+    if defect == 'wrong-number': raw = m.canonical(json.loads(f[0]['prs'][0]['files'][next(iter(f[0]['prs'][0]['files']))]) | {'number': 9})
+    put(m, f[0], 2, stage, '2' * 40, raw, 2000)
+    if defect == 'wrong-number': put(m, f[0], 2, 'B', '3' * 40, f[0]['prs'][1]['files'][next(iter(f[0]['prs'][1]['files']))], 2030)
+    attempts = m.enumerate_attempts(f[0], Proofs())
+    assert attempts[1]['invalid_reason'] and check(m, f)['status'] == 'valid'
+
+
+@pytest.mark.parametrize('mode', ['all', 'audit'])
+def test_replay_eligibility_does_not_trust_missing_b_observations(m, monkeypatch, mode):
+    f = fixture(m, 18); a = json.loads(f[0]['prs'][0]['files'][next(iter(f[0]['prs'][0]['files']))]); a['det_mode'] = mode
+    update_file(m, f[0], 'A', a); b = json.loads(f[0]['prs'][1]['files'][next(iter(f[0]['prs'][1]['files']))]); c = json.loads(f[0]['prs'][2]['files'][next(iter(f[0]['prs'][2]['files']))]); next(r for r in b['tasks'] if r['unit_id'] == c['ranking'][4])['det'] = None
+    update_file(m, f[0], 'B', b)
+    monkeypatch.setattr(m, 'generate_pool', lambda *args, **kwargs: m.canonical(b))  # faulty self-consistent regenerator
     assert check(m, f)['status'] == 'invalid_cohort'
