@@ -74,7 +74,7 @@ def ranked(seed, purpose, ids):
 
 def assignments(seed, stage, primary, units, control, arms, repeats):
     if (len(set(arms)) != len(arms) or not {'native_goal', 'mission_verified_complex'} <= set(arms)
-            or not set(arms) <= set(ARMS)):
+            or not set(arms) <= set(ARMS) or (stage == 'pilot' and set(arms) != set(ARMS))):
         raise ValueError('arms_invalid')
     rows = []
     for group, selected in (('worker', units), ('control', control)):
@@ -182,7 +182,7 @@ def criteria(task, config, scope, observation):
                 if any(existing[j:j + len(sequence)] == sequence for j in range(len(existing))): matching = True
     absent = not any(task['task_id'].casefold() in text.casefold() or repo.casefold() in text.casefold() for text in scopes)
     con = not matching and absent
-    files = {posixpath.normpath(c['path']) for c in task['changes'] if source(c)}
+    files = {posixpath.normpath(c['path']) for c in task['changes'] if source(c) and (c['added'] or c['deleted'])}
     changed = sum(len(c['added']) + len(c['deleted']) for c in task['changes'] if source(c))
     checks = task['checks']
     cx_values = {'source_files': len(files), 'changed_lines': changed, 'checks': len(checks),
@@ -341,8 +341,11 @@ def enumerate_attempts(history, proofs):
         attempt['invalid_reason'] = None
         try:
             a = json.loads(attempt['stages']['A']['raw'], object_pairs_hook=public._unique_object)
-            if type(a) is not dict or not {'number', 'round', 'margin', 'chain'} <= a.keys() or type(a['number']) is not int or a['number'] != attempt['number']:
+            if type(a) is not dict or not {'number', 'round', 'margin', 'chain', 'snapshot_digest', 'scope_digest', 'generator_sha',
+                    'prior_attempts_digest', 'licenses', 'store_contents', 'cx_files', 'cx_checks', 'cx_lines',
+                    'con_length', 'con_lines', 'g3_percent', 'det_mode', 'packages'} <= a.keys() or type(a['number']) is not int or a['number'] != attempt['number']:
                 raise ValueError('V1_invalid_A')
+            if type(a['chain']) is not dict or not {'hash', 'public_key', 'genesis', 'period'} <= a['chain'].keys(): raise ValueError('V1_invalid_A')
             attempt['a'] = a
         except (KeyError, TypeError, ValueError):
             attempt['invalid_reason'] = 'V1_invalid_A'; continue
@@ -397,7 +400,6 @@ def canonical_attempt(attempts, materials):
             times = [a['stages']['A'][k] for k in ('merged_at', 'time')]
             if a['a']['round'] <= p['a']['round'] or (all(type(t) is int for t in times) and min(times) <= limit):
                 raise ValueError('no_canonical_attempt: attempt_chain_invalid')
-    candidates = []
     for index, attempt in enumerate(attempts):
         try:
             if attempt.get('invalid_reason'): continue
@@ -409,12 +411,7 @@ def canonical_attempt(attempts, materials):
             if stages['P']['raw'].splitlines().count(b'attempt_digest: ' + digest(stages['A']['raw']).encode()) != 1: continue
             if stages['A']['merged_at'] >= stages['B']['merged_at']: continue
             if a['prior_attempts_digest'] != prior_digest(attempts[:index], before=stages['A']['merged_at']): continue
-            if any(a['round'] <= p['a']['round'] for p in previous): continue
-            limits = [max(p['stages']['W']['merged_at'], p['stages']['W']['time'])
-                      if withdrawn(p) else cutoff(p) for p in previous]
-            if any(min(stages['A']['merged_at'], stages['A']['time']) <= t for t in limits): continue
-            if any((withdrawn(p) or p not in candidates) and a['snapshot_digest'] == p['a']['snapshot_digest']
-                   for p in previous): continue
+            if any(a['snapshot_digest'] == p['a']['snapshot_digest'] for p in previous): continue
             if attempt['number'] not in materials: raise UnknownAttempt('attempt_materials_unknown')
             material = materials[attempt['number']]
             if type(material) is not dict or any(material.get(k) is None for k in ('snapshot', 'scope', 'generator_sha')): raise UnknownAttempt('attempt_materials_unknown')
@@ -425,16 +422,15 @@ def canonical_attempt(attempts, materials):
             if regenerated != stages['B']['raw']: continue
             reused = False
             for previous_attempt in previous:
-                if withdrawn(previous_attempt) or previous_attempt not in candidates:
-                    try:
-                        old_pool = json.loads(previous_attempt['stages']['B']['raw'])
-                        if pool_identity(old_pool) == pool_identity(manifest): reused = True
-                    except (KeyError, TypeError, ValueError):
-                        pass
+                try:
+                    old_pool = json.loads(previous_attempt['stages']['B']['raw'])
+                    if pool_identity(old_pool) == pool_identity(manifest): reused = True
+                except (KeyError, TypeError, ValueError):
+                    pass
             if reused: continue
             return attempt
         except (KeyError, TypeError, ValueError, UnicodeError) as exc:
-            if isinstance(exc, UnknownAttempt) or str(exc) == 'det_observations_missing': raise
+            if isinstance(exc, UnknownAttempt): raise
             continue
     raise ValueError('no_canonical_attempt')
 
@@ -470,7 +466,7 @@ def verify_cohort(history, materials, used_number, beacon, records, proofs, repl
         selection = json.loads(stages['C']['raw'])
         if not before(stages['C'] | {'time': stages['C']['merged_at']}, stages['D']['merged_at']): raise ValueError('selection_timestamp_invalid')
         if stages['C']['merged_at'] < cutoff(attempt) + a['margin']: raise ValueError('selection_before_beacon')
-        if canonical(select(seed, manifest, selection['arms'])) != stages['C']['raw']:
+        if canonical(select(seed, manifest, ARMS)) != stages['C']['raw']:
             raise ValueError('selection_mismatch')
         d = json.loads(stages['D']['raw'])
         minimum = materials[used_number]['minimum_k']
@@ -478,14 +474,12 @@ def verify_cohort(history, materials, used_number, beacon, records, proofs, repl
         confirmation = confirm(seed, selection, stages['C']['sha'], d['K'], d['arms'])
         if canonical(confirmation) != stages['D']['raw']: raise ValueError('confirmation_mismatch')
         primary = [selection['primary'][u] for u in selection['ranking'][:d['K']]]
-        primary_units = [r['unit_id'] for r in manifest['tasks'] if r['task_id'] in primary]
-        if len(set(primary_units)) != d['K']: raise ValueError('primary_unit_duplicate')
         result['checks']['1'] = True
         result['lineage_digest'] = manifest['lineage_digest']
+        declared = [line.removeprefix(b'lineage_digest: ').decode() for line in stages['P']['raw'].splitlines() if line.startswith(b'lineage_digest: ')]
         result['checks']['2'] = (digest(canonical(manifest['lineage'])) == manifest['lineage_digest']
-                                 == materials[used_number]['lineage_digest'])
+                                 and declared == [manifest['lineage_digest']])
         if not result['checks']['2']: raise ValueError('lineage_digest_mismatch')
-        if not records: raise ValueError('confirmation_records_missing')
         pilot_units = set(selection['pilot']); confirm_units = set(selection['ranking'][:d['K']])
         confirmation_records = [r for r in records if r['unit_id'] in confirm_units]
         if not confirmation_records: raise ValueError('confirmation_records_missing')
@@ -499,8 +493,6 @@ def verify_cohort(history, materials, used_number, beacon, records, proofs, repl
             arms = d['arms'] if r['unit_id'] in confirm_units else selection['arms']
             if r['arm'] not in arms: raise ValueError('unplanned_arm_run')
             if r['started_at'] <= stages['C']['merged_at']: raise ValueError('worker_before_selection')
-            if r['unit_id'] in confirm_units and r['started_at'] <= stages['D']['merged_at']:
-                raise ValueError('worker_before_confirmation')
             if r['package'] != a['packages'][r['arm']]: raise ValueError('package_mismatch')
         chosen = primary + [selection['primary'][u] for u in selection['pilot']]
         mode = a['det_mode']

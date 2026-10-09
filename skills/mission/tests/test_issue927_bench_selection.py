@@ -108,6 +108,7 @@ def fixture(m, count=16):
     beacon = {'signature': signature, 'randomness': hashlib.sha256(bytes.fromhex(signature)).hexdigest()}
     seed = bytes.fromhex(beacon['randomness'])
     b = pool(m, data)
+    a['lineage_digest'] = json.loads(b)['lineage_digest']
     c = m.canonical(m.select(seed, json.loads(b), m.ARMS))
     d = m.canonical(m.confirm(seed, json.loads(c), 'c' * 40, 4, m.ARMS))
     history = {'commits': [], 'prs': [], 'current_files': {}, 'reachable': [], 'total_prs': 0,
@@ -131,7 +132,9 @@ def put(m, history, number, stage, sha, content, when):
     commit = {'sha': sha, 'files': {path: content}}
     if stage == 'A':
         document = f'{m.ATTEMPT_PATH}/{number:04}/preregistration.md'
-        commit['files'][document] = b'# Frozen registration\nattempt_digest: ' + m.digest(content).encode()
+        try: lineage = json.loads(content).get('lineage_digest', '')
+        except (ValueError, AttributeError): lineage = ''
+        commit['files'][document] = b'# Frozen registration\nattempt_digest: ' + m.digest(content).encode() + b'\nlineage_digest: ' + lineage.encode()
     history['commits'].append(commit)
     proofs = {p: {'time': when + 1, 'signature': sign((m.digest(raw) + ':' + str(when + 1)).encode())}
               for p, raw in commit['files'].items()}
@@ -149,9 +152,9 @@ def check(m, f, used=1, rerun=None):
 
 
 def update_file(m, history, stage, value, number=1):
-    name = {'A': 'attempt.json', 'B': 'pool-manifest.json', 'C': 'selection.json', 'D': 'confirmation.json'}[stage]
+    name = {'A': 'attempt.json', 'B': 'pool-manifest.json', 'C': 'selection.json', 'D': 'confirmation.json', 'P': 'preregistration.md'}[stage]
     path = f'{m.ATTEMPT_PATH}/{number:04}/{name}'
-    raw = m.canonical(value)
+    raw = value if type(value) is bytes else m.canonical(value)
     for c in history['commits'] + history['prs']:
         if path in c['files']: c['files'][path] = raw
     history['current_files'][path] = raw
@@ -161,7 +164,7 @@ def update_file(m, history, stage, value, number=1):
             pr['proofs'][path]['signature'] = sign((m.digest(raw) + ':' + str(time)).encode())
     if stage == 'A':
         document = f'{m.ATTEMPT_PATH}/{number:04}/preregistration.md'
-        document_raw = b'# Frozen registration\nattempt_digest: ' + m.digest(raw).encode()
+        document_raw = b'# Frozen registration\nattempt_digest: ' + m.digest(raw).encode() + b'\nlineage_digest: ' + json.loads(raw).get('lineage_digest', '').encode()
         for c in history['commits'] + history['prs']:
             if document in c['files']: c['files'][document] = document_raw
         history['current_files'][document] = document_raw
@@ -197,22 +200,26 @@ def test_history_requires_complete_append_only_main_pr_bijection(m, defect):
     f = fixture(m); h = f[0]
     if defect == 'unreachable': h['reachable'].remove('b' * 40)
     if defect == 'changed-file': h['current_files'][next(iter(h['current_files']))] = b'changed'
-    if defect == 'direct-commit': h['prs'].pop(0); h['total_prs'] -= 1
+    if defect == 'direct-commit': h['commits'].append(h['commits'][0] | {'sha': '9' * 40})
     if defect == 'missing-commit': h['commits'].pop(0)
     if defect == 'wrong-base': h['prs'][0]['base'] = 'other'
     if defect == 'outside-path':
         pr = h['prs'][0]; path, raw = next(iter(pr['files'].items()))
-        pr['files'] = {'other/attempt.json': raw}
+        for c in h['commits'] + h['prs']:
+            if path in c['files']: c['files']['other/attempt.json'] = c['files'].pop(path)
+        h['current_files']['other/attempt.json'] = h['current_files'].pop(path)
     if defect == 'missing-page': h['total_prs'] += 1
     if defect == 'duplicate-pr': h['prs'].append(h['prs'][0]); h['total_prs'] += 1
     if defect == 'unprotected': h['protection']['force_push'] = True
     if defect == 'wrong-B-reference':
         b = json.loads(h['prs'][1]['files'][next(iter(h['prs'][1]['files']))]); b['commit_a'] = 'wrong'
         update_file(m, h, 'B', b)
-    assert check(m, f)['status'] == 'invalid_cohort'
+    result = check(m, f)
+    assert result['status'] == 'invalid_cohort'
+    if defect in ('direct-commit', 'outside-path'): assert result['reason'] == ('history_incomplete' if defect == 'direct-commit' else 'history_path_invalid')
 
 
-def second(m, f, *, withdrawal=None, a_time=1300, round_number=200):
+def second(m, f, *, withdrawal=None, a_time=1300, round_number=200, new_pool=False):
     h = f[0]
     if withdrawal is not None:
         put(m, h, 1, 'W', 'e' * 40, m.canonical({'reason': 'package_change'}), withdrawal)
@@ -221,14 +228,14 @@ def second(m, f, *, withdrawal=None, a_time=1300, round_number=200):
     a.update(number=2, round=round_number, prior_attempts_digest=m.prior_digest(previous, before=a_time))
     f[1][2] = copy.deepcopy(f[1][1])
     material = f[1][2]
-    if withdrawal is not None:
+    if withdrawal is not None or new_pool:
         old_id = material['snapshot'][-1]['task_id']
         material['snapshot'][-1] = task(999)
         material['observations']['task-999'] = material['observations'].pop(old_id)
         a['snapshot_digest'] = m.snapshot_digest(material['snapshot'])
-    put(m, h, 2, 'A', '1' * 40, m.canonical(a), a_time)
     b = m.generate_pool(material['snapshot'], a, material['scope'], material['observations'], commit_a='1' * 40)
-    material['lineage_digest'] = json.loads(b)['lineage_digest']
+    a['lineage_digest'] = material['lineage_digest'] = json.loads(b)['lineage_digest']
+    put(m, h, 2, 'A', '1' * 40, m.canonical(a), a_time)
     put(m, h, 2, 'B', '2' * 40, b, a_time + 30)
     return m.enumerate_attempts(h, Proofs())
 
@@ -299,7 +306,7 @@ def test_audit_contains_all_selected_and_59_per_det_stratum_by_key(m):
     data = inputs(m, 150)
     for t in data[0][75:]: data[3][t['task_id']]['starter'] = [observed(True)] * 3
     manifest = json.loads(pool(m, data)); seed = b'seed'
-    chosen = ['task-149']
+    chosen = [next(t['task_id'] for t in manifest['tasks'] if t['task_id'] not in m.audit_tasks(seed, manifest, []))]
     ids = m.audit_tasks(seed, manifest, chosen)
     expected = set(chosen)
     for rows in (manifest['tasks'][:75], manifest['tasks'][75:]):
@@ -326,9 +333,14 @@ def test_postseed_failure_invalidates_cohort_without_fallback(m, defect):
     if defect == 'D-proof-time':
         path = next(iter(h['prs'][3]['files'])); h['prs'][3]['proofs'][path] = {
             'time': 1200, 'signature': sign((m.digest(h['prs'][3]['files'][path]) + ':1200').encode())}
-    if defect == 'pre-C-worker': records[0]['started_at'] = 1000
+    if defect == 'pre-C-worker':
+        pilot = json.loads(h['prs'][2]['files'][next(iter(h['prs'][2]['files']))])['assignments'][0]
+        records.append({k: pilot[k] for k in ('task_id', 'unit_id', 'arm')} | {'package': records[0]['package'], 'started_at': 1000})
+        records[-1]['package'] = json.loads(h['prs'][0]['files'][next(iter(h['prs'][0]['files']))])['packages'][pilot['arm']]
     if defect == 'pre-D-worker': records[0]['started_at'] = 1099
-    assert check(m, f)['status'] == 'invalid_cohort'
+    result = check(m, f)
+    assert result['status'] == 'invalid_cohort'
+    if defect == 'pre-C-worker': assert result['reason'] == 'worker_before_selection'
 
 
 def test_key_length_prefix_and_ties_use_utf8_identifiers(m, monkeypatch):
@@ -439,7 +451,7 @@ def test_frozen_inputs_and_preregistration_evidence_cannot_be_replaced(m, defect
                 f[1][1]['observations'], commit_a=attempts[1]['stages']['A']['sha'])
         with pytest.raises(ValueError, match='no_canonical_attempt'): m.canonical_attempt(attempts, f[1])
     else:
-        if defect == 'lineage-binding': f[1][1]['lineage_digest'] = 'sha256:' + '0' * 64
+        if defect == 'lineage-binding': update_file(m, f[0], 'P', next(v for p, v in f[0]['current_files'].items() if p.endswith('preregistration.md')).replace(b'lineage_digest: sha256:', b'lineage_digest: wrong:'))
         if defect == 'C-before-beacon': f[0]['prs'][2]['merged_at'] = 999
         if defect == 'generator-binding': f[1][1]['generator_sha'] = '0' * 40
         if defect == 'minimum-K': f[1][1]['minimum_k'] = 5
@@ -528,6 +540,7 @@ def regenerate_committed(m, f):
     h, materials, beacon, records = f
     a = json.loads(h['prs'][0]['files'][next(iter(h['prs'][0]['files']))]); material = materials[1]
     b = json.loads(m.generate_pool(material['snapshot'], a, material['scope'], material['observations'], commit_a='a' * 40))
+    a['lineage_digest'] = b['lineage_digest']; update_file(m, h, 'A', a)
     c = m.select(bytes.fromhex(beacon['randomness']), b, m.ARMS)
     d = m.confirm(bytes.fromhex(beacon['randomness']), c, 'c' * 40, 4, m.ARMS)
     for stage, value in [('B', b), ('C', c), ('D', d)]: update_file(m, h, stage, value)
@@ -565,7 +578,7 @@ def test_collect_det_uses_i2c_provider_three_times_per_variant_after_early_filte
 @pytest.mark.parametrize('defect', ['proof-error', 'replay-error', 'missing-document', 'document-binding',
                                    'empty-records', 'unknown-unit', 'invalid-det-mode'])
 def test_unavailable_or_missing_evidence_fails_closed(m, defect):
-    f = fixture(m)
+    f = fixture(m, 18 if defect == 'unknown-unit' else 16)
     if defect == 'replay-error':
         def replay(*args): raise OSError('unavailable evaluator')
         assert check(m, f, rerun=replay)['status'] == 'invalid_cohort'; return
@@ -581,11 +594,14 @@ def test_unavailable_or_missing_evidence_fails_closed(m, defect):
                 if path in c['files']: c['files'][path] = b'different registration'
             f[0]['current_files'][path] = b'different registration'
     if defect == 'empty-records': f[3].clear()
-    if defect == 'unknown-unit': f[3][0]['unit_id'] = 'unknown'
+    if defect == 'unknown-unit':
+        c = json.loads(f[0]['prs'][2]['files'][next(iter(f[0]['prs'][2]['files']))]); f[3][0].update(unit_id=c['ranking'][4], task_id=c['primary'][c['ranking'][4]])
     if defect == 'invalid-det-mode':
         a = json.loads(f[0]['prs'][0]['files'][next(iter(f[0]['prs'][0]['files']))]); a['det_mode'] = 'none'
         update_file(m, f[0], 'A', a)
-    assert check(m, f)['status'] == 'invalid_cohort'
+    result = check(m, f)
+    assert result['status'] == 'invalid_cohort'
+    if defect == 'unknown-unit': assert result['reason'] == 'unselected_worker_run'
 
 
 def test_beacon_signature_is_checked_even_when_randomness_matches_bad_signature(m):
@@ -609,7 +625,7 @@ def test_snapshot_digest_and_missing_root_evidence_cannot_be_accepted(m):
     with pytest.raises(ValueError, match='lineage_roots_missing'): pool(m, data)
 
 
-@pytest.mark.parametrize('defect', [None, 'repeat-cursor', 'total-changed', 'missing-page', 'head-moved'])
+@pytest.mark.parametrize('defect', [None, 'repeat-cursor', 'total-changed', 'missing-page', 'head-moved', 'invalid-total'])
 def test_provider_adapter_drains_pages_and_freezes_one_main_snapshot(m, defect):
     h = fixture(m)[0]; calls = []
     class Provider:
@@ -621,11 +637,11 @@ def test_provider_adapter_drains_pages_and_freezes_one_main_snapshot(m, defect):
             assert path == m.ATTEMPT_PATH; calls.append(cursor)
             index = 0 if cursor is None else int(cursor)
             return {'items': h['prs'][index:index + 2],
-                    'total': 5 if defect == 'total-changed' and index else 4,
+                    'total': 4.0 if defect == 'invalid-total' else 5 if defect == 'total-changed' and index else 4,
                     'next': cursor if defect == 'repeat-cursor' and index else
                             None if index or defect == 'missing-page' else '2'}
     if defect:
-        with pytest.raises(ValueError): m.acquire_history(Provider())
+        with pytest.raises(ValueError, match='pagination_total_invalid' if defect == 'invalid-total' else 'main_moved' if defect == 'head-moved' else 'pagination_'): m.acquire_history(Provider())
     else:
         assert m.acquire_history(Provider()) == h and calls == [None, '2']
 
@@ -651,12 +667,15 @@ def test_declared_metadata_cannot_replace_execution_or_pool_identity(m, defect):
         with pytest.raises(ValueError, match='det_cases_invalid'): m.case_values(result, task(0)['checks'])
         return
     if defect == 'wrong-task': f[3][0]['task_id'] = 'unselected'
-    if defect == 'unplanned-arm': f[3][0]['arm'] = 'other'
+    if defect == 'unplanned-arm':
+        f[3][0]['arm'] = 'other'; a = json.loads(f[0]['prs'][0]['files'][next(iter(f[0]['prs'][0]['files']))]); a['packages']['other'] = f[3][0]['package']; update_file(m, f[0], 'A', a)
     if defect == 'float-start': f[3][0]['started_at'] = 1200.5
-    assert check(m, f)['status'] == 'invalid_cohort'
+    result = check(m, f)
+    assert result['status'] == 'invalid_cohort'
+    if defect == 'unplanned-arm': assert result['reason'] == 'unplanned_arm_run'
 
 
-@pytest.mark.parametrize('finding', ['H1', 'M1', 'M2', 'L1', 'L2', 'L3-case-count', 'L3-row', 'L5'])
+@pytest.mark.parametrize('finding', ['H1', 'M1', 'M2', 'L1', 'L2', 'L3-case-count', 'L3-row', 'L5', 'empty-source', 'deleted-source'])
 def test_exploration_pool_regressions(m, finding):
     data = inputs(m); t = data[0][0]
     if finding == 'H1':
@@ -672,6 +691,8 @@ def test_exploration_pool_regressions(m, finding):
         for _ in range(2000): value = [value]
         with pytest.raises(ValueError, match='canonical_schema_invalid'): m.canonical(value)
         return
+    if finding == 'deleted-source': t['changes'][1]['deleted'] = t['changes'][1]['added']; t['changes'][1]['added'] = []
+    if finding == 'empty-source': t['changes'][0]['added'] *= 2; t['changes'][1]['added'] = []
     if finding == 'M1': data[2]['mission']['README.md'] = 'Owner/Project-0'
     if finding == 'M2': t['base_files'] = {'tiny': 'one line'}
     if finding == 'L1': data[2]['mission']['README.md'] = '\n'.join(t['changes'][0]['added'][:3])
@@ -683,10 +704,11 @@ def test_exploration_pool_regressions(m, finding):
         return
     data[1]['snapshot_digest'] = m.snapshot_digest(data[0]); data[1]['scope_digest'] = m.digest(m.canonical(data[2]))
     b = json.loads(pool(m, data)); row = b['tasks'][0]
+    if finding == 'empty-source': assert row['reason'] == 'Cx' and row['criteria']['Cx']['values']['source_files'] == 1
     if finding == 'M1': assert row['reason'] == 'Con'
     if finding == 'M2': assert len({r['unit_id'] for r in b['tasks']}) == 16 and not b['lineage'][0]['G3']
     if finding == 'L1': assert row['criteria']['Con']['values'] == {'identifier_absent': True, 'source_match': True}
-    if finding == 'L2': assert row['criteria']['Cx']['values']['source_files'] == 2
+    if finding in ('L2', 'deleted-source'): assert row['criteria']['Cx']['values']['source_files'] == 2
 
 
 @pytest.mark.parametrize('finding', ['M4', 'L3-protection', 'L3-total', 'L3-used', 'L3-C', 'L4', 'L6a', 'H1-cohort'])
@@ -711,29 +733,29 @@ def test_exploration_verification_regressions(m, finding):
         f[0]['current_files'][path] = raw
         f[0]['prs'][0]['proofs'][path]['signature'] = sign((m.digest(raw) + ':101').encode())
     if finding in ('L6a', 'H1-cohort'):
-        attempts = second(m, f); material = f[1][2]; a = attempts[1]['a']
-        old = material['snapshot'][-1]['task_id']; material['snapshot'][-1] = task(999); material['observations']['task-999'] = material['observations'].pop(old)
-        a['snapshot_digest'] = m.snapshot_digest(material['snapshot']); attempts[1]['stages']['A']['raw'] = m.canonical(a)
-        attempts[1]['stages']['P']['raw'] = b'attempt_digest: ' + m.digest(m.canonical(a)).encode()
-        attempts[1]['stages']['B']['raw'] = m.generate_pool(material['snapshot'], a, material['scope'], material['observations'], commit_a='1' * 40)
+        attempts = second(m, f, new_pool=True); a = attempts[1]['a']
         if finding == 'L6a': f[1].pop(1)
         else:
             b = json.loads(attempts[0]['stages']['B']['raw']); b['tasks'][0]['det'] = None; attempts[0]['stages']['B']['raw'] = m.canonical(b)
             a['prior_attempts_digest'] = m.prior_digest(attempts[:1], before=attempts[1]['stages']['A']['merged_at']); attempts[1]['stages']['A']['raw'] = m.canonical(a)
             attempts[1]['stages']['P']['raw'] = b'attempt_digest: ' + m.digest(m.canonical(a)).encode()
-        with pytest.raises(ValueError, match='attempt_materials_unknown|det_observations_missing'): m.canonical_attempt(attempts, f[1])
+        if finding == 'H1-cohort': assert m.canonical_attempt(attempts, f[1])['number'] == 2
+        else:
+            with pytest.raises(ValueError, match='attempt_materials_unknown'): m.canonical_attempt(attempts, f[1])
         return
     assert check(m, f, used=True if finding == 'L3-used' else 1)['status'] == 'invalid_cohort'
 
 
-@pytest.mark.parametrize('defect', ['B-only', 'W-only', 'broken-A', 'duplicate-A', 'wrong-number'])
+@pytest.mark.parametrize('defect', ['B-only', 'W-only', 'broken-A', 'duplicate-A', 'wrong-number', 'missing-chain-key'])
 def test_later_v1_invalid_attempt_does_not_poison_canonical_attempt(m, defect):
     f = fixture(m)
     stage = 'B' if defect == 'B-only' else 'W' if defect == 'W-only' else 'A'
     raw = b'{' if defect == 'broken-A' else b'{"number":2,"number":2}' if defect == 'duplicate-A' else m.canonical({'number': 9})
+    if defect == 'missing-chain-key':
+        a = json.loads(f[0]['prs'][0]['files'][next(iter(f[0]['prs'][0]['files']))]); del a['chain']['hash']; raw = m.canonical(a | {'number': 2})
     if defect == 'wrong-number': raw = m.canonical(json.loads(f[0]['prs'][0]['files'][next(iter(f[0]['prs'][0]['files']))]) | {'number': 9})
     put(m, f[0], 2, stage, '2' * 40, raw, 2000)
-    if defect == 'wrong-number': put(m, f[0], 2, 'B', '3' * 40, f[0]['prs'][1]['files'][next(iter(f[0]['prs'][1]['files']))], 2030)
+    if defect in ('wrong-number', 'missing-chain-key'): put(m, f[0], 2, 'B', '3' * 40, f[0]['prs'][1]['files'][next(iter(f[0]['prs'][1]['files']))], 2030)
     attempts = m.enumerate_attempts(f[0], Proofs())
     assert attempts[1]['invalid_reason'] and check(m, f)['status'] == 'valid'
 
@@ -745,3 +767,40 @@ def test_replay_eligibility_does_not_trust_missing_b_observations(m, monkeypatch
     update_file(m, f[0], 'B', b)
     monkeypatch.setattr(m, 'generate_pool', lambda *args, **kwargs: m.canonical(b))  # faulty self-consistent regenerator
     assert check(m, f)['status'] == 'invalid_cohort'
+
+
+@pytest.mark.parametrize('defect', ['pilot-arms', 'pilot-generator', 'lineage-missing', 'lineage-mismatch', 'lineage-incidental', 'lineage-duplicate'])
+def test_review_pilot_and_lineage_are_bound_to_preregistration(m, defect):
+    f = fixture(m); h = f[0]; c = json.loads(h['prs'][2]['files'][next(iter(h['prs'][2]['files']))])
+    if defect == 'pilot-generator':
+        with pytest.raises(ValueError, match='arms_invalid'): m.select(bytes.fromhex(f[2]['randomness']), json.loads(h['prs'][1]['files'][next(iter(h['prs'][1]['files']))]), ['native_goal', 'mission_verified_complex'])
+        return
+    if defect == 'pilot-arms':
+        c['arms'].remove('mission_baseline'); c['assignments'] = [r for r in c['assignments'] if r['arm'] != 'mission_baseline']
+        update_file(m, h, 'C', c); update_file(m, h, 'D', m.confirm(bytes.fromhex(f[2]['randomness']), c, 'c' * 40, 4, c['arms']))
+        f[3][:] = [r for r in f[3] if r['arm'] != 'mission_baseline']
+    else:
+        raw = next(v for p, v in h['current_files'].items() if p.endswith('preregistration.md')); declaration = raw.splitlines()[-1]
+        if defect == 'lineage-missing': raw = raw.replace(b'\n' + declaration, b'')
+        if defect == 'lineage-mismatch': raw = raw.replace(declaration, b'lineage_digest: sha256:' + b'0' * 64)
+        if defect == 'lineage-incidental': raw = raw.replace(declaration, b'incidental ' + declaration)
+        if defect == 'lineage-duplicate': raw += b'\n' + declaration
+        update_file(m, h, 'P', raw)
+    assert check(m, f)['reason'] == ('selection_mismatch' if defect == 'pilot-arms' else 'lineage_digest_mismatch')
+
+
+@pytest.mark.parametrize('defect', ['separate-P', 'B-before-A', 'merge-order', 'missing-A-key'])
+def test_review_attempt_route_and_missing_keys(m, defect):
+    f = fixture(m)
+    if defect == 'missing-A-key':
+        a = json.loads(f[0]['prs'][0]['files'][next(iter(f[0]['prs'][0]['files']))]); del a['snapshot_digest']; update_file(m, f[0], 'A', a)
+        attempts = second(m, f, new_pool=True)
+        assert attempts[0]['invalid_reason'] == 'V1_invalid_A' and m.canonical_attempt(attempts, f[1])['number'] == 2
+    elif defect == 'merge-order':
+        put(m, f[0], 2, 'B', '2' * 40, b'{}', 50)
+        assert check(m, f)['reason'] == 'attempt_order_invalid'
+    else:
+        attempts = m.enumerate_attempts(f[0], Proofs()); stages = attempts[0]['stages']
+        if defect == 'separate-P': stages['P']['sha'] = '9' * 40
+        else: stages['A']['merged_at'] = stages['B']['merged_at'] + 1
+        with pytest.raises(ValueError, match='no_canonical_attempt'): m.canonical_attempt(attempts, f[1])

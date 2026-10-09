@@ -1,106 +1,63 @@
 # Offline pool selection and preregistration verification
 
-`bench_selection.py` implements the I2d boundary in
-[the evaluation preregistration](../../docs/design/884-evaluation-aggregation.md),
-§5.0, §5.1 and §3.2.1 checks 1–3. It does not start worker runs.
+`bench_selection.py` implements I2d in [the evaluation preregistration](../../docs/design/884-evaluation-aggregation.md),
+§5.0, §5.1 and §3.2.1 checks 1–3. Inputs are injected; no transport or worker run is started.
 
-## Pure inputs and outputs
+## Pool and assignments
 
-`generate_pool(snapshot, config, scope, observations, commit_a=sha)` returns
-canonical JSON bytes. Every snapshot task has a row, including exclusions with
-the first failed criterion in Lic → Con → Cx → Det order. Rows contain source
-identifiers, input/evidence digests, criterion values, and recorded evaluations;
-they do not contain task descriptions, source code, or package contents.
+`generate_pool(snapshot, config, scope, observations, commit_a=sha)` returns canonical JSON bytes.
+Every snapshot task has a row with its first failure in Lic → Con → Cx → Det order, identifiers,
+input/evidence digests, criterion values and evaluations. Descriptions/source/package contents are omitted.
+The data-only snapshot supplies task/benchmark IDs, immutable revision, repository URL, base commit,
+complete reachable roots, base path/text pairs, both licenses, natural-request provenance, immutable
+image/command, named fail-to-pass/pass-to-pass checks, and reference path/added/deleted changes.
+Preserve hunk separation. Snapshot normalization packs canonical `tasks.json` in fixed-mode USTAR;
+acquisition must bind the data to the declared base commit and benchmark revision.
 
-The snapshot is a list of data-only task definitions. Each task supplies
-`task_id`, `benchmark`, immutable `revision`, repository URL, `base_commit`,
-complete reachable `roots`, and `base_files` as path/text pairs. It also supplies
-benchmark/upstream license identifiers, `natural_request`, immutable evaluation
-image/command, named checks with `fail_to_pass`/`pass_to_pass` kinds, and reference
-changes with path/added/deleted lines. Added lines must preserve hunk separation;
-do not concatenate disconnected hunks into a fictitious continuous sequence.
-The normalization is canonical `tasks.json` in a sorted, fixed-mode USTAR
-archive. Source acquisition must bind these data to the declared upstream base
-commit and distribution revision.
+`config` supplies license rights (copy/execute, optionally store), `store_contents`, integer thresholds
+`cx_files`, `cx_checks`, `cx_lines`, `con_length`, `con_lines`, `g3_percent`, snapshot/scope digests
+and pinned `generator_sha`. `scope` groups all tracked texts at A and package texts as mission/packages.
+Acquisition owns corpus completeness and license/natural-request provenance, beyond supplied booleans.
+`observations[task_id]` contains three I2c results per starter/reference; missing early-filter observations
+are rejected. Invalid Det JSON schema is excluded with its sorted JSON digest. `collect_det` captures
+observations after early filters. `BundleReplay` uses I2c freeze/evaluate with a reference-applied tree;
+real container jobs require execution approval.
 
-`config` provides confirmed license rights (`copy`, `execute`, optionally
-`store`), `store_contents`, owner-approved integer thresholds `cx_files`,
-`cx_checks`, `cx_lines`, `con_length`, `con_lines`, `g3_percent`, the snapshot and
-scope digests, and pinned `generator_sha`. `scope` contains all tracked repository
-texts at A and all package texts, grouped as `mission` and `packages`. Corpus
-completeness and license/natural-request provenance belong to the acquisition
-provider; supplied booleans alone do not establish their external truth.
+`select(seed, manifest, arms)` produces C: 12 pilot units, remaining ranking, one primary per unit,
+two repetitions per pilot arm, deterministic IDs and execution order. `confirm(seed, C, commit_c, K, arms)`
+produces D: first K ranked units and ceil(K/2) controls. Canonical JSON allows strings, safe integers,
+booleans, null, lists and string-keyed dictionaries, rejects floats/deep recursion, and orders keys by
+UTF-16. Identifier/key ties use UTF-8 bytes. Pilot arms are frozen to all three §2 arms (72 assignments).
 
-`observations[task_id]` has three I2c result dictionaries for each of `starter`
-and `reference`. Invalid Det JSON schema is excluded with its sorted JSON digest. `collect_det` captures these through an injected replay provider
-only after the early filters pass. `BundleReplay` calls I2c's `freeze_candidate`
-and `evaluate_assignment`; reference jobs supply a reference-applied candidate.
-Calling it with real jobs can run containers and requires execution approval.
+## Acquisition and evidence
 
-`select(seed, manifest, arms)` produces C: 12 pilot units, remaining unit ranking,
-one primary task per unit, and two pilot repetitions per arm in seeded order.
-`confirm(seed, C, commit_c, K, arms)` produces canonical D content with the first
-K ranked units, ceil(K/2) controls, deterministic IDs and execution order.
-Canonicalization supports strings, safe integers, booleans, null, lists and
-string-keyed dictionaries; it rejects floats and uses RFC 8785 UTF-16 key order.
-Task/unit/assignment ordering ties use UTF-8 byte order as preregistered.
+`acquire_history(provider)` drains merged PR pages, checks stable totals/cursors and brackets acquisition
+with `main_head`. `main_history` supplies all path-touching main commits, reachable SHAs, current bytes
+and force-push/deletion protection. PRs supply SHA, main base, integer merge time, files and proofs.
+A adds attempt.json and preregistration.md in the same merge; B/C/D/W use the frozen filenames.
+All files must remain immutable. Integer Unix times use strict pre-cutoff/pre-run comparisons.
+`verify_timestamp(digest, proof)` cryptographically binds the digest to a verified block header/time.
+`verify_beacon(chain, round, beacon)` verifies the pinned chain/key/round signature and returns the
+reported 32 randomness bytes. No fallback seed or boolean verification flag is accepted. Production
+transport/cryptography is injected; offline fixtures use real RSA/SHA-256, not production proofs.
 
-## Injected acquisition and proof adapters
+`verify_cohort(history, materials, used_number, beacon, records, proofs, replay)` regenerates B and picks
+the earliest seed-independent V1–V5 candidate, then verifies C/D, package, timing and Det replays.
+V4 failures permit later candidates; post-seed failures never do. Reusing identical invalid/withdrawn
+pools is forbidden even with changed snapshot serialization/reference metadata. Trusted materials supply
+snapshot, scope, loaded generator revision and pilot-derived `minimum_k`. Load this code from A's pinned
+revision; a matching SHA string alone does not establish provenance. Records supply task/unit, arm,
+package SHA/digest and integer start time. Check 2 binds the lineage record to P, not caller metadata.
+Only status=valid with checks 1–3 true establishes selection evidence. I1 still checks run separation,
+order, complete assignments and statistics; K planning, approval and acquisition remain caller duties.
 
-`acquire_history(provider)` drains `merged_pr_page(path, cursor)` until `next`
-is null, checking stable totals and detecting repeated cursors. `main_history`
-returns all path-touching main commits, reachable merge SHAs, current file bytes
-and force-push/deletion protection. `main_head` brackets acquisition. These
-methods perform transport only in the caller's provider; tests use local data.
+## 解釈（owner確認待ち）
 
-History PRs supply `sha`, main `base`, integer `merged_at`, file bytes, and
-per-file proofs. A adds `attempt.json` and `preregistration.md` in the same merge;
-the document binds A's content digest. B/C/D/withdrawal use the preregistered
-filenames. History must account for all these merged files and preserve bytes.
-Times are integer Unix seconds, with strict pre-cutoff/pre-run comparisons.
-
-`verify_timestamp(content_digest, proof)` must cryptographically verify the
-attestation and bind its digest to a verified block header; it returns the block
-time. Unavailable/invalid attestations cannot satisfy V2 or V5.
-`verify_beacon(chain, round, beacon)` must verify the signature for the pinned
-chain/key/round and return 32 randomness bytes. These bytes must match the
-reported randomness. There is no fallback seed or boolean verification flag.
-Production transport, beacon-specific cryptography, and timestamp-chain
-verification are injected, not bundled here. Offline fixtures exercise actual
-RSA/SHA-256 signatures; they are not production beacon or timestamp proofs.
-
-## Verification evidence
-
-`verify_cohort(history, materials, used_number, beacon, records, proofs, replay)`
-regenerates B, determines the earliest seed-independent V1–V5 candidate, then
-checks that C/D, packages, timing and Det replays match. Later candidates are
-never promoted after a post-seed failure. Withdrawn/invalid pools cannot be
-reused by changing only their snapshot serialization or reference metadata.
-
-Each attempt's trusted `materials` contains its snapshot, scope, loaded
-`generator_sha`, preregistered `lineage_digest`, and pilot-derived `minimum_k`.
-Load this module from A's pinned generator revision; passing a matching SHA
-string does not verify source provenance. The generator provider owns that
-binding. Records use planned arm names, selected task/unit IDs, package SHA and
-digest, and integer start times; adapters normalize host-specific records first.
-
-The result contains `status`, `canonical_attempt`, checks `1`–`3`, lineage and
-evidence digests, replayed task IDs and failure reason. Only `status=valid` with
-all three checks true is selection evidence. I1 must still establish run
-separation and execution order (checks 4–5), complete assignment accounting and
-statistical validity. K computation, execution approvals and actual acquisition
-are caller responsibilities; this module does not change §9's frozen choices.
-
-## 解釈（owner 確認待ち）
-
-CC 決定に従う暫定解釈。G3 は比較対象が 0 件なら結合しない。G1・G2 は適用する。
-`chain_schedule(chain_hash)` は hash に結び付けて認証した genesis・period を返す。
-宣言値との不一致は拒否し、`cutoff` は認証値だけから計算する。
-V1 不成立の試行は `invalid_reason` を記録し、既存の正準試行を変えない。
-round の再利用・非増加や試行の重なりは cohort 全体を拒否する。
-必要な materials が欠けた試行は `attempt_materials_unknown`（UNKNOWN）とし、後続へ繰り上げない。
-P の束縛は独立した宣言行 `attempt_digest: sha256:<A の bytes の SHA-256、64 桁小文字 hex>`
-がちょうど 1 行あることとする。本文中の部分一致や宣言行の重複は認めない。
-
-未定義（owner の決定事項）: 撤回 pool の部分集合・1 task 除去を再利用に含めるか。
-実装は snapshot digest と pool identity の完全一致による既存の拒否を維持し、拡張しない。
+CC決定: G3は比較対象0件なら結合しない（G1・G2は適用）。
+`chain_schedule(chain_hash)`はhashに結び付けて認証したgenesis・periodを返し、宣言値との不一致を拒否する。
+V1不成立は`invalid_reason`を記録。round非増加・重なりはcohort全体を拒否する。
+必要なmaterialsの欠落はUNKNOWN（`attempt_materials_unknown`）で後続へ繰り上げない。
+Pは独立した宣言行`attempt_digest: sha256:<AのbytesのSHA-256、64桁小文字hex>`と
+`lineage_digest: sha256:<系譜記録のSHA-256、64桁小文字hex>`を各1行持つ。部分一致・重複を認めない。
+未定義（ownerの決定事項）: 撤回poolの部分集合・1task除去を再利用に含めるか。
+実装はsnapshot digestとpool identityの完全一致による拒否を維持する。§9の凍結項目は変えない。
