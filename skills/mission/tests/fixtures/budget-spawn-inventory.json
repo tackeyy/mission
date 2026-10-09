@@ -1,4 +1,13 @@
 {
+  "fresh-review-replay": {
+    "candidates": {
+      "lib/mission_application/fresh_review_publish.py:_replay_hypotheses:run_contract_verifier": 1
+    },
+    "reason": "D output-import replay (design 881 section 3.2 row 7), bounded by the request max_replays and remaining dispatch deadline/wall time. F reservation, deadline-bound collection and settlement remain pending in F2b (#922; section 7). No reservation coverage is claimed.",
+    "rows": [
+      7
+    ]
+  },
   "public-benchmark-tool": {
     "candidates": {
       "benchmarks/mission-vs-goal/public_benchmark.py:_completion_result:_run_bounded": 1,
@@ -13,11 +22,14 @@
   },
   "rows-1-2": {
     "candidates": {
+      "lib/mission_application/verification_exec.py:main:Popen": 2,
       "lib/mission_application/verification_execution.py:run_contract_verifier:execute_candidate": 1,
+      "lib/mission_application/verification_execution.py:run_verification_receipt_cli:run_contract_verifier": 1,
       "lib/mission_application/verification_runner.py:_tracked:run": 1,
-      "lib/mission_application/verification_runner.py:execute_candidate:Popen": 1
+      "lib/mission_application/verification_runner.py:execute_candidate:Popen": 1,
+      "lib/mission_application/verification_runner.py:execute_candidate:spawn_exec": 1
     },
-    "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+    "reason": "APIs and references for these design entries, including the private deadline executor. CLI budget admission, reservation and settlement remain pending in F2a (#921; section 7). No reservation coverage is claimed.",
     "rows": [
       1,
       2
@@ -172,12 +184,16 @@
       "lib/mission_application/specialist_selection.py:decline_specialist_selection:execution": 2,
       "lib/mission_application/stale_cleanup.py:run_cleanup_stale:execute": 6,
       "lib/mission_application/supersede_reviews.py:_publish_review_group:execute": 1,
+      "lib/mission_application/verification_exec.py:main:executable": 1,
       "lib/mission_application/verification_execution.py:run_contract_verifier:executed_count": 1,
+      "lib/mission_application/verification_runner.py:execute_candidate:exec_failed": 4,
+      "lib/mission_application/verification_runner.py:execute_candidate:executable": 1,
       "lib/mission_application/verifier_policy.py:inline_python_source:executable": 1,
       "lib/mission_kernel/budget.py:_reservation:system": 1,
       "lib/mission_kernel/budget_decisions.py:settle:system": 3,
       "lib/mission_kernel/codec_v4.py:project_legacy_document:executor_handoff": 1,
       "lib/mission_kernel/evidence.py:project_verification_receipt:executed_count": 2,
+      "lib/mission_kernel/fresh_review_completion.py:judge_completion:launch": 6,
       "lib/mission_kernel/fresh_review_coverage.py:_validated:launch": 12,
       "lib/mission_kernel/fresh_review_publish.py:validate_failed_import:launch": 1,
       "lib/mission_kernel/fresh_review_receipts.py:decode_terminal_receipt:launch": 11,

@@ -47,7 +47,7 @@ def test_public_prepare_publishes_input_and_retries_historical_request(completio
     assert json.loads(status.stdout)['requests'][0]['status'] == 'pending'
     _reject_unchanged(run_cli, root, [*ARGS[:-2], '--adapter-registration-digest', 'sha256:' + 'b' * 64],
                       'operation', env={'MISSION_OPERATION_ID': 'prepare-one'})
-    _reject_unchanged(run_cli, root, ['mark-passes'], 'acceptance-coverage-pending')
+    _reject_unchanged(run_cli, root, ['mark-passes'], 'acceptance-receipt-missing')
 
 
 @pytest.mark.parametrize('args,reason', [

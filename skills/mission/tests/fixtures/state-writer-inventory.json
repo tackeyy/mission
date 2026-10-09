@@ -285,6 +285,10 @@
     "_proposed_state:copy-ref": 1,
     "_publish_review_group:copy-ref": 2
   },
+  "lib/mission_application/verification_exec.py": {
+    "_stop:write": 1,
+    "main:write": 2
+  },
   "lib/mission_application/verification_runner.py": {
     "_read:open-write": 1,
     "execute_candidate:replace": 3,
@@ -351,6 +355,8 @@
     "visit:remove": 1
   },
   "lib/mission_kernel/fresh_review_completion.py": {
+    "_completion_facts:dynamic": 1,
+    "_completion_facts:replace": 2,
     "_decode_completion_evidence:dynamic": 1
   },
   "lib/mission_kernel/fresh_review_coverage.py": {

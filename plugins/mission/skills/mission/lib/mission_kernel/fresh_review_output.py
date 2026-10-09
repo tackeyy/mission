@@ -328,7 +328,7 @@ def inspect_output(record, observation, output_bytes, *, candidate_digest, budge
     return decision(TerminalReason.NONE, output)
 
 
-def replay_eligibility(request, hypothesis, frozen_policy):
+def replay_eligibility(request, hypothesis, frozen_policy, *, published=False):
     """Select only the frozen replay command; a reason retains an open hypothesis.
 
     The importer supplies the entire frozen verifier policy. Both its policy
@@ -339,7 +339,7 @@ def replay_eligibility(request, hypothesis, frozen_policy):
     request = decode_request(request_document(request))
     if not isinstance(hypothesis, FindingHypothesis):
         raise FreshReviewError('fresh-review-output-invalid')
-    hypothesis = _hypothesis(_wire(hypothesis), hypothesis.criterion_id)
+    hypothesis = _hypothesis(_wire(hypothesis), hypothesis.criterion_id, published=published)
     _json_builtins(frozen_policy, 'output-invalid')
     binding = next((item for item in request.candidate_bindings if item.role == 'replay'
                     and item.criterion_id == hypothesis.criterion_id), None)
@@ -417,6 +417,11 @@ def derive_output_coverage(output, request, contract):
             or validated['requirement_digest'] != request.requirement_digest
             or output.contract_digest != request.contract_digest):
         raise FreshReviewError('fresh-review-coverage-invalid')
+    return _coverage_facts(output, request, validated)
+
+
+def _coverage_facts(output, request, validated):
+    """Shared ledger judgement after the caller closes the typed evidence."""
     requirements = {item['id']: item for item in validated['requirements']}
     criteria = {item['id']: item for item in validated['criteria']}
     searched = {item.criterion_id: item for item in output.criterion_results}
