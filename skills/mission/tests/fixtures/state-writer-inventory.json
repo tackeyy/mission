@@ -294,7 +294,8 @@
     "settle_collected_verification:replace": 1
   },
   "lib/mission_application/verification_exec.py": {
-    "main:write": 2
+    "_stop:write": 1,
+    "main:write": 3
   },
   "lib/mission_application/verification_runner.py": {
     "_read:open-write": 1,
@@ -360,6 +361,9 @@
     "projection_document:dynamic": 3,
     "reserve_request:replace": 1,
     "visit:remove": 1
+  },
+  "lib/mission_kernel/fresh_review_completion.py": {
+    "_decode_completion_evidence:dynamic": 1
   },
   "lib/mission_kernel/fresh_review_coverage.py": {
     "_validated:dynamic": 2

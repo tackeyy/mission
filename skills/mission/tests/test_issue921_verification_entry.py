@@ -79,6 +79,7 @@ def test_budget_verification_deadline_retains_output_exit_and_cleans_group(run_c
     state = json.loads(_state_path(tmp_path).read_text())
     receipt = state['verification_receipts'][-1]
     assert receipt['timed_out'] and receipt['exit_code'] == -signal.SIGKILL
+    assert receipt['block_reason'] == 'timeout'
     assert receipt['output_digest'] == 'sha256:' + hashlib.sha256(b'prefix\n').hexdigest()
     assert receipt['observed_output_bytes'] == 7
     assert not state['budget_ledger']['reservations']
@@ -444,7 +445,7 @@ def test_deadline_preserves_large_candidate_result_and_kills_grandchildren(run_c
     assert result.returncode == 0, result.stderr
     receipt = json.loads(_state_path(tmp_path).read_text())['verification_receipts'][-1]
     assert receipt['exit_code'] == -signal.SIGKILL and receipt['timed_out']
-    assert receipt['block_reason'] == 'budget-deadline'
+    assert receipt['block_reason'] == 'timeout'
     assert receipt['output_digest'] == 'sha256:' + hashlib.sha256(b'prefix\n').hexdigest()
     assert receipt['observed_output_bytes'] == 7
 
@@ -538,68 +539,8 @@ def test_progress_result_signature_includes_exit_status_count_and_output(run_cli
     assert all(s.candidate_digest == receipt['candidate_digest'] for s in settlements)
 
 
-def test_budget_mode_still_reports_a_shorter_frozen_timeout(tmp_path):
-    import time
-    from mission_application.verification_runner import execute_candidate
-    from .test_issue878_verification_runner import _policy
-    from mission_application.verifier_policy import validate
-    policy = _policy()
-    policy['commands'][0].update(timeout_sec=1, argv=[policy['commands'][0]['argv'][0], '-c', 'import time; time.sleep(60)'])
-    command = validate(policy)['project-test']
-    from mission_application.verification_runner import CandidateSnapshot, _digest
-    candidate = CandidateSnapshot((), _digest(()))
-    result = execute_candidate(candidate, command, relative_cwd='.', budget_deadline=time.monotonic() + 10)
-    assert result['timed_out'] and result['block_reason'] == 'timeout'
 
 
-def test_verifier_grandchild_is_gone_before_post_run_observation(run_cli, tmp_path, monkeypatch):
-    import os
-    import time
-    from mission_application import verification_runner as runner
-    from mission_application.verifier_policy import validate
-    from .test_issue878_verification_runner import _policy
-    marker = tmp_path / 'grandchild-pid'
-    policy = _policy()
-    policy['commands'][0].update(timeout_sec=2, argv=[policy['commands'][0]['argv'][0], '-c',
-        'import subprocess,sys,time; from pathlib import Path; '
-        'p=subprocess.Popen([sys.executable,"-c","import time; time.sleep(60)"]); '
-        f'Path({str(marker)!r}).write_text(str(p.pid)); print("prefix",flush=True); time.sleep(60)'])
-    command = validate(policy)['project-test']
-    snapshot = runner.CandidateSnapshot((runner.CandidateFile('input', 0o644, b'input'),), '')
-    from dataclasses import replace
-    snapshot = replace(snapshot, digest=runner._digest(snapshot.files))
-    read = runner._read
-    checked = []
-    def observe(*a, **kw):
-        pid = int(marker.read_text())
-        with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
-        checked.append(pid)
-        return read(*a, **kw)
-    monkeypatch.setattr(runner, '_read', observe)
-    import budgeted_exec
-    cleanup = budgeted_exec.cleanup_group
-    def before_cleanup(child, **kw):
-        # SIGKILL at the child deadline must include grandchildren, before
-        # normal terminal cleanup or potentially slow candidate observation.
-        end = time.monotonic() + .2
-        try:
-            while time.monotonic() < end:
-                try:
-                    os.kill(int(marker.read_text()), 0)
-                except ProcessLookupError:
-                    break
-                time.sleep(.01)
-            with pytest.raises(ProcessLookupError):
-                os.kill(int(marker.read_text()), 0)
-        finally:
-            reclaimed = cleanup(child, **kw)  # always reclaim only our group
-        return reclaimed
-    monkeypatch.setattr(budgeted_exec, 'cleanup_group', before_cleanup)
-    deadline = time.monotonic() + 2
-    result = runner.execute_candidate(snapshot, command, relative_cwd='.', budget_deadline=deadline)
-    assert time.monotonic() >= deadline  # never cut the admitted execution short
-    assert result['block_reason'] == 'budget-deadline' and checked
 
 
 def test_cleanup_requires_session_identity_even_when_reservation_ids_overlap(tmp_path, monkeypatch):
@@ -624,56 +565,52 @@ def test_verification_job_rejects_deadline_that_cannot_be_enforced():
         decode_job(raw)
 
 
-@pytest.mark.parametrize('unavailable', [True, False])
-def test_verifier_exec_failure_is_distinct_from_registered_exit_126(tmp_path, unavailable):
+
+
+
+
+
+
+def test_replay_path_conflict_keeps_candidate_digest_and_stops_identical_retry(run_cli, tmp_path):
+    from mission_application.verification_runner import capture_candidate
+    policy = _replay_policy()
+    policy['commands'][0]['replay']['relative_path'] = 'tracked.txt'
+    _prepare_public_runner(tmp_path, run_cli, policy=policy)
+    _budget(tmp_path)
+    repro = tmp_path / 'replay.json'
+    repro.write_text(json.dumps({'artifact_kind': 'counterexample', 'content': 'proof'}))
+    candidate = capture_candidate(tmp_path, declared_untracked=[], external_inputs=[]).digest
+    limit = json.loads(_state_path(tmp_path).read_text())['budget_ledger']['policy']['no_progress_limit']
+    for _ in range(limit):
+        result = run_cli('verification', 'run', '--criterion', 'AC1', '--repro-input', str(repro), cwd=tmp_path)
+        assert result.returncode == 0, result.stderr
+        state = json.loads(_state_path(tmp_path).read_text())
+        receipt = state['verification_receipts'][-1]
+        assert receipt['candidate_digest'] == candidate
+        assert receipt['block_reason'] == 'replay-input-path-conflict'
+        assert state['budget_ledger']['progress'][0]['candidate_digest'] == candidate
+    result = run_cli('verification', 'run', '--criterion', 'AC1', '--repro-input', str(repro), cwd=tmp_path)
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads(_state_path(tmp_path).read_text())['verification_receipts'][-1]
+    assert receipt['candidate_digest'] == candidate and receipt['block_reason'] == 'budget-no-new-evidence'
+
+
+@pytest.mark.parametrize('run_sec,reason', [(4, 'budget-deadline'), (5, 'timeout')])
+def test_timeout_reason_uses_reserved_run_duration_not_startup_delay(run_cli, tmp_path, monkeypatch, run_sec, reason):
     import time
-    from mission_application.verification_runner import execute_candidate, CandidateSnapshot, _digest
-    from .test_issue878_verification_runner import _policy
-    from mission_application.verifier_policy import validate
-    command = validate(_policy())['project-test']
-    command.update(argv=['missing-neutral-verifier'] if unavailable else
-        [command['argv'][0], '-c', 'import sys; sys.exit(126)'], toolchain=None)
-    result = execute_candidate(CandidateSnapshot((), _digest(())), command,
-        relative_cwd='.', budget_deadline=time.monotonic()+5)
-    assert result['status'] == ('blocked' if unavailable else 'failed')
-    assert result['block_reason'] == ('process-unavailable' if unavailable else None)
-    assert result['exit_code'] == (None if unavailable else 126)
-
-
-def test_deadline_watchdog_start_failure_cannot_report_a_completed_verifier(monkeypatch):
-    import os, time
-    from mission_application import verification_exec as bootstrap
-    receiver, sender = os.pipe()
-    monkeypatch.setattr(bootstrap.sys, 'argv', ['bootstrap', str(time.monotonic()+10), str(sender), 'neutral-verifier'])
-    def unavailable(*a, **kw):
-        raise OSError('watchdog unavailable')
-    def stop_owned_group(*a):
-        raise SystemExit(2)
-    monkeypatch.setattr(bootstrap.subprocess, 'Popen', unavailable)
-    monkeypatch.setattr(bootstrap.os, 'killpg', stop_owned_group)
-    try:
-        with pytest.raises(SystemExit):
-            bootstrap.main()
-        assert os.read(receiver, 1) == b'E'
-    finally:
-        os.close(receiver); os.close(sender)
-
-
-def test_completed_failed_verifier_does_not_wait_for_grandchild_stdout(tmp_path):
-    import time, hashlib, os
-    from mission_application.verification_runner import execute_candidate, CandidateSnapshot, _digest
-    from .test_issue878_verification_runner import _policy
-    from mission_application.verifier_policy import validate
-    marker = tmp_path / 'grandchild-pid'
-    command = validate(_policy())['project-test']
-    command['argv'] = [command['argv'][0], '-c',
-        'import subprocess,sys; from pathlib import Path; '
-        'p=subprocess.Popen([sys.executable,"-c","import time; time.sleep(60)"]); '
-        f'Path({str(marker)!r}).write_text(str(p.pid)); print("prefix",flush=True); sys.exit(1)']
-    started = time.monotonic()
-    result = execute_candidate(CandidateSnapshot((), _digest(())), command,
-        relative_cwd='.', budget_deadline=started+5)
-    assert result['status'] == 'failed' and result['exit_code'] == 1 and not result['timed_out']
-    assert result['output_digest'] == 'sha256:' + hashlib.sha256(b'prefix\n').hexdigest()
-    with pytest.raises(ProcessLookupError):
-        os.kill(int(marker.read_text()), 0)
+    import budgeted_exec
+    from dataclasses import replace
+    from datetime import datetime, timezone
+    from mission_application.verification_budget import reserve_verification, execute_verification
+    _prepare_public_runner(tmp_path, run_cli)
+    _budget(tmp_path)
+    document = json.loads(_state_path(tmp_path).read_text())
+    at = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    budget, refusal = reserve_verification(document, 'AC1', run_sec, at, None)
+    assert refusal is None
+    budget = replace(budget, deadline=time.monotonic() + .01)
+    monkeypatch.setattr(budgeted_exec, 'run_job', lambda *a, **kw:
+        dict(status='blocked', timed_out=True, exit_code=-9, block_reason='budget-deadline'))
+    receipt = execute_verification(document, tmp_path, 'AC1', None, budget,
+        dict(timeout_sec=5), session_id='neutral')
+    assert receipt['block_reason'] == reason

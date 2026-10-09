@@ -57,10 +57,9 @@ def run_budget_next(out, data, at, legacy_pressure, spawn_actions, capacity_stat
     return out
 
 
-def run_budget_reconcile_cli(args, services):
+def run_budget_reconcile_cli(args, services, *, cleanup_jobs):
     """Charge crashed dispatches before removing jobs with proven dead owners."""
     from mission_kernel.commands import ReconcileDispatchBudget
-    from mission_persistence.spawn_jobs import cleanup_jobs
     from .cli_operation import prepare_cli_operation
     root = Path.cwd()
     state_file = services.resolve_state_file(root)

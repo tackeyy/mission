@@ -286,6 +286,16 @@ D では closed v5 の typed codec/pure gate を対応させるが、一般の p
 closed v5 の公開成功も要求するなら別の互換性作業が必要であり、範囲拡大の判断事項とする。
 contract **キー欠落**の legacy だけが従来成功条件へ進む。
 
+入力補完（[Issue 913](https://github.com/tackeyy/mission/issues/913) の先行 PR）は inert とする。
+application が completed terminal の coverage/finding evidence を store から読み、ref の digest・size を検証して
+immutable typed carrier として MarkPass へ渡す。kernel は carrier の canonical bytes の digest・size を
+state の ref と再照合し、filesystem を読まない。request ごとの input digest と verification/replay を含む
+command ごとの candidate snapshot は application が prepare と同じ計算で再観測し、typed bindings で運ぶ。
+preflight と MarkPass は同じ carrier 検証を共有する。この先行 PR は完了判定を変えず、既存の pending gate を維持する。
+carrier を一つも渡さない既定値（evidence が空 tuple、bindings が None）だけは検証を省略する。
+入力を渡した場合は両方を必要とし、省略は `acceptance-fresh-review-completion-carrier-incomplete` で拒否する。
+bindings とともに渡した空 evidence も completed request の集合と照合する。
+
 ## 6. C から引き継ぐ Low の処理
 
 決定 (a): persisted command_id の型を lookup 前に検査する。凍結 command は

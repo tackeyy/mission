@@ -24,8 +24,7 @@
     "candidates": {
       "lib/mission_application/spawn_trampoline.py:main:run_contract_verifier": 1,
       "lib/mission_application/verification_budget.py:execute_verification:run_job": 1,
-      "lib/mission_application/verification_exec.py:main:Popen": 1,
-      "lib/mission_application/verification_exec.py:main:execvpe": 1,
+      "lib/mission_application/verification_exec.py:main:Popen": 2,
       "lib/mission_application/verification_execution.py:run_contract_verifier:execute_candidate": 1,
       "lib/mission_application/verification_execution.py:run_verification_receipt_cli:run_contract_verifier": 1,
       "lib/mission_application/verification_runner.py:_tracked:run": 1,

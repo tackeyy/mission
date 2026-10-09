@@ -186,6 +186,7 @@ from mission_projection.stats import (  # noqa: E402
     project_stats,
 )
 from mission_application.ports import AuditMetadata, ExecutionRequest  # noqa: E402
+from mission_application.fresh_review_completion import FreshReviewCompletionServices  # noqa: E402
 from mission_application.review import (  # noqa: E402
     AcceptanceCandidateServices,
     MarkPassRequest,
@@ -242,6 +243,7 @@ from mission_application.evidence import (  # noqa: E402
     verify_published_evidence_effects,
 )
 from mission_application.budget import run_budget_status_cli, run_budget_next, run_budget_reconcile_cli
+from mission_persistence.spawn_jobs import cleanup_jobs
 from mission_kernel.budget import BudgetError
 from mission_application.fresh_review import run_fresh_review_prepare_cli, run_fresh_review_status_cli
 from mission_application.fresh_review_withdraw import run_fresh_review_withdraw_cli
@@ -567,7 +569,10 @@ from mission_persistence.administrative import (  # noqa: E402
     administrative_commit,
     restore_record as restore_administrative_record,
 )
-from mission_persistence.strict_reader import read_stable_bytes as _read_stable_bytes  # noqa: E402
+from mission_persistence.strict_reader import (  # noqa: E402
+    read_stable_bytes as _read_stable_bytes,
+    read_stable_payload_beneath as _read_stable_payload_beneath,
+)
 
 SCHEMA_VERSION = 4  # v4: structured scoring provenance is mandatory for new sessions
 NEW_SESSION_REPOSITORY_FORMAT = RepositoryFormat.V5
@@ -13795,7 +13800,7 @@ def cmd_fresh_review_prepare(args):
 
 
 def cmd_budget_reconcile(args):
-    print(run_budget_reconcile_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES))
+    print(run_budget_reconcile_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES, cleanup_jobs=cleanup_jobs))
 
 
 def cmd_budget_status(args):
@@ -14114,6 +14119,8 @@ def cmd_mark_passes(args):
                 optional_unclosed_skills=_unclosed_optional_specialist_skills,
                 selection_id=_current_selection_id,
                 capture_acceptance_candidates=AcceptanceCandidateServices(cwd, load_verifier_policy),
+                capture_fresh_review_completion=FreshReviewCompletionServices(
+                    cwd, load_verifier_policy, _read_stable_payload_beneath),
                 early_stop_evaluation=lambda data, latest, at: _early_stop_evaluation(
                     cwd, data, latest, at, getattr(args, "early_stop_rationale", None)
                 ),

@@ -1238,7 +1238,7 @@ def _maximum_agreement_delta(payload: dict[str, object]) -> float | None:
 
 
 def _acceptance_completion_ready(state: MissionState, command: MarkPass) -> None:
-    """Keep contract-enabled sessions pending until typed coverage exists."""
+    """Authenticate optional completion inputs while retaining the pending gate."""
     document = (
         state.legacy_passthrough.thaw()
         if state.legacy_passthrough is not None
@@ -1254,6 +1254,14 @@ def _acceptance_completion_ready(state: MissionState, command: MarkPass) -> None
         commands = frozen_verifier_commands(contract)
     except AcceptanceContractError as exc:
         raise _Rejected(str(exc)) from exc
+    from .fresh_review_completion import validate_completion_carriers
+    from .fresh_review import FreshReviewError
+    from acceptance_contract import canonical_contract_digest
+    try:
+        validate_completion_carriers(state.fresh_review, command.fresh_review_evidence,
+                                     command.fresh_review_bindings, canonical_contract_digest(contract))
+    except FreshReviewError as exc:
+        raise _Rejected(exc.code) from exc
     if contract.get("coverage") != {"status": "valid"}:
         raise _Rejected("acceptance-coverage-pending")
     criteria = contract.get("criteria")

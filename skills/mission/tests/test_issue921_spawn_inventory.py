@@ -23,14 +23,15 @@ FIXTURE = Path(__file__).parent / 'fixtures/budget-spawn-inventory.json'
 
 # Only non-spawning references observed in bin/mission-state.py and lib/.
 # Exact names (no prefix exemptions): a future API must be classified explicitly.
-SAFE = set("""os.O_CLOEXEC os.O_CREAT os.O_DIRECTORY os.O_EXCL os.O_NOFOLLOW os.O_NONBLOCK
+SAFE = set("""os.CLD_EXITED os.CLD_KILLED os.CLD_DUMPED
+os.O_CLOEXEC os.O_CREAT os.O_DIRECTORY os.O_EXCL os.O_NOFOLLOW os.O_NONBLOCK
 os.O_RDONLY os.O_RDWR os.O_WRONLY os.P_PID os.PathLike os.WEXITED os.WNOHANG
 os.WNOWAIT os.X_OK os.access os.chmod os.close os.defpath os.dup os.environ
-os.environ.get os.fchmod os.fdopen os.fspath os.fstat os.fsync os.getpid os.getppid os.getpgrp
-os.getuid os.kill os.killpg os.link os.listdir os.lstat os.mkdir os.open os.path
+os.environ.get os.fchmod os.fdopen os.fspath os.fstat os.fsync os.getpid os.getppid
+os.getuid os.getpgrp os.kill os.killpg os.link os.listdir os.lstat os.mkdir os.open os.path
 os.path.abspath os.path.basename os.path.lexists os.path.normpath os.pathsep
 os.pathsep.join os.pipe os.read os.readlink os.rename os.replace os.rmdir os.scandir
-os.sep os.set_blocking os.set_inheritable os.setsid os.stat os.stat_result os.unlink
+os.sep os.set_blocking os.set_inheritable os.setpgid os.setsid os.stat os.stat_result os.unlink
 os.waitid os.walk os.write subprocess.DEVNULL subprocess.PIPE subprocess.STDOUT
 subprocess.TimeoutExpired multiprocessing.connection multiprocessing.connection.wait""".split())
 CAPABILITIES = {'subprocess', 'os', 'posix', '_posixsubprocess', 'multiprocessing',
@@ -39,8 +40,8 @@ UNKNOWN = 'unclassified-spawn'
 SUBPROCESS_APIS = {'run', 'call', 'check_call', 'check_output', 'getoutput', 'getstatusoutput'}
 TAILS = set("""Popen Process Pool ProcessPoolExecutor get_context fork forkpty system
 popen launch collect cancel recover observe_parent run_job dispatch_prepared_packet
-_run_bounded create_worker_export initialize_worker_export_repository
-subprocess_exec subprocess_shell run_contract_verifier""".split())
+_run_bounded create_worker_export initialize_worker_export_repository run_contract_verifier
+subprocess_exec subprocess_shell""".split())
 
 
 def spawn_calls(source):

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import secrets
 import time
 
-from mission_kernel.budget import decode_ledger
+from mission_kernel.budget import decode_ledger, cleanup_sec
 from mission_kernel.commands import ReserveDispatchBudget, RecordBudgetRefusal
 from .provider_budget import ProviderBudget, _apply
 from .artifact import EvidenceFailure
@@ -44,13 +44,17 @@ def execute_verification(document, root, criterion, repro_input, budget, command
     from mission_kernel.budget_decisions import stalled_candidate
     from .verification_execution import _blocked_receipt
     try:
-        return run_job('verification', {'contract': document['acceptance_contract'],
+        receipt = run_job('verification', {'contract': document['acceptance_contract'],
             'criterion': criterion, 'repro_input': repro_input, 'deadline': budget.deadline,
             'no_progress_candidate': stalled_candidate(decode_ledger(document), 'verification-run', criterion)},
             root / '.mission-state' / 'exec-jobs', deadline=budget.deadline,
             collect_deadline=budget.deadline + 1 + budget.policy.post_run_sec,
             term_grace=budget.policy.term_grace_sec, kill_wait=budget.policy.kill_wait_sec,
             reservation_id=budget.reservation.reservation_id.replace(':', '_'), cwd=root, session_id=session_id)
+        run_sec = budget.reservation.reserved_sec - cleanup_sec(budget.policy, 'verification-run') - budget.policy.commit_margin_sec
+        if receipt['block_reason'] == 'budget-deadline' and receipt['exit_code'] is not None and run_sec >= command['timeout_sec']:
+            receipt['block_reason'] = 'timeout'
+        return receipt
     except Exception as exc:
         # Without a supervisor frame we cannot prove its nested verifier group
         # was reclaimed, even when the outer supervisor group was reclaimed.
