@@ -363,6 +363,8 @@
     "visit:remove": 1
   },
   "lib/mission_kernel/fresh_review_completion.py": {
+    "_completion_facts:dynamic": 1,
+    "_completion_facts:replace": 2,
     "_decode_completion_evidence:dynamic": 1
   },
   "lib/mission_kernel/fresh_review_coverage.py": {

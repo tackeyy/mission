@@ -45,35 +45,7 @@ def completed_evidence(output, request, contract, replays=()):
         else:
             if eligibility is not None or reason != 'none':
                 raise FreshReviewError('fresh-review-replay-invalid')
-            try:
-                project_verification_receipt(RecordVerificationReceipt('observed', freeze_json_value(replay)))
-            except (EvidenceRuleError, TypeError, ValueError) as exc:
-                raise FreshReviewError('fresh-review-replay-invalid') from exc
-            binding = next(item for item in request.candidate_bindings if item.role == 'replay'
-                           and item.criterion_id == hypothesis.criterion_id)
-            source = next(item for item in request.candidate_bindings if item.role == 'verification'
-                          and item.criterion_id == hypothesis.criterion_id)
-            commands = contract['verifier_policy']['commands']
-            definition = commands[binding.command_id]
-            policy = commands[source.command_id]['replay']
-            repro = hypothesis.repro_input.thaw()
-            digest = 'sha256:' + hashlib.sha256(repro['artifact_kind'].encode() + b'\0' +
-                policy['relative_path'].encode() + b'\0' + repro['content'].encode()).hexdigest()
-            if any(replay.get(key) != value for key, value in dict(contract_digest=request.contract_digest,
-                criterion_id=hypothesis.criterion_id, candidate_digest=binding.snapshot_digest,
-                verifier_policy_digest=request.verifier_policy_digest, verifier_definition_digest=binding.definition_digest,
-                argv=definition['argv'], relative_cwd=definition['relative_cwd'],
-                runner_provenance='mission-public-cli/1', repro_input_digest=(None if replay.get('status') == 'blocked' and replay.get('repro_input_digest') is None else digest)).items()):
-                raise FreshReviewError('fresh-review-replay-binding-invalid')
-            actual = hypothesis.actual.thaw()
-            expected = hypothesis.expected.thaw()
-            criterion = next(item for item in contract['criteria'] if item['id'] == hypothesis.criterion_id)
-            supported = (criterion['verification_kind'] == 'command' and criterion['command_id'] == source.command_id
-                and replay['status'] == 'failed' and not replay['timed_out']
-                and replay['exit_code'] is not None and replay['exit_code'] > 0 and not replay['output_truncated']
-                and expected.get('criterion_id') == hypothesis.criterion_id
-                and all(key in replay and type(replay[key]) is type(value) and replay[key] == value
-                        for key, value in actual.items()))
+            supported = _replay_supports_hypothesis(request, hypothesis, contract, replay)
             status = 'verified' if supported else 'blocked'
             reason = 'none' if supported else replay['block_reason'] or 'replay-claim-unconfirmed'
         raw = next(item for result in output_document(output)['criterion_results'] for item in result['findings']
@@ -94,6 +66,41 @@ def completed_evidence(output, request, contract, replays=()):
                            for item in output.criterion_results],
         requirements=output_document(output)['coverage'])
     return canonical_bytes(payload), tuple(findings)
+
+
+def _replay_supports_hypothesis(request, hypothesis, contract, replay):
+    """Shared validation of a bound runner observation and counterexample."""
+    if replay_eligibility(request, hypothesis, contract['verifier_policy']) is not None:
+        raise FreshReviewError('fresh-review-replay-invalid')
+    try:
+        project_verification_receipt(RecordVerificationReceipt('observed', freeze_json_value(replay)))
+    except (EvidenceRuleError, TypeError, ValueError) as exc:
+        raise FreshReviewError('fresh-review-replay-invalid') from exc
+    binding = next(item for item in request.candidate_bindings if item.role == 'replay'
+                   and item.criterion_id == hypothesis.criterion_id)
+    source = next(item for item in request.candidate_bindings if item.role == 'verification'
+                  and item.criterion_id == hypothesis.criterion_id)
+    commands = contract['verifier_policy']['commands']
+    definition = commands[binding.command_id]
+    policy = commands[source.command_id]['replay']
+    repro = hypothesis.repro_input.thaw()
+    digest = 'sha256:' + hashlib.sha256(repro['artifact_kind'].encode() + b'\0' +
+        policy['relative_path'].encode() + b'\0' + repro['content'].encode()).hexdigest()
+    if any(replay.get(key) != value for key, value in dict(contract_digest=request.contract_digest,
+        criterion_id=hypothesis.criterion_id, candidate_digest=binding.snapshot_digest,
+        verifier_policy_digest=request.verifier_policy_digest, verifier_definition_digest=binding.definition_digest,
+        argv=definition['argv'], relative_cwd=definition['relative_cwd'],
+        runner_provenance='mission-public-cli/1', repro_input_digest=(None if replay.get('status') == 'blocked' and replay.get('repro_input_digest') is None else digest)).items()):
+        raise FreshReviewError('fresh-review-replay-binding-invalid')
+    actual = hypothesis.actual.thaw()
+    expected = hypothesis.expected.thaw()
+    criterion = next(item for item in contract['criteria'] if item['id'] == hypothesis.criterion_id)
+    return (criterion['verification_kind'] == 'command' and criterion['command_id'] == source.command_id
+        and replay['status'] == 'failed' and not replay['timed_out']
+        and replay['exit_code'] is not None and replay['exit_code'] > 0 and not replay['output_truncated']
+        and expected.get('criterion_id') == hypothesis.criterion_id
+        and all(key in replay and type(replay[key]) is type(value) and replay[key] == value
+                for key, value in actual.items()))
 
 
 def evidence_claim(kind, content):

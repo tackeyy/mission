@@ -34,7 +34,7 @@ def test_completed_output_and_coverage_share_one_public_commit(reviewer, run_cli
     assert json.loads(import_output(run_cli, reviewer).stdout)['record'] == record
     _reject_unchanged(run_cli, root, ['fresh-review', 'import', '--request', request['request_id'],
         '--adapter', 'neutral'], 'fresh-review-consumed', env={**reviewer[2], 'MISSION_OPERATION_ID': 'import-two'})
-    _reject_unchanged(run_cli, root, ['mark-passes'], 'acceptance-coverage-pending')
+    _reject_unchanged(run_cli, root, ['mark-passes'], 'acceptance-receipt-missing')
 
 
 @pytest.fixture
@@ -80,7 +80,7 @@ def test_fixture_child_counterexample_has_replay_facts_and_completion_stays_clos
     assert finding['status'] == 'verified' and finding['resolution'] == 'open'
     assert json.loads(journal.read_text())['count'] == 1
     assert json.loads(run_cli('get', cwd=root).stdout).get('verification_receipts', []) == []
-    _reject_unchanged(run_cli, root, ['mark-passes'], 'acceptance-coverage-pending')
+    _reject_unchanged(run_cli, root, ['mark-passes'], 'acceptance-receipt-missing')
 
 
 @pytest.mark.parametrize('expired', [False, True])
@@ -158,7 +158,7 @@ def test_unverified_replay_is_kept_as_an_open_finding(replay_reviewer, run_cli, 
                                      'claim': 'replay-claim-unconfirmed', 'passed': 'replay-claim-unconfirmed'}[case]
     if case == 'passed':
         assert evidence['replay']['status'] == 'passed' and evidence['actual']['exit_code'] == 0
-    _reject_unchanged(run_cli, root, ['mark-passes'], 'acceptance-coverage-pending')
+    _reject_unchanged(run_cli, root, ['mark-passes'], 'acceptance-receipt-missing')
 
 
 @pytest.mark.parametrize('replay_reviewer,reason', [('timeout','timeout'), ('stale-toolchain','toolchain-stale'),
@@ -536,7 +536,7 @@ def test_expanded_replay_evidence_overflow_preserves_only_failed_diagnostics(rep
     assert next_attempt.returncode == 0, next_attempt.stderr
     requests = json.loads(run_cli('fresh-review', 'status', cwd=root).stdout)['requests']
     assert requests[0]['result'] == record['result']
-    _reject_unchanged(run_cli, root, ['mark-passes'], 'acceptance-coverage-pending')
+    _reject_unchanged(run_cli, root, ['mark-passes'], 'acceptance-receipt-missing')
 
 
 def test_sender_rejection_precedes_malformed_output_and_replay(completed_carrier):
