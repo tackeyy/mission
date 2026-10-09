@@ -331,7 +331,14 @@ def test_provider_terminal_probes_release_budget_and_deadline_prevents_late_spaw
         iteration=1, phase='planning', env_extra=env)
     _budget(tmp_path)
     if probe == 'unavailable':
-        monkeypatch.setattr(invoke_here.module, '_command_is_available', lambda _: False)
+        from types import SimpleNamespace
+        from mission_application import provider_budget
+        clock = [100.0]
+        monkeypatch.setattr(provider_budget, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+        def unavailable(_):
+            clock[0] += 5  # Preflight overhead is not executed child time.
+            return False
+        monkeypatch.setattr(invoke_here.module, '_command_is_available', unavailable)
     if probe == 'dispatch-stall':
         original = LegacyV4Repository.save
         def stall(repo, data, **kw):
