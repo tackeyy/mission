@@ -217,6 +217,8 @@ def judge_completion(projection, evidence, bindings, contract, contract_digest, 
     latest whole attempt and each required criterion's latest attempt. Earlier
     whole receipts are superseded; partial receipts' open obligations remain.
     Condition 5 checks unresolved bound findings from every attempt last.
+    D1 reserved/consumed checkpoints have no terminal receipt and are judged as
+    pending, after the same freshness check, without changing stored records.
     """
     from .fresh_review import FreshReviewRecord
     from .fresh_review_coverage import FreshReviewAttempt, judge_fresh_review, judge_criterion, FreshReviewReason, REASON_ORDER
@@ -225,8 +227,12 @@ def judge_completion(projection, evidence, bindings, contract, contract_digest, 
         raise FreshReviewError(INCOMPLETE)
     validate_completion_carriers(projection, evidence, bindings, contract_digest)
     records = tuple(item for item in projection.requests if isinstance(item, FreshReviewRecord))
-    attempts = tuple(FreshReviewAttempt(item.request, item.status,
-        None if item.result is None else decode_terminal_receipt(item.result.thaw())) for item in records)
+    # D1 nonce checkpoints have no authenticated terminal receipt; even a
+    # consumed result claiming success remains pending in the decision table.
+    legacy_statuses = ('reserved', 'consumed')
+    attempts = tuple(FreshReviewAttempt(item.request, 'pending' if item.status in legacy_statuses else item.status,
+        None if item.status in legacy_statuses or item.result is None
+        else decode_terminal_receipt(item.result.thaw())) for item in records)
     try:
         facts = tuple(_completion_facts(item, next(r.request for r in records if r.request.request_id == item.request_id),
                                         contract) for item in evidence)

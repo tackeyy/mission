@@ -189,6 +189,54 @@ def test_only_latest_attempt_state_affects_completion(clean, status, superseded)
         rejected(state, command, 'acceptance-' + reason)
 
 
+@pytest.mark.parametrize('status', ['reserved', 'consumed'])
+@pytest.mark.parametrize('scope', ['whole', 'criterion'])
+@pytest.mark.parametrize('position', ['superseded', 'latest', 'stale'])
+def test_legacy_nonce_checkpoints_follow_latest_attempt_rules(clean, status, scope, position):
+    from mission_kernel.fresh_review import (FreshReviewRecord, reserve_request, consume_request,
+                                            projection_document, decode_projection)
+    state, command = clean
+    if scope == 'criterion':
+        state, command = with_contract(clean, lambda c: c['criteria'].append(dict(c['criteria'][0], id='AC2')))
+        whole = state.fresh_review.requests[0]
+        coverage = command.fresh_review_evidence[0].coverage.thaw()
+        coverage['criterion_results'].append(dict(criterion_id='AC2', status='searched', reason_code='none'))
+        coverage['requirements'][0]['criterion_ids'].append('AC2')
+        whole, evidence = bound_record(whole, coverage, criterion_ids=('AC1', 'AC2'),
+            candidate_bindings=(*whole.request.candidate_bindings,
+                *(replace(b, criterion_id='AC2') for b in whole.request.candidate_bindings)))
+        whole = replace(whole, launch=freeze_json_value(whole.result.thaw()['launch_receipt']))
+        state = replace(state, fresh_review=FreshReviewProjection((whole,)))
+        command = command_for(state, (evidence,))
+    record = state.fresh_review.requests[0]
+    request = replace(record.request, request_id='legacy', nonce='legacy-nonce')
+    if scope == 'criterion':
+        request = replace(request, criterion_ids=('AC2',),
+            candidate_bindings=tuple(b for b in request.candidate_bindings if b.criterion_id == 'AC2'))
+    pending = FreshReviewRecord(request, 'legacy-prepare', record.prepare_intent_digest, record.prepare_payload_digest)
+    arguments = dict(operation_id='legacy-dispatch', intent_digest=canonical_digest('intent'),
+                     payload_digest=canonical_digest('payload'))
+    legacy = reserve_request(FreshReviewProjection((pending,)), request, **arguments)
+    if status == 'consumed':
+        # A legacy result can claim success without any authenticated receipt.
+        legacy = consume_request(legacy, request, result={'status': 'passed'}, **arguments)
+    other = legacy.requests[0]
+    rows = (other, record) if position == 'superseded' else (record, other)
+    projection = decode_projection({'fresh_review': projection_document(FreshReviewProjection(rows))})
+    state = replace(state, fresh_review=projection)
+    command = command_for(state, command.fresh_review_evidence)
+    if position == 'stale':
+        inputs = command.fresh_review_bindings.input_digests
+        command = replace(command, fresh_review_bindings=replace(command.fresh_review_bindings,
+            input_digests=(*inputs[:-1], (request.request_id, canonical_digest('changed-input')))))
+    if position == 'superseded':
+        assert acceptance_completion_rejection(state, command) is None
+        assert decide(state, command).accepted
+    else:
+        reason = 'stale' if position == 'stale' else 'pending'
+        rejected(state, command, 'acceptance-fresh-review-' + reason)
+
+
 def with_contract(clean, change):
     state, command = clean
     document = state.legacy_passthrough.thaw()

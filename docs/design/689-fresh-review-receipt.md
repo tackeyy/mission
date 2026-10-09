@@ -199,6 +199,8 @@ ledger の omission を valid と呼ぶ自己申告だけでは足りず、kerne
 
 行は上から順に評価し、最初に当てはまった行を採る（実行途中でも古い候補に束縛された attempt は stale を返す）。
 
+保存互換のD1 nonce checkpoint（`mission-fresh-review/1`の`reserved`／`consumed`）は、[nonce reducer](../../skills/mission/lib/mission_kernel/fresh_review.py)が保存するdispatch前の予約／未解釈JSON結果で、検証可能なterminal receiptを持たない。保存recordを変えず、判定時だけ両方をreceiptなしの`pending`相当へ写す。最新なら行2のfreshnessを先に検査し、一致しても行3の`acceptance-fresh-review-pending`で拒否する。最新の全体attempt・各required criterionの最新attemptでない古いcheckpointは、その状態で後続reviewを妨げない。
+
 `CommitFreshReviewResult` の一つの public state commit で、terminal receipt、output content-addressed ref、
 output digest、coverage receipt、open obligations/findings、request 消費を束縛する。
 ここでの commit は repository publication の世代であり Git commit ではない。
