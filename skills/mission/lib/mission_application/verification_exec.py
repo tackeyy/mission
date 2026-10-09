@@ -15,6 +15,15 @@ import sys
 import time
 
 
+MAX_DEADLINE_AHEAD_SEC = 86400  # F's seconds-policy ceiling; also bounds select
+
+
+def deadline_is_valid(value):
+    # Check the range before isfinite so huge integers cannot overflow float.
+    return (type(value) in (int, float) and 0 < value <= time.monotonic() + MAX_DEADLINE_AHEAD_SEC
+            and math.isfinite(value))
+
+
 def _stop(control, reason):
     try:
         os.write(control, reason)  # nonblocking; never a payload channel
@@ -26,9 +35,19 @@ def _stop(control, reason):
 def main():
     if len(sys.argv) < 4:
         return 2
-    deadline = float(sys.argv[1])
     control = int(sys.argv[2])
-    if not math.isfinite(deadline) or deadline <= 0 or control < 3:
+    if control < 3:
+        return 2
+    os.set_blocking(control, False)
+    try:
+        deadline = float(sys.argv[1])
+    except (ValueError, OverflowError):
+        deadline = None
+    if not deadline_is_valid(deadline):
+        try:
+            os.write(control, b'E')
+        except OSError:
+            pass
         return 2
     if sys.argv[3] == '--watchdog':
         os.write(1, b'R')  # private readiness pipe; target has not started
@@ -36,7 +55,6 @@ def main():
             time.sleep(min(.01, max(0, deadline - time.monotonic())))
         _stop(control, b'T')
         return 2
-    os.set_blocking(control, False)
     try:
         watchdog = subprocess.Popen([sys.executable, '-I', '-S', __file__, sys.argv[1], sys.argv[2], '--watchdog'],
             pass_fds=(control,), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, close_fds=True)

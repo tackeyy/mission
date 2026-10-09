@@ -92,6 +92,64 @@ raise SystemExit(namespace['main']())
     return child, receiver
 
 
+@pytest.mark.parametrize('deadline', [float('inf'), float('nan'), 1e10, 1e18, 1e300,
+    True, False, -1, 'later', 10**400])
+def test_invalid_budget_deadline_is_blocked_before_spawn(monkeypatch, deadline):
+    import budgeted_exec
+    spawned, original = [], budgeted_exec.spawn_exec
+    def spawn(*args, **kwargs):
+        spawned.append(args)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(budgeted_exec, 'spawn_exec', spawn)
+    command = validate(_policy())['project-test']
+    result = runner.execute_candidate(runner.CandidateSnapshot((), runner._digest(())),
+        command, relative_cwd='.', budget_deadline=deadline)
+    assert result['status'] == 'blocked' and result['block_reason'] == 'process-unavailable'
+    assert result['exit_code'] is None and not result['timed_out']
+    assert result['observed_output_bytes'] == 0 and spawned == []
+
+
+@pytest.mark.parametrize('deadline', ['inf', 'nan', '1e10', '1e18', '1e300', 'True', 'later', '-1'])
+def test_bootstrap_invalid_deadline_reports_admission_failure(monkeypatch, deadline):
+    from mission_application import verification_exec as bootstrap
+    receiver, sender = os.pipe()
+    os.set_blocking(receiver, False)
+    monkeypatch.setattr(bootstrap.sys, 'argv', ['bootstrap', deadline, str(sender), 'neutral-verifier'])
+    monkeypatch.setattr(bootstrap.subprocess, 'Popen',
+        lambda *a, **kw: pytest.fail('invalid deadline admitted a watchdog or target'))
+    try:
+        assert bootstrap.main() == 2
+        assert os.read(receiver, 1) == b'E'
+    finally:
+        os.close(receiver); os.close(sender)
+
+
+@pytest.mark.parametrize('mode,backend', [
+    ('leader', 'native'), ('group', 'native'), ('group', 'kqueue'), ('legacy', 'native'),
+])
+def test_stopped_verifier_waits_for_deadline(tmp_path, monkeypatch, mode, backend):
+    if backend == 'kqueue':
+        if sys.platform != 'darwin':
+            pytest.skip('Darwin kqueue fallback')
+        monkeypatch.delattr(os, 'waitid', raising=False)
+    marker = tmp_path / 'owned-pids'
+    stop = (f'os.kill(os.getppid(),{int(signal.SIGSTOP)})' if mode == 'leader' else
+            f'os.killpg(os.getpgrp(),{int(signal.SIGSTOP)})')
+    program = _program(marker).removesuffix('time.sleep(60)') + stop + '; time.sleep(60)'
+    command = validate(_policy())['project-test']
+    command.update(argv=[command['argv'][0], '-c', program], timeout_sec=1 if mode == 'legacy' else 5)
+    deadline = time.monotonic()+1
+    kwargs = {} if mode == 'legacy' else {'budget_deadline': deadline}
+    with _marked_group(marker):
+        result = runner.execute_candidate(runner.CandidateSnapshot((), runner._digest(())),
+            command, relative_cwd='.', **kwargs)
+        assert marker.exists(), 'verifier did not reach SIGSTOP'
+        assert result['status'] == 'blocked' and result['timed_out']
+        assert result['block_reason'] == ('timeout' if mode == 'legacy' else 'budget-deadline')
+        assert time.monotonic() >= deadline and result['exit_code'] == -signal.SIGKILL
+        _wait(lambda: all(_absent(pid) for pid in json.loads(marker.read_text())[1:]))
+
+
 @pytest.mark.parametrize('fault,reason,seconds', [
     ('raise SystemExit(1)', b'E', 3),
     ('import os,time; os.write(1,b"X"); time.sleep(60)', b'E', 3),

@@ -303,8 +303,15 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None, bud
             raise VerificationRunnerError("test-report-input-conflict")
     before = candidate.digest
     started = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-    if not _toolchain_matches(command):
-        return {"started_at": started, "finished_at": started, "exit_code": None, "timed_out": False, "executed_count": None, "output_digest": "sha256:" + hashlib.sha256(b"").hexdigest(), "observed_output_bytes": 0, "output_truncated": False, "status": "blocked", "block_reason": "toolchain-stale", "repro_input_digest": None}
+    block_reason = None
+    if budget_deadline is not None:
+        from mission_application.verification_exec import deadline_is_valid
+        if not deadline_is_valid(budget_deadline):
+            block_reason = "process-unavailable"
+    if block_reason is None and not _toolchain_matches(command):
+        block_reason = "toolchain-stale"
+    if block_reason is not None:
+        return {"started_at": started, "finished_at": started, "exit_code": None, "timed_out": False, "executed_count": None, "output_digest": "sha256:" + hashlib.sha256(b"").hexdigest(), "observed_output_bytes": 0, "output_truncated": False, "status": "blocked", "block_reason": block_reason, "repro_input_digest": None}
     timed_out = False
     with contextlib.ExitStack() as descriptors, materialize_candidate(candidate) as root:
         control_receiver = None
