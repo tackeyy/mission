@@ -241,7 +241,7 @@ from mission_application.evidence import (  # noqa: E402
     validate_context_iteration_override,
     verify_published_evidence_effects,
 )
-from mission_application.budget import run_budget_status_cli, run_budget_next
+from mission_application.budget import run_budget_status_cli, run_budget_next, run_budget_reconcile_cli
 from mission_kernel.budget import BudgetError
 from mission_application.fresh_review import run_fresh_review_prepare_cli, run_fresh_review_status_cli
 from mission_application.fresh_review_withdraw import run_fresh_review_withdraw_cli
@@ -13794,6 +13794,10 @@ def cmd_fresh_review_prepare(args):
     print(run_fresh_review_prepare_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES))
 
 
+def cmd_budget_reconcile(args):
+    print(run_budget_reconcile_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES))
+
+
 def cmd_budget_status(args):
     print(run_budget_status_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES))
 
@@ -16330,9 +16334,10 @@ def _add_review_parsers(subparsers) -> None:
     p_verify_claims.add_argument("--doc-digest", required=True)
     p_verify_claims.add_argument("--out", required=True)
     p_verify_claims.set_defaults(func=cmd_verification_claims)
-    p_budget = sub.add_parser("budget", help="予算 ledger の読み取り専用表示")
+    p_budget = sub.add_parser("budget", help="予算 ledger の表示と crash 精算")
     p_budget_sub = p_budget.add_subparsers(dest="budget_command", required=True)
     p_budget_sub.add_parser("status", help="予算 policy と ledger の状態").set_defaults(func=cmd_budget_status)
+    p_budget_sub.add_parser("reconcile", help="crash 後の予約を精算").set_defaults(func=cmd_budget_reconcile)
     p_fresh = sub.add_parser("fresh-review", help="typed fresh-review request と起動を管理")
     p_fresh_sub = p_fresh.add_subparsers(dest="fresh_review_command", required=True)
     p_prepare = p_fresh_sub.add_parser("prepare", help="候補と入力を凍結し、一回使用の request を保存")

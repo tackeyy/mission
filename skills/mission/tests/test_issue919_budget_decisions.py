@@ -335,7 +335,7 @@ def test_spawn_entry_inventory_is_closed_and_inert_until_f2_coverage():
         'repair-disposition-run', 'recover', 'system-recover', 'repair-begin',
     }
     assert set(BUDGET_SPAWN_ENTRIES) == expected
-    assert {key for key, value in BUDGET_SPAWN_ENTRIES.items() if value == 'pending'} == expected - {'invoke-command', 'invoke-prepared'}
+    assert {key for key, value in BUDGET_SPAWN_ENTRIES.items() if value == 'pending'} == expected - {'invoke-command', 'invoke-prepared', 'verification-run'}
     with pytest.raises(TypeError):
         BUDGET_SPAWN_ENTRIES['verification-run'] = 'covered'
 

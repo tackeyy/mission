@@ -39,7 +39,7 @@ UNKNOWN = 'unclassified-spawn'
 SUBPROCESS_APIS = {'run', 'call', 'check_call', 'check_output', 'getoutput', 'getstatusoutput'}
 TAILS = set("""Popen Process Pool ProcessPoolExecutor get_context fork forkpty system
 popen launch collect cancel recover observe_parent run_job dispatch_prepared_packet
-subprocess_exec subprocess_shell""".split())
+subprocess_exec subprocess_shell run_contract_verifier""".split())
 
 
 def spawn_calls(source):
@@ -183,7 +183,7 @@ def test_spawn_inventory_matches_design_table_and_has_no_unclassified_call():
 
 def test_covered_provider_entries_leave_other_dispatch_entries_pending():
     from mission_kernel.budget import BUDGET_SPAWN_ENTRIES
-    assert {key for key, status in BUDGET_SPAWN_ENTRIES.items() if status == 'covered'} == {'invoke-command', 'invoke-prepared'}
+    assert {key for key, status in BUDGET_SPAWN_ENTRIES.items() if status == 'covered'} == {'invoke-command', 'invoke-prepared', 'verification-run'}
     assert set(BUDGET_SPAWN_ENTRIES.values()) == {'covered', 'pending'}
     source = (MISSION / 'lib/mission_application/command_provider.py').read_text()
     calls = {node.func.id for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
@@ -370,3 +370,13 @@ def test_imports_and_namespace_escape_routes_are_inventory_candidates(source):
 def test_allowlisted_imports_do_not_introduce_spawn_candidates(name):
     module, _, api = name.rpartition('.')
     assert not spawn_calls(f'from {module} import {api} as reference\nconsume(reference)')
+
+
+@pytest.mark.parametrize('source', [
+    'run_contract_verifier(state)',
+    'from mission_application.verification_execution import run_contract_verifier as v\nv(state)',
+    'consume(run_contract_verifier)',
+    'module.run_contract_verifier(state)',
+])
+def test_contract_verifier_new_callers_cannot_escape_inventory(source):
+    assert any(tail == 'run_contract_verifier' for _, tail in spawn_calls(source))

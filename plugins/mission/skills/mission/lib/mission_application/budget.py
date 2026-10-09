@@ -1,4 +1,4 @@
-"""Read-only F1 queries; no policy intake, admission or mutation use case."""
+"""Budget queries and crash reconciliation; policy intake remains unpublished."""
 from __future__ import annotations
 
 import json
@@ -55,3 +55,33 @@ def run_budget_next(out, data, at, legacy_pressure, spawn_actions, capacity_stat
             f"時間予算の {pressure['pressure_pct']}% を消費。optional specialist / critic の"
             ' 新規 spawn を控え、成果物の確定を優先する。')
     return out
+
+
+def run_budget_reconcile_cli(args, services):
+    """Charge crashed dispatches before removing jobs with proven dead owners."""
+    from mission_kernel.commands import ReconcileDispatchBudget
+    from mission_persistence.spawn_jobs import cleanup_jobs
+    from .cli_operation import prepare_cli_operation
+    root = Path.cwd()
+    state_file = services.resolve_state_file(root)
+    if not state_file.exists():
+        services.fail('budget-state-missing', 2)
+    identity = prepare_cli_operation('budget-reconcile', {}, session_id=state_file.stem,
+        compatibility_arguments=services.compatibility_arguments, canonical_operation=services.canonical_operation)
+    repository = services.repository(root, state_file, stamp=True, strict_read=True, pre_admit_lease=True,
+        session_id=state_file.stem, operation_id=identity.operation_id,
+        operation_command=identity.operation_command, operation_command_type=identity.command_type)
+    with repository.transaction():
+        document = repository.load()
+        ledger = decode_ledger(document)
+        if ledger.policy is not None:
+            result = repository.execute(ReconcileDispatchBudget(services.now()))
+            if result.decision is not None and not result.decision.accepted:
+                services.fail(result.decision.rejection.code, 2)
+            ledger = decode_ledger(result.projection)
+        opened = {r.reservation_id.replace(':', '_') for r in ledger.reservations}
+        recovery = ledger.stop_slots.system_recovery.reservation
+        if recovery is not None:
+            opened.add(recovery.reservation_id.replace(':', '_'))
+        removed = cleanup_jobs(root / '.mission-state' / 'exec-jobs', open_reservations=opened)
+    return json.dumps({'ok': True, 'open_reservations': len(opened), 'removed_jobs': len(removed)})

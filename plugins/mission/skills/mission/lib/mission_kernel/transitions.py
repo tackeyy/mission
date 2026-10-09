@@ -38,6 +38,7 @@ from .commands import (
     ReserveDispatchBudget,
     RecordBudgetRefusal,
     SettleDispatchBudget,
+    ReconcileDispatchBudget,
     EnterFinalPhase,
     BudgetStop as BudgetStopCommand,
     Reactivate,
@@ -317,6 +318,18 @@ def _settle_budget(state: MissionState, raw_command: object) -> Transition:
     except BudgetError as exc:
         raise _Rejected(str(exc)) from exc
     return Transition(_with_budget(state, ledger), (KernelEvent('budget-dispatch-settled'),))
+
+
+def _reconcile_budget(state: MissionState, command: object) -> Transition:
+    assert isinstance(command, ReconcileDispatchBudget)
+    if state.budget.policy is None:
+        raise _Rejected('budget-policy-absent')
+    try:
+        ledger = with_clock(state.budget, command.at, active=state.control.loop_active)
+        ledger = record_exhaustion(expire_reservations(ledger, command.at), command.at)
+    except BudgetError as exc:
+        raise _Rejected(str(exc)) from exc
+    return Transition(_with_budget(state, ledger), (KernelEvent('budget-reconciled'),))
 
 
 def _enter_final_budget(state: MissionState, raw_command: object) -> Transition:
@@ -1711,6 +1724,20 @@ def _record_verification(state: MissionState, raw_command: object) -> Transition
 def _record_verification_receipt(state: MissionState, raw_command: object) -> Transition:
     command = raw_command
     assert isinstance(command, RecordVerificationReceipt)
+    if state.budget.policy is not None and command.settlement is None:
+        raise _Rejected('verification-settlement-binding-invalid')
+    if command.settlement is not None:
+        row = next((r for r in state.budget.reservations if r.reservation_id == command.settlement.reservation_id), None)
+        receipt = command.receipt.thaw()
+        if (row is None or row.entry != 'verification-run' or row.target != receipt.get('criterion_id')
+                or command.settlement.at != command.at
+                or command.settlement.result_digest != receipt.get('output_digest')
+                or command.settlement.candidate_digest != receipt.get('contract_digest')
+                or command.settlement.output_bytes != receipt.get('observed_output_bytes')
+                or command.settlement.completed != (receipt.get('status') == 'passed')
+                or (command.settlement.outcome == 'kill-unconfirmed') != (receipt.get('block_reason') == 'kill-unconfirmed')):
+            raise _Rejected('verification-settlement-binding-invalid')
+        state = _settle_budget(state, command.settlement).new_state
     try:
         document, _entry = apply_verification_receipt(_evidence_document(state), command)
     except EvidenceRuleError as rejected:
@@ -2462,6 +2489,8 @@ TRANSITION_TABLE = build_transition_table(
             _command_type_guard(SettleDispatchBudget),
             _settle_budget,
         ),
+        TransitionRule("budget-reconcile", ReconcileDispatchBudget,
+                       _command_type_guard(ReconcileDispatchBudget), _reconcile_budget),
         TransitionRule(
             "budget-enter-final",
             EnterFinalPhase,

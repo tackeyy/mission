@@ -171,6 +171,9 @@
     "prepare_artifact_publish:copy-ref": 2,
     "prepare_artifact_render:copy-ref": 1
   },
+  "lib/mission_application/budget.py": {
+    "run_budget_reconcile_cli:replace": 2
+  },
   "lib/mission_application/claims_ledger.py": {
     "project_claims_ledger:copy-ref": 1
   },
@@ -264,6 +267,11 @@
   "lib/mission_application/supersede_reviews.py": {
     "_proposed_state:copy-ref": 1,
     "_publish_review_group:copy-ref": 2
+  },
+  "lib/mission_application/verification_budget.py": {
+    "execute_verification:replace": 1,
+    "reserve_verification:replace": 1,
+    "settle_collected_verification:replace": 1
   },
   "lib/mission_application/verification_runner.py": {
     "_read:open-write": 1,

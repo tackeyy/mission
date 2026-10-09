@@ -51,6 +51,7 @@ COMMAND_OWNER_REGISTRY = {
         "context-manifest",
         "progress clear",
         "progress update",
+        "budget reconcile",
         "verification claims",
         "verification record",
         "verification run",
@@ -137,6 +138,7 @@ C2_REPOSITORY_COMMANDS = frozenset(
         "executor-handoff verify-step",
         "planning reselect",
         "supersede-reviews",
+        "budget reconcile",
         # Batch 2 specialists plus later repository-owned selection decisions
         "specialists decline",
         "specialists recommend",

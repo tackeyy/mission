@@ -276,7 +276,7 @@ def _executed_count(command, root: Path) -> tuple[int | None, bool]:
     return root_stats["tests"] - root_stats["skipped"], root_stats["failures"] == root_stats["errors"] == 0
 
 
-def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
+def execute_candidate(candidate, command, *, relative_cwd, repro_input=None, budget_deadline=None):
     """Run one frozen argv in a materialized candidate and return facts only.
 
     No caller supplied shell text or ambient environment reaches the child.
@@ -328,7 +328,7 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
         try:
             child = subprocess.Popen(
                 argv, cwd=cwd, shell=False, stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=budget_deadline is None,
             env={"PATH": str(Path(command["toolchain"]["path"]).parent) if command.get("toolchain") else os.defpath, **command.get("env", {})},
             )
         except OSError:
@@ -353,14 +353,14 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
         assert child.stdout is not None
         stdout = child.stdout
         selector.register(stdout, selectors.EVENT_READ)
-        deadline = time.monotonic() + timeout
+        deadline = min(time.monotonic() + timeout, budget_deadline - .5) if budget_deadline is not None else time.monotonic() + timeout
         while selector.get_map() or child.poll() is None:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 if not timed_out:
                     timed_out = True
                     try:
-                        os.killpg(child.pid, signal.SIGKILL)
+                        child.kill() if budget_deadline is not None else os.killpg(child.pid, signal.SIGKILL)
                     except OSError:
                         pass
                     selector.close()
@@ -383,7 +383,7 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
         except subprocess.TimeoutExpired:
             timed_out = True
             try:
-                os.killpg(child.pid, signal.SIGKILL)
+                child.kill() if budget_deadline is not None else os.killpg(child.pid, signal.SIGKILL)
             except OSError:
                 pass
             exit_code = child.poll()
