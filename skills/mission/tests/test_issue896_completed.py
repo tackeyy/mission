@@ -130,7 +130,7 @@ def test_bound_output_fails_closed_for_deadline_and_contract_content(reviewer, r
     assert (root / record['result']['output_ref']['relative_path']).read_bytes() == canonical_bytes(raw)
 
 
-@pytest.mark.parametrize('case', ['unsupported', 'budget', 'claim'])
+@pytest.mark.parametrize('case', ['unsupported', 'budget', 'claim', 'passed'])
 def test_unverified_replay_is_kept_as_an_open_finding(replay_reviewer, run_cli, case):
     from mission_kernel.fresh_review import canonical_bytes
     root, _, _, journal = replay_reviewer
@@ -142,8 +142,10 @@ def test_unverified_replay_is_kept_as_an_open_finding(replay_reviewer, run_cli, 
         finding['command_id'] = 'unregistered'
     elif case == 'budget':
         stored['budget_used']['replays'] = 16
-    elif case == 'claim':
+    elif case in ('claim', 'passed'):
         finding['actual'] = {'exit_code': 0}
+        if case == 'passed':
+            finding['repro_input']['content'] = 'proof'
     stored['output'] = canonical_bytes(raw).decode()
     stored['budget_used']['output_bytes'] = len(stored['output'].encode())
     journal.write_text(json.dumps(stored))
@@ -153,7 +155,9 @@ def test_unverified_replay_is_kept_as_an_open_finding(replay_reviewer, run_cli, 
     evidence = json.loads((root / receipt['findings'][0]['relative_path']).read_bytes())
     assert evidence['status'] == 'blocked' and evidence['resolution'] == 'open'
     assert evidence['reason_code'] == {'unsupported': 'replay-unsupported', 'budget': 'replay-budget-exceeded',
-                                     'claim': 'replay-claim-unconfirmed'}[case]
+                                     'claim': 'replay-claim-unconfirmed', 'passed': 'replay-claim-unconfirmed'}[case]
+    if case == 'passed':
+        assert evidence['replay']['status'] == 'passed' and evidence['actual']['exit_code'] == 0
     _reject_unchanged(run_cli, root, ['mark-passes'], 'acceptance-coverage-pending')
 
 
@@ -300,26 +304,163 @@ def test_import_rejects_malformed_replay_budget_without_crashing(completed_carri
         validate_failed_import(record, replace(command, budget_used=freeze_json_value(used)), contract)
 
 
-def test_completed_import_rejects_forged_replay_binding_and_underreported_usage(completed_carrier):
+@pytest.mark.parametrize('status,exit_code,actual,expected_status', [
+    ('passed', 0, {'exit_code': 0}, 'blocked'),
+    ('passed', 0, {'status': 'passed'}, 'blocked'),
+    ('failed', 1, {'exit_code': 1}, 'verified'),
+    ('failed', 0, {'exit_code': 0}, 'blocked'),
+    ('failed', -1, {'exit_code': -1}, 'blocked'),
+])
+def test_only_observed_command_failure_verifies_counterexample(completed_carrier, status, exit_code, actual, expected_status):
+    import base64
+    from mission_kernel.fresh_review_output import decode_output
+    from mission_kernel.fresh_review_publish import completed_evidence
+    from mission_kernel.json_codec import freeze_json_value
+    record, command, contract = completed_carrier
+    output = json.loads(base64.b64decode(command.output_base64))
+    output['criterion_results'][0]['findings'][0]['actual'] = actual
+    carrier = command.replay_results[0].thaw()
+    carrier['replay'].update(status=status, exit_code=exit_code)
+    _, findings = completed_evidence(decode_output(output), record.request, contract, (freeze_json_value(carrier),))
+    finding = json.loads(findings[0])
+    assert finding['status'] == expected_status and finding['resolution'] == 'open'
+    assert finding['reason_code'] == ('none' if expected_status == 'verified' else 'replay-claim-unconfirmed')
+
+
+def _rebind_replay_finding(record, command, contract, carrier):
+    """Rebuild artifact claims too, so only the replay binding guard rejects."""
+    import base64
+    from dataclasses import replace
+    from mission_kernel.fresh_review_output import decode_output
+    from mission_kernel.fresh_review_publish import completed_evidence, evidence_claim, reference
+    from mission_kernel.fresh_review import canonical_bytes
+    from mission_kernel.json_codec import freeze_json_value
+    output = decode_output(json.loads(base64.b64decode(command.output_base64)))
+    _, findings = completed_evidence(output, record.request, contract, command.replay_results)
+    finding = json.loads(findings[0])
+    # Derive the valid projection, then replace its embedded observation. This
+    # lets the test construct coherent forged evidence without disabling guards.
+    finding['replay'] = carrier['replay']
+    claims = (evidence_claim('fresh-review-finding', canonical_bytes(finding)),)
+    receipt = command.receipt.thaw()
+    receipt['findings'] = [reference(item) for item in claims]
+    return replace(command, receipt=freeze_json_value(receipt), findings_effect=claims,
+                   replay_results=(freeze_json_value(carrier),))
+
+
+@pytest.mark.parametrize('field', ['contract_digest', 'criterion_id', 'candidate_digest',
+    'verifier_definition_digest', 'verifier_policy_digest', 'repro_input_digest',
+    'argv', 'runner_provenance', 'relative_cwd'])
+def test_completed_import_rejects_forged_replay_binding(completed_carrier, field):
+    from mission_kernel.fresh_review import FreshReviewError
+    from mission_kernel.fresh_review_publish import validate_failed_import
+    record, command, contract = completed_carrier
+    carrier = command.replay_results[0].thaw()
+    carrier['replay'][field] = ('sha256:' + 'b' * 64 if field.endswith('_digest') else
+                              ['other-verifier'] if field == 'argv' else 'other')
+    forged = _rebind_replay_finding(record, command, contract, carrier)
+    with pytest.raises(FreshReviewError, match='^fresh-review-replay-binding-invalid$'):
+        validate_failed_import(record, forged, contract)
+
+
+def test_completed_import_rejects_underreported_replay_usage(completed_carrier):
     from dataclasses import replace
     from mission_kernel.fresh_review import FreshReviewError
     from mission_kernel.fresh_review_publish import validate_failed_import
     from mission_kernel.json_codec import freeze_json_value
     record, command, contract = completed_carrier
     validate_failed_import(record, command, contract)
-    for field in ('contract_digest', 'criterion_id', 'candidate_digest', 'verifier_definition_digest',
-                  'verifier_policy_digest', 'repro_input_digest', 'argv', 'runner_provenance'):
-        raw = command.replay_results[0].thaw()
-        raw['replay'][field] = ['foreign'] if field == 'argv' else 'foreign'
-        with pytest.raises(FreshReviewError):
-            validate_failed_import(record, replace(command, replay_results=(freeze_json_value(raw),)), contract)
     used = command.budget_used.thaw()
     used['replays'] = 0
     receipt = command.receipt.thaw()
     receipt['budget_used'] = used
-    with pytest.raises(FreshReviewError):
+    with pytest.raises(FreshReviewError, match='^fresh-review-replay-budget-invalid$'):
         validate_failed_import(record, replace(command, budget_used=freeze_json_value(used),
             receipt=freeze_json_value(receipt)), contract)
+
+
+@pytest.mark.parametrize('field', ['coverage_effect', 'findings_effect'])
+def test_import_checks_claims_even_when_receipt_references_are_valid(completed_carrier, field):
+    from dataclasses import replace
+    from mission_kernel.fresh_review import FreshReviewError
+    from mission_kernel.fresh_review_publish import validate_failed_import
+    record, command, contract = completed_carrier
+    claim = command.coverage_effect if field == 'coverage_effect' else command.findings_effect[0]
+    forged = replace(claim, size=claim.size + 1)
+    with pytest.raises(FreshReviewError, match='^fresh-review-output-effect-invalid$'):
+        validate_failed_import(record, replace(command, **{field: forged if field == 'coverage_effect' else (forged,)}), contract)
+
+
+def test_import_checks_terminal_independence_directly(completed_carrier):
+    from dataclasses import replace
+    from mission_kernel.fresh_review import FreshReviewError
+    from mission_kernel.fresh_review_publish import validate_failed_import
+    from mission_kernel.json_codec import freeze_json_value
+    record, command, contract = completed_carrier
+    receipt = command.receipt.thaw()
+    receipt['independent'] = False
+    with pytest.raises(FreshReviewError, match='^fresh-review-output-effect-invalid$'):
+        validate_failed_import(record, replace(command, receipt=freeze_json_value(receipt)), contract)
+
+
+def test_decode_checks_terminal_independence_directly(completed_carrier):
+    from mission_kernel.fresh_review import FreshReviewError, canonical_digest
+    from mission_kernel.fresh_review_dispatch import decode_dispatch_record, reservation_id_for_operation, budget_class_for_fresh_review_dispatch
+    from .test_issue917_fresh_review_bounds import maximum_intent
+    record, command, _ = completed_carrier
+    fields = {name: getattr(record, name) for name in record.__dataclass_fields__}
+    dispatch = maximum_intent()
+    dispatch.update(operation_id=record.operation_id, fencing_epoch=2,
+        invocation_id='inv_' + canonical_digest(record.request.request_id)[7:39],
+        parent_identity=record.launch.thaw()['parent_identity'], outbound_packet_digest=record.request.input_digest,
+        iteration=record.request.iteration, reservation_id=reservation_id_for_operation(record.operation_id),
+        budget_class=budget_class_for_fresh_review_dispatch())
+    fields.update(status='completed', launch=record.launch.thaw(), dispatch=dispatch,
+        intent_digest='sha256:'+'a'*64, payload_digest='sha256:'+'a'*64, result=command.receipt.thaw())
+    decode_dispatch_record(dict(fields))
+    fields['result']['independent'] = False
+    with pytest.raises(FreshReviewError, match='^fresh-review-independent-invalid$'):
+        decode_dispatch_record(fields)
+
+
+@pytest.mark.parametrize('expired', [False, True])
+def test_replay_candidate_drift_is_reason_coded_and_never_publishes_success(replay_reviewer, run_cli, monkeypatch, capsys, expired):
+    import base64
+    from types import SimpleNamespace
+    from .test_command_inventory import _load_mission_state_module
+    from .test_issue879_completion_cli import _public_bytes, _persisted_fixture_document
+    from .test_issue912_fresh_review_dispatch import _expire_dispatch
+    from mission_application import fresh_review_publish as publisher
+    root, request, env, journal = replay_reviewer
+    invoke(run_cli, replay_reviewer, FIXTURE_REVIEW_MODE='counterexample')
+    if expired:
+        _expire_dispatch(replay_reviewer)
+    saved = json.loads(journal.read_text())
+    launch = saved['launch']
+    observation = {key: launch[key] for key in ('operation_id', 'fencing_epoch', 'request_id', 'nonce', 'child_identity')}
+    observation.update(process_exited=True, exit_code=0, budget_used=saved['budget_used'], launch_receipt=launch)
+    host = SimpleNamespace(resolve=lambda _: SimpleNamespace(registration=SimpleNamespace(digest=request['adapter_registration_digest'])),
+        recover=lambda *_: dict(observation=observation, output=base64.b64encode(saved['output'].encode()).decode()))
+    runner = publisher.run_contract_verifier
+    def drift(*args, **kwargs):
+        return {**runner(*args, **kwargs), 'candidate_digest': 'sha256:' + 'b'*64}
+    monkeypatch.setattr(publisher, 'run_contract_verifier', drift)
+    monkeypatch.chdir(root)
+    for key, value in {**env, 'MISSION_OPERATION_ID': 'import-one', 'MISSION_SESSION_ID': 'test', 'MISSION_LEASE_ID': 'test-lease'}.items():
+        monkeypatch.setenv(key, value)
+    before = _public_bytes(root)
+    services = _load_mission_state_module()._ACCEPTANCE_CONTRACT_CLI_SERVICES
+    args = SimpleNamespace(request=request['request_id'], adapter='neutral')
+    if expired:
+        result = json.loads(publisher.run_fresh_review_import_cli(args, services, host))
+        assert result['record']['status'] == 'failed' and result['record']['result']['reason'] == 'timeout'
+    else:
+        with pytest.raises(SystemExit) as error:
+            publisher.run_fresh_review_import_cli(args, services, host)
+        assert error.value.code == 2
+        assert 'fresh-review-replay-binding-invalid' in capsys.readouterr().err
+        assert _public_bytes(root) == before
+        assert _persisted_fixture_document(root)['fresh_review']['requests'][0]['status'] == 'running'
 
 
 @pytest.mark.parametrize('field,value', [(field, value) for field in ('started_at', 'finished_at')

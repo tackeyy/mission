@@ -20,6 +20,11 @@ def completed_evidence(output, request, contract, replays=()):
 
     Observations are application facts, not child-supplied replay receipts. They
     never enter normal verification history or resolve an open finding.
+    A command criterion expects its registered check to pass. Only a bound,
+    observed positive exit code confirms a counterexample to that check.
+    Matching authored facts alone do not establish a violation: passed replays,
+    signal termination, prose expectations and unobserved prohibited effects
+    remain unconfirmed.
     """
     coverage = derive_output_coverage(output, request, contract)
     hypotheses = [item for result in output.criterion_results for item in result.findings]
@@ -62,8 +67,10 @@ def completed_evidence(output, request, contract, replays=()):
                 raise FreshReviewError('fresh-review-replay-binding-invalid')
             actual = hypothesis.actual.thaw()
             expected = hypothesis.expected.thaw()
-            supported = (replay['status'] in ('passed', 'failed') and not replay['timed_out']
-                and replay['exit_code'] is not None and not replay['output_truncated']
+            criterion = next(item for item in contract['criteria'] if item['id'] == hypothesis.criterion_id)
+            supported = (criterion['verification_kind'] == 'command' and criterion['command_id'] == source.command_id
+                and replay['status'] == 'failed' and not replay['timed_out']
+                and replay['exit_code'] is not None and replay['exit_code'] > 0 and not replay['output_truncated']
                 and expected.get('criterion_id') == hypothesis.criterion_id
                 and all(key in replay and type(replay[key]) is type(value) and replay[key] == value
                         for key, value in actual.items()))
