@@ -35,6 +35,11 @@ from .commands import (
     InitializeArtifact,
     MarkHalt,
     MarkPass,
+    ReserveDispatchBudget,
+    RecordBudgetRefusal,
+    SettleDispatchBudget,
+    EnterFinalPhase,
+    BudgetStop as BudgetStopCommand,
     Reactivate,
     RecordArtifactPublication,
     RecordExecutorStep,
@@ -103,6 +108,9 @@ from .model import (
     SessionRole,
     TerminalOutcome,
 )
+from .budget import BudgetError, Settlement, decode_ledger, ledger_document
+from .budget_decisions import (Admission, admit, completion_rejection, enter_final, expire_reservations, record_exhaustion,
+    reserve, settle, stop, with_clock)
 
 
 class TransitionTableError(ValueError):
@@ -142,6 +150,212 @@ def _unbound_state(state: MissionState, **changes: Any) -> MissionState:
     return replace(state, snapshot_provenance=None, **changes)
 
 
+def _with_budget(state: MissionState, ledger: object) -> MissionState:
+    """Update the typed projection and every authoritative wire backing together."""
+    # The ledger is bound to the session's budget_minutes; check the round trip with it.
+    source = state.legacy_passthrough if state.legacy_passthrough is not None else state.extensions
+    minutes = source.thaw().get('budget_minutes')
+    try:
+        # Encoding validates caller text (reasons, scopes); a bad value is a rejection.
+        document = ledger_document(ledger)
+        if decode_ledger({'budget_minutes': minutes, 'budget_ledger': document}) != ledger:
+            raise _Rejected('budget-projection-backing-invalid')
+    except BudgetError as exc:
+        raise _Rejected(str(exc)) from exc
+    extensions = state.extensions.thaw()
+    extensions['budget_ledger'] = document
+    frozen_extensions = freeze_json_value(extensions)
+    if not isinstance(frozen_extensions, FrozenJsonObject):
+        raise _Rejected('budget-projection-backing-invalid')
+    changes: dict[str, Any] = {
+        'budget': ledger,
+        'extensions': frozen_extensions,
+    }
+    if state.legacy_passthrough is not None:
+        legacy = state.legacy_passthrough.thaw()
+        legacy['budget_ledger'] = document
+        frozen_legacy = freeze_json_value(legacy)
+        if not isinstance(frozen_legacy, FrozenJsonObject):
+            raise _Rejected('budget-projection-backing-invalid')
+        changes['legacy_passthrough'] = frozen_legacy
+    return _unbound_state(state, **changes)
+
+
+def _budget_guard(function, *args):
+    """Evaluate a budget guard; malformed command input is a rejection, not a crash."""
+    try:
+        return function(*args)
+    except BudgetError as exc:
+        raise _Rejected(str(exc)) from exc
+
+
+def _budget_at(command: object) -> str:
+    at = getattr(command, 'at', None)
+    if not isinstance(at, str):
+        raise _Rejected('budget-command-time-invalid')
+    return at
+
+
+def _observe_budget(state: MissionState, at: str, *, active: bool | None = None) -> MissionState:
+    ledger = state.budget
+    if ledger.policy is None:
+        return state
+    try:
+        if active is None:
+            ledger = record_exhaustion(ledger, at)
+        else:
+            ledger = record_exhaustion(expire_reservations(with_clock(ledger, at, active=active), at), at)
+    except BudgetError as exc:
+        raise _Rejected(str(exc)) from exc
+    return _with_budget(state, ledger)
+
+
+def _prepare_budget_admission(state: MissionState, command: ReserveDispatchBudget):
+    """Prepare the one authoritative admission snapshot for reserve/refusal.
+
+    Refusal persistence is a reducer operation, but it must describe the same
+    attempted admission as a reservation would.  In particular capacity is a
+    property of the encoded, post-clock/latch snapshot, not caller input.
+    """
+    if state.budget.policy is None:
+        raise _Rejected('budget-policy-absent')
+    if state.control.loop_active is not True:
+        raise _Rejected('budget-loop-inactive')
+    try:
+        observed = expire_reservations(with_clock(state.budget, command.at, active=state.control.loop_active), command.at)
+        if observed.stop_slots.final_latch is None:
+            from .budget import deadlines
+            if command.at >= deadlines(observed, command.at).repair:
+                from .budget import FinalLatch
+                observed = replace(observed, stop_slots=replace(observed.stop_slots,
+                    final_latch=FinalLatch(command.at, 'repair-deadline')))
+    except BudgetError as exc:
+        raise _Rejected(str(exc)) from exc
+    # E0 remains the capacity authority.  This reducer supplies only the
+    # actual persisted document and F's bounded reservation row delta.
+    try:
+        from .codec_v4 import project_legacy_document
+        from .state_capacity import BUDGET_RESERVATION_ROW_DELTA, BUDGET_SETTLEMENT_ROW_DELTA, StateEncoding, state_capacity_verdict
+        if state.schema_origin.value == 'v5':
+            from .codec_v5 import encode_v5_state
+            from .guidance import GuidanceFacts
+            if not isinstance(command.guidance, GuidanceFacts):
+                raise _Rejected('budget-capacity-evidence-required')
+            observed_state = _with_budget(state, observed)
+            encoded_payload = encode_v5_state(observed_state, command.guidance)
+            payload = json.loads(encoded_payload)
+            encoded = len(encoded_payload)
+            encoding = StateEncoding.CANONICAL
+        else:
+            observed_state = _with_budget(state, observed)
+            payload = json.loads(project_legacy_document(observed_state))
+            encoded = len(json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True).encode('utf-8'))
+            encoding = StateEncoding.LEGACY_PRETTY
+        verdict = state_capacity_verdict(None, payload, encoded, encoding=encoding)
+        from .budget_decisions import CapacityEvidence
+        held = sum(row.reserved_bytes + BUDGET_SETTLEMENT_ROW_DELTA for row in observed.reservations)
+        recovery = observed.stop_slots.system_recovery.reservation
+        if recovery is not None:
+            held += recovery.reserved_bytes + BUDGET_SETTLEMENT_ROW_DELTA
+        capacity = CapacityEvidence(max(0, verdict.metrics.headroom - held), BUDGET_RESERVATION_ROW_DELTA)
+    except _Rejected:
+        raise
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise _Rejected('budget-capacity-evidence-invalid') from exc
+    admission = admit(observed, state, command.at, entry=command.entry, target=command.target,
+        operation_id=command.operation_id, fencing_epoch=command.fencing_epoch,
+        policy_timeout=command.policy_timeout, reserved_bytes=command.reserved_bytes,
+        candidate_digest=command.candidate_digest, fallback_reason=command.fallback_reason, capacity=capacity)
+    return observed, admission
+
+
+def _reserve_budget(state: MissionState, raw_command: object) -> Transition:
+    command = raw_command
+    assert isinstance(command, ReserveDispatchBudget)
+    observed, admission = _prepare_budget_admission(state, command)
+    if hasattr(admission, 'reason'):
+        raise _Rejected(admission.reason)
+    try:
+        ledger = reserve(observed, admission)
+        ledger = record_exhaustion(expire_reservations(ledger, command.at), command.at)
+    except BudgetError as exc:
+        raise _Rejected(str(exc)) from exc
+    if admission.replay:
+        if admission.saved_settlement is None:
+            raise _Rejected('budget-replay-settlement-missing')
+        return Transition(_with_budget(state, ledger),
+                          (BudgetDispatchReplayed('budget-dispatch-replayed', admission.saved_settlement),))
+    return Transition(_with_budget(state, ledger), (KernelEvent('budget-dispatch-reserved'),))
+
+
+def _record_budget_refusal(state: MissionState, raw_command: object) -> Transition:
+    command = raw_command
+    assert isinstance(command, RecordBudgetRefusal)
+    request = command.request
+    if not isinstance(request, ReserveDispatchBudget) or request.at != command.at:
+        raise _Rejected('budget-refusal-request-invalid')
+    try:
+        _observed, result = _prepare_budget_admission(state, request)
+    except BudgetError as exc:
+        raise _Rejected(str(exc)) from exc
+    if isinstance(result, Admission):
+        raise _Rejected('budget-refusal-not-current')
+    if result.ledger is None:
+        raise _Rejected('budget-refusal-unrecordable')
+    return Transition(_with_budget(state, result.ledger), (KernelEvent('budget-dispatch-refused'),))
+
+
+def _settle_budget(state: MissionState, raw_command: object) -> Transition:
+    command = raw_command
+    assert isinstance(command, SettleDispatchBudget)
+    if state.budget.policy is None:
+        raise _Rejected('budget-policy-absent')
+    try:
+        observed = with_clock(state.budget, command.at, active=state.control.loop_active)
+        ledger = settle(observed, command.at, reservation_id=command.reservation_id,
+            outcome=command.outcome, elapsed_sec=command.elapsed_sec, candidate_digest=command.candidate_digest,
+            result_digest=command.result_digest, tool_calls=command.tool_calls, replays=command.replays,
+            output_bytes=command.output_bytes, completed=command.completed)
+        ledger = record_exhaustion(expire_reservations(ledger, command.at), command.at)
+    except BudgetError as exc:
+        raise _Rejected(str(exc)) from exc
+    return Transition(_with_budget(state, ledger), (KernelEvent('budget-dispatch-settled'),))
+
+
+def _enter_final_budget(state: MissionState, raw_command: object) -> Transition:
+    command = raw_command
+    assert isinstance(command, EnterFinalPhase)
+    if state.budget.policy is None:
+        raise _Rejected('budget-policy-absent')
+    try:
+        ledger = enter_final(expire_reservations(with_clock(state.budget, command.at, active=state.control.loop_active), command.at), command.at, command.reason)
+    except BudgetError as exc:
+        raise _Rejected(str(exc)) from exc
+    return Transition(_with_budget(state, ledger), (KernelEvent('budget-final-entered'),))
+
+
+def _budget_stop(state: MissionState, raw_command: object) -> Transition:
+    command = raw_command
+    assert isinstance(command, BudgetStopCommand)
+    if state.budget.policy is None:
+        raise _Rejected('budget-policy-absent')
+    try:
+        ledger = stop(expire_reservations(with_clock(state.budget, command.at, active=False), command.at), command.at, command.scope, command.reason_code)
+    except BudgetError as exc:
+        raise _Rejected(str(exc)) from exc
+    control = _active_control(state)
+    outcome = TerminalOutcome(terminal_outcome_for_halt(
+        HaltCategory.PARTIAL_DONE.value, control.session_role.value, superseded=False))
+    new_control = replace(control, phase=Phase.HALTED, loop_active=False,
+        halt_reason=command.reason_code, halt_category=HaltCategory.PARTIAL_DONE,
+        terminal_outcome=outcome)
+    lifecycle = _apply_compatibility(_unbound_state(state, control=new_control), MarkHalt,
+        CompatibilityPayload(), at=command.at, dedicated_upserts={
+            'phase': Phase.HALTED.value, 'loop_active': False, 'halt_reason': command.reason_code})
+    return Transition(_with_budget(lifecycle, ledger),
+                      (KernelEvent('budget-stopped'), KernelEvent('mission-halted')))
+
+
 def _a4_authority_document(state: MissionState) -> dict[str, object]:
     return (
         state.legacy_passthrough.thaw()
@@ -161,6 +375,12 @@ def _sync_a4_projection(state: MissionState) -> MissionState:
 @dataclass(frozen=True)
 class KernelEvent:
     type: str
+
+
+@dataclass(frozen=True)
+class BudgetDispatchReplayed(KernelEvent):
+    """A retained D/E settlement answers a replay without authorizing spawn."""
+    settlement: Settlement
 
 
 @dataclass(frozen=True)
@@ -264,6 +484,7 @@ def _active_control(state: MissionState) -> MissionControl:
 _COMPATIBILITY_FORBIDDEN_FIELDS = frozenset(
     {
         "fresh_review",
+        "budget_ledger",
         "phase",
         "passes",
         "loop_active",
@@ -859,6 +1080,8 @@ def _mark_halt(state: MissionState, raw_command: object) -> Transition:
             "halt_reason": legacy_reason,
         },
     )
+    if state.budget.policy is not None:
+        new_state = _observe_budget(new_state, _budget_at(command), active=False)
     return Transition(
         new_state,
         (KernelEvent("mission-halted"),),
@@ -883,6 +1106,11 @@ def _reactivate(state: MissionState, raw_command: object) -> Transition:
     command = raw_command
     assert isinstance(command, Reactivate)
     control = state.control
+    if state.budget.policy is not None:
+        at = _budget_at(command)
+        from .budget import exhaustion
+        if _budget_guard(exhaustion, state.budget, at) is not None:
+            raise _Rejected('budget-exhausted')
     if command.approved_by_user is not True:
         raise _Rejected("approval-required")
     _reason(command.reason)
@@ -913,6 +1141,8 @@ def _reactivate(state: MissionState, raw_command: object) -> Transition:
             "halt_reason": "",
         },
     )
+    if state.budget.policy is not None:
+        new_state = _observe_budget(new_state, _budget_at(command), active=True)
     return Transition(
         new_state,
         (KernelEvent("mission-reactivated"),),
@@ -957,6 +1187,8 @@ def _resume_stale(state: MissionState, raw_command: object) -> Transition:
         at=command.at,
         dedicated_upserts=dedicated,
     )
+    if state.budget.policy is not None:
+        new_state = _observe_budget(new_state, _budget_at(command), active=True)
     return Transition(
         new_state,
         (KernelEvent("stale-mission-resumed"),),
@@ -1079,6 +1311,10 @@ def acceptance_completion_rejection(state: MissionState, command: MarkPass) -> s
 def _mark_pass(state: MissionState, raw_command: object) -> Transition:
     command = raw_command
     assert isinstance(command, MarkPass)
+    if state.budget.policy is not None:
+        reason = _budget_guard(completion_rejection, state.budget, _budget_at(command))
+        if reason is not None:
+            raise _Rejected(reason)
     control = _active_control(state)
     _acceptance_completion_ready(state, command)
     if type(command.force) is not bool:
@@ -1144,6 +1380,8 @@ def _mark_pass(state: MissionState, raw_command: object) -> Transition:
             "loop_active": False,
         },
     )
+    if state.budget.policy is not None:
+        new_state = _observe_budget(new_state, _budget_at(command), active=False)
     if command.force:
         force_payload = command.compatibility.upserts.thaw().get("force_approval")
         if not isinstance(force_payload, dict) or force_payload.get("consumed") is not True:
@@ -2205,6 +2443,36 @@ TRANSITION_TABLE = build_transition_table(
             MarkPass,
             _command_type_guard(MarkPass),
             _mark_pass,
+        ),
+        TransitionRule(
+            "budget-reserve-dispatch",
+            ReserveDispatchBudget,
+            _command_type_guard(ReserveDispatchBudget),
+            _reserve_budget,
+        ),
+        TransitionRule(
+            "budget-record-refusal",
+            RecordBudgetRefusal,
+            _command_type_guard(RecordBudgetRefusal),
+            _record_budget_refusal,
+        ),
+        TransitionRule(
+            "budget-settle-dispatch",
+            SettleDispatchBudget,
+            _command_type_guard(SettleDispatchBudget),
+            _settle_budget,
+        ),
+        TransitionRule(
+            "budget-enter-final",
+            EnterFinalPhase,
+            _command_type_guard(EnterFinalPhase),
+            _enter_final_budget,
+        ),
+        TransitionRule(
+            "budget-stop",
+            BudgetStopCommand,
+            _command_type_guard(BudgetStopCommand),
+            _budget_stop,
         ),
         TransitionRule(
             "reactivate",

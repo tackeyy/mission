@@ -5,7 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, fields, is_dataclass
 from enum import Enum
 import re
-from typing import Optional, Union
+from typing import Optional, Union, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .guidance import GuidanceFacts
 
 from .json_codec import decode_json_object, encode_json_object, freeze_json_value
 from .model import FrozenJsonObject
@@ -93,6 +96,53 @@ class MarkPass:
     acceptance_candidate_digests: FrozenJsonObject = FrozenJsonObject(())
     at: Optional[str] = None
     compatibility: CompatibilityPayload = EMPTY_COMPATIBILITY_PAYLOAD
+
+
+@dataclass(frozen=True)
+class ReserveDispatchBudget:
+    at: str
+    entry: str
+    target: str
+    operation_id: str
+    fencing_epoch: int
+    policy_timeout: int
+    reserved_bytes: int
+    candidate_digest: str
+    fallback_reason: str | None = None
+    guidance: "GuidanceFacts | None" = None
+
+
+@dataclass(frozen=True)
+class RecordBudgetRefusal:
+    at: str
+    request: ReserveDispatchBudget
+
+
+@dataclass(frozen=True)
+class SettleDispatchBudget:
+    at: str
+    reservation_id: str
+    outcome: str
+    elapsed_sec: int | None
+    candidate_digest: str
+    result_digest: str
+    tool_calls: int | None = None
+    replays: int | None = None
+    output_bytes: int | None = None
+    completed: bool = False
+
+
+@dataclass(frozen=True)
+class EnterFinalPhase:
+    at: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class BudgetStop:
+    at: str
+    scope: str
+    reason_code: str
 
 
 @dataclass(frozen=True)
@@ -504,6 +554,11 @@ Command = Union[
     InitializeArtifact,
     MarkHalt,
     MarkPass,
+    ReserveDispatchBudget,
+    RecordBudgetRefusal,
+    SettleDispatchBudget,
+    EnterFinalPhase,
+    BudgetStop,
     Reactivate,
     RecordArtifactPublication,
     RecordVerification,
@@ -539,6 +594,11 @@ _COMMAND_TYPES = {
     InitializeArtifact: "initialize-artifact",
     MarkHalt: "mark-halt",
     MarkPass: "mark-pass",
+    ReserveDispatchBudget: "budget-reserve-dispatch",
+    RecordBudgetRefusal: "budget-record-refusal",
+    SettleDispatchBudget: "budget-settle-dispatch",
+    EnterFinalPhase: "budget-enter-final",
+    BudgetStop: "budget-stop",
     Reactivate: "reactivate",
     RecordArtifactPublication: "record-artifact-publication",
     RecordVerification: "record-verification",
@@ -561,6 +621,12 @@ _COMMAND_TYPES = {
 
 
 def _command_value(value: object) -> object:
+    # Guidance binds a reader-issued snapshot object.  Its public projection is
+    # closed and portable; recursively walking the dataclass would otherwise
+    # serialize its opaque private binding.
+    from .guidance import GuidanceFacts, guidance_payload
+    if isinstance(value, GuidanceFacts):
+        return guidance_payload(value)
     if isinstance(value, Enum):
         return value.value
     if value is None or isinstance(value, (bool, int, float, str)):
