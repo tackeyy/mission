@@ -24,6 +24,8 @@ from scoring_provenance import reduce_review_aggregate as _canonical_review_redu
 
 from .ports import LegacyMissionRepository
 from .compatibility import compatibility_delta
+from .fresh_review_completion import FreshReviewCompletionInputs
+from mission_kernel.fresh_review import FreshReviewError
 from acceptance_contract import AcceptanceContractError, frozen_verifier_commands
 
 
@@ -370,6 +372,7 @@ class MarkPassServices:
     # (記録のみ)。未配線の adapter では None を許し、記録を省略する。
     early_stop_evaluation: Callable[[dict, dict | None, str], dict | None] | None = None
     capture_acceptance_candidates: Callable[[dict], dict] | None = None
+    capture_fresh_review_completion: Callable[[dict], FreshReviewCompletionInputs] | None = None
 
 
 @dataclass(frozen=True)
@@ -508,15 +511,23 @@ def mark_pass(
                 if services.capture_acceptance_candidates is not None
                 else {}
             )
+            fresh_inputs = (
+                services.capture_fresh_review_completion(data)
+                if services.capture_fresh_review_completion is not None and 'acceptance_contract' in data
+                else FreshReviewCompletionInputs()
+            )
+        except FreshReviewError as exc:
+            raise ReviewFailure(exc.code, reason=exc.code) from exc
         except AcceptanceContractError as exc:
             raise ReviewFailure(str(exc), reason=str(exc)) from exc
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, KeyError, TypeError, RecursionError) as exc:
             raise ReviewFailure("acceptance candidate capture failed", reason="acceptance-candidate-unavailable") from exc
         frozen_candidates = freeze_json_value(acceptance_candidates)
         if "acceptance_contract" in data:
             reason = acceptance_completion_rejection(
                 decode_mission_state(json.dumps(data).encode("utf-8")),
-                MarkPass(acceptance_candidate_digests=frozen_candidates),
+                MarkPass(acceptance_candidate_digests=frozen_candidates,
+                         fresh_review_evidence=fresh_inputs.evidence, fresh_review_bindings=fresh_inputs.bindings),
             )
             if reason is not None:
                 raise ReviewFailure(reason, reason=reason)
@@ -589,6 +600,8 @@ def mark_pass(
             specialist_gate_satisfied=not request.force,
             verified_score_index=None if request.force else latest_index,
             acceptance_candidate_digests=frozen_candidates,
+            fresh_review_evidence=fresh_inputs.evidence,
+            fresh_review_bindings=fresh_inputs.bindings,
             at=request.at,
             compatibility=compatibility_delta(
                 data,
