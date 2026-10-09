@@ -3,6 +3,7 @@
 This freezes syntactic candidates, not arbitrary dynamically generated code.
 exec/eval, importlib, __import__, and getattr(*args) are outside the static
 boundary of design section 3.2; they can generate arbitrary code or names.
+Native FFI calls such as libc.vfork() are also outside this syntactic scope.
 Unresolved reflective access to capability modules is fail-closed, including
 references never invoked. Alias unions preserve capability across rebinding.
 Runtime entry tests establish reservation-before-spawn ordering separately.
@@ -37,7 +38,8 @@ CAPABILITIES = {'subprocess', 'os', 'posix', '_posixsubprocess', 'multiprocessin
 UNKNOWN = 'unclassified-spawn'
 SUBPROCESS_APIS = {'run', 'call', 'check_call', 'check_output', 'getoutput', 'getstatusoutput'}
 TAILS = set("""Popen Process Pool ProcessPoolExecutor get_context fork forkpty system
-popen launch collect cancel recover observe_parent run_job dispatch_prepared_packet""".split())
+popen launch collect cancel recover observe_parent run_job dispatch_prepared_packet
+subprocess_exec subprocess_shell""".split())
 
 
 def spawn_calls(source):
@@ -103,17 +105,32 @@ def spawn_calls(source):
             observer = (isinstance(parent, ast.Call) and parent.args and parent.args[0] is node
                         and bool(names(parent.func)) and names(parent.func) <=
                         {'hasattr', 'builtins.hasattr', 'getattr', 'builtins.getattr', 'operator.getitem'})
-            for name in names(node):
+            values = names(node)
+            if isinstance(node, ast.Name) and node.id in TAILS and not any(
+                    name.rsplit('.', 1)[-1] == node.id for name in values):
+                values = values | {node.id}
+            if imported_capability and (values & {'sys.modules'} or
+                    any(name.rsplit('.', 1)[-1] in {'__globals__', 'f_globals'} for name in values)):
+                # The namespace reference is statically identified; freeze it
+                # separately from unresolved capability names, never exempt it.
+                found[(self.function, 'namespace-access')] += 1
+            for name in values:
                 tail = name.rsplit('.', 1)[-1]
                 if name in SAFE:
                     continue
                 invoked_lookup = (tail == 'dynamic-spawn' and isinstance(parent, ast.Call)
                                   and parent.func is node)
                 named_reference = (not isinstance(node, ast.Name) or '.' in name
-                                   or tail in {'spawn_exec', 'run_job', 'dispatch_prepared_packet'})
+                                   or tail in TAILS or tail == 'spawn_exec')
                 if invoked_lookup or known_spawn(name) and named_reference:
                     found[(self.function, tail)] += 1
                 elif name == UNKNOWN or capable(name) and (tail.startswith('__') or not (receiver and name in CAPABILITIES) and not (observer and name in CAPABILITIES)):
+                    found[(self.function, UNKNOWN)] += 1
+        def visit_Import(self, node):
+            # Root imports declare namespaces; every non-allowlisted nested
+            # module can expose capabilities even if it is never referenced.
+            for item in node.names:
+                if capable(item.name) and item.name not in CAPABILITIES | SAFE:
                     found[(self.function, UNKNOWN)] += 1
         def visit_ImportFrom(self, node):
             for item in node.names:
@@ -276,6 +293,7 @@ def test_unclassified_capability_cannot_be_whitelisted(monkeypatch, tmp_path):
     'operator.getitem(os, "fspath")', 'hasattr(os, name)',
     '__import__("subprocess").__dict__',
     'importlib.import_module("subprocess").__dict__', 'exec(code)', 'eval(code)', 'getattr(*args)', 'globals()', 'locals()',
+    'libc.vfork()', 'fn.__globals__', 'frame.f_globals', 'sys.modules["os"]',
 ])
 def test_known_non_spawn_and_out_of_scope_dynamic_import_are_excluded(source):
     assert not spawn_calls(source)
@@ -322,3 +340,30 @@ def test_safe_allowlist_contains_only_observed_runtime_names():
                 if isinstance(key, ast.Constant) and isinstance(key.value, str):
                     observed.add(origin(node.args[0]) + '.' + key.value)
     assert SAFE <= observed
+
+
+@pytest.mark.parametrize('tail', sorted(TAILS | {'subprocess_exec', 'subprocess_shell'}))
+@pytest.mark.parametrize('use', ['{tail}([])', 'consume({tail})', '{tail} = harmless\nconsume({tail})'])
+def test_bare_spawn_tail_cannot_be_hidden_by_injection_or_rebinding(tail, use):
+    source = f'def invoke({tail}):\n' + '\n'.join('    ' + line for line in use.format(tail=tail).splitlines())
+    assert ('invoke', tail) in spawn_calls(source)
+
+
+@pytest.mark.parametrize('source', [
+    'import multiprocessing.popen_fork', 'import os.future_api',
+    'import multiprocessing.popen_fork as p', 'import os.future_api as p',
+    'loop.subprocess_exec(protocol, "cmd")', 'loop.subprocess_shell(protocol, "cmd")',
+    'import subprocess\nfn.__globals__', 'import os\nframe.f_globals',
+    'import os\ngetattr(fn, "__globals__")', 'import os\ngetattr(frame, "f_globals")',
+    'import subprocess\nimport sys\nsys.modules["subprocess"]',
+    'import os\nimport sys as s\ns.modules.get("os")',
+    'import os\nfrom sys import modules as m\nconsume(m)',
+])
+def test_imports_and_namespace_escape_routes_are_inventory_candidates(source):
+    assert spawn_calls(source)
+
+
+@pytest.mark.parametrize('name', sorted(SAFE))
+def test_allowlisted_imports_do_not_introduce_spawn_candidates(name):
+    module, _, api = name.rpartition('.')
+    assert not spawn_calls(f'from {module} import {api} as reference\nconsume(reference)')
