@@ -110,8 +110,9 @@ class Adapter:
         journal = json.loads(_journal().read_text())
         launch = journal['launch']
         observation = {'launch_receipt': launch, 'process_exited': journal.get('process_exited')}
-        observation.update({key: launch[key] for key in
-                            ('operation_id', 'fencing_epoch', 'request_id', 'nonce', 'child_identity')})
+        if not journal.get('minimal_observation'):
+            observation.update({key: launch[key] for key in
+                                ('operation_id', 'fencing_epoch', 'request_id', 'nonce', 'child_identity')})
         if journal.get('process_exited') is True:
             observation.update(exit_code=journal.get('exit_code'), budget_used=journal.get('budget_used'))
         observation.update(journal.get('observation_updates', {}))

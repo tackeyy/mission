@@ -455,3 +455,49 @@ def test_failed_import_binds_reference_size_and_digest_to_diagnostic(prepared_fa
     forged = _forge_diagnostic_reference(prepare().command, mutation)
     with pytest.raises(FreshReviewError, match='fresh-review-output-effect-invalid'):
         validate_failed_import(record, forged)
+
+
+@pytest.mark.parametrize('status', ['running', 'dispatch-unknown'])
+@pytest.mark.parametrize('report', ['foreign-child', 'minimal'])
+@pytest.mark.parametrize('output', [None, 'partial'])
+@pytest.mark.parametrize('cancel', ['cancelled', 'unknown'])
+def test_expired_nonimport_report_can_cancel_saved_dispatch(reviewer, run_cli, status, report, output, cancel):
+    from .test_issue912_fresh_review_dispatch import _expire_dispatch
+    root, request, env, journal = reviewer
+    old = invoke(run_cli, reviewer, **({'FIXTURE_REVIEW_MODE': 'crash'} if status == 'dispatch-unknown' else {}))
+    stored = json.loads(journal.read_text())
+    stored.update(process_exited=False, output=output)
+    if report == 'foreign-child':
+        stored['observation_updates'] = {'child_identity': 'foreign'}
+    else:
+        stored['minimal_observation'] = True
+    journal.write_text(json.dumps(stored))
+    _expire_dispatch(reviewer)
+    if cancel == 'unknown':
+        result = run_cli('fresh-review', 'reconcile', '--request', request['request_id'], '--adapter', 'neutral',
+            cwd=root, env_extra={**env, 'MISSION_OPERATION_ID': 'reconcile-one', 'FIXTURE_CANCEL': cancel})
+        assert result.returncode == 2 and 'fresh-review-kill-unconfirmed' in result.stderr
+        record = json.loads(run_cli('get', cwd=root).stdout)['fresh_review']['requests'][0]
+        assert record['status'] == 'running' and record.get('result') is None
+    else:
+        record = invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one', FIXTURE_CANCEL=cancel)
+        assert record['status'] == 'abandoned-unknown'
+        assert record['result']['reason'] == 'output-unobservable'
+        assert record['result']['dispatch_operation_id'] == old['dispatch']['operation_id']
+        assert 'output_ref' not in record['result']
+    assert record['launch'] == (old.get('launch') or stored['launch'])
+    assert journal.with_suffix('.cancel').read_text() == 'running'
+    assert json.loads(journal.read_text())['count'] == 1
+
+
+@pytest.mark.parametrize('status', ['running', 'dispatch-unknown'])
+def test_live_minimal_recovery_without_output_does_not_require_import_sender(reviewer, run_cli, status):
+    root, _, _, journal = reviewer
+    old = invoke(run_cli, reviewer, **({'FIXTURE_REVIEW_MODE': 'crash'} if status == 'dispatch-unknown' else {}))
+    stored = json.loads(journal.read_text())
+    stored.update(process_exited=False, output=None, minimal_observation=True)
+    journal.write_text(json.dumps(stored))
+    record = invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one')
+    assert record['status'] == 'running'
+    assert record['launch'] == (old.get('launch') or stored['launch'])
+    assert not journal.with_suffix('.cancel').exists()

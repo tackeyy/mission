@@ -260,10 +260,13 @@ def _reconcile(record, args, operation, repo, root, services, host):
             output = base64.b64decode(observed['output'], validate=True)
         except (KeyError, TypeError, ValueError):
             output = None
-        # Validate the report against a tentative running record before any
-        # launch publication. Stage-one rejection must preserve dispatch-unknown.
-        validate_output_sender(replace(record, status='running', launch=freeze_json_value(raw),
-                                       independent=independent), observation)
+        before_deadline = _utc(services.now()) < record.dispatch.thaw()['deadline_at']
+        importing = observation.get('process_exited') is True or (before_deadline and output is not None)
+        # Sender validation gates import, not cancellation of the saved dispatch.
+        # A rejected import must not publish the tentative running record.
+        if importing:
+            validate_output_sender(replace(record, status='running', launch=freeze_json_value(raw),
+                                           independent=independent), observation)
         if record.status == 'dispatch-unknown':
             record_provider_receipt([record.dispatch.thaw()], _saga_intent(record),
                                     {'kind': 'provider', 'identity': launch.child_identity})
@@ -281,7 +284,7 @@ def _reconcile(record, args, operation, repo, root, services, host):
                 operation=operation, epoch=epoch, observation=observation, raw=output,
                 root=root, services=services)
             return json.dumps({'ok': True, 'record': _wire(record)})
-        if output is not None and _utc(services.now()) < record.dispatch.thaw()['deadline_at']:
+        if output is not None and before_deadline:
             reader = repo(':candidate', False)
             with reader.transaction():
                 _candidate(reader.load(), root, record.request, services)
