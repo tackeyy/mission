@@ -241,6 +241,8 @@ from mission_application.evidence import (  # noqa: E402
     validate_context_iteration_override,
     verify_published_evidence_effects,
 )
+from mission_application.budget import run_budget_status_cli, run_budget_next
+from mission_kernel.budget import BudgetError
 from mission_application.fresh_review import run_fresh_review_prepare_cli, run_fresh_review_status_cli
 from mission_application.fresh_review_withdraw import run_fresh_review_withdraw_cli
 from mission_application.fresh_review_dispatch import run_fresh_review_dispatch_cli
@@ -8301,6 +8303,7 @@ _ACCEPTANCE_CONTRACT_CLI_SERVICES = AcceptanceContractCliServices(
     load_verifier_policy,
     partial(state_capacity_status, load_snapshot=_load_authoritative_state),
     commit_errors=(CapacityWriteError,),
+    load_snapshot=_load_authoritative_state,
 )
 
 
@@ -8650,28 +8653,8 @@ def cmd_next(args):
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
     out = _derive_next_action(data, authoritative=snapshot)
-    # #238 (S6): 時間予算の消費率を advisory として常に添付する。
-    # exceeded 時のみ、spawn 系の高コスト手を consider-halt へ差し替え、
-    # 成果物確定 + partial-done halt を促す (予算切れ全損の防止)。
-    # aggregate-reviews / mark-passes 等の安価なローカル完結手・terminal・
-    # await-user は override しない (誠実な終端を優先)。
-    pressure = _budget_pressure(data, iso_now())
-    out["budget_pressure"] = pressure
-    if pressure and pressure["level"] == "exceeded" and out.get("next_action") in BUDGET_SPAWN_ACTIONS:
-        out["budget_overridden_action"] = out["next_action"]
-        out["next_action"] = "consider-halt"
-        out["summary"] = (
-            f"時間予算 {pressure['budget_minutes']} 分を超過 ({pressure['elapsed_minutes']} 分経過)。"
-            " 新規 spawn を止め、現時点の成果物を確定して partial-done で終了する。"
-        )
-        out["command_hint"] = (
-            'mission-state.py mark-halt --reason "時間予算超過: 完了分と未完了作業を明記" --category partial-done'
-        )
-    elif pressure and pressure["level"] == "warn":
-        out["budget_warning"] = (
-            f"時間予算の {pressure['pressure_pct']}% を消費。optional specialist / critic の"
-            " 新規 spawn を控え、成果物の確定を優先する。"
-        )
+    out = run_budget_next(out, data, iso_now(), _budget_pressure, BUDGET_SPAWN_ACTIONS,
+                          partial(_ACCEPTANCE_CONTRACT_CLI_SERVICES.capacity_status, sf))
     out.setdefault("details", {})
     out.update({
         "phase": snapshot.phase,
@@ -13810,6 +13793,10 @@ def cmd_fresh_review_prepare(args):
     print(run_fresh_review_prepare_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES))
 
 
+def cmd_budget_status(args):
+    print(run_budget_status_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES))
+
+
 def cmd_fresh_review_run(args):
     print(run_fresh_review_dispatch_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES, fresh_review_host))
 
@@ -16338,6 +16325,9 @@ def _add_review_parsers(subparsers) -> None:
     p_verify_claims.add_argument("--doc-digest", required=True)
     p_verify_claims.add_argument("--out", required=True)
     p_verify_claims.set_defaults(func=cmd_verification_claims)
+    p_budget = sub.add_parser("budget", help="予算 ledger の読み取り専用表示")
+    p_budget_sub = p_budget.add_subparsers(dest="budget_command", required=True)
+    p_budget_sub.add_parser("status", help="予算 policy と ledger の状態").set_defaults(func=cmd_budget_status)
     p_fresh = sub.add_parser("fresh-review", help="typed fresh-review request と起動を管理")
     p_fresh_sub = p_fresh.add_subparsers(dest="fresh_review_command", required=True)
     p_prepare = p_fresh_sub.add_parser("prepare", help="候補と入力を凍結し、一回使用の request を保存")
@@ -16956,7 +16946,7 @@ def main():
     except CommandOutcomeInputError:
         print('{"ok": false, "outcome_kind": "invalid-input"}')
         raise SystemExit(2)
-    except (FreshReviewError, CapacityWriteError) as error:
+    except (FreshReviewError, BudgetError, CapacityWriteError) as error:
         print(f"ERROR: {error.code}", file=sys.stderr)
         sys.exit(2)
     except SpecialistPublicContractError as error:
