@@ -74,7 +74,8 @@ def ranked(seed, purpose, ids):
 
 def validate_arms(arms):
     if (type(arms) not in (list, tuple) or not arms or any(type(a) is not str for a in arms)
-            or len(set(arms)) != len(arms) or not set(arms) <= set(ARMS)):
+            or len(set(arms)) != len(arms) or not set(arms) <= set(ARMS)
+            or not {'native_goal', 'mission_verified_complex'} <= set(arms)):
         raise ValueError('arms_invalid')
 
 
@@ -333,11 +334,14 @@ def enumerate_attempts(history, proofs):
             validate_arms(a['pilot_arms']); validate_arms(a['confirmatory_arms'])
             if attempt_round(attempt) is None: raise ValueError('V1_invalid_A')
         except (KeyError, TypeError, ValueError):
-            attempt['invalid_reason'] = 'V1_invalid_A'; continue
-        if not {'A', 'P', 'B'} <= attempt['stages'].keys():
-            attempt['invalid_reason'] = 'V1_missing_stage'; continue
-        attempt['schedule'] = proofs.chain_schedule(a['chain']['hash'])
-        cutoff(attempt)
+            attempt['invalid_reason'] = 'V1_invalid_A'
+        if not attempt['invalid_reason'] and not {'A', 'P', 'B'} <= attempt['stages'].keys():
+            attempt['invalid_reason'] = 'V1_missing_stage'
+        try:
+            attempt['schedule'] = proofs.chain_schedule(attempt['a']['chain']['hash'])
+            cutoff(attempt)
+        except (KeyError, TypeError, ValueError):
+            if not attempt['invalid_reason']: raise
     ordered = sorted(attempts.values(), key=lambda a: (min(s['merged_at'] for s in a['stages'].values()), a['number']))
     if [a['number'] for a in ordered] != sorted(attempts): raise ValueError('attempt_order_invalid')
     return ordered
@@ -366,15 +370,34 @@ def before(stage, limit):
 
 def withdrawn(attempt):
     stage = attempt['stages'].get('W')
-    return not attempt.get('invalid_reason') and stage is not None and before(stage, cutoff(attempt))
+    return stage is not None and before(stage, cutoff(attempt))
 
 
 def pool_identity(manifest):
-    return sorted((r['benchmark'], r['revision'], r['task_id'], r['repository'], r['base_commit'])
-                  for r in manifest['tasks'] if r['accepted'])
+    if type(manifest['tasks']) is not list or any(type(r['accepted']) is not bool for r in manifest['tasks']):
+        raise ValueError('pool_identity_invalid')
+    rows = [(r['benchmark'], r['revision'], r['task_id'], r['repository'], r['base_commit'])
+            for r in manifest['tasks'] if r['accepted']]
+    if any(type(v) is not str for row in rows for v in row): raise ValueError('pool_identity_invalid')
+    return sorted(rows)
 
 
 class UnknownAttempt(ValueError): pass
+
+
+def attempt_limit(attempt):
+    try:
+        return max(attempt['stages']['W'][k] for k in ('merged_at', 'time')) if withdrawn(attempt) else cutoff(attempt)
+    except (KeyError, TypeError, ValueError): return None
+
+
+def pool_evidence(attempt):
+    try:
+        snapshot = attempt['a']['snapshot_digest']
+        if type(snapshot) is not str or not re.fullmatch(r'sha256:[0-9a-f]{64}', snapshot): raise ValueError('snapshot_invalid')
+        return snapshot, pool_identity(json.loads(attempt['stages']['B']['raw'], object_pairs_hook=public._unique_object))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise UnknownAttempt('attempt_pool_unknown') from exc
 
 
 def attempt_round(attempt):
@@ -386,26 +409,27 @@ def canonical_attempt(attempts, materials):
     rounds = [attempt_round(a) for a in attempts if attempt_round(a) is not None]
     if any(later <= earlier for earlier, later in zip(rounds, rounds[1:])):
         raise ValueError('no_canonical_attempt: attempt_chain_invalid')
-    valid = [a for a in attempts if not a.get('invalid_reason')]
-    for i, a in enumerate(valid):
-        for p in valid[:i]:
-            limit = max(p['stages']['W']['merged_at'], p['stages']['W']['time']) if withdrawn(p) else cutoff(p)
-            times = [a['stages']['A'][k] for k in ('merged_at', 'time')]
-            if all(type(t) is int for t in times) and min(times) <= limit:
+    for i, a in enumerate(attempts):
+        for p in attempts[:i]:
+            limit = attempt_limit(p)
+            times = [a['stages'].get('A', {}).get(k) for k in ('merged_at', 'time')]
+            if limit is not None and all(type(t) is int for t in times) and min(times) <= limit:
                 raise ValueError('no_canonical_attempt: attempt_chain_invalid')
     for index, attempt in enumerate(attempts):
         try:
             if attempt_round(attempt) is None: raise UnknownAttempt('attempt_round_unknown')
             if attempt.get('invalid_reason'): continue
             a, stages = attempt['a'], attempt['stages']
-            previous = [p for p in attempts[:index] if not p.get('invalid_reason')]
+            previous = attempts[:index]
+            if any(attempt_limit(p) is None for p in previous): raise UnknownAttempt('attempt_history_unknown')
+            pools = [pool_evidence(p) for p in previous]
             if withdrawn(attempt): continue
             if not all(before(stages[s], cutoff(attempt)) for s in ('A', 'P', 'B')): continue
             if stages['P']['sha'] != stages['A']['sha']: continue
             if stages['P']['raw'].splitlines().count(b'attempt_digest: ' + digest(stages['A']['raw']).encode()) != 1: continue
             if stages['A']['merged_at'] >= stages['B']['merged_at']: continue
             if a['prior_attempts_digest'] != prior_digest(attempts[:index], before=stages['A']['merged_at']): continue
-            if any(a['snapshot_digest'] == p['a']['snapshot_digest'] for p in previous): continue
+            if any(a['snapshot_digest'] == snapshot for snapshot, _ in pools): continue
             if attempt['number'] not in materials: raise UnknownAttempt('attempt_materials_unknown')
             material = materials[attempt['number']]
             if type(material) is not dict or any(material.get(k) is None for k in ('snapshot', 'scope', 'generator_sha')): raise UnknownAttempt('attempt_materials_unknown')
@@ -414,14 +438,7 @@ def canonical_attempt(attempts, materials):
             observations = {r['task_id']: r['det'] for r in manifest['tasks'] if r['det'] is not None}
             regenerated = generate_pool(material['snapshot'], a, material['scope'], observations, commit_a=stages['A']['sha'])
             if regenerated != stages['B']['raw']: continue
-            reused = False
-            for previous_attempt in previous:
-                try:
-                    old_pool = json.loads(previous_attempt['stages']['B']['raw'])
-                    if pool_identity(old_pool) == pool_identity(manifest): reused = True
-                except (KeyError, TypeError, ValueError):
-                    pass
-            if reused: continue
+            if any(identity == pool_identity(manifest) for _, identity in pools): continue
             return attempt
         except (KeyError, TypeError, ValueError, UnicodeError) as exc:
             if isinstance(exc, UnknownAttempt): raise
