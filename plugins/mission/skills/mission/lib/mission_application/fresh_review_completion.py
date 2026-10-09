@@ -36,7 +36,7 @@ def _read(root, reference):
         raise FreshReviewError(MISMATCH)
     try:
         return decode_json_object(raw, limit=FRESH_REVIEW_EVIDENCE_MAX_BYTES).thaw()
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
         raise FreshReviewError(INVALID) from exc
 
 
@@ -61,7 +61,14 @@ def observe_completion_inputs(state, *, root, load_policy):
                 tuple(_read(root, ref) for ref in terminal.findings)))
     code = 'acceptance-fresh-review-bindings-unavailable'
     ids = {binding.command_id for item in records for binding in item.request.candidate_bindings}
-    if not ids.issubset(commands) or load_policy(root)['digest'] != contract['verifier_policy']['digest']:
+    if not ids.issubset(commands):
+        raise FreshReviewError(code)
+    try:
+        policy = load_policy(root)
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+        # RuntimeError also covers recursion while loading the current policy.
+        raise FreshReviewError(code) from exc
+    if not isinstance(policy, dict) or policy.get('digest') != contract['verifier_policy']['digest']:
         raise FreshReviewError(code)
     selected = {key: commands[key] for key in ids}
     snapshots = prepare._capture(root, selected)

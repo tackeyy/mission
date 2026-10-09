@@ -339,6 +339,7 @@ def test_matching_carrier_does_not_enable_the_unconditional_fresh_review_gate(ga
     ('symlink', 'unavailable'), ('directory', 'unavailable'), ('oversized', 'unavailable'),
     ('duplicate-key', 'invalid'), ('invalid-json', 'invalid'), ('non-object', 'invalid'),
     ('invalid-utf8', 'invalid'),
+    ('deep-object', 'invalid'), ('deep-array', 'invalid'),
 ])
 def test_application_never_decodes_unbound_or_unsafe_bytes(published, tmp_path, case, reason):
     import hashlib
@@ -351,9 +352,11 @@ def test_application_never_decodes_unbound_or_unsafe_bytes(published, tmp_path, 
         raw = raw.replace(b'AC1', b'AC2')
     elif case == 'oversized':
         raw = b'x' * (262144 + 1)
-    elif case in ('duplicate-key', 'invalid-json', 'non-object', 'invalid-utf8'):
+    elif case in ('duplicate-key', 'invalid-json', 'non-object', 'invalid-utf8', 'deep-object', 'deep-array'):
         raw = {'duplicate-key': b'{"id":1,"id":2}', 'invalid-json': b'{',
-               'non-object': b'[]', 'invalid-utf8': b'\xff'}[case]
+               'non-object': b'[]', 'invalid-utf8': b'\xff',
+               'deep-object': b'{"a":' * 20000 + b'0' + b'}' * 20000,
+               'deep-array': b'{"a":' + b'[' * 100000 + b'0' + b']' * 100000 + b'}'}[case]
         reference = replace(reference, digest='sha256:' + hashlib.sha256(raw).hexdigest(), size=len(raw))
     path = tmp_path / reference.relative_path
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -366,7 +369,10 @@ def test_application_never_decodes_unbound_or_unsafe_bytes(published, tmp_path, 
     elif case != 'missing':
         path.write_bytes(raw)
     with pytest.raises(FreshReviewError, match='^acceptance-fresh-review-evidence-' + reason + '$'):
-        _read(tmp_path, reference)
+        try:
+            _read(tmp_path, reference)
+        except RecursionError:
+            pytest.fail('evidence recursion escaped the reason-code boundary', pytrace=False)
 
 
 def test_real_prepare_packet_is_reobserved_and_candidate_change_is_not_hidden(completion_session, run_cli):
@@ -500,3 +506,66 @@ def test_unavailable_current_bindings_do_not_return_saved_request_digests(publis
     policy = {'digest': 'sha256:' + '0' * 64} if case == 'policy-changed' else contract['verifier_policy']
     with pytest.raises(FreshReviewError, match='^acceptance-fresh-review-bindings-unavailable$'):
         app.observe_completion_inputs(data, root=tmp_path, load_policy=lambda _: policy)
+
+
+@pytest.mark.parametrize('policy', [None, [], 'policy', 1, {}, {'digest': None}, {'digest': []},
+                                   KeyError('digest'), TypeError('policy'), RuntimeError('read'),
+                                   OSError('read'), ValueError('policy'),
+                                   RecursionError('policy')])
+def test_policy_read_or_shape_failure_has_a_bindings_reason(published, tmp_path, monkeypatch, policy):
+    from mission_application import fresh_review_completion as app
+    data = dict(acceptance_contract=published[2])
+    def load_policy(_):
+        if isinstance(policy, BaseException):
+            raise policy
+        return policy
+    monkeypatch.setattr(app.prepare, '_capture', lambda *_: pytest.fail('invalid policy reached capture'))
+    with pytest.raises(FreshReviewError, match='^acceptance-fresh-review-bindings-unavailable$'):
+        app.observe_completion_inputs(data, root=tmp_path, load_policy=load_policy)
+
+
+@pytest.fixture
+def assert_capture_rejection(published, tmp_path):
+    import contextlib
+    from types import SimpleNamespace
+    from mission_application import review
+    data = dict(acceptance_contract=published[2], passes=False, loop_active=True)
+    original = json.dumps(data).encode()
+    state_path = tmp_path / 'state.json'
+    state_path.write_bytes(original)
+    evidence_path = tmp_path / 'coverage.json'
+    evidence_path.write_bytes(published[3])
+    def unreachable(*_, **__):
+        pytest.fail('capture rejection reached a gate or persistence')
+    repo = SimpleNamespace(transaction=contextlib.nullcontext, load=lambda: data, execute=unreachable)
+    services = review.MarkPassServices(
+        verify_force_approval=unreachable, validate_force_terminal=unreachable,
+        validate_score_evidence=unreachable, validate_artifact_gate=unreachable,
+        validate_specialist_gate=unreachable, transition_phase=unreachable,
+        optional_unclosed_skills=unreachable, selection_id=unreachable)
+    def check(field, capture, reason):
+        with pytest.raises(review.ReviewFailure) as error:
+            review.mark_pass(repo, review.MarkPassRequest(True, 'fixture', True, '', '2026-01-01T00:00:00Z'),
+                             replace(services, **{field: capture}))
+        assert error.value.reason == reason
+        assert json.dumps(data).encode() == original
+        assert state_path.read_bytes() == original
+        assert evidence_path.read_bytes() == published[3]
+    return check
+
+
+@pytest.mark.parametrize('field', ['capture_acceptance_candidates', 'capture_fresh_review_completion'])
+@pytest.mark.parametrize('error_type', [KeyError, TypeError, RecursionError])
+def test_mark_pass_capture_errors_are_review_failures_without_publication(assert_capture_rejection, field, error_type):
+    def capture(_):
+        raise error_type('capture')
+    assert_capture_rejection(field, capture, 'acceptance-candidate-unavailable')
+
+
+def test_mark_pass_preserves_the_policy_bindings_failure(assert_capture_rejection, tmp_path):
+    from mission_application.fresh_review_completion import FreshReviewCompletionServices
+    def load_policy(_):
+        raise RuntimeError('policy read failed')
+    assert_capture_rejection('capture_fresh_review_completion',
+                             FreshReviewCompletionServices(tmp_path, load_policy),
+                             'acceptance-fresh-review-bindings-unavailable')

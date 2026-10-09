@@ -520,7 +520,7 @@ def mark_pass(
             raise ReviewFailure(exc.code, reason=exc.code) from exc
         except AcceptanceContractError as exc:
             raise ReviewFailure(str(exc), reason=str(exc)) from exc
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, KeyError, TypeError, RecursionError) as exc:
             raise ReviewFailure("acceptance candidate capture failed", reason="acceptance-candidate-unavailable") from exc
         frozen_candidates = freeze_json_value(acceptance_candidates)
         if "acceptance_contract" in data:
