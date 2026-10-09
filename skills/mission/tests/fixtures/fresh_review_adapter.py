@@ -35,6 +35,12 @@ class Adapter:
                 'while True: p.write_text(str(i)); i+=1; time.sleep(.01)',
                 str(_journal().with_suffix('.heartbeat'))],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # Block only after the descendant has proven it runs, so the caller's
+            # timeout always has a live descendant to kill (interpreter start-up
+            # can exceed a short timeout on a loaded CI runner).
+            heartbeat = _journal().with_suffix('.heartbeat')
+            while not heartbeat.exists():
+                time.sleep(.01)
             while True:
                 time.sleep(1)
         return freeze_json_value({'parent_identity': 'fixture-parent'})

@@ -451,7 +451,8 @@ def test_exec_timeout_kills_callback_descendants_without_success(reviewer, monke
     monkeypatch.setenv('FIXTURE_REVIEW_MODE', 'callback-timeout')
     monkeypatch.syspath_prepend(environment['PYTHONPATH'])
     pin = host.resolve('neutral')
-    assert host._call(pin, 'observe', {}, timeout=.3) == {'unknown': True}
+    # The fixture blocks once its descendant is running; the timeout bounds start-up.
+    assert host._call(pin, 'observe', {}, timeout=5) == {'unknown': True}
     heartbeat = journal.with_suffix('.heartbeat')
     assert heartbeat.exists()  # A real descendant was running, not a stub.
     before = heartbeat.read_bytes()
