@@ -1,4 +1,16 @@
 {
+  "public-benchmark-tool": {
+    "candidates": {
+      "benchmarks/mission-vs-goal/public_benchmark.py:_completion_result:_run_bounded": 1,
+      "benchmarks/mission-vs-goal/public_benchmark.py:_container_evaluate:_run_bounded": 3,
+      "benchmarks/mission-vs-goal/public_benchmark.py:prepare_assignment:create_worker_export": 1,
+      "benchmarks/mission-vs-goal/public_benchmark.py:prepare_assignment:initialize_worker_export_repository": 1
+    },
+    "reason": "Standalone public benchmark tool (design 881 section 3.2 row 14), never a Mission session dispatch. G initializes/exports a temporary starter repo; H bounds create/start/inspect/remove of the offline immutable evaluator container. No reservation coverage is claimed.",
+    "rows": [
+      14
+    ]
+  },
   "rows-1-2": {
     "candidates": {
       "lib/mission_application/verification_execution.py:run_contract_verifier:execute_candidate": 1,

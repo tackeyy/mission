@@ -284,17 +284,29 @@ def worker_export_manifest(worker_root: Path) -> dict[str, Any]:
     return {"schema": "mission-worker-export/1", "sha256": _digest_tree(worker_root, exclude_git=True)}
 
 
-def initialize_worker_export_repository(worker_root: Path) -> str:
-    """Give the filtered export its own history-free revision scope."""
+def initialize_worker_export_repository(worker_root: Path, *, literal_snapshot: bool = False) -> str:
+    """Give the filtered export its own history-free revision scope.
+
+    literal_snapshot is for an already digest-verified upstream snapshot:
+    retain ignored files and prevent attributes from transforming source bytes
+    or excluding/substituting them during archive. The default is unchanged.
+    """
     commands = (
         ["git", "init", "--quiet"],
-        ["git", "add", "--all"],
+        ["git", "add", *(["--force"] if literal_snapshot else []), "--all"],
         ["git", "-c", "user.name=benchmark", "-c", "user.email=benchmark@invalid", "commit", "--quiet", "-m", "benchmark export"],
     )
     for command in commands:
         result = subprocess.run(command, cwd=worker_root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
         if result.returncode != 0:
             raise RuntimeError("worker export repository initialization failed")
+        if literal_snapshot and command[:2] == ["git", "init"]:
+            attributes = worker_root / ".git" / "info" / "attributes"
+            attributes.parent.mkdir(parents=True, exist_ok=True)
+            attributes.write_text(
+                "* -text -filter -ident -working-tree-encoding -export-ignore -export-subst\n",
+                encoding="utf-8",
+            )
     result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=worker_root, text=True, capture_output=True, check=False)
     commit = result.stdout.strip()
     if result.returncode != 0 or not _COMMIT_RE.fullmatch(commit):
