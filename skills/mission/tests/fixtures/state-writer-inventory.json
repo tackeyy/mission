@@ -330,6 +330,10 @@
     "dispatch_state:replace": 3,
     "validate_launch:dynamic": 2
   },
+  "lib/mission_kernel/fresh_review_output.py": {
+    "_matches_request:dynamic": 2,
+    "_wire:dynamic": 1
+  },
   "lib/mission_kernel/fresh_review_receipts.py": {
     "_timestamp:replace": 1,
     "decode_terminal_receipt:dynamic": 2
