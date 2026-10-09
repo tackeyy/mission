@@ -1355,7 +1355,7 @@ def refuse_unauthorized_published_blobs(
         valid = shape is None and not internal
         if shape is not None:
             valid = not published or (
-                len(published) == shape["blob_count"]
+                (len(published) == shape["blob_count"] if shape["blob_count"] is not None else len(published) <= shape["blob_max"])
                 and shape["internal_min"] <= len(internal) <= shape["internal_max"]
                 and all(kind in shape["rules"] for kind, _blob in internal)
             )

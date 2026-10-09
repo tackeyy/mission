@@ -1,4 +1,4 @@
-"""Pure dispatch and failed-output bindings; completed publication is unavailable."""
+"""Pure dispatch and atomic terminal/output publication bindings."""
 from __future__ import annotations
 from dataclasses import replace
 
@@ -11,7 +11,7 @@ from .fresh_review import (
 )
 from .fresh_review_receipts import (
     decode_launch_receipt, decode_terminal_receipt, receipt_document, ContextMode,
-    BlockedFreshReview, AbandonedFreshReview, FailedFreshReview, _integer, validate_dispatch_intent,
+    BlockedFreshReview, AbandonedFreshReview, FailedFreshReview, CompletedFreshReview, _integer, validate_dispatch_intent,
     FRESH_REVIEW_DISPATCH_SHAPE,
 )
 from .json_codec import freeze_json_value
@@ -93,9 +93,9 @@ def decode_dispatch_record(fields):
     if fields['status'] == 'running' and launch is None or fields['status'] == 'dispatch-unknown' and launch is not None:
         raise FreshReviewError('fresh-review-record-invalid')
     result = fields['result']
-    if fields['status'] in ('blocked', 'abandoned-unknown', 'failed'):
+    if fields['status'] in ('blocked', 'abandoned-unknown', 'failed', 'completed'):
         receipt = decode_terminal_receipt(result)
-        if not isinstance(receipt, (BlockedFreshReview, AbandonedFreshReview, FailedFreshReview)) or (
+        if not isinstance(receipt, (BlockedFreshReview, AbandonedFreshReview, FailedFreshReview, CompletedFreshReview)) or (
                 receipt.outcome, receipt.request_id, receipt.request_digest, receipt.nonce,
                 receipt.dispatch_operation_id, receipt.dispatch_fencing_epoch, receipt.candidate_digest) != (
                 fields['status'], request.request_id, canonical_digest(request_document(request)), request.nonce,
@@ -105,6 +105,8 @@ def decode_dispatch_record(fields):
         if (isinstance(receipt, BlockedFreshReview) and launch is not None
                 or (receipt_document(terminal_launch) if terminal_launch is not None else None) != launch):
             raise FreshReviewError('fresh-review-terminal-binding-mismatch')
+        if isinstance(receipt, CompletedFreshReview) and receipt.independent != fields['independent']:
+            raise FreshReviewError('fresh-review-independent-invalid')
         fields['result'] = freeze_json_value(receipt_document(receipt))
     elif result is not None:
         raise FreshReviewError('fresh-review-record-invalid')
@@ -165,7 +167,7 @@ def dispatch_state(state, command):
         receipt = decode_terminal_receipt(command.receipt.thaw())
         if isinstance(command, ImportFreshReviewOutput):
             from .fresh_review_publish import validate_failed_import
-            validate_failed_import(record, command)
+            validate_failed_import(record, command, document.get('acceptance_contract'))
         elif not isinstance(receipt, (BlockedFreshReview, AbandonedFreshReview)):
             raise FreshReviewError('fresh-review-output-import-required')
         if (receipt.commit_operation_id, receipt.commit_fencing_epoch) != (command.operation_id, command.fencing_epoch):

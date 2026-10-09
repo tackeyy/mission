@@ -220,6 +220,9 @@
     "_utc:replace": 1,
     "begin:replace": 1
   },
+  "lib/mission_application/fresh_review_publish.py": {
+    "_replay_hypotheses:replace": 2
+  },
   "lib/mission_application/guard_application.py": {
     "_command_subject:dynamic": 1,
     "receipt_decision:replace": 1
@@ -359,6 +362,10 @@
     "_matches_request:dynamic": 2,
     "_wire:dynamic": 1
   },
+  "lib/mission_kernel/fresh_review_publish.py": {
+    "failed:replace": 1,
+    "validate_failed_import:replace": 1
+  },
   "lib/mission_kernel/fresh_review_receipts.py": {
     "_timestamp:replace": 1,
     "decode_terminal_receipt:dynamic": 2
@@ -423,7 +430,7 @@
   },
   "lib/mission_persistence/evidence_order.py": {
     "_claim_publication_path:dynamic": 1,
-    "_publication_claims:dynamic": 2
+    "_publication_claims:dynamic": 4
   },
   "lib/mission_persistence/evidence_publish_path.py": {
     "open_evidence_publish_directory:open-write": 4

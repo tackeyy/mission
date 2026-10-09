@@ -103,7 +103,7 @@ def materialize(root, request):
             digest = canonical_digest(snapshot)
             contents.append((ContentAddressedRef('fresh-review-snapshot',
                 'snapshots/' + digest[7:] + '.json', digest, len(content)), content))
-        for handle, content in contents:
+        for handle, content in {handle.relative_path: (handle, content) for handle, content in contents}.values():
             target = folder / handle.relative_path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
