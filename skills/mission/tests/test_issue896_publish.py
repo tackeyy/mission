@@ -43,7 +43,7 @@ def test_bound_invalid_output_publishes_diagnostic_and_terminal_together(reviewe
     assert manifest['blobs'][0]['digest'] == receipt['output_digest']
     assert (state_root / manifest['blobs'][0]['object']).read_bytes() == content
     assert json.loads(import_output(run_cli, reviewer).stdout)['record'] == record
-    _reject_unchanged(run_cli, root, ['mark-passes'], 'acceptance-coverage-pending')
+    _reject_unchanged(run_cli, root, ['mark-passes'], 'acceptance-receipt-missing')
 
 
 def exited(journal, *, output=None, exit_code=0):
@@ -121,7 +121,7 @@ def test_bound_failures_consume_closed_variant_without_success(reviewer, run_cli
         requests = json.loads(run_cli('fresh-review', 'status', cwd=root).stdout)['requests']
         assert requests[0]['result'] == record['result']
         assert requests[1]['request']['nonce'] != request['nonce']
-        _reject_unchanged(run_cli, root, ['mark-passes'], 'acceptance-coverage-pending')
+        _reject_unchanged(run_cli, root, ['mark-passes'], 'acceptance-receipt-missing')
 
 
 @pytest.mark.parametrize('case', ['sender', 'unfinished'])
@@ -373,7 +373,7 @@ def test_confirmed_exit_without_output_has_same_failed_terminal(reviewer, run_cl
     record = json.loads(result.stdout)['record']
     assert record['status'] == 'failed' and record['result']['reason'] == reason
     assert 'output_ref' not in record['result'] and 'output_digest' not in record['result']
-    _reject_unchanged(run_cli, root, ['mark-passes'], 'acceptance-coverage-pending')
+    _reject_unchanged(run_cli, root, ['mark-passes'], 'acceptance-receipt-missing')
 
 
 def test_import_checks_entire_launch_receipt_beyond_sender_fields(reviewer, run_cli):

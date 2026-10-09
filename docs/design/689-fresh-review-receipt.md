@@ -199,6 +199,8 @@ ledger の omission を valid と呼ぶ自己申告だけでは足りず、kerne
 
 行は上から順に評価し、最初に当てはまった行を採る（実行途中でも古い候補に束縛された attempt は stale を返す）。
 
+保存互換のD1 nonce checkpoint（`mission-fresh-review/1`の`reserved`／`consumed`）は、[nonce reducer](../../skills/mission/lib/mission_kernel/fresh_review.py)が保存するdispatch前の予約／未解釈JSON結果で、検証可能なterminal receiptを持たない。保存recordを変えず、判定時だけ両方をreceiptなしの`pending`相当へ写す。最新なら行2のfreshnessを先に検査し、一致しても行3の`acceptance-fresh-review-pending`で拒否する。最新の全体attempt・各required criterionの最新attemptでない古いcheckpointは、その状態で後続reviewを妨げない。
+
 `CommitFreshReviewResult` の一つの public state commit で、terminal receipt、output content-addressed ref、
 output digest、coverage receipt、open obligations/findings、request 消費を束縛する。
 ここでの commit は repository publication の世代であり Git commit ではない。
@@ -258,7 +260,7 @@ terminal commit 後・応答前の停止は同一 operation の再応答で回�
 1. contract・凍結 verifier policy の shape と identity が有効。
 2. required criteria 全てに、最新の通常 verification receipt が passed、現 candidate と定義・policy が一致。
 3. 各 required criterion について、その criterion を含む最新の attempt（request）が、現 contract/input/candidate に束縛された completed fresh review receipt である。加えて §4「実効 coverage の選び方」により、最新の全体 attempt が現候補に対する有効な全体 coverage receipt である（それより前の全体 attempt の receipt は数えない）。
-4. 全て `independent=true`、criterion search 完了、全 ledger の実効 coverage valid、open obligation がない。
+4. 判定に使うcompleted attempt（最新の全体attemptと各required criterionの最新attempt）が全て `independent=true`、criterion search完了、全ledgerの実効coverage valid、部分requestのreceiptを含めopen obligationがない。
 5. required obligation または禁止副作用へ束縛された未解決 finding がゼロ。Medium も含む。
 
 無条件 `acceptance-fresh-review-pending` を以上へ置換し、fresh review に関する判定は §4「実効 coverage の選び方」の表の順と理由コード（`acceptance-fresh-review-missing`・`acceptance-fresh-review-stale`・`acceptance-fresh-review-pending`・`acceptance-fresh-review-non-independent`・`acceptance-coverage-open`）に従う。
@@ -291,10 +293,13 @@ application が completed terminal の coverage/finding evidence を store か�
 immutable typed carrier として MarkPass へ渡す。kernel は carrier の canonical bytes の digest・size を
 state の ref と再照合し、filesystem を読まない。request ごとの input digest と verification/replay を含む
 command ごとの candidate snapshot は application が prepare と同じ計算で再観測し、typed bindings で運ぶ。
-preflight と MarkPass は同じ carrier 検証を共有する。この先行 PR は完了判定を変えず、既存の pending gate を維持する。
-carrier を一つも渡さない既定値（evidence が空 tuple、bindings が None）だけは検証を省略する。
+preflight と MarkPass は同じ carrier 検証を共有する。先行PRでは完了判定を変えず、既存のpending gateを維持した。
+先行PRではcarrierを一つも渡さない既定値（evidenceが空tuple、bindingsがNone）だけは検証を省略した。
 入力を渡した場合は両方を必要とし、省略は `acceptance-fresh-review-completion-carrier-incomplete` で拒否する。
 bindings とともに渡した空 evidence も completed request の集合と照合する。
+
+完了判定PRでは契約付きsessionのcarrierを必須とし、両方の省略も `acceptance-fresh-review-completion-carrier-incomplete` で拒否する。契約キーがないlegacyだけは従来のgateへ進む。条件1→2→3→4→5の順で最初の未達を返す。条件3の全体・criterionの判定は共通に `missing → stale → pending → non-independent → coverage-open` の表順で集約し、criterionの列挙順に依存しない。条件4の独立性・探索完了は最新の全体attemptと各required criterionの最新attemptだけを検査し、古い全体receiptの状態は数えない。実効coverageと部分receiptを含むopen義務を次に検査し、条件5では全attemptの未解決findingを最後に検査する。carrierのdigest・集合・内部整合は条件3の判定前に検証する（内部不整合は `acceptance-fresh-review-evidence-invalid`）。importerと同じledger・replay規則でopen IDとfindingの対応を再導出し、実行済みだが未確認のblocked replayもopenのまま保持する。契約内coverageは不変のpendingであり、完了はprojectionから導出する実効coverageで判定する。
+
 
 ## 6. C から引き継ぐ Low の処理
 
