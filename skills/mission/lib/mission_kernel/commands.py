@@ -16,6 +16,8 @@ from .model import HaltCategory, Phase, PreparedHandoff
 from .artifact import ArtifactEffectClaim
 from .a4 import SpecialistRecommendationProjection
 from .fresh_review import FreshReviewRequest
+from .fresh_review_completion import FreshReviewCompletionEvidence
+from .fresh_review_coverage import FreshReviewBindings
 
 
 @dataclass(frozen=True)
@@ -96,6 +98,8 @@ class MarkPass:
     acceptance_candidate_digests: FrozenJsonObject = FrozenJsonObject(())
     at: Optional[str] = None
     compatibility: CompatibilityPayload = EMPTY_COMPATIBILITY_PAYLOAD
+    fresh_review_evidence: tuple[FreshReviewCompletionEvidence, ...] = ()
+    fresh_review_bindings: FreshReviewBindings | None = None
 
 
 @dataclass(frozen=True)

@@ -210,7 +210,7 @@ def test_finding_limit_is_global_across_all_criteria():
 
 @pytest.mark.parametrize('change', [dict(severity='Critical'), dict(finding_id='../escape'),
     dict(criterion_id='AC2'), dict(requirement_ids=['R1', 'R1']), dict(repro_input={'content': 'x'}),
-    dict(summary=''), dict(actual=None), dict(expected=None), dict(extra=True)])
+    dict(summary=''), dict(actual=None), dict(actual={}), dict(expected=None), dict(extra=True)])
 def test_malformed_finding_never_becomes_a_completed_hypothesis(change):
     raw = output_document()
     raw['criterion_results'][0]['findings'] = [{**finding(), **change}]
