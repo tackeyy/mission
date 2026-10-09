@@ -519,3 +519,24 @@ def test_schema_and_binding_failure_precede_measured_budget_failure(case, reason
     body = canonical_bytes(raw)
     assert inspect(body, used=dict(wall_time_sec=301, tool_calls=0, replays=0,
                                    output_bytes=len(body))).reason == reason
+
+
+def test_replay_eligibility_validates_links_against_the_whole_frozen_policy():
+    # command-1 -> replay-1 -> replay-2 is a valid registered chain; the first replay stays eligible.
+    from mission_kernel.fresh_review_output import replay_eligibility
+    request, hypothesis, policy = replay_fixture()
+    target = policy['commands']['replay-1']
+    second = {key: copy.deepcopy(value) for key, value in target.items()}
+    second['id'] = 'replay-2'
+    target['replay'] = dict(command_id='replay-2', allowed_artifact_kinds=['text'], max_bytes=1,
+                            relative_path='repro.txt')
+    policy['commands']['replay-2'] = second
+    source, replay = request.candidate_bindings
+    request = replace(request, candidate_bindings=(
+        source, replace(replay, definition_digest=canonical_digest(target))))
+    assert replay_eligibility(request, hypothesis, policy) is None
+    # A dangling link anywhere in the frozen policy still makes it unsupported.
+    target['replay']['command_id'] = 'missing'
+    request = replace(request, candidate_bindings=(
+        source, replace(replay, definition_digest=canonical_digest(target))))
+    assert replay_eligibility(request, hypothesis, policy) == 'replay-unsupported'

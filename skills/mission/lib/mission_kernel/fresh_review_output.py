@@ -354,7 +354,9 @@ def replay_eligibility(request, hypothesis, frozen_policy):
             if (definition['id'] != item.command_id
                     or canonical_digest(definition) != item.definition_digest):
                 return 'replay-unsupported'
-        validate_command_links({item.command_id: commands[item.command_id] for item in (source, binding)})
+        # Links are a property of the whole frozen policy: a replay target may itself
+        # name a further replay command that is not part of this binding pair.
+        validate_command_links(commands)
     except (VerifierPolicyError, FreshReviewError):
         return 'replay-unsupported'
     replay_policy = commands[source.command_id].get('replay')
