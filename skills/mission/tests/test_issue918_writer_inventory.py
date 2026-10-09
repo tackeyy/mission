@@ -177,10 +177,15 @@ def _writer_calls(source):
 def test_writer_inventory_matches_baseline_manifest():
     mission = Path(__file__).resolve().parents[1]
     inventory = {}
-    for path in [*(mission / 'bin').rglob('*.py'), *(mission / 'lib').rglob('*.py')]:
+    # Public benchmark output/materialization is outside session state, but its
+    # new raw I/O must also be explicitly inventoried.
+    benchmarks = [mission.parents[1] / 'benchmarks/mission-vs-goal' / name
+                  for name in ('public_benchmark.py', 'native_goal_benchmark.py')]
+    for path in [*(mission / 'bin').rglob('*.py'), *(mission / 'lib').rglob('*.py'), *benchmarks]:
         calls = _writer_calls(path.read_text())
         if calls:
-            inventory[str(path.relative_to(mission))] = {
+            key = str(path.relative_to(mission.parents[1])) if path in benchmarks else str(path.relative_to(mission))
+            inventory[key] = {
                 f'{function}:{sink}': count for (function, sink), count in sorted(calls.items())}
     # Include infrastructure/evidence sinks and ambiguous syntactic candidates.
     # New raw I/O in a new module or an existing function changes this map.

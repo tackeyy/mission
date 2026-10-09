@@ -83,7 +83,9 @@ def test_valid_bound_output_returns_frozen_hypotheses_without_consuming_request(
 
 @pytest.mark.parametrize('field,value', [('operation_id', 'another'), ('fencing_epoch', 3),
     ('fencing_epoch', True), ('request_id', 'another'), ('nonce', 'another'),
-    ('child_identity', 'another')])
+    ('child_identity', 'another')] + [(field, value)
+        for field in ('operation_id', 'fencing_epoch', 'request_id', 'nonce', 'child_identity')
+        for value in (None, True, 0, [], {})])
 def test_sender_mismatch_precedes_even_invalid_output_and_preserves_running(field, value):
     record = running()
     with pytest.raises(FreshReviewError, match='fresh-review-output-sender-mismatch'):

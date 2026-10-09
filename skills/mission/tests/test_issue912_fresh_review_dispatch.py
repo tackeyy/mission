@@ -306,13 +306,13 @@ def test_reconcile_rechecks_candidate_before_publishing_running(reviewer, run_cl
     assert json.loads(journal.read_text())['count'] == 1
 
 
-def test_public_dispatch_schema_names_the_incomplete_saga(tmp_path, run_cli):
+def test_public_dispatch_schema_names_the_host_observed_saga(tmp_path, run_cli):
     for command in ('fresh-review-run', 'fresh-review-reconcile'):
         result = run_cli('schema', '--contract', command, cwd=tmp_path)
         assert result.returncode == 0, result.stdout + result.stderr
         schema = json.loads(result.stdout)
         assert schema['closed'] is True
-        assert schema['terminal_outcomes'] == (['blocked', 'abandoned-unknown', 'failed']
+        assert schema['terminal_outcomes'] == (['blocked', 'abandoned-unknown', 'failed', 'completed']
                                                if command == 'fresh-review-reconcile' else
                                                ['blocked', 'abandoned-unknown'])
 

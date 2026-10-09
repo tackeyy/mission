@@ -677,3 +677,20 @@ def test_invalid_session_documents_do_not_publish_task_prose(tmp_path, document)
     record, _ = record_and_spec()
     integrity().collect_post_run(tmp_path, record, lambda *_: {'mission_state': document, 'session_init': document})
     assert record['mission_state'] is None and record['session_init'] is None
+
+
+@pytest.mark.parametrize('outcome', ['completed', 'failed'])
+def test_rpc_cleanup_failure_does_not_replace_observed_outcome(tmp_path, monkeypatch, outcome):
+    probe = _load_probe()
+    evidence = {}
+    class Rpc(FakeRpc):
+        def close(self): raise OSError('neutral cleanup failure')
+    fake = Rpc(None, 'success', probe)
+    fake.probe_evidence = evidence
+    monkeypatch.setattr(probe, 'RpcProcess', lambda *_: fake)
+    monkeypatch.setattr(probe, '_codex_version', lambda: 'v')
+    reason = None if outcome == 'completed' else 'goal_not_complete'
+    monkeypatch.setattr(probe, 'observe_codex_goal', lambda *_: dict(goal_status='complete', outcome=outcome, reason=reason, fidelity='verified'))
+    result = probe.run_codex_assignment(tmp_path, 'o', 'a', 10, None, 1, 'm', 'high', 'p', evidence=evidence)
+    assert (result['outcome'], result['reason']) == (outcome, reason)
+    assert result['process_cleanup_error'] == 'OSError'

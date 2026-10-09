@@ -53,15 +53,16 @@ def exited(journal, *, output=None, exit_code=0):
     journal.write_text(json.dumps(stored))
 
 
-def test_reconcile_imports_bound_failure_after_takeover_without_another_launch(reviewer, run_cli):
+@pytest.mark.parametrize('outcome', ['failed', 'completed'])
+def test_reconcile_imports_bound_failure_after_takeover_without_another_launch(reviewer, run_cli, outcome):
     from .test_issue879_completion_cli import _rewrite_fixture_document
     root, request, env, journal = reviewer
     unknown = invoke(run_cli, reviewer, FIXTURE_REVIEW_MODE='crash')
-    exited(journal)
+    exited(journal, output=json.dumps(bound_output(request)) if outcome == 'completed' else 'invalid')
     _rewrite_fixture_document(root, lambda state: state.update(lease_expires_at='2000-01-01T00:00:00Z'))
     record = invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one',
                     MISSION_LEASE_ID='takeover-lease')
-    assert record['status'] == 'failed'
+    assert record['status'] == outcome
     receipt = record['result']
     assert receipt['dispatch_fencing_epoch'] == unknown['dispatch']['fencing_epoch']
     assert receipt['commit_fencing_epoch'] > receipt['dispatch_fencing_epoch']
@@ -121,8 +122,8 @@ def test_bound_failures_consume_closed_variant_without_success(reviewer, run_cli
         _reject_unchanged(run_cli, root, ['mark-passes'], 'acceptance-coverage-pending')
 
 
-@pytest.mark.parametrize('case', ['sender', 'unfinished', 'valid'])
-def test_rejected_report_and_valid_unimplemented_import_leave_running_unchanged(reviewer, run_cli, case):
+@pytest.mark.parametrize('case', ['sender', 'unfinished'])
+def test_rejected_report_leaves_running_unchanged(reviewer, run_cli, case):
     from mission_kernel.fresh_review import canonical_bytes
     root, request, env, journal = reviewer
     invoke(run_cli, reviewer)
@@ -132,12 +133,8 @@ def test_rejected_report_and_valid_unimplemented_import_leave_running_unchanged(
         stored['launch']['child_identity'] = 'foreign-child'
     elif case == 'unfinished':
         stored['process_exited'] = False
-    else:
-        stored['output'] = canonical_bytes(bound_output(request)).decode()
-        stored['budget_used']['output_bytes'] = len(stored['output'].encode())
     journal.write_text(json.dumps(stored))
-    code = {'sender': 'fresh-review-output-sender-mismatch', 'unfinished': 'fresh-review-output-observation-invalid',
-            'valid': 'fresh-review-completed-import-unavailable'}[case]
+    code = {'sender': 'fresh-review-output-sender-mismatch', 'unfinished': 'fresh-review-output-observation-invalid'}[case]
     _reject_unchanged(run_cli, root, ['fresh-review', 'import', '--request', request['request_id'],
         '--adapter', 'neutral'], code, env={**env, 'MISSION_OPERATION_ID': 'import-one'})
 
@@ -252,15 +249,16 @@ def test_failed_writer_shape_is_below_e0_constant_at_maximum_fields(monkeypatch)
     assert prepared.effects[0].size == 262144
 
 
+@pytest.mark.parametrize('outcome', ['failed', 'completed'])
 @pytest.mark.parametrize('point,committed', [('after-generation-publish', False), ('after-head-replace', True)])
-def test_interrupted_publication_never_exposes_terminal_without_output(reviewer, run_cli, monkeypatch, point, committed):
+def test_interrupted_publication_never_exposes_terminal_without_output(reviewer, run_cli, monkeypatch, point, committed, outcome):
     from .test_command_inventory import _load_mission_state_module
     from .test_issue879_completion_cli import _persisted_fixture_document
     from mission_application.fresh_review_publish import prepare_failed_output
     from mission_application.evidence import execute_evidence_operation
     root, request, env, journal = reviewer
     invoke(run_cli, reviewer)
-    exited(journal)
+    exited(journal, output=json.dumps(bound_output(request)) if outcome == 'completed' else 'invalid')
     monkeypatch.chdir(root)
     monkeypatch.setenv('MISSION_SESSION_ID', 'test')
     monkeypatch.setenv('MISSION_LEASE_ID', 'test-lease')
@@ -288,16 +286,18 @@ def test_interrupted_publication_never_exposes_terminal_without_output(reviewer,
     with pytest.raises(Interrupted):
         execute_evidence_operation(repository, lambda _: prepared)
     persisted = _persisted_fixture_document(root)
-    assert persisted['fresh_review']['requests'][0]['status'] == ('failed' if committed else 'running')
-    target = root / prepared.effects[0].target
-    if committed:
-        assert target.read_bytes() == prepared.effects[0].content
-    else:
-        assert not target.exists()
+    assert persisted['fresh_review']['requests'][0]['status'] == (outcome if committed else 'running')
+    for effect in prepared.effects:
+        target = root / effect.target
+        if committed:
+            assert target.read_bytes() == effect.content
+        else:
+            assert not target.exists()
     repository._repository.fault_injector = None
     execute_evidence_operation(repository, lambda _: prepared)
-    assert _persisted_fixture_document(root)['fresh_review']['requests'][0]['status'] == 'failed'
-    assert target.read_bytes() == prepared.effects[0].content
+    assert _persisted_fixture_document(root)['fresh_review']['requests'][0]['status'] == outcome
+    for effect in prepared.effects:
+        assert (root / effect.target).read_bytes() == effect.content
 
 
 @pytest.mark.parametrize('observed', [None, [], True, 7, 'observation'])
@@ -353,7 +353,7 @@ def test_import_schema_exposes_only_request_and_adapter():
     schema = json.loads(render_contract_schema('fresh-review-import'))
     assert set(schema['required']) == {'request', 'adapter'}
     assert schema['closed'] is True
-    assert schema['terminal_outcomes'] == ['failed']
+    assert schema['terminal_outcomes'] == ['failed', 'completed']
 
 
 @pytest.mark.parametrize('command', ['import', 'reconcile'])
@@ -506,7 +506,7 @@ def test_live_minimal_recovery_without_output_does_not_require_import_sender(rev
 
 @pytest.mark.parametrize('status', ['running', 'dispatch-unknown'])
 @pytest.mark.parametrize('deadline', ['before', 'after'])
-@pytest.mark.parametrize('sender', ['matching', 'foreign', 'missing'])
+@pytest.mark.parametrize('sender', ['matching', 'foreign', 'wrong-type', 'missing'])
 @pytest.mark.parametrize('process', ['exited', 'live'])
 @pytest.mark.parametrize('body', ['output', 'none'])
 def test_reconcile_sender_deadline_table(reviewer, run_cli, status, deadline, sender, process, body):
@@ -520,19 +520,21 @@ def test_reconcile_sender_deadline_table(reviewer, run_cli, status, deadline, se
                                               output_bytes=7 if body == 'output' else 0))
     if sender == 'foreign':
         stored['observation_updates'] = {'child_identity': 'foreign'}
+    elif sender == 'wrong-type':
+        stored['observation_updates'] = {'fencing_epoch': True}
     elif sender == 'missing':
         stored['minimal_observation'] = True
     journal.write_text(json.dumps(stored))
     if deadline == 'after':
         _expire_dispatch(reviewer)
-    if deadline == 'before' and sender == 'foreign':
+    if deadline == 'before' and sender in ('foreign', 'wrong-type'):
         _reject_unchanged(run_cli, root, ['fresh-review', 'reconcile', '--request', request['request_id'],
             '--adapter', 'neutral'], 'fresh-review-output-sender-mismatch',
             env={**env, 'MISSION_OPERATION_ID': 'reconcile-table'})
         assert not journal.with_suffix('.cancel').exists()
         return
     record = invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-table')
-    ignored = deadline == 'after' and sender == 'foreign'
+    ignored = deadline == 'after' and sender in ('foreign', 'wrong-type')
     failed = process == 'exited' and not ignored
     cancelled = deadline == 'after' and not failed
     assert record['status'] == ('failed' if failed else 'abandoned-unknown' if cancelled else 'running')
