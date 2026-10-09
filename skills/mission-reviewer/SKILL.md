@@ -13,6 +13,8 @@ allowed-tools: Read, Grep, Glob, Bash(git diff:*), Bash(git log:*), Bash(git sta
 
 ## 入力
 
+契約付きsessionの独立反例探索は、下の「契約付きsessionのfresh review」に従う別の入力・出力契約を使う。以下の採点用入力をfresh reviewの初期contextへ混ぜない。
+
 - ミッション記述
 - 評価観点（例: 「観点A: ミッション達成度」「観点B: 正確性」「観点C: 実用性」「観点D: 計画指示明瞭度」※Dはオプション）
 - 成果物（変更ファイル、実行結果、テスト結果等）
@@ -25,6 +27,24 @@ allowed-tools: Read, Grep, Glob, Bash(git diff:*), Bash(git log:*), Bash(git sta
 - context manifest パス (#241、diff レビュー時のみ): args に `mission-context-manifest/1` JSON のパスが渡された場合、manifest (mission goal / prior findings) と指定 diff を一次スコープとしてレビューし、リポジトリ全体の走査を省く。manifest が読めない・スキーマ不一致の場合は通常どおり全成果物をレビューする (fail-safe)。スコープ縮小は探索範囲のみで、採点基準・Step 0 のテスト実行義務は不変
   - manifest を正常に受領して bounded review を実行した場合、review JSON の `notes` 自由記述に `context: bounded` を明記する (#352)
   - `prior_findings` が空でも「前回は指摘なし」とは限らない。判断には `prior_findings_status` を見る (#690)。`complete` なら空は「指摘が無かった」を意味するが、`no-history` は未採点、`partial` は供給元を持たない entry が混ざっている状態であり、**いずれも前回指摘の不在を示さない**。`complete` 以外では前回指摘が無いものとして扱わず、diff の探索範囲を狭めない
+
+## 契約付きsessionのfresh review
+
+`acceptance_contract`キーがあるsessionでは、採点JSONだけでは完了できない。
+全required criterionの現候補でのpassed verification receipt、有効なfresh review receipt、
+validな実効coverage、必須違反の未解決findingが0件であることをcompletion gateが要求する。
+契約キー欠落のlegacyだけは従来の採点経路を使う。nullはキー欠落として扱わない。
+
+1. Orchestratorは`fresh-review prepare --perspective <観点> --adapter-registration-digest <登録digest>`でrequestを保存し、`fresh-review run --request <request_id> --adapter <登録ID>`で登録adapterを起動する。reviewerはimmutable input packet内の元要求、ledger、criteria、凍結verifier policy、候補snapshotから反例を探す。実装者の成功説明・採点・既存review結論・会話履歴を初期入力に含めない。
+2. Reviewerは`mission-fresh-review-output/1`を返す。requestのidentity・nonce・iterationと各binding digest、request digestを保持し、選択されたcriterionごとの`criterion_results`（`searched`または理由付き`blocked`）、全requirementの`coverage`（分類確認、対応criterion、`valid`または理由付き`open`）を返す。探索不能を空findingの成功として報告しない。
+3. 反例はfinding hypothesisとしてcriterion・requirement・禁止副作用のID、severity、summary、登録replay command ID、`repro_input`、`actual`、`expected`を返す。`replay_evidence_ref`はnullとし、runner receiptを自作しない。詳細な閉じたfield契約は[output decoder](../../skills/mission/lib/mission_kernel/fresh_review_output.py)を参照する。
+4. Adapterが起動identity・context分離・入力受領digest・能力と予算の強制・終了・output bytesを観測する。Orchestratorは`fresh-review import --request <request_id> --adapter <登録ID>`で専用importを行う。applicationが登録replayを実行し、output・coverage・finding・terminal receiptを同じ公開commitに束縛する。reviewerはstate・coverage・receiptへ直接書き込まない。通常の`review-import --iteration <N> --stdin`による`mission-review/1`採点とは別経路である。
+5. 同じcontextのinline実行はhost観測により`independent=false`となる。completedとして保存されても`acceptance-fresh-review-non-independent`で完了に数えない。最新の全体attemptをprepareした時点で以前のclean receiptへ戻れず、pendingは`acceptance-fresh-review-pending`、failed等は`acceptance-coverage-open`となる。後のclean reviewも過去の未解決findingを消さない。
+
+通常のreview→aggregate→`push-score --scoring-json`も必要であり、fresh review receiptは採点を代替しない。
+完了のauthorityはmissionのgateにある。実hostのcontext分離はadapterの観測で確かめるもので、
+tests配下のfixture childによる回帰成功は実hostの保証ではない。
+入力・receipt・完了条件は[設計§2〜§5](../../docs/design/689-fresh-review-receipt.md)を参照する。
 
 ## 行動指針
 

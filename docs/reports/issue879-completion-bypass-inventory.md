@@ -1,15 +1,21 @@
 # 必須条件の completion gate: 経路と検証証拠
 
-対象: [Issue 879](https://github.com/tackeyy/mission/issues/879) /
+対象: [Cの完了gate: Issue 879](https://github.com/tackeyy/mission/issues/879) /
 [merged PR 893](https://github.com/tackeyy/mission/pull/893)。
 基点は `baabdd957e3929304c8d353c968a894ed02537b9`、開始 head は
 `a3dafc43f29df323374b20803e2ae38688068dc4`。C の実装は 2026-10-03 12:40 JST に
 merge commit `93c0833efc55a90f535d7c525ac533c7897b3cbf` として取り込まれた。
-本書は C の履歴と、後続 [D0: Issue 894](https://github.com/tackeyy/mission/issues/894) の形状検証を記録する。
+本書はCの履歴を保持し、[D3: receiptと完了gateの統合](https://github.com/tackeyy/mission/issues/689)後のproducer・gate・CI配線を記録する。
+現在形は base `8f845886` の実装を参照する。D3a の 2 本は GitHub の一次記録で次のとおり merge 済み（2026-10-10 に CC が `gh pr view` で取得）。
+両 PR の異系統 review と独立 Checker の判定は、各 PR の記録コメントにある。
 
-## C の確定記録
+- [入力補完 PR 963](https://github.com/tackeyy/mission/pull/963): 2026-10-10 04:51 JST（2026-10-09T19:51:06Z）に merge commit `d9f40d2017f299ac23622771f09fb99829b12f9d`
+- [完了判定 PR 973](https://github.com/tackeyy/mission/pull/973): 2026-10-10 08:21 JST（2026-10-09T23:21:33Z）に merge commit `8f845886b43814276d0cd25099d8056386618536`
 
-以下は GitHub の一次記録（PR 893 のコメント、required CI run、merge commit）で確認した値である。
+## Cの確定記録（履歴）
+
+以下は以前の本書がGitHubの一次記録（PR 893のコメント、required CI run、merge commit）から記録した値である。
+履歴として保持する（今回は再取得していない）。
 
 - [PR 893 の review / Checker / merge](https://github.com/tackeyy/mission/pull/893):
   reviewed head `b1b30145cf596c4577ed5ea86de3d016754fd31c` で異系統 review round 1 と
@@ -22,10 +28,12 @@ merge commit `93c0833efc55a90f535d7c525ac533c7897b3cbf` として取り込まれ
 
 ## 実装の結論
 
-契約付き session の成功終了は拒否したままにする。coverage/fresh-review の公開 producer は
-この段階にはない。`acceptance-fresh-review-pending` は解消しない。
-matching receipt の回帰は、coverage が valid の保存済み fixture に対して公開 runner を実行し、
-実際の passed receipt を生成する。公開 API が coverage を valid にできる、または完了できるという証明ではない。
+契約付きsessionは、現候補で全required verification receiptがpassed、全体coverageと各required criterionの
+最新fresh review receiptが有効、実効coverageがvalid、必須違反の未解決findingが0件の時だけ完了できる。
+公開producerは`fresh-review prepare/run/import`。importがoutput・coverage・finding・terminal receiptを
+同じ公開commitへ束縛し、applicationが証拠bytesと現候補を再取得、kernelがMarkPassで再検証する。
+契約内coverageはimport時のpendingのままであり、fixtureによるvalidの直書きは成功の証明に使わない。
+通常の採点gateも維持する。契約キー欠落だけが従来の成功経路へ進む。
 
 - kernel は legacy passthrough または closed-v5 extensions から契約を読む。
 - application は同じ pure guard を承認 provider の起動前にも確認する。
@@ -46,9 +54,9 @@ v4 flat と v5 fenced container の両方を実行する。
 
 | 経路 | 判定・証拠となるテスト |
 |---|---|
-| `mark-passes` / 未合格 `closeout` | `test_pending_contract_rejects_public_completion_atomically`: pending coverage を拒否 |
+| `mark-passes` / 未合格 `closeout` | `test_pending_contract_rejects_public_completion_atomically`: verification receipt欠落を拒否 |
 | 既に `passes=true` の `closeout` | `test_already_passed_contract_closeout_is_not_a_success_shortcut`: exit 2、公開 bytes 不変 |
-| valid coverage、matching passed receipt | `test_public_completion_revalidates_latest_receipt[matching]`: fresh-review pending まで到達して拒否 |
+| matching passed receipt、fresh review未実施 | `test_public_completion_revalidates_latest_receipt[matching]`: `acceptance-fresh-review-missing`で拒否 |
 | 必須 receipt 欠落、2 つ目の必須条件欠落 | 同関数の `missing` / `missing-second`: 全 required 条件を要求 |
 | malformed / 最新 failed / 最新 blocked | 同関数の `invalid` / `latest-failed` / `latest-blocked`: 古い pass に fallback しない |
 | contract / frozen policy / verifier definition 不一致 | 同関数の `stale-contract` / `stale-policy-binding` / `stale-definition` |
@@ -64,7 +72,7 @@ v4 flat と v5 fenced container の両方を実行する。
 | `verification run` | 上記 receipt 回帰と既存 [runner テスト](../../skills/mission/tests/test_issue878_verification_runner.py): runner が receipt だけを発行。passed command は fresh review を代替しない |
 | `halt` / `mark-halt` | `test_halt_stops_a_contract_session_without_claiming_success`: 停止は許可するが `passes=false`, phase=halted, outcome=failed。契約も維持 |
 | v4 decode/encode/projection | `test_codecs_keep_contract_and_receipt_evidence`: 契約と receipt を legacy projection に保持し、kernel/CLI が拒否 |
-| closed schema 5 decode/encode | 同関数: extensions の契約/receipt を保持し、pure kernel が pending coverage を拒否。契約なしの pure MarkPass は従来どおり成功 |
+| closed schema 5 decode/encode | 同関数: extensionsの契約/receiptを保持し、pure kernelが未passed receiptを拒否。契約なしのpure MarkPassは従来どおり成功。closed-v5の公開成功bridgeはD3対象外 |
 | D0: 不正な criterion command_id / 凍結 command の欠落field・出力要素・external inputs | `test_malformed_frozen_verifier_rejects_public_completion_atomically`: lookup / hash / capture 前に `acceptance-contract-invalid` または `verifier-policy-command-invalid` で拒否 |
 | D0: live / frozen command の閉じた形 | `test_shared_validator_closes_live_and_frozen_command_fields_before_sets`: 必須fieldと各要素の表を共有し、live の set 化前検査も検証 |
 | D0 追補: `acceptance-contract status` の不正binding・criterion・command・Unicode | `test_status_rejects_malformed_persisted_contract_atomically` と上記共有表: 同じ閉じたvalidatorを表示・digest前に通し、exit 2で拒否。正常契約とキー欠落は `test_status_keeps_valid_and_contractless_sessions_readable` で維持 |
@@ -80,10 +88,30 @@ v4 flat と v5 fenced container の両方を実行する。
 | D0: v4 / closed-v5 kernel の null・不正command | `test_codecs_keep_contract_and_receipt_evidence[null / malformed-command]`: pure gate が理由コード付き拒否、transition なし |
 | 契約なし normal pass、既 pass closeout | `test_contractless_completion_and_already_passed_closeout_remain_usable`: 公開成功動作と再 closeout の bytes 不変を維持 |
 
-source inventory: `skills/mission/lib/mission_application/review.py` の `mark_pass` と
+以下のD3テストは[公開CLI end-to-end](../../skills/mission/tests/test_issue689_completion_e2e.py)を指す。
+通常initとpolicy/contract importから開始し、登録fixture childがimmutable packetを読む。
+v5だけは契約登録前の公開init結果を既存genesis helperでcontainerへ包む。acceptance証拠は直書きしない。
+拒否時はmark-passesとcloseoutの理由コード、terminal flags、公開state/backup/evidenceの全bytesを比較する。
+
+| D3の経路 | 判定・証拠となるテスト |
+|---|---|
+| 全required receipt・独立探索・coverage・finding条件が成立 | `test_public_completion_requires_generated_receipts_and_keeps_score_gate`: 採点前は拒否、既存score経路後にmark-passes/初回closeoutでpasses=true |
+| 正常な契約付きsessionの再closeout | `test_public_already_passed_contract_closeout_has_no_success_shortcut`: Cの既pass shortcut拒否を維持し、exit 2・terminal flagsと公開bytes不変。初回closeoutの成功とは区別する |
+| AC2のverification欠落・最新failed・fresh reviewなし | `test_public_completion_rejects_missing_or_superseded_evidence_atomically`: `missing-second-verifier` / `latest-failed-verifier` / `missing-review` |
+| 全体reviewなし、部分AC1のみ | 同関数`partial-review`: `acceptance-fresh-review-missing`。部分receiptを全体coverageとして採用しない |
+| 同一contextのinline・runningのまま・明示open coverage | 同関数`inline` / `running` / `open-coverage`: non-independent / pending / coverage-openで拒否 |
+| import後にtracked候補のbytesが変更 | 同関数`stale-candidate`: `acceptance-receipt-stale`。同じGit HEADでも再取得したbytesで拒否 |
+| 候補変更後にverificationだけを再実行 | 同関数`stale-review`: 全verificationが現候補でpassedでも、古いfresh reviewを`acceptance-fresh-review-stale`で拒否 |
+| clean全体review後の2回目prepare / failed import | 同関数`new-pending` / `new-failed`: pending / coverage-open。古いclean receiptへ戻らない |
+| clean全体review後のAC2だけの新しいpending attempt | 同関数`new-partial-pending`: 全体coverageがcleanでもrequired criterionの最新attemptで拒否 |
+| 1件の必須違反finding・後のclean全体review | 同関数`finding` / `old-finding`: severityがLowでも`acceptance-unresolved-finding`。古いfindingを新しいclean outputで消さない |
+| 契約キー欠落legacy | `test_public_contract_key_absent_legacy_still_completes`: 公開init・score・mark-passes・再closeoutがv4/v5で成立 |
+
+source inventory（locatorは本書からの相対リンク）:
+[applicationのmark_pass](../../skills/mission/lib/mission_application/review.py)と
 `skills/mission/lib/mission_kernel/transitions.py` の `_mark_pass` が pass writer。
 `skills/mission/lib/mission_kernel/commands.py` の `GENERIC_SET_DEDICATED_FIELDS` は
-`acceptance_contract` / `verification_receipts` を保護する。
+`acceptance_contract` / `verification_receipts` / `fresh_review`を保護する。
 `skills/mission/lib/mission_application/lifecycle.py` の `advance` は terminal targets を拒否する。
 `skills/mission/lib/mission_application/legacy_initialization.py` の `initialize_legacy_v4` は
 通常 init で契約付きの既存 document を再初期化しない。
@@ -91,7 +119,13 @@ source inventory: `skills/mission/lib/mission_application/review.py` の `mark_p
 `mission_persistence/reinitialization.py::V5MissionReinitializer` が別 identity の開始を扱う経路であり、
 旧 mission の completion は行わない。
 `skills/mission/bin/mission-state.py` の parser は acceptance-contract を import/status、
-runner receipt を verification run に限定する。契約削除・任意 runner receipt import の公開 command はない。
+runner receiptをverification runに限定する。契約削除・任意runner receipt importの公開commandはない。
+[fresh_review_completion.py::observe_completion_inputs](../../skills/mission/lib/mission_application/fresh_review_completion.py)が
+coverage/findingのref・digest・sizeを読み、prepareと同じpacket/candidateを再取得する。
+[kernelのjudge_completion](../../skills/mission/lib/mission_kernel/fresh_review_completion.py)がcarrierの内部整合、
+最新全体/criterion attempt、独立性、open義務、全attemptの未解決findingを検査する。
+[publisher](../../skills/mission/lib/mission_application/fresh_review_publish.py)が専用importの公開producerであり、
+reviewerが作るのはoutputだけである。
 
 ## テストの検出価値と統合
 
@@ -108,7 +142,11 @@ subprocess の費用は実測結果に記録する。純粋な単体検査だけ
 CI は `.github/workflows/ci.yml` の Python shards → `make test-shard` が `skills/mission` を収集する。
 `scripts/ci_shard_targets.py::expand_target` は tracked ファイルだけを列挙するため、
 C の回帰ファイルは PR 893 で tracked となり、required CI run 37093400756 で実行された。
-D0 は同じ tracked ファイルを拡張するため、その収集経路を共有する。
+D0は同じtrackedファイルを拡張するため、その収集経路を共有する。
+D3の新規ファイルも同じPython shards→make test-shard→`expand_target`経路に置く。
+今回はgit操作を行わず、新規ファイルのGit登録・commitとrequired CIは未実施である。
+未登録ファイルはdirectory収集に入らないため、依頼元で登録してからCIを取得する必要がある。
+ローカルではファイルを明示して実行する。CI成功をローカルGreenで代替しない。
 draft skip は検証成功と扱わない。
 
 ## C の Red と途中結果（履歴）
@@ -191,7 +229,15 @@ reviewed area は repo の 600 行 accountability 帯、1,400 行未満。
 PR をさらに分けない理由は、C の completion authority、公開 CLI、拒否時の publication、
 配布 mirror が同じ受入条件を構成したため。C は PR 893 として merge 済み。
 
-## 未解決・範囲外
+## 現在の未解決・範囲外
+
+- 新規D3テストのGit登録・正式review・独立Checker・required CI・mergeは依頼元の次工程。今回はローカル検証までであり、acceptedを主張しない。
+- 実host adapterとcontext分離のprobeは[D4: Issue 897](https://github.com/tackeyy/mission/issues/897)。fixture childの成功を実hostの独立性証明として扱わない。
+- closed schema 5の公開成功bridgeは[設計§5](../design/689-fresh-review-receipt.md)の対象外。v5 containerのv4 payloadとは区別する。
+- `acceptance-contract status`はimportされたcoverageを表示し、`imported_coverage`/`effective_coverage`を返さない。completedかつvalidな公開receiptを作ったsessionでも確認した。[status実装](../../skills/mission/lib/mission_application/acceptance.py)と[設計§4](../design/689-fresh-review-receipt.md)の表示契約の差分であり、D3では製品コードを修正しない。completion gateは保存されたreceiptから実効coverageを検証している。
+- [withdrawnの扱い: Issue 974](https://github.com/tackeyy/mission/issues/974)は別PRの範囲として変更しない。
+
+## C当時の未解決・範囲外（履歴）
 
 1. fresh-review producer は後続 [Issue 689](https://github.com/tackeyy/mission/issues/689) の責務。
    coverage を valid にする公開 producer も本 PR にはない。現段階では契約付き session の成功を主張しない。
@@ -389,7 +435,7 @@ python3 -m pytest -q \
 commit案は `fix: 契約参照経路の不正形とcanonicalエラーを拒否する`（実装・回帰・mirror）と
 `docs: status検証と同種検索結果を記録する`（本書）。
 
-## D0 parser追補: 共有URL / state encoding境界
+## D0 parser追補: 共有URL / state encoding境界（履歴）
 
 開始HEADは `79ca75a289a5a3df73797525da69f80e43f66b18`（clean）。依頼元から共有された
 正式reviewと独立Checkerはともにchanges-requestedで、Mediumは不正URLの未捕捉ValueErrorと

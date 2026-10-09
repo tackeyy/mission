@@ -306,6 +306,19 @@ orchestrator は仮置き、ミッション分解、実行、reviewer JSON 収�
 詳細な運用プロトコルは [`skills/mission/SKILL.md`](skills/mission/SKILL.md)、`stats` / audit の raw・completed 品質 schema は [`docs/PASS_RATE_METRICS.ja.md`](docs/PASS_RATE_METRICS.ja.md)、明示的に再利用する state snapshot は [`docs/STATE_SNAPSHOTS.ja.md`](docs/STATE_SNAPSHOTS.ja.md) を参照してください。
 `--goal-dispatch` は Simple routing 後の完遂先を inline / host-native から選び、`--force-mission` は Simple なら goal に逃がす場面でも mission ループを維持します。
 
+契約付きsessionでは、現候補に対する全required criterionのpassed verification receipt、
+独立したfresh review receipt、validな実効coverage、必須違反の未解決findingが0件であることも必要です。
+runtime adapterは`$XDG_CONFIG_HOME/mission/fresh-review-adapters.json`へ登録します。既定のadapterはありません。
+公開経路は`init`→登録policyと`acceptance-contract import`→各required criterionの
+`verification run --criterion <ID>`→`fresh-review prepare`→`fresh-review run`→
+`fresh-review import`→通常のreview・aggregate・`push-score --scoring-json`→`mark-passes`/`closeout`です。
+同じcontextのinline実行は`independent=false`で完了に数えません。新しい全体attemptをprepareすると
+以前のclean coverageへ戻れず、後のclean reviewも未解決findingを消しません。
+契約キー欠落のlegacyは従来の完了条件を維持します。
+[reviewerの入出力](skills/mission-reviewer/SKILL.md#契約付きsessionのfresh-review)と
+[receiptの設計](docs/design/689-fresh-review-receipt.md)を参照してください。
+fixture adapterの回帰対象はv4 flatとv4 payloadを保持するv5 fenced containerであり、実hostのcontext分離は保証しません。
+
 ## 動作環境
 
 - macOS / Linux
