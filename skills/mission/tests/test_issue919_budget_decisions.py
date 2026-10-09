@@ -335,7 +335,7 @@ def test_spawn_entry_inventory_is_closed_and_inert_until_f2_coverage():
         'repair-disposition-run', 'recover', 'system-recover', 'repair-begin',
     }
     assert set(BUDGET_SPAWN_ENTRIES) == expected
-    assert set(BUDGET_SPAWN_ENTRIES.values()) == {'pending'}
+    assert {key for key, value in BUDGET_SPAWN_ENTRIES.items() if value == 'pending'} == expected - {'invoke-command', 'invoke-prepared'}
     with pytest.raises(TypeError):
         BUDGET_SPAWN_ENTRIES['verification-run'] = 'covered'
 
@@ -513,7 +513,7 @@ def test_capacity_reserves_settlement_write_for_new_and_open_rows(opened):
         state = decide(state, replace(_reserve('2026-01-01T00:01:00Z', 'fresh-review-run', 'target:old', 'op:old'), policy_timeout=1200)).transition.new_state
         state = decide(state, _reserve('2026-01-01T00:20:29Z', 'system-recover', 'target:old', 'op:recover')).transition.new_state
         state = decide(state, EnterFinalPhase('2026-01-01T00:20:29Z', 'explicit')).transition.new_state
-    bytes_ = _headroom(state) - BUDGET_RESERVATION_ROW_DELTA - BUDGET_SETTLEMENT_ROW_DELTA - opened * BUDGET_SETTLEMENT_ROW_DELTA - (8 if opened == 1 else 0)
+    bytes_ = _headroom(state) - BUDGET_RESERVATION_ROW_DELTA - BUDGET_SETTLEMENT_ROW_DELTA
     request = _reserve(state.budget.clock.last_observed_at, 'verification-run', 'target:new', 'op:new', bytes_)
     assert decide(state, request).accepted
     assert decide(state, replace(request, reserved_bytes=bytes_ + 1)).rejection.code == 'budget-state-capacity-exhausted'
@@ -563,3 +563,30 @@ def test_unhashable_entry_is_recorded_as_a_refusal(entry):
     refused = _admit(state.budget, state, entry=entry)
     assert refused.reason == 'budget-entry-invalid'
     assert refused.ledger.stop_slots.refusal_count == 1
+
+
+@pytest.mark.parametrize('layout', ['v4', 'v5'])
+@pytest.mark.parametrize('system', [False, True])
+def test_other_writers_cannot_spend_open_budget_terminal_bytes(layout, system):
+    from mission_kernel import state_capacity as sc
+    from mission_persistence.capacity_gate import check_state_capacity, CapacityWriteError
+    from .test_issue933_state_capacity_verdict import _base
+    state = _state()
+    held = decide(state, replace(_reserve('2026-01-01T00:01:00Z',
+        'fresh-review-run', 'target:held', 'op:held', 65536), policy_timeout=1200)).transition.new_state
+    if system:
+        held = decide(held, _reserve('2026-01-01T00:20:29Z',
+            'system-recover', 'target:held', 'op:recover', 65536)).transition.new_state
+    document, encoding = _base(layout)
+    target = document if layout == 'v4' else document['extensions']
+    target.update(budget_minutes=30, budget_ledger=ledger_document(held.budget))
+    encode = lambda: json.dumps(document, indent=2 if layout == 'v4' else None).encode()
+    before = encode()
+    target['padding'] = ''
+    target['padding'] = 'x' * (sc.STATE_LIMIT - sc.system_remaining(document) - 32768 - len(encode()))
+    expected = (2 if system else 1) * (65536 + BUDGET_SETTLEMENT_ROW_DELTA)
+    verdict = state_capacity_verdict(None, document, len(encode()), encoding=encoding)
+    assert verdict.metrics.reserved == expected
+    assert not verdict.accepted
+    with pytest.raises(CapacityWriteError, match='state-capacity-exhausted'):
+        check_state_capacity(before, encode(), encoding=encoding)

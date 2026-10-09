@@ -243,6 +243,9 @@
     "reconcile_dispatch_unknown:copy-ref": 1,
     "record_provider_receipt:copy-ref": 1
   },
+  "lib/mission_application/provider_budget.py": {
+    "reserve_provider:replace": 1
+  },
   "lib/mission_application/provider_process.py": {
     "exchange_provider:dynamic": 1,
     "pump:write": 1

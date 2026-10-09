@@ -236,7 +236,7 @@ def _prepare_budget_admission(state: MissionState, command: ReserveDispatchBudge
     # actual persisted document and F's bounded reservation row delta.
     try:
         from .codec_v4 import project_legacy_document
-        from .state_capacity import BUDGET_RESERVATION_ROW_DELTA, BUDGET_SETTLEMENT_ROW_DELTA, StateEncoding, state_capacity_verdict
+        from .state_capacity import BUDGET_RESERVATION_ROW_DELTA, StateEncoding, state_capacity_verdict
         if state.schema_origin.value == 'v5':
             from .codec_v5 import encode_v5_state
             from .guidance import GuidanceFacts
@@ -254,11 +254,7 @@ def _prepare_budget_admission(state: MissionState, command: ReserveDispatchBudge
             encoding = StateEncoding.LEGACY_PRETTY
         verdict = state_capacity_verdict(None, payload, encoded, encoding=encoding)
         from .budget_decisions import CapacityEvidence
-        held = sum(row.reserved_bytes + BUDGET_SETTLEMENT_ROW_DELTA for row in observed.reservations)
-        recovery = observed.stop_slots.system_recovery.reservation
-        if recovery is not None:
-            held += recovery.reserved_bytes + BUDGET_SETTLEMENT_ROW_DELTA
-        capacity = CapacityEvidence(max(0, verdict.metrics.headroom - held), BUDGET_RESERVATION_ROW_DELTA)
+        capacity = CapacityEvidence(verdict.metrics.headroom, BUDGET_RESERVATION_ROW_DELTA)
     except _Rejected:
         raise
     except (TypeError, ValueError, UnicodeError) as exc:

@@ -22,10 +22,11 @@ STOP_SLOTS_MAX_BYTES = 16 * 1024
 PHASES = ('planning', 'implementation', 'verification', 'repair', 'final')
 BASIS_POINTS = (1000, 4000, 2000, 2000, 1000)
 # Stable entry names, not CLI spellings or caller-selected phase labels.
-BUDGET_SPAWN_ENTRIES = MappingProxyType(dict.fromkeys((
+BUDGET_SPAWN_ENTRIES = MappingProxyType({**dict.fromkeys((
     'verification-run', 'repair-reverify', 'invoke-command', 'invoke-prepared',
     'verify-approval', 'force-approval', 'fresh-review-run',
-    'repair-disposition-run', 'recover', 'system-recover', 'repair-begin'), 'pending'))
+    'repair-disposition-run', 'recover', 'system-recover', 'repair-begin'), 'pending'),
+    **{'invoke-command': 'covered', 'invoke-prepared': 'covered'}})
 REPAIR_ENTRIES = ('repair-reverify', 'repair-disposition-run')
 # Recovery inherits the class of the dispatch it recovers (design 881 §3.6).
 CLASS_INHERITING_ENTRIES = ('recover', 'system-recover')
