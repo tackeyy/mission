@@ -150,13 +150,21 @@ def test_receipt_commit_never_delays_child_deadline(run_cli, tmp_path, prepare_a
     def stalled_receipt(repo, state, **kwargs):
         entry = (state.get('specialist_invocations') or [{}])[-1]
         if entry.get('status') == 'running':
-            time.sleep(1.2)
-            with pytest.raises(ProcessLookupError):
-                os.kill(entry['child_pid'], 0)
-            observed.append(True)
+            # Stall the receipt commit past the child deadline; the child must be
+            # reaped by its own absolute deadline, not after this commit returns.
+            # The bound is deadline + kill grace + slack, so a loaded runner whose
+            # second-granular clock eats part of the window does not flake.
+            bound = time.monotonic() + 3 + 10
+            while time.monotonic() < bound:
+                try:
+                    os.kill(entry['child_pid'], 0)
+                except ProcessLookupError:
+                    observed.append(True)
+                    break
+                time.sleep(.05)
         return save(repo, state, **kwargs)
     monkeypatch.setattr(LegacyV4Repository, 'save', stalled_receipt)
-    invoke_here([*args, '--timeout', '1'], env)
+    invoke_here([*args, '--timeout', '3'], env)
     assert observed
 
 

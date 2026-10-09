@@ -47,11 +47,12 @@ def spawn_calls(source):
     parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
     def capable(name):
         return name.split('.')[0] in CAPABILITIES
-    def tail_spawn(tail):
-        return tail in TAILS or tail.startswith(('spawn', 'exec', 'posix_spawn', 'create_subprocess_'))
     def known_spawn(name):
-        return tail_spawn(name.rsplit('.', 1)[-1]) or (
-            name.startswith('subprocess.') and name.rsplit('.', 1)[-1] in SUBPROCESS_APIS)
+        # Every receiver and bare binding uses the same syntactic tail rule.
+        # Builtin exec/eval generate arbitrary code and remain out of scope.
+        tail = name.rsplit('.', 1)[-1]
+        return tail not in {'exec', 'eval'} and (tail in TAILS | SUBPROCESS_APIS or
+            tail.startswith(('spawn', 'exec', 'posix_spawn', 'create_subprocess_')))
     def attribute(values, key):
         # Unknown receivers still expose syntactic spawn tails. Collapse other
         # origins so self-referential assignments have a finite fixed point.
@@ -106,7 +107,7 @@ def spawn_calls(source):
                         and bool(names(parent.func)) and names(parent.func) <=
                         {'hasattr', 'builtins.hasattr', 'getattr', 'builtins.getattr', 'operator.getitem'})
             values = names(node)
-            if isinstance(node, ast.Name) and node.id in TAILS and not any(
+            if isinstance(node, ast.Name) and known_spawn(node.id) and not any(
                     name.rsplit('.', 1)[-1] == node.id for name in values):
                 values = values | {node.id}
             if imported_capability and (values & {'sys.modules'} or
@@ -120,9 +121,7 @@ def spawn_calls(source):
                     continue
                 invoked_lookup = (tail == 'dynamic-spawn' and isinstance(parent, ast.Call)
                                   and parent.func is node)
-                named_reference = (not isinstance(node, ast.Name) or '.' in name
-                                   or tail in TAILS or tail == 'spawn_exec')
-                if invoked_lookup or known_spawn(name) and named_reference:
+                if invoked_lookup or known_spawn(name):
                     found[(self.function, tail)] += 1
                 elif name == UNKNOWN or capable(name) and (tail.startswith('__') or not (receiver and name in CAPABILITIES) and not (observer and name in CAPABILITIES)):
                     found[(self.function, UNKNOWN)] += 1
@@ -342,10 +341,14 @@ def test_safe_allowlist_contains_only_observed_runtime_names():
     assert SAFE <= observed
 
 
-@pytest.mark.parametrize('tail', sorted(TAILS | {'subprocess_exec', 'subprocess_shell'}))
-@pytest.mark.parametrize('use', ['{tail}([])', 'consume({tail})', '{tail} = harmless\nconsume({tail})'])
+@pytest.mark.parametrize('tail', sorted(TAILS | SUBPROCESS_APIS | {
+    'posix_spawn', 'posix_spawnp', 'execv', 'spawnv', 'spawn', 'create_subprocess_exec',
+    'spawn_future_api', 'exec_future_api', 'posix_spawn_future_api', 'create_subprocess_future_api'}))
+@pytest.mark.parametrize('use', ['{tail}([])', 'consume({tail})', '{tail} = harmless\nconsume({tail})', 'keyword:{tail}([])'])
 def test_bare_spawn_tail_cannot_be_hidden_by_injection_or_rebinding(tail, use):
-    source = f'def invoke({tail}):\n' + '\n'.join('    ' + line for line in use.format(tail=tail).splitlines())
+    signature = f'*, {tail}=None' if use.startswith('keyword:') else tail
+    use = use.removeprefix('keyword:')
+    source = f'def invoke({signature}):\n' + '\n'.join('    ' + line for line in use.format(tail=tail).splitlines())
     assert ('invoke', tail) in spawn_calls(source)
 
 
