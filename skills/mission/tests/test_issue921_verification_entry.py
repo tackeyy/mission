@@ -614,3 +614,45 @@ def test_timeout_reason_uses_reserved_run_duration_not_startup_delay(run_cli, tm
     receipt = execute_verification(document, tmp_path, 'AC1', None, budget,
         dict(timeout_sec=5), session_id='neutral')
     assert receipt['block_reason'] == reason
+
+
+@pytest.mark.parametrize('budgeted', [False, True])
+@pytest.mark.parametrize('fault,reason', [
+    ('unsupported', 'replay-unsupported'), ('invalid', 'replay-input-invalid'),
+    ('oversize', 'replay-input-invalid'),
+    ('path-conflict', 'replay-input-path-conflict'), ('no-progress', 'budget-no-new-evidence'),
+])
+def test_blocked_verifier_receipts_record_current_observation_time(monkeypatch, tmp_path, budgeted, fault, reason):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    import time
+    from mission_application import verification_execution as execution
+    from mission_application.verifier_policy import validate
+    from .test_issue878_verification_runner import _contract
+    contract = _contract('neutral-session')
+    commands = validate(_replay_policy())
+    contract['verifier_policy'] = dict(digest='sha256:' + 'a'*64, commands=commands)
+    repro = dict(artifact_kind='counterexample', content='proof')
+    if fault == 'unsupported':
+        commands['project-test'].pop('replay')
+    elif fault == 'invalid':
+        repro['content'] = True
+    elif fault == 'oversize':
+        repro['content'] = 'x'*65
+    candidate = SimpleNamespace(digest='sha256:' + 'b'*64,
+        files=[SimpleNamespace(path='repro.json')])
+    monkeypatch.setattr(execution, 'capture_candidate', lambda *a, **kw: candidate)
+    monkeypatch.setattr(execution, 'execute_candidate', lambda *a, **kw: pytest.fail('blocked replay started target'))
+    before = datetime.now(timezone.utc).replace(microsecond=0)
+    receipt = execution.run_contract_verifier(dict(acceptance_contract=contract),
+        project_root=tmp_path, criterion_id='AC1', repro_input=repro,
+        **({'budget_deadline': time.monotonic()+5} if budgeted else {}),
+        no_progress_candidate=candidate.digest if fault == 'no-progress' else None)
+    after = datetime.now(timezone.utc)
+    assert receipt['status'] == 'blocked' and receipt['block_reason'] == reason
+    start, finish = (datetime.fromisoformat(receipt[key].replace('Z', '+00:00'))
+        for key in ('started_at', 'finished_at'))
+    assert before <= start <= finish <= after, receipt
+    assert receipt['exit_code'] is None and not receipt['timed_out']
+    if fault in ('path-conflict', 'no-progress'):
+        assert receipt['candidate_digest'] == candidate.digest
