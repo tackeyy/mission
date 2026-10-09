@@ -177,6 +177,8 @@ def run_fresh_review_dispatch_cli(args, services, host):
                 try:
                     raw = result.get('launch_receipt')
                     launch, _ = validate_launch(record.request, record.dispatch.thaw(), raw)
+                    if _sender_observation(record, raw, raw) is None:
+                        raise FreshReviewError('fresh-review-output-sender-mismatch')
                     record_provider_receipt([record.dispatch.thaw()], _saga_intent(record),
                                             {'kind': 'provider', 'identity': launch.child_identity})
                     dispatch_epoch = record.dispatch.thaw()['fencing_epoch']
@@ -211,6 +213,29 @@ def run_fresh_review_dispatch_cli(args, services, host):
         services.fail(getattr(exc, 'code', str(exc)), 2)
 
 
+def _sender_observation(record, observation, raw_launch):
+    """Optional recovery identity is all-or-nothing, bound to the saved dispatch.
+
+    Missing fields are bound to a launch receipt that the caller must validate
+    before passing the observation to the kernel. Any supplied field requires
+    all five to match an observable child exactly.
+    None means the entire report must be rejected or ignored at the deadline.
+    """
+    observation = observation if isinstance(observation, dict) else {}
+    dispatch = record.dispatch.thaw()
+    launch = record.launch.thaw() if record.launch is not None else raw_launch
+    expected = dict(operation_id=dispatch['operation_id'], fencing_epoch=dispatch['fencing_epoch'],
+        request_id=record.request.request_id, nonce=record.request.nonce,
+        child_identity=launch.get('child_identity') if isinstance(launch, dict) else None)
+    if any(key in observation for key in expected):
+        if (type(expected['child_identity']) is not str or not expected['child_identity']
+                or any(key not in observation or type(observation.get(key)) is not type(value)
+                       or observation.get(key) != value for key, value in expected.items())):
+            return None
+        return observation
+    return dict(observation, **expected)
+
+
 def _reconcile(record, args, operation, repo, root, services, host):
     if isinstance(record, WithdrawnFreshReviewRecord):
         raise FreshReviewError('fresh-review-request-withdrawn')
@@ -240,6 +265,13 @@ def _reconcile(record, args, operation, repo, root, services, host):
         pin = None
     observation = observed.get('observation')
     raw = observation.get('launch_receipt') if isinstance(observation, dict) else None
+    before_deadline = _utc(services.now()) < record.dispatch.thaw()['deadline_at']
+    observation = _sender_observation(record, observation, raw)
+    if observation is None:
+        if before_deadline:
+            raise FreshReviewError('fresh-review-output-sender-mismatch')
+        # An untrusted report cannot supply launch, exit, or output evidence.
+        observation, raw = {}, None
     if raw is not None:
         # A saved launch rejects foreign reports. Before launch persistence,
         # binding mismatch can become blocked only after confirmed cancellation.
@@ -260,13 +292,10 @@ def _reconcile(record, args, operation, repo, root, services, host):
             output = base64.b64decode(observed['output'], validate=True)
         except (KeyError, TypeError, ValueError):
             output = None
-        before_deadline = _utc(services.now()) < record.dispatch.thaw()['deadline_at']
-        importing = observation.get('process_exited') is True or (before_deadline and output is not None)
-        # Sender validation gates import, not cancellation of the saved dispatch.
-        # A rejected import must not publish the tentative running record.
-        if importing:
-            validate_output_sender(replace(record, status='running', launch=freeze_json_value(raw),
-                                           independent=independent), observation)
+        # The optional identity was resolved before any running publication;
+        # retain the kernel's strict import boundary for the bound observation.
+        validate_output_sender(replace(record, status='running', launch=freeze_json_value(raw),
+                                       independent=independent), observation)
         if record.status == 'dispatch-unknown':
             record_provider_receipt([record.dispatch.thaw()], _saga_intent(record),
                                     {'kind': 'provider', 'identity': launch.child_identity})

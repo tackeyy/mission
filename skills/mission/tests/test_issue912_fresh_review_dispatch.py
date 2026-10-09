@@ -244,21 +244,21 @@ def test_unobservable_recovery_receipt_converges_to_abandoned(reviewer, run_cli,
 
 @pytest.mark.parametrize('status', ['dispatch-unknown', 'running'])
 @pytest.mark.parametrize('field', ['operation_id', 'fencing_epoch', 'request_id', 'nonce'])
-def test_recovery_binding_mismatch_is_recoverable_only_before_launch_saved(reviewer, run_cli, status, field):
+def test_recovery_sender_binding_mismatch_rejects_then_cancels(reviewer, run_cli, status, field):
     root, request, environment, journal = reviewer
-    invoke(run_cli, reviewer, **({'FIXTURE_REVIEW_MODE': 'crash'} if status == 'dispatch-unknown' else {}))
+    old = invoke(run_cli, reviewer, **({'FIXTURE_REVIEW_MODE': 'crash'} if status == 'dispatch-unknown' else {}))
     stored = json.loads(journal.read_text())
     stored['launch'][field] = stored['launch'][field] + 1 if field == 'fencing_epoch' else 'foreign-child'
     stored.update(output=None, process_exited=True)
     journal.write_text(json.dumps(stored))
-    if status == 'dispatch-unknown':
-        assert invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one')['status'] == status
-        _expire_dispatch(reviewer)
-        assert invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one')['status'] == 'blocked'
-    else:
-        _reject_unchanged(run_cli, root, ['fresh-review', 'reconcile', '--request', request['request_id'],
-                          '--adapter', 'neutral'], 'fresh-review-launch-binding-mismatch',
-                          env={**environment, 'MISSION_OPERATION_ID': 'reconcile-one'})
+    _reject_unchanged(run_cli, root, ['fresh-review', 'reconcile', '--request', request['request_id'],
+                      '--adapter', 'neutral'], 'fresh-review-output-sender-mismatch',
+                      env={**environment, 'MISSION_OPERATION_ID': 'reconcile-one'})
+    assert not journal.with_suffix('.cancel').exists()
+    _expire_dispatch(reviewer)
+    record = invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one')
+    assert record['status'] == 'abandoned-unknown' and record.get('launch') == old.get('launch')
+    assert journal.with_suffix('.cancel').read_text() == status
     assert json.loads(journal.read_text())['count'] == 1
 
 
@@ -269,7 +269,7 @@ def test_running_child_identity_mismatch_is_rejected_without_consuming(reviewer,
     stored['launch']['child_identity'] = 'foreign-child'
     journal.write_text(json.dumps(stored))
     _reject_unchanged(run_cli, root, ['fresh-review', 'reconcile', '--request', request['request_id'],
-                      '--adapter', 'neutral'], 'fresh-review-launch-binding-mismatch',
+                      '--adapter', 'neutral'], 'fresh-review-output-sender-mismatch',
                       env={**environment, 'MISSION_OPERATION_ID': 'reconcile-one'})
 
 

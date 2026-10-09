@@ -478,15 +478,16 @@ def test_expired_nonimport_report_can_cancel_saved_dispatch(reviewer, run_cli, s
             cwd=root, env_extra={**env, 'MISSION_OPERATION_ID': 'reconcile-one', 'FIXTURE_CANCEL': cancel})
         assert result.returncode == 2 and 'fresh-review-kill-unconfirmed' in result.stderr
         record = json.loads(run_cli('get', cwd=root).stdout)['fresh_review']['requests'][0]
-        assert record['status'] == 'running' and record.get('result') is None
+        assert record['status'] == (status if report == 'foreign-child' else 'running')
+        assert record.get('result') is None
     else:
         record = invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one', FIXTURE_CANCEL=cancel)
         assert record['status'] == 'abandoned-unknown'
-        assert record['result']['reason'] == 'output-unobservable'
+        assert record['result']['reason'] == ('child-unobservable' if report == 'foreign-child' else 'output-unobservable')
         assert record['result']['dispatch_operation_id'] == old['dispatch']['operation_id']
         assert 'output_ref' not in record['result']
-    assert record['launch'] == (old.get('launch') or stored['launch'])
-    assert journal.with_suffix('.cancel').read_text() == 'running'
+    assert record.get('launch') == (old.get('launch') if report == 'foreign-child' else old.get('launch') or stored['launch'])
+    assert journal.with_suffix('.cancel').read_text() == (status if report == 'foreign-child' else 'running')
     assert json.loads(journal.read_text())['count'] == 1
 
 
@@ -500,4 +501,84 @@ def test_live_minimal_recovery_without_output_does_not_require_import_sender(rev
     record = invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one')
     assert record['status'] == 'running'
     assert record['launch'] == (old.get('launch') or stored['launch'])
+    assert not journal.with_suffix('.cancel').exists()
+
+
+@pytest.mark.parametrize('status', ['running', 'dispatch-unknown'])
+@pytest.mark.parametrize('deadline', ['before', 'after'])
+@pytest.mark.parametrize('sender', ['matching', 'foreign', 'missing'])
+@pytest.mark.parametrize('process', ['exited', 'live'])
+@pytest.mark.parametrize('body', ['output', 'none'])
+def test_reconcile_sender_deadline_table(reviewer, run_cli, status, deadline, sender, process, body):
+    """Recovery cannot publish a foreign report or strand an optional-field adapter."""
+    from .test_issue912_fresh_review_dispatch import _expire_dispatch
+    root, request, env, journal = reviewer
+    old = invoke(run_cli, reviewer, **({'FIXTURE_REVIEW_MODE': 'crash'} if status == 'dispatch-unknown' else {}))
+    stored = json.loads(journal.read_text())
+    stored.update(process_exited=process == 'exited', output='invalid' if body == 'output' else None,
+                  exit_code=0, budget_used=dict(wall_time_sec=1, tool_calls=0, replays=0,
+                                              output_bytes=7 if body == 'output' else 0))
+    if sender == 'foreign':
+        stored['observation_updates'] = {'child_identity': 'foreign'}
+    elif sender == 'missing':
+        stored['minimal_observation'] = True
+    journal.write_text(json.dumps(stored))
+    if deadline == 'after':
+        _expire_dispatch(reviewer)
+    if deadline == 'before' and sender == 'foreign':
+        _reject_unchanged(run_cli, root, ['fresh-review', 'reconcile', '--request', request['request_id'],
+            '--adapter', 'neutral'], 'fresh-review-output-sender-mismatch',
+            env={**env, 'MISSION_OPERATION_ID': 'reconcile-table'})
+        assert not journal.with_suffix('.cancel').exists()
+        return
+    record = invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-table')
+    ignored = deadline == 'after' and sender == 'foreign'
+    failed = process == 'exited' and not ignored
+    cancelled = deadline == 'after' and not failed
+    assert record['status'] == ('failed' if failed else 'abandoned-unknown' if cancelled else 'running')
+    assert journal.with_suffix('.cancel').exists() == cancelled
+    if ignored:
+        assert record.get('launch') == old.get('launch')
+        assert journal.with_suffix('.cancel').read_text() == status
+    if failed:
+        assert record['result']['reason'] == 'output-invalid'
+        if body == 'none':
+            assert 'output_ref' not in record['result']
+    if cancelled:
+        assert 'output_ref' not in record['result']
+    assert json.loads(journal.read_text())['count'] == 1
+
+
+@pytest.mark.parametrize('status', ['running', 'dispatch-unknown'])
+def test_foreign_exit_cannot_bypass_unconfirmed_cancel(reviewer, run_cli, status):
+    from .test_issue912_fresh_review_dispatch import _expire_dispatch
+    root, request, env, journal = reviewer
+    invoke(run_cli, reviewer, **({'FIXTURE_REVIEW_MODE': 'crash'} if status == 'dispatch-unknown' else {}))
+    stored = json.loads(journal.read_text())
+    stored.update(process_exited=True, output=None, observation_updates={'child_identity': 'foreign'})
+    journal.write_text(json.dumps(stored))
+    _expire_dispatch(reviewer)
+    _reject_unchanged(run_cli, root, ['fresh-review', 'reconcile', '--request', request['request_id'],
+        '--adapter', 'neutral'], 'fresh-review-kill-unconfirmed',
+        env={**env, 'MISSION_OPERATION_ID': 'reconcile-one', 'FIXTURE_CANCEL': 'unknown'})
+    assert journal.with_suffix('.cancel').read_text() == status
+
+
+@pytest.mark.parametrize('receipt', ['no-receipt', 'missing-child', 'null-child'])
+def test_partial_or_unobservable_sender_cannot_match_missing_child(reviewer, run_cli, receipt):
+    root, request, env, journal = reviewer
+    invoke(run_cli, reviewer, FIXTURE_REVIEW_MODE='crash')
+    stored = json.loads(journal.read_text())
+    launch = dict(stored['launch'])
+    launch.pop('child_identity')
+    updates = {key: stored['launch'][key] for key in
+               ('operation_id', 'fencing_epoch', 'request_id', 'nonce')}
+    if receipt == 'null-child':
+        launch['child_identity'] = updates['child_identity'] = None
+    updates['launch_receipt'] = None if receipt == 'no-receipt' else launch
+    stored.update(output=None, process_exited=False, minimal_observation=True, observation_updates=updates)
+    journal.write_text(json.dumps(stored))
+    _reject_unchanged(run_cli, root, ['fresh-review', 'reconcile', '--request', request['request_id'],
+        '--adapter', 'neutral'], 'fresh-review-output-sender-mismatch',
+        env={**env, 'MISSION_OPERATION_ID': 'reconcile-one'})
     assert not journal.with_suffix('.cancel').exists()
