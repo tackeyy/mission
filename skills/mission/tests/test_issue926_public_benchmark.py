@@ -64,18 +64,26 @@ def fixture_bundle(module, tmp_path, mutate=lambda m: None):
              'starters/task-a/main.py': (starter / 'main.py').read_bytes(),
              'evaluators/task-a/test.patch': b'neutral patch bytes',
              'evaluators/task-a/runner.py': b'raise RuntimeError("must not import")\n'}
+    if len(manifest['tasks']) > 1:
+        for task in manifest['tasks'][1:]:
+            files[task['starter_root'] + '/main.py'] = files['starters/task-a/main.py']
+            files[task['evaluator_root'] + '/test.patch'] = b'neutral patch bytes'
     path = archive(tmp_path / 'bundle.tar', files)
     return path, manifest
 
 
-@pytest.mark.parametrize('defect', ['unknown-key', 'duplicate-task', 'duplicate-check', 'no-checks', 'nested-key'])
+@pytest.mark.parametrize('defect', ['unknown-key', 'duplicate-task', 'duplicate-root', 'duplicate-benchmark', 'duplicate-check', 'no-checks', 'nested-key'])
 def test_bundle_rejects_unknown_keys_duplicate_ids_and_empty_checks(tmp_path, defect):
     module = load_module()
     def mutate(manifest):
         task = manifest['tasks'][0]
         if defect == 'unknown-key': manifest['unexpected'] = True
         if defect == 'nested-key': task['environment']['unexpected'] = True
-        if defect == 'duplicate-task': manifest['tasks'].append(task.copy())
+        if defect == 'duplicate-task':
+            other = task | {'starter_root': 'starters/task-b', 'evaluator_root': 'evaluators/task-b'}
+            manifest['tasks'].append(other)
+        if defect == 'duplicate-root': manifest['tasks'].append(task | {'task_id': 'task-b'})
+        if defect == 'duplicate-benchmark': manifest['benchmarks'].append(manifest['benchmarks'][0].copy())
         if defect == 'duplicate-check': task['checks'].append(task['checks'][0].copy())
         if defect == 'no-checks': task['checks'] = []
     path, _ = fixture_bundle(module, tmp_path, mutate)
@@ -109,7 +117,8 @@ def test_assignment_and_envelope_bind_bundle_starter_and_initial_worker_digest(t
     envelope = module.freeze_candidate(bundle, assignment, worker)
     assert envelope['bundle_digest'] == bundle.digest
     assert envelope['starter_digest'] == assignment['worker_export']['initial_sha256']
-    assert envelope['candidate_digest'] == envelope['starter_digest']
+    assert envelope['candidate_digest'] == module._candidate_digest(worker)
+    assert envelope['candidate_digest'].startswith('sha256-tree-exec-v1:')
     assert module.validate_binding(bundle, assignment, envelope, assignment['worker_export'])['task_id'] == 'task-a'
     envelope['bundle_digest'] = 'sha256:' + '0' * 64
     with pytest.raises(ValueError, match='candidate_envelope_mismatch'):
@@ -156,6 +165,7 @@ def test_evaluator_uses_fresh_read_only_copy_and_evaluator_owned_tests(tmp_path,
     ('changed-source', 'candidate_changed', 'failed'),
     ('changed-copy', 'candidate_changed', 'failed'),
     ('count', 'evaluator_cases_invalid', 'failed'),
+    ('extra-duplicate', 'evaluator_cases_invalid', 'failed'),
     ('names', 'evaluator_cases_invalid', 'failed'),
     ('duplicate', 'evaluator_cases_invalid', 'failed'),
     ('zero', 'evaluator_cases_invalid', 'failed'),
@@ -197,6 +207,7 @@ def test_evaluator_preserves_non_pass_and_classifies_environment_failures(tmp_pa
         if defect == 'changed-copy': copies[-1].joinpath('main.py').write_text('changed')
         cases = [{'name': 'repair', 'passed': True}, {'name': 'preserve', 'passed': True}]
         if defect == 'count': cases.pop()
+        if defect == 'extra-duplicate': cases.append(cases[0].copy())
         if defect == 'names': cases[0]['name'] = 'foreign'
         if defect == 'duplicate': cases[1]['name'] = 'repair'
         if defect == 'zero': cases = []
@@ -331,3 +342,179 @@ def test_invalid_timeout_is_rejected_without_environment_start(tmp_path, monkeyp
     monkeypatch.setattr(module.fixtures, '_run_bounded', forbidden)
     result = module.evaluate_assignment(bundle, assignment, assignment['worker_export'], worker, envelope, timeout)
     assert result['status'] == 'failed' and result['reason'] == 'evaluation_entry_invalid'
+
+
+@pytest.mark.parametrize('phase', ['freeze', 'copy', 'after'])
+def test_executable_bit_changes_are_bound_to_candidate(tmp_path, monkeypatch, phase):
+    module = load_module()
+    bundle, assignment, worker = prepared(module, tmp_path, monkeypatch)
+    path = worker / 'main.py'
+    monkeypatch.setattr(module.fixtures, '_run_bounded', lambda *a, **k: pytest.fail('must not launch'))
+    old_h_digest = module.native._digest_tree(worker, exclude_git=True)
+    envelope = module.freeze_candidate(bundle, assignment, worker)
+    if phase == 'freeze':
+        path.chmod(0o755)
+        result = module.evaluate_assignment(bundle, assignment, assignment['worker_export'], worker, envelope)
+        assert result['reason'] == 'candidate_digest_mismatch'
+    else:
+        if phase == 'copy':
+            original = module.shutil.copy2
+            def copy(source, target):
+                result = original(source, target)
+                target.chmod(0o755)
+                return result
+            monkeypatch.setattr(module.shutil, 'copy2', copy)
+        else:
+            def evaluate(task, fresh, evaluator, timeout):
+                (fresh / 'main.py').chmod(0o755)
+                return 'passed', None, []
+            monkeypatch.setattr(module, '_container_evaluate', evaluate)
+        result = module.evaluate_assignment(bundle, assignment, assignment['worker_export'], worker, envelope)
+        assert result['reason'] in ('candidate_changed', 'candidate_invalid')
+    assert module.native._digest_tree(worker, exclude_git=True) == old_h_digest
+
+
+@pytest.mark.parametrize('names', [('Run.py', 'run.py'), ('é.py', 'e\u0301.py'), ('Dir/a', 'dir/b')])
+def test_bundle_rejects_portable_path_collisions(tmp_path, names):
+    module = load_module()
+    path = archive(tmp_path / 'collision.tar', {name: b'neutral' for name in names})
+    with pytest.raises(ValueError, match='bundle_member_invalid'):
+        module.bundle_digest(path)
+
+
+@pytest.mark.parametrize('prefix', ['starters/task-a', 'evaluators/task-a'])
+@pytest.mark.parametrize('defect', ['bytes', 'mode'])
+def test_materialized_tree_is_verified_against_bundle(tmp_path, monkeypatch, prefix, defect):
+    module = load_module()
+    path, _ = fixture_bundle(module, tmp_path)
+    bundle = module.load_bundle(path, module.bundle_digest(path))
+    original = Path.write_bytes
+    def corrupt(path, data):
+        return original(path, data + b'changed')
+    if defect == 'bytes': monkeypatch.setattr(Path, 'write_bytes', corrupt)
+    else:
+        chmod = Path.chmod
+        monkeypatch.setattr(Path, 'chmod', lambda path, mode: chmod(path, 0o755))
+    with pytest.raises(ValueError, match='bundle_materialization_mismatch'):
+        module._write_tree(bundle, prefix, tmp_path / 'materialized')
+
+
+@pytest.mark.parametrize('defect', ['patch', 'starter', 'rejected-prepare', 'rejected-binding'])
+def test_bundle_patch_starter_and_acceptance_boundaries(tmp_path, monkeypatch, defect):
+    module = load_module()
+    def mutate(manifest):
+        task = manifest['tasks'][0]
+        if defect == 'starter': task['starter_digest'] = 'sha256:' + '0' * 64
+        if defect.startswith('rejected'):
+            task['criteria']['Lic'].update(accepted=False, reason='license unavailable')
+    path, _ = fixture_bundle(module, tmp_path, mutate)
+    if defect == 'patch':
+        files = module._archive_files(path)
+        del files['evaluators/task-a/test.patch']
+        archive(path, {key: value[0] for key, value in files.items()})
+        with pytest.raises(ValueError, match='bundle_schema_invalid'):
+            module.load_bundle(path, module.bundle_digest(path))
+        return
+    bundle = module.load_bundle(path, module.bundle_digest(path))
+    if defect == 'rejected-binding':
+        identity = module._identity(bundle, bundle.task('task-a'))
+        assignment = identity | {'source_commit': 'd' * 40, 'worker_export': {'initial_sha256': identity['starter_digest']}}
+        envelope = identity | {'candidate_digest': module._candidate_digest(tmp_path / 'starter')}
+        with pytest.raises(ValueError, match='bundle_task_rejected'):
+            module.validate_binding(bundle, assignment, envelope, assignment['worker_export'])
+    else:
+        monkeypatch.setattr(module.native, 'initialize_worker_export_repository', lambda *a, **k: pytest.fail('must reject before git'))
+        with pytest.raises(ValueError, match='bundle_starter_mismatch' if defect == 'starter' else 'bundle_task_rejected'):
+            module.prepare_assignment(bundle, 'task-a', tmp_path / 'worker')
+
+
+@pytest.mark.parametrize('defect', ['corrupt', 'long'])
+def test_archive_errors_have_bundle_reason_codes(tmp_path, defect):
+    module = load_module()
+    path = tmp_path / 'invalid.tar'
+    if defect == 'corrupt': path.write_bytes(b'not a tar')
+    else: archive(path, {'x' * 256: b'neutral'})
+    for entry in (lambda: module.bundle_digest(path), lambda: module.load_bundle(path, 'sha256:' + '0' * 64)):
+        with pytest.raises(ValueError, match='bundle_archive_invalid'):
+            entry()
+
+
+@pytest.mark.parametrize('stage', ['create', 'inspect'])
+@pytest.mark.parametrize('flag', [2, 3, 4])
+def test_environment_control_failures_retry_once(tmp_path, monkeypatch, stage, flag):
+    module = load_module()
+    bundle, assignment, worker = prepared(module, tmp_path, monkeypatch)
+    envelope = module.freeze_candidate(bundle, assignment, worker)
+    creates = []
+    def bounded(command, **kwargs):
+        if command[1] == 'create': creates.append(1)
+        result = [0, b'[{"name":"repair","passed":true},{"name":"preserve","passed":true}]', False, False, False]
+        if command[1] == stage: result[flag] = True
+        return tuple(result)
+    monkeypatch.setattr(module.fixtures, '_run_bounded', bounded)
+    result = module.evaluate_assignment(bundle, assignment, assignment['worker_export'], worker, envelope)
+    assert result['reason'] == 'evaluator_process_unavailable' and len(creates) == 2
+
+
+@pytest.mark.parametrize('character', [',', '"', '\n'])
+def test_mount_paths_reject_option_injection(tmp_path, monkeypatch, character):
+    module = load_module()
+    monkeypatch.setattr(module.fixtures, '_run_bounded', lambda *a, **k: pytest.fail('must reject before spawn'))
+    with pytest.raises(ValueError, match='evaluator_mount_invalid'):
+        module._container_evaluate({'environment': {'image': 'neutral', 'command': ['true']}},
+                                   tmp_path / ('candidate' + character), tmp_path / 'evaluator', 1)
+
+
+def test_literal_snapshot_uses_real_local_git_without_user_config_or_hooks(tmp_path, monkeypatch):
+    module = load_module()
+    root = tmp_path / 'source'
+    root.mkdir()
+    (root / '.gitignore').write_text('ignored.txt\n')
+    (root / '.gitattributes').write_text('* text eol=lf export-ignore filter=neutral\n')
+    (root / 'ignored.txt').write_bytes(b'neutral\r\n')
+    executable = root / 'verify.sh'
+    executable.write_text('#!/bin/sh\nexit 0\n')
+    executable.chmod(0o755)
+    hooks = tmp_path / 'hooks'
+    hooks.mkdir()
+    hook = hooks / 'pre-commit'
+    hook.write_text('#!/bin/sh\nexit 99\n')
+    hook.chmod(0o755)
+    config = tmp_path / 'global-config'
+    config.write_text(f'[core]\n hooksPath = {hooks}\n[filter "neutral"]\n clean = false\n required = true\n')
+    monkeypatch.setenv('GIT_CONFIG_GLOBAL', str(config))
+    original_run = module.native.subprocess.run
+    def isolated_git(command, **kwargs):
+        env = kwargs['env']
+        assert env['GIT_CONFIG_GLOBAL'] == '/dev/null' and env['GIT_CONFIG_NOSYSTEM'] == '1'
+        assert env['GIT_CONFIG_COUNT'] == '1' and env['GIT_CONFIG_KEY_0'] == 'core.hooksPath'
+        assert env['GIT_CONFIG_VALUE_0'] == '/dev/null'
+        return original_run(command, **kwargs)
+    monkeypatch.setattr(module.native.subprocess, 'run', isolated_git)
+    before = module._candidate_digest(root)
+    commit = module.native.initialize_worker_export_repository(root, literal_snapshot=True)
+    exported = module.native.create_worker_export(root, commit, tmp_path / 'export', [p.name for p in root.iterdir() if p.name != '.git'])
+    assert module._candidate_digest(exported) == before
+
+
+
+def test_mode_change_during_snapshot_is_rejected(tmp_path, monkeypatch):
+    module = load_module()
+    path = tmp_path / 'verify.sh'
+    path.write_text('neutral')
+    original = module.native.os.open
+    def open_and_change(target, *args, **kwargs):
+        descriptor = original(target, *args, **kwargs)
+        if Path(target) == path: path.chmod(0o755)
+        return descriptor
+    monkeypatch.setattr(module.native.os, 'open', open_and_change)
+    with pytest.raises(ValueError, match='changed during snapshot'):
+        module._candidate_digest(tmp_path)
+
+
+@pytest.mark.parametrize('component', ['.GIT', '.Git'])
+def test_bundle_rejects_git_directory_case_aliases(tmp_path, component):
+    module = load_module()
+    path = archive(tmp_path / 'alias.tar', {component + '/config': b'neutral'})
+    with pytest.raises(ValueError, match='bundle_path_invalid'):
+        module.bundle_digest(path)

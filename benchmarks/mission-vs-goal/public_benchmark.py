@@ -17,6 +17,7 @@ import shutil
 import tarfile
 import tempfile
 import uuid
+import unicodedata
 from types import MappingProxyType
 from typing import Mapping
 
@@ -26,6 +27,7 @@ import complex_fixture_benchmark as fixtures
 
 MAX_BUNDLE_BYTES = 512 * 1024 * 1024
 DIGEST = re.compile(r'sha256:[0-9a-f]{64}')
+TREE_DIGEST = re.compile(r'sha256-tree-exec-v1:[0-9a-f]{64}')
 
 
 def _sha(data):
@@ -36,18 +38,24 @@ def _path(value):
     if (type(value) is not str or not value or '\\' in value or ':' in value
             or any(ord(c) < 32 for c in value)
             or PurePosixPath(value).is_absolute()
-            or any(p in ('', '.', '..', '.git') for p in value.split('/'))):
+            or any(unicodedata.normalize('NFD', p).casefold() in ('', '.', '..', '.git') for p in value.split('/'))):
         raise ValueError('bundle_path_invalid')
     return value
 
 
 def _archive_files(path):
-    files, names, total = {}, set(), 0
+    files, names, portable, total = {}, set(), {}, 0
     with tarfile.open(path, 'r:') as tar:
         for entry in tar:
             name = _path(entry.name.rstrip('/') if entry.isdir() else entry.name)
             if name in names or not (entry.isdir() or entry.isfile()):
                 raise ValueError('bundle_member_invalid')
+            for i in range(1, len(name.split('/')) + 1):
+                prefix = '/'.join(name.split('/')[:i])
+                folded = unicodedata.normalize('NFD', prefix).casefold()
+                if folded in portable and portable[folded] != prefix:
+                    raise ValueError('bundle_member_invalid')
+                portable[folded] = prefix
             names.add(name)
             if entry.isfile():
                 total += entry.size
@@ -70,14 +78,24 @@ def _normalized_digest(files):
     return _sha(buffer.getvalue())
 
 
+def _read_bundle(path):
+    try:
+        files = _archive_files(path)
+        return files, _normalized_digest(files)
+    except (tarfile.TarError, UnicodeError) as exc:
+        raise ValueError('bundle_archive_invalid') from exc
+    except ValueError as exc:
+        if str(exc).startswith('bundle_'): raise
+        raise ValueError('bundle_archive_invalid') from exc
+
+
 def bundle_digest(path):
     """Compute the preregistered digest without parsing or executing content."""
-    return _normalized_digest(_archive_files(path))
+    return _read_bundle(path)[1]
 
 
 def load_bundle(path, expected_digest):
-    files = _archive_files(path)
-    digest = _normalized_digest(files)
+    files, digest = _read_bundle(path)
     if not isinstance(expected_digest, str) or not DIGEST.fullmatch(expected_digest) or digest != expected_digest:
         raise ValueError('bundle_digest_mismatch')
     try:
@@ -197,12 +215,23 @@ def _identity(bundle, task):
 
 def _write_tree(bundle, prefix, destination):
     destination.mkdir()
+    expected = {}
     for name, (data, mode) in bundle.files.items():
         if name.startswith(prefix + '/'):
             target = destination / name[len(prefix) + 1:]
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
             target.chmod(mode)
+            expected[unicodedata.normalize('NFD', name[len(prefix) + 1:])] = (data, mode)
+    actual = {}
+    for path in destination.rglob('*'):
+        if path.is_symlink(): raise ValueError('bundle_materialization_mismatch')
+        if path.is_dir(): continue
+        if not path.is_file():
+            raise ValueError('bundle_materialization_mismatch')
+        actual[unicodedata.normalize('NFD', path.relative_to(destination).as_posix())] = (path.read_bytes(), path.stat().st_mode & 0o777)
+    if actual != expected:
+        raise ValueError('bundle_materialization_mismatch')
 
 
 def prepare_assignment(bundle, task_id, destination):
@@ -219,10 +248,11 @@ def prepare_assignment(bundle, task_id, destination):
         # with no '.' shortcut. G rejects links and special archive members.
         allowed = sorted(path.name for path in starter.iterdir())
         if not allowed: raise ValueError('bundle_starter_empty')
+        mode_digest = _candidate_digest(starter)
         commit = native.initialize_worker_export_repository(starter, literal_snapshot=True)
         native.create_worker_export(starter, commit, destination, allowed)
     initial = native._digest_tree(destination, exclude_git=True)
-    if initial != task['starter_digest']: raise ValueError('assignment_worker_mismatch')
+    if _candidate_digest(destination) != mode_digest or initial != task['starter_digest']: raise ValueError('assignment_worker_mismatch')
     return _identity(bundle, task) | {'source_commit': commit, 'worker_export': {'initial_sha256': initial}}
 
 
@@ -240,7 +270,7 @@ def validate_binding(bundle, assignment, envelope, worker_export):
         if (set(envelope) != set(BINDING_KEYS) | {'candidate_digest'}
                 or any(envelope[key] != value for key, value in identity.items())
                 or not isinstance(envelope['candidate_digest'], str)
-                or not DIGEST.fullmatch(envelope['candidate_digest'])):
+                or not TREE_DIGEST.fullmatch(envelope['candidate_digest'])):
             raise ValueError('candidate_envelope_mismatch')
         if not all(value['accepted'] for value in task['criteria'].values()):
             raise ValueError('bundle_task_rejected')
@@ -249,16 +279,20 @@ def validate_binding(bundle, assignment, envelope, worker_export):
         raise ValueError('assignment_invalid') from exc
 
 
+def _candidate_digest(path):
+    return native._digest_tree(path, exclude_git=True, include_executable=True)
+
+
 def freeze_candidate(bundle, assignment, candidate):
     identity = _identity(bundle, bundle.task(assignment['task_id']))
-    envelope = identity | {'candidate_digest': native._digest_tree(candidate, exclude_git=True)}
+    envelope = identity | {'candidate_digest': _candidate_digest(candidate)}
     validate_binding(bundle, assignment, envelope, assignment['worker_export'])
     return envelope
 
 
 
 def _copy_candidate(candidate, destination):
-    initial = native._digest_tree(candidate, exclude_git=True)
+    initial = _candidate_digest(candidate)
     destination.mkdir()
     for path in candidate.rglob('*'):
         relative = path.relative_to(candidate)
@@ -266,7 +300,7 @@ def _copy_candidate(candidate, destination):
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, target)
-    if native._digest_tree(candidate, exclude_git=True) != initial or native._digest_tree(destination, exclude_git=True) != initial:
+    if _candidate_digest(candidate) != initial or _candidate_digest(destination) != initial:
         raise ValueError('candidate_changed')
     return initial
 
@@ -277,9 +311,14 @@ def _container_evaluate(task, candidate, evaluator, timeout_seconds):
     The command must emit a JSON list of {name, passed} records, using only
     evaluator-owned tests. Patch application happens in the disposable /work;
     candidate and evaluator inputs are read-only, outside that working tree.
+    create/inspect/cleanup control failures are infrastructure failures, retried
+    once by evaluate_assignment; attached execution limits retain H reasons.
     """
     name = 'mission-public-' + uuid.uuid4().hex
-    mount = lambda path, target: f'type=bind,src={path},dst={target},readonly'
+    def mount(path, target):
+        if any(c in str(path) for c in ',\"\\') or any(ord(c) < 32 for c in str(path)):
+            raise ValueError('evaluator_mount_invalid')
+        return f'type=bind,src={path},dst={target},readonly'
     script = 'cp -a /candidate/. /work/ && cd /work && git apply /evaluator/test.patch && exec "$@"'
     command = ['docker', 'create', '--pull=never', '--name', name, '--network=none',
                '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges',
@@ -313,6 +352,8 @@ def _container_evaluate(task, candidate, evaluator, timeout_seconds):
 
 def _process_failure(result, *, launching):
     code, _, timeout, overflow, incomplete = result
+    if launching and (code != 0 or timeout or overflow or incomplete):
+        return 'failed', 'evaluator_process_unavailable'
     if timeout: return 'blocked', 'evaluator_timeout'
     if overflow: return 'failed', 'evaluator_output_too_large'
     if incomplete: return 'blocked', 'evaluator_reader_incomplete'
@@ -366,7 +407,7 @@ def _case_result(task, output):
 
 def _evaluate_once(bundle, task, candidate, expected_digest, base, timeout_seconds):
     try:
-        initial = native._digest_tree(candidate, exclude_git=True)
+        initial = _candidate_digest(candidate)
         base = base | {'candidate_digest': initial}
         if initial != expected_digest: return base | {'reason': 'candidate_digest_mismatch'}
         with tempfile.TemporaryDirectory(prefix='mission-public-evaluator-') as temporary:
@@ -376,8 +417,8 @@ def _evaluate_once(bundle, task, candidate, expected_digest, base, timeout_secon
             _write_tree(bundle, task['evaluator_root'], evaluator)
             status, reason, cases = _container_evaluate(task, fresh, evaluator, timeout_seconds)
             # Check both source and read-only mount even after timeout/failure.
-            if (native._digest_tree(candidate, exclude_git=True) != initial
-                    or native._digest_tree(fresh, exclude_git=True) != initial):
+            if (_candidate_digest(candidate) != initial
+                    or _candidate_digest(fresh) != initial):
                 return base | {'reason': 'candidate_changed', 'cases': cases}
         return base | {'status': status, 'reason': reason, 'cases': cases, 'case_count': len(cases)}
     except (ValueError, OSError):

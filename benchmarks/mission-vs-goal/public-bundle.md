@@ -12,7 +12,8 @@ Supply an **uncompressed tar** and the externally preregistered digest to
 without parsing the manifest. Normalization is USTAR: sorted regular-file
 paths, zero uid/gid/mtime, empty owner names, mode 0644 or 0755 according to the
 executable bit. Directory metadata is excluded. Links, special entries,
-duplicate/escaping paths and `.git` components are rejected. File content is
+duplicate/escaping paths, case-folded or Unicode-normalized component collisions,
+and case-folded `.git` components are rejected. File content is
 limited to 512 MiB per bundle. Long paths unsupported by USTAR are rejected.
 The verified bytes are retained in memory; later source-tar changes cannot
 replace the inputs. Only after digest matching is `manifest.json` parsed.
@@ -45,18 +46,23 @@ remain inputs established by cohort selection and verification.
 
 1. Call `prepare_assignment(bundle, task_id, destination)` before the worker
    starts. It writes only the accepted task's starter into a temporary repo,
-   verifies its content digest, and passes every top-level path (including
+   verifies written bytes/modes against the bundle and its content digest, and passes every top-level path (including
    dotfiles) to G's export allowlist. Literal snapshot initialization retains
    ignored files and disables content/archive transformations from attributes.
-   Export digest mismatch fails. Keep the returned initial worker digest as
+   Export content or executable-mode digest mismatch fails. Keep the returned initial worker digest as
    harness-owned evidence; do not recompute it from the worker's final tree.
 2. After worker termination, call `freeze_candidate(bundle, assignment,
    candidate)`. The envelope binds task, unit, benchmark, base commit, bundle,
-   starter and candidate digests. The caller owns this freeze and its storage.
+   starter and candidate digests. Candidate digests use `sha256-tree-exec-v1:`:
+   domain-separated SHA-256 over G’s path/content framing plus all three
+   executable bits. G/H’s default `sha256:` content digest and historical values
+   remain unchanged; starter provenance retains that format, with modes checked
+   separately against bundle/export bytes. The caller owns this freeze and its storage.
 3. Call `evaluate_assignment(bundle, assignment, initial_worker_export,
    candidate, envelope, timeout_seconds=...)`. It checks provenance before
    launching any environment, creates a fresh copy without `.git`, retains
-   executable modes, and checks both source and copy digests after evaluation.
+   executable modes, rechecks the written evaluator against bundle bytes/modes,
+   and checks both source and copy digests after evaluation.
 
 The Docker path uses a **locally available image only** (`--pull=never`), with
 network disabled, a read-only root filesystem/input mounts, dropped
@@ -75,6 +81,8 @@ Well-formed observations are retained even when their inventory mismatches.
 Container terminal state is inspected to distinguish startup/engine failure
 from a candidate command exit, as required by the [Docker CLI start
 implementation](https://github.com/docker/cli/blob/f415da838bed6a0e12ca6cb86ba198fdac6beb9c/cli/command/container/start.go#L150-L187).
+Create/inspect/cleanup timeout, overflow, incomplete output or command failure
+are control-plane failures; attached evaluation limits keep H’s original reasons.
 Environment startup/engine failure uses `evaluator_process_unavailable`, the
 infrastructure reason used by H. Only this reason permits one reevaluation of
 the same frozen candidate in a fresh environment. `evaluations` retains both
