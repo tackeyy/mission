@@ -221,3 +221,117 @@ def test_pipe_filling_after_readiness_cannot_block_deadline_recovery(provider, m
         signal.signal(signal.SIGALRM, previous)
     assert filled and result.timed_out and result.kill_confirmed
     assert time.monotonic() - started < 2
+
+
+@pytest.mark.parametrize('input_count', [1, 2])
+def test_preflight_json_expansion_has_no_additional_packet_limit(provider, tmp_path, input_count):
+    from provider_preflight import MAX_INPUT_BYTES, build_preflight, safe_input_snapshot
+    from .test_provider_preflight import _subject
+    from mission_application.provider_process import exchange_provider
+    snapshots = []
+    for index in range(input_count):
+        source = tmp_path / f'input-{index}.txt'
+        source.write_bytes(b'\0' * MAX_INPUT_BYTES)
+        snapshots.append(safe_input_snapshot(source, root=tmp_path))
+    packet = build_preflight(_subject(), snapshots)['outbound_packet_bytes']
+    assert len(packet) > input_count * 6 * MAX_INPUT_BYTES
+    child = provider('import hashlib,sys; raw=sys.stdin.buffer.read(); '
+                     'print(hashlib.sha256(raw).hexdigest()); print(len(raw),file=sys.stderr)')
+    result = exchange_provider(child, packet, time.monotonic() + 10, kill_wait=1)
+    assert result.stdout.strip() == hashlib.sha256(packet).hexdigest().encode()
+    assert result.stderr.strip() == str(len(packet)).encode()
+    assert result.exit_code == 0 and not result.timed_out and result.kill_confirmed
+
+
+def test_connection_reset_finishes_writing_and_preserves_result(provider, monkeypatch):
+    from mission_application.provider_process import exchange_provider
+    child = provider('import sys; sys.stdin.buffer.read(); print("accepted-prefix"); '
+                     'print("refused",file=sys.stderr); sys.exit(23)')
+    fd, write = child.stdin.fileno(), os.write
+    injected = []
+    def reset(target, raw):
+        if target == fd and not injected:
+            injected.append(True)
+            raise ConnectionResetError(errno.ECONNRESET, 'peer reset')
+        return write(target, raw)
+    monkeypatch.setattr(os, 'write', reset)
+    result = exchange_provider(child, b'x' * (1024 * 1024), time.monotonic() + 10, kill_wait=1)
+    assert injected and result.stdout == b'accepted-prefix\n' and result.stderr == b'refused\n'
+    assert result.exit_code == 23 and result.kill_confirmed and not result.timed_out
+
+
+def test_stdout_before_large_stdin_completes_both_directions(provider):
+    from mission_application.provider_process import exchange_provider
+    packet = b'p' * (1024 * 1024)
+    child = provider('import hashlib,sys; sys.stdout.buffer.write(b"o"*1048576); '
+                     'sys.stdout.buffer.flush(); raw=sys.stdin.buffer.read(); '
+                     'print(len(raw),hashlib.sha256(raw).hexdigest(),file=sys.stderr)')
+    result = exchange_provider(child, packet, time.monotonic() + 3, kill_wait=1)
+    assert result.stdout == b'o' * len(packet)
+    assert result.stderr.strip() == f'{len(packet)} {hashlib.sha256(packet).hexdigest()}'.encode()
+    assert result.exit_code == 0 and not result.timed_out and result.output_complete
+
+
+def test_caller_exception_does_not_turn_unconfirmed_result_into_exception(provider, monkeypatch):
+    from mission_application.provider_process import exchange_provider
+    child = provider('print("done")')
+    cleanup = budgeted_exec.cleanup_group
+    def unconfirmed(*args, **kwargs):
+        cleanup(*args, **kwargs)
+        return False
+    monkeypatch.setattr(budgeted_exec, 'cleanup_group', unconfirmed)
+    try:
+        raise LookupError('caller exception')
+    except LookupError:
+        result = exchange_provider(child, b'', time.monotonic() + 10, kill_wait=1)
+    assert result.stdout == b'done\n' and result.exit_code == 0 and not result.kill_confirmed
+
+
+@pytest.mark.parametrize('confirmed', [True, False])
+def test_collection_error_uses_cleanup_confirmation(provider, monkeypatch, confirmed):
+    from mission_application.provider_process import exchange_provider
+    child = provider('print("final-output")')
+    until = time.monotonic() + 3
+    while not budgeted_exec.observe_exit(child.pid):
+        assert time.monotonic() < until
+        time.sleep(.01)
+    fd, read = child.stdout.fileno(), os.read
+    cleaned = []
+    cleanup = budgeted_exec.cleanup_group
+    def cleanup_result(*args, **kwargs):
+        assert cleanup(*args, **kwargs)
+        cleaned.append(True)
+        return confirmed
+    def fail_collection(target, size):
+        if target == fd and cleaned:
+            raise OSError(errno.EIO, 'collection failure')
+        return read(target, size)
+    monkeypatch.setattr(budgeted_exec, 'cleanup_group', cleanup_result)
+    monkeypatch.setattr(os, 'read', fail_collection)
+    error, message = (OSError, 'collection failure') if confirmed else (ValueError, 'kill-unconfirmed')
+    with pytest.raises(error, match=message):
+        exchange_provider(child, b'', time.monotonic() + 10, kill_wait=1)
+    assert cleaned and child.returncode == 0
+    assert all(stream.closed for stream in (child.stdin, child.stdout, child.stderr))
+
+
+def test_deadline_delivers_sigterm_and_allows_handler_to_finish(provider, tmp_path):
+    from mission_application.provider_process import exchange_provider
+    ready = tmp_path / 'ready'
+    child = provider('import pathlib,signal,sys,time\n'
+                     'def terminate(signum,frame):\n'
+                     ' print("term-received",flush=True)\n'
+                     ' time.sleep(.05)\n'
+                     ' print("grace-complete",flush=True)\n'
+                     ' sys.exit(17)\n'
+                     'signal.signal(signal.SIGTERM,terminate)\n'
+                     f'pathlib.Path({str(ready)!r}).touch()\n'
+                     'time.sleep(60)\n')
+    until = time.monotonic() + 3
+    while not ready.exists():
+        assert time.monotonic() < until
+        time.sleep(.01)
+    result = exchange_provider(child, b'', time.monotonic() + .1,
+                               term_grace=.5, kill_wait=1)
+    assert result.timed_out and result.kill_confirmed and result.exit_code == 17
+    assert result.stdout == b'term-received\ngrace-complete\n' and result.output_complete

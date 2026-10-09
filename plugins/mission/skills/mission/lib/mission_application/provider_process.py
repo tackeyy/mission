@@ -11,7 +11,6 @@ import errno
 import math
 import os
 import selectors
-import sys
 import time
 
 import budgeted_exec
@@ -34,7 +33,9 @@ def exchange_provider(child, packet, deadline, *, term_grace=.2, kill_wait=.2,
     """Consume exclusively owned pipes of an unreaped spawn_exec child.
 
     deadline is an absolute monotonic value captured before spawn, never a new
-    relative timeout. Each stream retains at most output_limit bytes (1..4 MiB);
+    relative timeout. Packet admission belongs to preflight: JSON escaping and
+    multiple inputs have no additional encoded-size limit here. Each stream retains
+    at most output_limit bytes (1..4 MiB);
     output_bytes counts drained bytes even after truncation. Incomplete/truncated
     output must not be interpreted as complete evidence by the eventual caller.
     Durations are finite seconds in 0..86400, matching the budget policy bound.
@@ -44,6 +45,7 @@ def exchange_provider(child, packet, deadline, *, term_grace=.2, kill_wait=.2,
     outputs = {'stdout': bytearray(), 'stderr': bytearray()}
     observed, timed_out, truncated, unavailable = 0, False, False, False
     selector = None
+    confirmed = None
     cleanup_grace, cleanup_wait = .2, .2
 
     def close_stream(stream):
@@ -65,7 +67,7 @@ def exchange_provider(child, packet, deadline, *, term_grace=.2, kill_wait=.2,
                     return type(value) in (int, float) and math.isfinite(value)
                 except OverflowError:
                     return False
-            if (type(packet) is not bytes or len(packet) > 4 * 1024 * 1024
+            if (type(packet) is not bytes
                     or not finite(deadline)
                     or any(not finite(value) or not 0 <= value <= 86400
                            for value in (term_grace, kill_wait, collect_sec))
@@ -114,7 +116,7 @@ def exchange_provider(child, packet, deadline, *, term_grace=.2, kill_wait=.2,
                     except (BlockingIOError, InterruptedError):
                         continue
                     except OSError as exc:
-                        if exc.errno != errno.EBADF and not (key.data == 'stdin' and exc.errno == errno.EPIPE):
+                        if exc.errno != errno.EBADF and not (key.data == 'stdin' and exc.errno in (errno.EPIPE, errno.ECONNRESET)):
                             raise
                         unavailable |= key.data != 'stdin'
                         close_stream(key.fileobj)
@@ -130,14 +132,18 @@ def exchange_provider(child, packet, deadline, *, term_grace=.2, kill_wait=.2,
             close_stream(child.stdin)
             confirmed = budgeted_exec.cleanup_group(child, term_grace=cleanup_grace,
                                                    kill_wait=cleanup_wait, timed_out=timed_out)
-            if not confirmed and sys.exc_info()[0] is not None:
-                raise ValueError('kill-unconfirmed')
         collect_until = time.monotonic() + collect_sec
         while selector.get_map() and time.monotonic() < collect_until:
             pump(collect_until)
         complete = not selector.get_map() and not unavailable
         return ProviderExchange(bytes(outputs['stdout']), bytes(outputs['stderr']),
                                 child.returncode, timed_out, confirmed, observed, truncated, complete)
+    except BaseException:
+        # Only exceptions raised by this exchange count, including collection.
+        # An enclosing caller's except block is not an exchange failure.
+        if confirmed is False:
+            raise ValueError('kill-unconfirmed')
+        raise
     finally:
         for stream in (child.stdin, child.stdout, child.stderr):
             close_stream(stream)
