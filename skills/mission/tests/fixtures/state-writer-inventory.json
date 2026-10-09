@@ -239,6 +239,10 @@
     "reconcile_dispatch_unknown:copy-ref": 1,
     "record_provider_receipt:copy-ref": 1
   },
+  "lib/mission_application/provider_process.py": {
+    "exchange_provider:dynamic": 1,
+    "pump:write": 1
+  },
   "lib/mission_application/review.py": {
     "_kernel_state_for_pass:replace": 2,
     "mark_pass:copy-ref": 1
