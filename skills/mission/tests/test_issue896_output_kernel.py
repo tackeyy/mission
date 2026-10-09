@@ -540,3 +540,11 @@ def test_replay_eligibility_validates_links_against_the_whole_frozen_policy():
     request = replace(request, candidate_bindings=(
         source, replace(replay, definition_digest=canonical_digest(target))))
     assert replay_eligibility(request, hypothesis, policy) == 'replay-unsupported'
+
+
+@pytest.mark.parametrize('broken', [None, [], True, 7, 'command', {}])
+def test_replay_eligibility_rejects_malformed_unrelated_frozen_command(broken):
+    from mission_kernel.fresh_review_output import replay_eligibility
+    request, hypothesis, policy = replay_fixture()
+    policy['commands']['unrelated'] = broken
+    assert replay_eligibility(request, hypothesis, policy) == 'replay-unsupported'

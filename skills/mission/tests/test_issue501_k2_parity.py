@@ -309,6 +309,7 @@ def test_decide_and_guidance_share_one_named_transition_table():
         "fresh-review-prepare",
         "fresh-review-run",
         "fresh-review-launch",
+        "fresh-review-output-import",
         "fresh-review-result",
         "fresh-review-withdraw",
         "progress-clear",

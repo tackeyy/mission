@@ -52,6 +52,7 @@ from .commands import (
     WithdrawFreshReviewRequest,
     RecordFreshReviewLaunch,
     CommitFreshReviewResult,
+    ImportFreshReviewOutput,
     RejectExecutorHandoff,
     AbortExecutorHandoff,
     HandoffAbortReason,
@@ -2371,6 +2372,9 @@ TRANSITION_TABLE = build_transition_table(
             "fresh-review-result", CommitFreshReviewResult, _command_type_guard(CommitFreshReviewResult), _fresh_review_dispatch,
         ),
         TransitionRule(
+            "fresh-review-output-import", ImportFreshReviewOutput, _command_type_guard(ImportFreshReviewOutput), _fresh_review_dispatch,
+        ),
+        TransitionRule(
             "acceptance-contract-import",
             ImportAcceptanceContract,
             _command_type_guard(ImportAcceptanceContract),
@@ -2582,7 +2586,7 @@ def bind_transition_effects(
     registered = _ISSUED_TRANSITIONS[id(transition)]
     command = registered[2]
     claims: tuple[object, ...] | None = None
-    if isinstance(command, PrepareFreshReview):
+    if isinstance(command, (PrepareFreshReview, ImportFreshReviewOutput)):
         claims = () if command.effect is None else (command.effect,)
     elif isinstance(command, (InitializeArtifact, RenderArtifact, RecordArtifactPublication)):
         claims = (command.effect,)

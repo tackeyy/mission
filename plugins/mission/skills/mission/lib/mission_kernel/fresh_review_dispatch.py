@@ -1,9 +1,9 @@
-"""Pure dispatch bindings; completed/output publication remains outside D2c."""
+"""Pure dispatch and failed-output bindings; completed publication is unavailable."""
 from __future__ import annotations
 from dataclasses import replace
 
 from acceptance_contract import canonical_contract_digest
-from .commands import BeginFreshReviewDispatch, RecordFreshReviewLaunch, WithdrawFreshReviewRequest
+from .commands import BeginFreshReviewDispatch, RecordFreshReviewLaunch, WithdrawFreshReviewRequest, ImportFreshReviewOutput
 from .fresh_review import (
     FreshReviewError, _closed, _identifier, _digest, canonical_digest, request_document,
     projection_document, _replace_record, validate_projection_backing, record_operation_ids,
@@ -11,7 +11,7 @@ from .fresh_review import (
 )
 from .fresh_review_receipts import (
     decode_launch_receipt, decode_terminal_receipt, receipt_document, ContextMode,
-    BlockedFreshReview, AbandonedFreshReview, _integer, validate_dispatch_intent,
+    BlockedFreshReview, AbandonedFreshReview, FailedFreshReview, _integer, validate_dispatch_intent,
     FRESH_REVIEW_DISPATCH_SHAPE,
 )
 from .json_codec import freeze_json_value
@@ -93,9 +93,9 @@ def decode_dispatch_record(fields):
     if fields['status'] == 'running' and launch is None or fields['status'] == 'dispatch-unknown' and launch is not None:
         raise FreshReviewError('fresh-review-record-invalid')
     result = fields['result']
-    if fields['status'] in ('blocked', 'abandoned-unknown'):
+    if fields['status'] in ('blocked', 'abandoned-unknown', 'failed'):
         receipt = decode_terminal_receipt(result)
-        if not isinstance(receipt, (BlockedFreshReview, AbandonedFreshReview)) or (
+        if not isinstance(receipt, (BlockedFreshReview, AbandonedFreshReview, FailedFreshReview)) or (
                 receipt.outcome, receipt.request_id, receipt.request_digest, receipt.nonce,
                 receipt.dispatch_operation_id, receipt.dispatch_fencing_epoch, receipt.candidate_digest) != (
                 fields['status'], request.request_id, canonical_digest(request_document(request)), request.nonce,
@@ -163,7 +163,10 @@ def dispatch_state(state, command):
         if record.status not in ('dispatch-unknown', 'running') or not isinstance(command.receipt, FrozenJsonObject):
             raise FreshReviewError('fresh-review-consumed')
         receipt = decode_terminal_receipt(command.receipt.thaw())
-        if not isinstance(receipt, (BlockedFreshReview, AbandonedFreshReview)):
+        if isinstance(command, ImportFreshReviewOutput):
+            from .fresh_review_publish import validate_failed_import
+            validate_failed_import(record, command)
+        elif not isinstance(receipt, (BlockedFreshReview, AbandonedFreshReview)):
             raise FreshReviewError('fresh-review-output-import-required')
         if (receipt.commit_operation_id, receipt.commit_fencing_epoch) != (command.operation_id, command.fencing_epoch):
             raise FreshReviewError('fresh-review-stale-fence')
