@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from mission_application.provider_budget import reserve_provider, settle_provider
 import hashlib
 import json
 import re
+import time
 from typing import Optional
 
 from mission_application.planning import PlanningFailure, decide_provider_terminal_result, record_dispatch_intent, record_provider_receipt
@@ -310,6 +312,7 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
     timeout = _provider_timeout(provider, request.timeout_override)
     entry["timeout"] = timeout
 
+    budget = None
     # ── Section 1: Reservation ──
     _repo_invoke_reserve = _make_repo_invoke(":reserve")
     with _repo_invoke_reserve.transaction():
@@ -337,6 +340,13 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
             # the non-rollbackable provider dispatch saga.
             entry["operation_id"] = request.preflight_id
             entry["outbound_packet_digest"] = pointer["outbound_packet_digest"]
+            reserved_context = dispatch_state.get("provider_preflights", {}).get(request.preflight_id, {}).get("execution_context")
+            budget, refusal = reserve_provider(dispatch_state, entry, timeout, execution.clock(),
+                prepared=request.specialists_cmd == "invoke-prepared", provider=provider,
+                enforceable=not (isinstance(reserved_context, dict) and reserved_context.get("isolation") == "strict"))
+            if refusal:
+                _repo_invoke_reserve.save(dispatch_state)
+                raise CommandProviderFailure(refusal, refusal, 2)
             dispatch_state, entry, _ = state_effects.prepare_specialist_invocation_state(
                 dispatch_state,
                 entry,
@@ -469,11 +479,15 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
                 provider_policy.validate_invocation_transition(current_entry, failed)
                 state_effects.replace_provider_invocation(dispatch_state, failed)
                 dispatch_state["updated_at"] = completed_at
+                settle_provider(dispatch_state, budget, completed_at, execution.value_digest(failed))
                 _repo_invoke_prefail.save(dispatch_state)
         return CommandProviderResult(
             json.dumps({"ok": False, "outcome_kind": "external", "entry": failed}, ensure_ascii=False)
         )
     spawn_failed_reason = None
+    exchange = None
+    budget_failure = None
+    kill_confirmed = True
     if strict_result is not None:
         # A strict backend is still external work.  Its return value becomes
         # usable only after it supplies a closed, identity-bearing receipt and
@@ -517,14 +531,46 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
         stderr = execution.redact(str(strict_result.get("stderr") or ""))
     else:
         try:
-            process = execution.Popen(argv, stdin=execution.PIPE, stdout=execution.PIPE, stderr=execution.PIPE, env=command_env)
-        except OSError as exc:
+            if budget is None:
+                process = execution.Popen(argv, stdin=execution.PIPE, stdout=execution.PIPE, stderr=execution.PIPE, env=command_env)
+            else:
+                from budgeted_exec import spawn_exec
+                if time.monotonic() >= budget.deadline:
+                    raise OSError("budget-child-deadline-expired")
+                process = spawn_exec(argv, stdin=execution.PIPE, stdout=execution.PIPE,
+                                     stderr=execution.PIPE, cwd=cwd, env=command_env)
+        except (OSError, ValueError) as exc:
+            if budget is None and not isinstance(exc, OSError):
+                raise
             spawn_failed_reason = "spawn-failed"; exit_code = None; stdout = ""; stderr = execution.redact(str(exc))
             completed_at = execution.clock()
             entry.update({"status": "failed-before-start", "lifecycle_state": "terminal", "transitioned_at": completed_at,
                           "completed_at": completed_at, "reason_code": "spawn-failed",
                           "proven_no_dispatch": True})
         else:
+            if budget is not None:
+                # No repository lock/commit may delay the child's deadline.
+                # Persist the process receipt only after bounded collection and cleanup.
+                from mission_application.provider_process import exchange_provider
+                try:
+                    exchange = exchange_provider(process, packet, budget.deadline,
+                        term_grace=budget.policy.term_grace_sec, kill_wait=budget.policy.kill_wait_sec,
+                        collect_sec=budget.policy.collect_sec)
+                    exit_code = exchange.exit_code
+                    stdout = execution.redact(exchange.stdout.decode("utf-8", errors="replace"))
+                    stderr = execution.redact(exchange.stderr.decode("utf-8", errors="replace"))
+                    kill_confirmed = exchange.kill_confirmed
+                    if not kill_confirmed:
+                        budget_failure = "kill-unconfirmed"
+                    elif exchange.timed_out:
+                        budget_failure = "budget-child-timeout"
+                    elif not exchange.output_complete or exchange.output_truncated:
+                        budget_failure = "budget-output-incomplete"
+                except (OSError, ValueError) as exc:
+                    kill_confirmed = str(exc) != "kill-unconfirmed"
+                    budget_failure = "budget-provider-exchange-failed" if kill_confirmed else "kill-unconfirmed"
+                    exit_code, stdout, stderr = process.returncode, "", execution.redact(str(exc))
+
             entry["child_pid"] = process.pid
             entry["process_identity_digest"] = execution.value_digest({"invocation_id": entry["invocation_id"], "pid": process.pid, "running_at": running_at})
             _repo_invoke_proc = _make_repo_invoke(":proc")
@@ -533,7 +579,8 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
                 if not getattr(_repo_invoke_proc, "operation_replayed", False):
                     current_entry = dict(provider_policy.invocation_by_id(dispatch_state, entry["invocation_id"]))
                     if current_entry.get("status") != "dispatch-unknown":
-                        process.terminate(); process.wait(timeout=5)
+                        if budget is None:
+                            process.terminate(); process.wait(timeout=5)
                         raise CommandProviderFailure("provider-ineligible", "provider-ineligible: invocation-not-dispatch-unknown", 2)
                     try:
                         receipt_state = record_provider_receipt(
@@ -548,7 +595,8 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
                             {"kind": "process", "identity": entry["process_identity_digest"]},
                         )
                     except PlanningFailure as exc:
-                        process.terminate(); process.wait(timeout=5)
+                        if budget is None:
+                            process.terminate(); process.wait(timeout=5)
                         provider_policy.provider_gate(exc.code)
                     current_entry.update({
                         "child_pid": entry["child_pid"],
@@ -564,21 +612,30 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
                     dispatch_state["updated_at"] = execution.clock()
                     _repo_invoke_proc.save(dispatch_state)
                     entry = current_entry
-            try:
-                raw_stdout, raw_stderr = process.communicate(input=packet, timeout=timeout)
-            except execution.TimeoutExpired:
-                process.kill(); raw_stdout, raw_stderr = process.communicate(); raw_stderr = (raw_stderr or b"") + b"\ncommand provider timed out"
-            exit_code = process.returncode
-            stdout = execution.redact((raw_stdout or b"").decode("utf-8", errors="replace"))
-            stderr = execution.redact((raw_stderr or b"").decode("utf-8", errors="replace"))
+            if budget is None:
+                try:
+                    raw_stdout, raw_stderr = process.communicate(input=packet, timeout=timeout)
+                except execution.TimeoutExpired:
+                    process.kill(); raw_stdout, raw_stderr = process.communicate(); raw_stderr = (raw_stderr or b"") + b"\ncommand provider timed out"
+                exit_code = process.returncode
+                stdout = execution.redact((raw_stdout or b"").decode("utf-8", errors="replace"))
+                stderr = execution.redact((raw_stderr or b"").decode("utf-8", errors="replace"))
+
 
     if spawn_failed_reason:
         status, reason = "failed-before-start", stderr
     else:
-        evidence_status, reason = _classify_command_provider_result(provider, exit_code, stdout, stderr)
+        if budget_failure:
+            evidence_status, reason = "failed", budget_failure
+            entry["reason_code"] = budget_failure
+        else:
+            evidence_status, reason = _classify_command_provider_result(provider, exit_code, stdout, stderr)
+        decision_exit = exit_code
+        if budget is not None:
+            decision_exit = 124 if budget_failure else (128 - exit_code if isinstance(exit_code, int) and exit_code < 0 else exit_code)
         try:
             terminal = decide_provider_terminal_result(
-                exit_code=exit_code, evidence_status=evidence_status, reason=reason
+                exit_code=decision_exit, evidence_status=evidence_status, reason=reason
             )
         except PlanningFailure as exc:
             provider_policy.provider_gate(exc.code)
@@ -595,6 +652,8 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
         "completed_at": completed_at,
         "exit_code": exit_code,
     })
+    if budget is not None and reason:
+        reason = reason[:1024]
     if reason:
         entry["reason"] = reason
     evidence = (
@@ -661,6 +720,8 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
                 preflight_pointer["consumed_invocation_id"] = entry["invocation_id"]
             provider_policy.validate_specialist_public_state(data)
             state_effects.append_command_outcome(data, outcome)
+            settle_provider(data, budget, completed_at, execution.value_digest({"outbound_packet_digest": entry["outbound_packet_digest"], "exit_code": exit_code}),
+                            confirmed=kill_confirmed, output_bytes=exchange.output_bytes if exchange else None)
             state_effects.commit_specialist_state_with_save(
                 cwd, data, entry, request.iteration, evidence,
                 save_state=_repo_invoke_result.save,

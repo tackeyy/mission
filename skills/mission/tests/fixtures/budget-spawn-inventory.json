@@ -1,0 +1,291 @@
+{
+  "bin/mission-state.py:_git_checkout_identity:run": {
+    "count": 1,
+    "reason": "Short repository/process observation, not agent work",
+    "rows": [
+      13
+    ]
+  },
+  "bin/mission-state.py:_git_command_bytes:run": {
+    "count": 1,
+    "reason": "Short repository/process observation, not agent work",
+    "rows": [
+      13
+    ]
+  },
+  "bin/mission-state.py:_learning_brief_default_roots:run": {
+    "count": 1,
+    "reason": "Short repository/process observation, not agent work",
+    "rows": [
+      13
+    ]
+  },
+  "bin/mission-state.py:_pid_is_agent:run": {
+    "count": 1,
+    "reason": "Short repository/process observation, not agent work",
+    "rows": [
+      13
+    ]
+  },
+  "bin/mission-state.py:_run_strict_provider_backend:dispatch_prepared_packet": {
+    "count": 1,
+    "reason": "Strict isolation backend; refused for budgeted provider",
+    "rows": [
+      4
+    ]
+  },
+  "bin/mission-state.py:_tracked_repo_artifact_spec:run": {
+    "count": 2,
+    "reason": "Short repository/process observation, not agent work",
+    "rows": [
+      13
+    ]
+  },
+  "bin/mission-state.py:_validate_revision_scope:run": {
+    "count": 1,
+    "reason": "Short repository/process observation, not agent work",
+    "rows": [
+      13
+    ]
+  },
+  "bin/mission-state.py:checked:run": {
+    "count": 1,
+    "reason": "Short repository/process observation, not agent work",
+    "rows": [
+      13
+    ]
+  },
+  "bin/mission-state.py:find_agent_pid:run": {
+    "count": 2,
+    "reason": "Short repository/process observation, not agent work",
+    "rows": [
+      13
+    ]
+  },
+  "lib/budgeted_exec.py:run_job:spawn_exec": {
+    "count": 1,
+    "reason": "Shared exec-only boundary; callers own admission, pending callers remain inert",
+    "rows": [
+      1,
+      2,
+      3,
+      5,
+      6,
+      7,
+      8,
+      9
+    ]
+  },
+  "lib/budgeted_exec.py:spawn_exec:Popen": {
+    "count": 1,
+    "reason": "Shared exec-only boundary; callers own admission, pending callers remain inert",
+    "rows": [
+      1,
+      2,
+      3,
+      5,
+      6,
+      7,
+      8,
+      9
+    ]
+  },
+  "lib/fresh_review_host.py:_call:spawn_exec": {
+    "count": 1,
+    "reason": "Adapter call boundary; dispatch/recovery admission belongs to F2b",
+    "rows": [
+      7,
+      8,
+      9
+    ]
+  },
+  "lib/fresh_review_host.py:_callback:cancel": {
+    "count": 1,
+    "reason": "Adapter call boundary; dispatch/recovery admission belongs to F2b",
+    "rows": [
+      7,
+      8,
+      9
+    ]
+  },
+  "lib/fresh_review_host.py:_callback:launch": {
+    "count": 1,
+    "reason": "Adapter call boundary; dispatch/recovery admission belongs to F2b",
+    "rows": [
+      7,
+      8,
+      9
+    ]
+  },
+  "lib/fresh_review_host.py:_callback:recover": {
+    "count": 1,
+    "reason": "Adapter call boundary; dispatch/recovery admission belongs to F2b",
+    "rows": [
+      7,
+      8,
+      9
+    ]
+  },
+  "lib/fresh_review_runtime.py:load_adapter:dynamic-spawn": {
+    "count": 1,
+    "reason": "Pinned adapter factory invocation is external code inside the adapter child; F2b admission pending",
+    "rows": [
+      7,
+      8,
+      9
+    ]
+  },
+  "lib/integration_gate.py:_local_binary_runner:run": {
+    "count": 1,
+    "reason": "Repository integration tool outside session dispatch",
+    "rows": [
+      12
+    ]
+  },
+  "lib/integration_gate.py:_local_runner:run": {
+    "count": 1,
+    "reason": "Repository integration tool outside session dispatch",
+    "rows": [
+      12
+    ]
+  },
+  "lib/integration_gate.py:validate_default_branch_name:run": {
+    "count": 1,
+    "reason": "Repository integration tool outside session dispatch",
+    "rows": [
+      12
+    ]
+  },
+  "lib/mission_application/approval_verifier.py:run_approval:run_job": {
+    "count": 1,
+    "reason": "Registered exec helper; fork Process only for legacy callable verifier; admission pending",
+    "rows": [
+      5,
+      6
+    ]
+  },
+  "lib/mission_application/approval_verifier.py:run_callable:Process": {
+    "count": 1,
+    "reason": "Registered exec helper; fork Process only for legacy callable verifier; admission pending",
+    "rows": [
+      5,
+      6
+    ]
+  },
+  "lib/mission_application/approval_verifier.py:run_callable:get_context": {
+    "count": 1,
+    "reason": "Registered exec helper; fork Process only for legacy callable verifier; admission pending",
+    "rows": [
+      5,
+      6
+    ]
+  },
+  "lib/mission_application/command_provider.py:_invoke_command_provider:Popen": {
+    "count": 1,
+    "reason": "Legacy Popen without policy; budgeted provider uses spawn_exec after reservation commit",
+    "rows": [
+      3
+    ]
+  },
+  "lib/mission_application/command_provider.py:_invoke_command_provider:spawn_exec": {
+    "count": 1,
+    "reason": "Legacy Popen without policy; budgeted provider uses spawn_exec after reservation commit",
+    "rows": [
+      3
+    ]
+  },
+  "lib/mission_application/evidence.py:_git:run": {
+    "count": 1,
+    "reason": "Short repository/process observation, not agent work",
+    "rows": [
+      13
+    ]
+  },
+  "lib/mission_application/fresh_review_dispatch.py:_reconcile:recover": {
+    "count": 1,
+    "reason": "Adapter call boundary; dispatch/recovery admission belongs to F2b",
+    "rows": [
+      7,
+      8,
+      9
+    ]
+  },
+  "lib/mission_application/fresh_review_dispatch.py:finish:cancel": {
+    "count": 1,
+    "reason": "Adapter call boundary; dispatch/recovery admission belongs to F2b",
+    "rows": [
+      7,
+      8,
+      9
+    ]
+  },
+  "lib/mission_application/fresh_review_dispatch.py:run_fresh_review_dispatch_cli:cancel": {
+    "count": 1,
+    "reason": "Adapter call boundary; dispatch/recovery admission belongs to F2b",
+    "rows": [
+      7,
+      8,
+      9
+    ]
+  },
+  "lib/mission_application/fresh_review_dispatch.py:run_fresh_review_dispatch_cli:launch": {
+    "count": 1,
+    "reason": "Adapter call boundary; dispatch/recovery admission belongs to F2b",
+    "rows": [
+      7,
+      8,
+      9
+    ]
+  },
+  "lib/mission_application/verification_runner.py:_tracked:run": {
+    "count": 1,
+    "reason": "Verification candidate capture and runner; admission pending",
+    "rows": [
+      1,
+      2
+    ]
+  },
+  "lib/mission_application/verification_runner.py:execute_candidate:Popen": {
+    "count": 1,
+    "reason": "Verification candidate capture and runner; admission pending",
+    "rows": [
+      1,
+      2
+    ]
+  },
+  "lib/mission_persistence/aggregate_index.py:repair:recover": {
+    "count": 1,
+    "reason": "Syntactic recover candidate; aggregate journal recovery does not spawn",
+    "rows": [
+      15
+    ]
+  },
+  "lib/mission_persistence/reinitialization.py:start_new_mission:recover": {
+    "count": 1,
+    "reason": "Short repository/process observation, not agent work",
+    "rows": [
+      13
+    ]
+  },
+  "lib/mission_python_inventory.py:_assert_importable_from_root:run": {
+    "count": 1,
+    "reason": "Standalone import inspection",
+    "rows": [
+      14
+    ]
+  },
+  "lib/worktree_archive.py:_git_bytes:run": {
+    "count": 1,
+    "reason": "Short repository/process observation, not agent work",
+    "rows": [
+      13
+    ]
+  },
+  "lib/worktree_archive.py:worktree_archive_lineage_references:run": {
+    "count": 1,
+    "reason": "Short repository/process observation, not agent work",
+    "rows": [
+      13
+    ]
+  }
+}

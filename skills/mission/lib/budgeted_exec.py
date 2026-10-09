@@ -31,12 +31,12 @@ def _has_kqueue():
 
 
 def spawn_exec(argv, *, pass_fds=(), stdin=subprocess.DEVNULL,
-               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=None):
+               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=None, env=None):
     """No Python pre-exec callbacks or caller-supplied session options."""
     if not (_has_waitid() or _has_kqueue()):
         raise ValueError('budget-deadline-unenforceable')
     return subprocess.Popen(argv, start_new_session=True, close_fds=True,
-                            pass_fds=pass_fds, stdin=stdin, stdout=stdout, stderr=stderr, cwd=cwd)
+                            pass_fds=pass_fds, stdin=stdin, stdout=stdout, stderr=stderr, cwd=cwd, env=env)
 
 
 def observe_exit(pid):
