@@ -287,7 +287,10 @@ def probe_codex(worktree: Path, objective: str, acceptance: str, timeout: float,
         evidence["deadline_reached"] = True
         return {**(observation or {}), "native_goal_observed": bool(observation and observation.get("native_goal_observed")), "fidelity": "unverified", "outcome": "failed", "reason": "assignment_deadline_reached", "deadline_reached": True}
     finally:
-        rpc.close()
+        try:
+            rpc.close()
+        except Exception as exc:
+            evidence["process_cleanup_error"] = type(exc).__name__
 
 
 def run_codex_assignment(worktree, objective, acceptance, timeout, token_budget, max_turns,

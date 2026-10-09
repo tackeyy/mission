@@ -369,6 +369,10 @@ I2a が merge されるまでに得た record は、T 到達の Goal record が�
 5. **保管**: pool manifest と選択一覧は、§5.0 の試行の path に中身ごと commit する（識別子・判定・理由コード・digest だけで構成し、benchmark の課題文・検査・reference の中身を含めない）。snapshot の中身と evaluator 用データは digest を commit し、中身を公開 repo に置けるかは license による（Lic。§8.1）。置けない場合、第三者は benchmark の配布元から commit A の版を取得して snapshot digest と照合する。
 6. **使用回数**: 確認実験で一度だけ使う。確認実験の後に cohort の task を開発に使った場合、それ以降の結果は確認結果として扱わない。
 
+### 5.1.1 複数 benchmark の合算（追加決定・2026-10-08）
+
+[Issue #926: 外部 bundle の入口と公開 benchmark 用 evaluator](https://github.com/tackeyy/mission/issues/926) の owner 決定により、`report_kind=confirmatory` の母集団は複数の公開 benchmark の混合とする。主 pool は SWE-bench-Live/MultiLang、副 pool は SWE-rebench（事前構築済み image がある instance）・Multi-SWE-bench・SWE-PolyBench・SWE-bench Multilingual とし、benchmark を跨いで G1〜G3 の重複を排除した後に K を確定する。選定は [公開 benchmark 調査 §5 の選択肢1](https://github.com/tackeyy/mission/blob/2749e1831f263193a7aaf4c31816203288a80554/docs/design/925-public-benchmark-survey.md#5-推奨と-owner-が決めるべきこと) に基づく。これは §5.1 の単一選択を補う追加の決定であり、§9 の凍結項目、独立単位、選定基準、推定対象、K の決定方法は変えない。Det を満たす repo 数の確定と、有料 pilot の実行承認は引き続き別途必要である。
+
 ### 5.2 公開 benchmark の bundle と evaluator（決定・I2c）
 
 H の入口は repo 内の固定生成器と 12 件の固定 catalog を前提にし、H の evaluator は候補の `service.py` の `execute` を呼ぶ形に限られる。[S24][S14][S16][S28] I2c は公開 benchmark 用に別の入口と evaluator adapter を持ち、H の検査も判定規則も変えない。

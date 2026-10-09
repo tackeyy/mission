@@ -176,7 +176,7 @@ final latch は `budget enter-final`（明示）か `at ≥ repair の締切`（
 | 11 | — | `specialists reconcile-invocation` [S31] | spawn しない。回復の mutation | — | — | 開いている予約を精算 |
 | 12 | `integration_gate.py:67,79,171` [S32] | `gate-and-merge` | 対象外（mission repository 自身の merge 工程で、session の dispatch ではない。判断事項 6） | — | — | — |
 | 13 | git・ps の短い呼出し: `mission-state.py:1150, 2033, 2038, 6029, 6049, 6058, 6102, 10515, 10538, 14495`、`worktree_archive.py:115, 655`、`evidence.py:191` [S43] | 状態の観測・archive・revision scope の検証 | dispatch として数えない。agent の作業を起動しないため。時間は稼働時計に含まれる。timeout の無い git 呼出しが含まれるが、F の範囲外とする | — | — | — |
-| 14 | `mission_python_inventory.py:153` [S43] | repository の import 検査 tool（mission-state.py から import されない） | 対象外 | — | — | — |
+| 14 | `mission_python_inventory.py:153` [S43] | repository の import 検査 tool と `benchmarks/mission-vs-goal/public_benchmark.py`（どちらも mission-state.py から import されない独立した tool） | 対象外 | — | — | — |
 | 15 | spawn ではないヒット: `mission-state.py:43`（`import multiprocessing`）、`command_provider.py:110`（注入される `Popen` の field 宣言。実体は #3）、`command_owners.py:153` と `guard_timeout.py:309`（`pty\.` が英文の `empty.` に当たった偽陽性） | — | 該当なし | — | — | — |
 | 16 | host が起動する subagent（`next` の `run-planner`/`run-executor`/`run-reviewers` [S02]、goal dispatch の host-native 経路 [S48]）。`dispatch` 語のヒットの大半（`_resolve_goal_dispatch`、`record_dispatch_intent`・`reconcile_dispatch_unknown` [S49]）はこの経路の記録・案内で、mission は process を起動しない | host の作業 | **強制の外**。mission からは起動も中断もできない。§4.4 の inline 作業と同じ扱い（稼働時計に含まれ、侵食量として出る） | — | — | — |
 

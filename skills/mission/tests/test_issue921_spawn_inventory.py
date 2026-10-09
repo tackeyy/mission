@@ -39,6 +39,7 @@ UNKNOWN = 'unclassified-spawn'
 SUBPROCESS_APIS = {'run', 'call', 'check_call', 'check_output', 'getoutput', 'getstatusoutput'}
 TAILS = set("""Popen Process Pool ProcessPoolExecutor get_context fork forkpty system
 popen launch collect cancel recover observe_parent run_job dispatch_prepared_packet
+_run_bounded create_worker_export initialize_worker_export_repository
 subprocess_exec subprocess_shell""".split())
 
 
@@ -156,9 +157,11 @@ def spawn_calls(source):
 
 def inventory():
     result = {}
-    for path in [MISSION / 'bin/mission-state.py', *(MISSION / 'lib').rglob('*.py')]:
+    benchmark = ROOT / 'benchmarks/mission-vs-goal/public_benchmark.py'
+    for path in [MISSION / 'bin/mission-state.py', *(MISSION / 'lib').rglob('*.py'), benchmark]:
         for (function, call), count in spawn_calls(path.read_text()).items():
-            result[f'{path.relative_to(MISSION)}:{function}:{call}'] = count
+            relative = path.relative_to(ROOT) if path == benchmark else path.relative_to(MISSION)
+            result[f'{relative}:{function}:{call}'] = count
     return result
 
 
@@ -318,7 +321,8 @@ def test_allowlist_boundary_rejects_unknown_capabilities_and_receivers(source):
 
 def test_safe_allowlist_contains_only_observed_runtime_names():
     observed = set()
-    for path in [MISSION / 'bin/mission-state.py', *(MISSION / 'lib').rglob('*.py')]:
+    benchmark = ROOT / 'benchmarks/mission-vs-goal/public_benchmark.py'
+    for path in [MISSION / 'bin/mission-state.py', *(MISSION / 'lib').rglob('*.py'), benchmark]:
         tree, aliases = ast.parse(path.read_text()), {}
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
