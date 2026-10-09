@@ -311,8 +311,8 @@ def _container_evaluate(task, candidate, evaluator, timeout_seconds):
     The command must emit a JSON list of {name, passed} records, using only
     evaluator-owned tests. Patch application happens in the disposable /work;
     candidate and evaluator inputs are read-only, outside that working tree.
-    create/inspect/cleanup control failures are infrastructure failures, retried
-    once by evaluate_assignment; attached execution limits retain H reasons.
+    Control failures without an evaluation result permit one infrastructure
+    retry. Cleanup failure is recorded separately and never replaces a result.
     """
     name = 'mission-public-' + uuid.uuid4().hex
     def mount(path, target):
@@ -330,6 +330,7 @@ def _container_evaluate(task, candidate, evaluator, timeout_seconds):
                task['environment']['image'], '-c', script, 'evaluate',
                *task['environment']['command']]
     result = ('failed', 'evaluator_process_unavailable', [])
+    cleanup_failed = False
     try:
         created = fixtures._run_bounded(command, timeout_seconds=timeout_seconds)
         failure = _process_failure(created, launching=True)
@@ -343,11 +344,10 @@ def _container_evaluate(task, candidate, evaluator, timeout_seconds):
     finally:
         try:
             cleanup = fixtures._run_bounded(['docker', 'rm', '-f', name], timeout_seconds=timeout_seconds)
-            if _process_failure(cleanup, launching=True):
-                result = ('failed', 'evaluator_process_unavailable', [])
+            cleanup_failed = _process_failure(cleanup, launching=True) is not None
         except OSError:
-            result = ('failed', 'evaluator_process_unavailable', [])
-    return result
+            cleanup_failed = True
+    return (*result, cleanup_failed)
 
 
 def _process_failure(result, *, launching):
@@ -406,6 +406,7 @@ def _case_result(task, output):
 
 
 def _evaluate_once(bundle, task, candidate, expected_digest, base, timeout_seconds):
+    observed, verified = None, False
     try:
         initial = _candidate_digest(candidate)
         base = base | {'candidate_digest': initial}
@@ -415,14 +416,20 @@ def _evaluate_once(bundle, task, candidate, expected_digest, base, timeout_secon
             if _copy_candidate(candidate, fresh) != initial:
                 return base | {'reason': 'candidate_changed'}
             _write_tree(bundle, task['evaluator_root'], evaluator)
-            status, reason, cases = _container_evaluate(task, fresh, evaluator, timeout_seconds)
+            status, reason, cases, cleanup_failed = _container_evaluate(task, fresh, evaluator, timeout_seconds)
+            observed = base | {'status': status, 'reason': reason, 'cases': cases, 'case_count': len(cases)}
+            if cleanup_failed: observed = observed | {'cleanup_failed': True}
             # Check both source and read-only mount even after timeout/failure.
             if (_candidate_digest(candidate) != initial
                     or _candidate_digest(fresh) != initial):
-                return base | {'reason': 'candidate_changed', 'cases': cases}
-        return base | {'status': status, 'reason': reason, 'cases': cases, 'case_count': len(cases)}
+                return observed | {'status': 'failed', 'reason': 'candidate_changed', 'evaluations': [observed]}
+            verified = True
+        return observed | {'evaluations': [observed]} if cleanup_failed else observed
     except (ValueError, OSError):
-        return base | {'reason': 'candidate_invalid'}
+        if verified:
+            return observed | {'cleanup_failed': True, 'evaluations': [observed]}
+        return (observed or base) | {'status': 'failed', 'reason': 'candidate_invalid'} | (
+            {'evaluations': [observed]} if observed is not None else {})
 
 
 def evaluate_assignment(bundle, assignment, worker_export, candidate, candidate_envelope, timeout_seconds=3.0):

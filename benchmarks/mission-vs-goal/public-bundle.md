@@ -81,8 +81,11 @@ Well-formed observations are retained even when their inventory mismatches.
 Container terminal state is inspected to distinguish startup/engine failure
 from a candidate command exit, as required by the [Docker CLI start
 implementation](https://github.com/docker/cli/blob/f415da838bed6a0e12ca6cb86ba198fdac6beb9c/cli/command/container/start.go#L150-L187).
-Create/inspect/cleanup timeout, overflow, incomplete output or command failure
-are control-plane failures; attached evaluation limits keep H’s original reasons.
+Create/inspect control failures before a result permit one infrastructure retry.
+Cleanup failures add `cleanup_failed`; confirmed status/reason/cases are retained
+in `evaluations` and are never retried because of cleanup. Post-evaluation
+candidate integrity failures also retain the original observation there.
+Attached evaluation limits keep H’s original reasons.
 Environment startup/engine failure uses `evaluator_process_unavailable`, the
 infrastructure reason used by H. Only this reason permits one reevaluation of
 the same frozen candidate in a fresh environment. `evaluations` retains both

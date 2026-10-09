@@ -91,7 +91,7 @@ def test_bundle_rejects_unknown_keys_duplicate_ids_and_empty_checks(tmp_path, de
         module.load_bundle(path, module.bundle_digest(path))
 
 
-def prepared(module, tmp_path, monkeypatch):
+def prepared(module, tmp_path, monkeypatch, *, mode_change=False):
     import shutil
     import native_goal_benchmark as native
     seen = []
@@ -100,6 +100,7 @@ def prepared(module, tmp_path, monkeypatch):
         assert list(allowed_paths) == ['main.py']
         seen.append(1)
         shutil.copytree(source, output)
+        if mode_change: (output / 'main.py').chmod(0o755)
         return output
     monkeypatch.setattr(native, 'initialize_worker_export_repository', lambda root, *, literal_snapshot: 'd' * 40)
     monkeypatch.setattr(native, 'create_worker_export', export)
@@ -164,6 +165,7 @@ def test_evaluator_uses_fresh_read_only_copy_and_evaluator_owned_tests(tmp_path,
 @pytest.mark.parametrize('defect,reason,status', [
     ('changed-source', 'candidate_changed', 'failed'),
     ('changed-copy', 'candidate_changed', 'failed'),
+    ('invalid-source', 'candidate_invalid', 'failed'),
     ('count', 'evaluator_cases_invalid', 'failed'),
     ('extra-duplicate', 'evaluator_cases_invalid', 'failed'),
     ('names', 'evaluator_cases_invalid', 'failed'),
@@ -205,6 +207,8 @@ def test_evaluator_preserves_non_pass_and_classifies_environment_failures(tmp_pa
         starts.append(1)
         if defect == 'changed-source': worker.joinpath('main.py').write_text('changed')
         if defect == 'changed-copy': copies[-1].joinpath('main.py').write_text('changed')
+        if defect == 'invalid-source':
+            worker.joinpath('main.py').unlink(); worker.joinpath('main.py').symlink_to('missing')
         cases = [{'name': 'repair', 'passed': True}, {'name': 'preserve', 'passed': True}]
         if defect == 'count': cases.pop()
         if defect == 'extra-duplicate': cases.append(cases[0].copy())
@@ -218,6 +222,9 @@ def test_evaluator_preserves_non_pass_and_classifies_environment_failures(tmp_pa
     monkeypatch.setattr(module.fixtures, '_run_bounded', bounded)
     result = module.evaluate_assignment(bundle, assignment, assignment['worker_export'], worker, envelope)
     assert (result['status'], result['reason']) == (status, reason)
+    if defect in ('changed-source', 'changed-copy', 'invalid-source'):
+        assert result['evaluations'][0]['status'] == 'passed' and result['evaluations'][0]['reason'] is None
+        assert len(result['evaluations'][0]['cases']) == len(result['cases']) == 2
     if defect == 'count':
         assert result['case_count'] == 1 and result['cases'][0]['name'] == 'repair'
     if defect in ('create', 'os-error', 'start', 'start-created'):
@@ -367,7 +374,7 @@ def test_executable_bit_changes_are_bound_to_candidate(tmp_path, monkeypatch, ph
         else:
             def evaluate(task, fresh, evaluator, timeout):
                 (fresh / 'main.py').chmod(0o755)
-                return 'passed', None, []
+                return 'passed', None, [], False
             monkeypatch.setattr(module, '_container_evaluate', evaluate)
         result = module.evaluate_assignment(bundle, assignment, assignment['worker_export'], worker, envelope)
         assert result['reason'] in ('candidate_changed', 'candidate_invalid')
@@ -518,3 +525,77 @@ def test_bundle_rejects_git_directory_case_aliases(tmp_path, component):
     path = archive(tmp_path / 'alias.tar', {component + '/config': b'neutral'})
     with pytest.raises(ValueError, match='bundle_path_invalid'):
         module.bundle_digest(path)
+
+
+@pytest.mark.parametrize('outcome', ['contract', 'passed', 'invalid', 'infra'])
+@pytest.mark.parametrize('cleanup', ['timeout', 'overflow', 'incomplete', 'exit', 'os-error'])
+def test_cleanup_failure_preserves_observation_and_only_retries_infrastructure(tmp_path, monkeypatch, outcome, cleanup):
+    module = load_module()
+    bundle, assignment, worker = prepared(module, tmp_path, monkeypatch)
+    envelope = module.freeze_candidate(bundle, assignment, worker)
+    creates = []
+    cases = [{'name': 'repair', 'passed': outcome != 'contract'}, {'name': 'preserve', 'passed': True}]
+    def bounded(command, **kwargs):
+        operation = command[1]
+        if operation == 'create': creates.append(1)
+        if operation == 'inspect':
+            if outcome == 'infra' and len(creates) == 1: return 125, b'', False, False, False
+            return 0, b'{"status":"exited","error":"","exit_code":0}', False, False, False
+        if operation == 'start':
+            output = b'{' if outcome == 'invalid' else json.dumps(cases if len(creates) == 1 else [c | {'passed': True} for c in cases]).encode()
+            return 0, output, False, False, False
+        if operation == 'rm' and len(creates) == 1:
+            if cleanup == 'os-error': raise OSError('neutral cleanup failure')
+            return (1 if cleanup == 'exit' else 0, b'', cleanup == 'timeout', cleanup == 'overflow', cleanup == 'incomplete')
+        return 0, b'', False, False, False
+    monkeypatch.setattr(module.fixtures, '_run_bounded', bounded)
+    result = module.evaluate_assignment(bundle, assignment, assignment['worker_export'], worker, envelope)
+    original = result['evaluations'][0]
+    assert original['cleanup_failed'] is True
+    if outcome == 'infra':
+        assert len(creates) == 2 and len(result['evaluations']) == 2 and result['status'] == 'passed'
+        assert original['reason'] == 'evaluator_process_unavailable' and original['cases'] == []
+    else:
+        status, reason = ('passed', None) if outcome == 'passed' else ('failed', 'evaluator_output_invalid' if outcome == 'invalid' else 'contract_mismatch')
+        assert len(creates) == 1 and result['cleanup_failed'] is True
+        assert (result['status'], result['reason'], result['cases']) == (status, reason, [] if outcome == 'invalid' else cases)
+        assert (original['status'], original['reason'], original['cases']) == (result['status'], result['reason'], result['cases'])
+
+
+def test_export_executable_mode_mismatch_has_fixed_reason(tmp_path, monkeypatch):
+    module = load_module()
+    with pytest.raises(ValueError, match='^assignment_worker_mismatch$'):
+        prepared(module, tmp_path, monkeypatch, mode_change=True)
+
+
+@pytest.mark.parametrize('digest', ['sha256:' + 'a' * 64, 'a' * 64, 'sha256-tree-exec-v1:' + 'A' * 64,
+                                  'sha256-tree-exec-v1:' + 'a' * 63, 'sha256-tree-exec-v1:' + 'a' * 65])
+def test_candidate_digest_format_has_fixed_reason(tmp_path, monkeypatch, digest):
+    module = load_module()
+    bundle, assignment, worker = prepared(module, tmp_path, monkeypatch)
+    envelope = module.freeze_candidate(bundle, assignment, worker) | {'candidate_digest': digest}
+    with pytest.raises(ValueError, match='^candidate_envelope_mismatch$'):
+        module.validate_binding(bundle, assignment, envelope, assignment['worker_export'])
+    monkeypatch.setattr(module.fixtures, '_run_bounded', lambda *a, **k: pytest.fail('must reject before spawn'))
+    assert module.evaluate_assignment(bundle, assignment, assignment['worker_export'], worker, envelope)['reason'] == 'candidate_envelope_mismatch'
+
+
+@pytest.mark.parametrize('passed', [False, True])
+def test_temporary_cleanup_failure_preserves_verified_result(tmp_path, monkeypatch, passed):
+    module = load_module()
+    bundle, assignment, worker = prepared(module, tmp_path, monkeypatch)
+    envelope = module.freeze_candidate(bundle, assignment, worker)
+    original = module.tempfile.TemporaryDirectory
+    class Directory:
+        def __init__(self, **kwargs): self.inner = original(**kwargs)
+        def __enter__(self): return self.inner.__enter__()
+        def __exit__(self, *args):
+            self.inner.__exit__(*args)
+            raise OSError('neutral temporary cleanup failure')
+    monkeypatch.setattr(module.tempfile, 'TemporaryDirectory', Directory)
+    cases = [{'name': 'repair', 'passed': passed}, {'name': 'preserve', 'passed': True}]
+    status, reason = ('passed', None) if passed else ('failed', 'contract_mismatch')
+    monkeypatch.setattr(module, '_container_evaluate', lambda *_: (status, reason, cases, False))
+    result = module.evaluate_assignment(bundle, assignment, assignment['worker_export'], worker, envelope)
+    assert (result['status'], result['reason'], result['cases']) == (status, reason, cases)
+    assert result['cleanup_failed'] is True and result['evaluations'][0]['reason'] == reason
