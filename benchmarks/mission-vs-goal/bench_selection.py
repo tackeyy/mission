@@ -72,10 +72,14 @@ def ranked(seed, purpose, ids):
     return sorted(ids, key=lambda value: (key(seed, purpose, value), value.encode()))
 
 
-def assignments(seed, stage, primary, units, control, arms, repeats):
-    if (len(set(arms)) != len(arms) or not {'native_goal', 'mission_verified_complex'} <= set(arms)
-            or not set(arms) <= set(ARMS) or (stage == 'pilot' and set(arms) != set(ARMS))):
+def validate_arms(arms):
+    if (type(arms) not in (list, tuple) or not arms or any(type(a) is not str for a in arms)
+            or len(set(arms)) != len(arms) or not set(arms) <= set(ARMS)):
         raise ValueError('arms_invalid')
+
+
+def assignments(seed, stage, primary, units, control, arms, repeats):
+    validate_arms(arms)
     rows = []
     for group, selected in (('worker', units), ('control', control)):
         for unit in selected:
@@ -261,27 +265,6 @@ def generate_pool(snapshot, config, scope, observations, *, commit_a):
                       'lineage': pairs, 'lineage_digest': digest(canonical(pairs))})
 
 
-def collect_det(snapshot, config, scope, number, replay):
-    """Capture six I2c evaluations per task passing Lic, Con and Cx.
-
-    This adapter has evaluation side effects; generate_pool itself is pure.
-    The caller records these observations in B before requesting any seed.
-    """
-    observations = {}
-    for task in snapshot:
-        early = criteria(task, config, scope, None)[:3]
-        if all(accepted for _, accepted, _ in early):
-            observations[task['task_id']] = {variant: [replay(number, task['task_id'], variant) for _ in range(3)]
-                                            for variant in ('starter', 'reference')}
-    return observations
-
-
-def audit_tasks(seed, manifest, selected):
-    result = set(selected)
-    for accepted in (True, False):
-        ids = [t['task_id'] for t in manifest['tasks'] if all(t['criteria'].get(c, {}).get('accepted') is True for c in ('Lic', 'Con', 'Cx')) and t['accepted'] is accepted]
-        result.update(ranked(seed, 'det-audit', ids)[:59])
-    return sorted(result, key=lambda v: v.encode())
 
 
 def acquire_history(provider):
@@ -341,12 +324,14 @@ def enumerate_attempts(history, proofs):
         attempt['invalid_reason'] = None
         try:
             a = json.loads(attempt['stages']['A']['raw'], object_pairs_hook=public._unique_object)
+            if type(a) is dict: attempt['a'] = a  # retain readable round even when V1 fails
             if type(a) is not dict or not {'number', 'round', 'margin', 'chain', 'snapshot_digest', 'scope_digest', 'generator_sha',
                     'prior_attempts_digest', 'licenses', 'store_contents', 'cx_files', 'cx_checks', 'cx_lines',
-                    'con_length', 'con_lines', 'g3_percent', 'det_mode', 'packages'} <= a.keys() or type(a['number']) is not int or a['number'] != attempt['number']:
+                    'con_length', 'con_lines', 'g3_percent', 'det_mode', 'packages', 'pilot_arms', 'confirmatory_arms'} <= a.keys() or type(a['number']) is not int or a['number'] != attempt['number']:
                 raise ValueError('V1_invalid_A')
             if type(a['chain']) is not dict or not {'hash', 'public_key', 'genesis', 'period'} <= a['chain'].keys(): raise ValueError('V1_invalid_A')
-            attempt['a'] = a
+            validate_arms(a['pilot_arms']); validate_arms(a['confirmatory_arms'])
+            if attempt_round(attempt) is None: raise ValueError('V1_invalid_A')
         except (KeyError, TypeError, ValueError):
             attempt['invalid_reason'] = 'V1_invalid_A'; continue
         if not {'A', 'P', 'B'} <= attempt['stages'].keys():
@@ -392,16 +377,25 @@ def pool_identity(manifest):
 class UnknownAttempt(ValueError): pass
 
 
+def attempt_round(attempt):
+    value = attempt.get('a', {}).get('round')
+    return value if type(value) is int and value > 0 else None
+
+
 def canonical_attempt(attempts, materials):
+    rounds = [attempt_round(a) for a in attempts if attempt_round(a) is not None]
+    if any(later <= earlier for earlier, later in zip(rounds, rounds[1:])):
+        raise ValueError('no_canonical_attempt: attempt_chain_invalid')
     valid = [a for a in attempts if not a.get('invalid_reason')]
     for i, a in enumerate(valid):
         for p in valid[:i]:
             limit = max(p['stages']['W']['merged_at'], p['stages']['W']['time']) if withdrawn(p) else cutoff(p)
             times = [a['stages']['A'][k] for k in ('merged_at', 'time')]
-            if a['a']['round'] <= p['a']['round'] or (all(type(t) is int for t in times) and min(times) <= limit):
+            if all(type(t) is int for t in times) and min(times) <= limit:
                 raise ValueError('no_canonical_attempt: attempt_chain_invalid')
     for index, attempt in enumerate(attempts):
         try:
+            if attempt_round(attempt) is None: raise UnknownAttempt('attempt_round_unknown')
             if attempt.get('invalid_reason'): continue
             a, stages = attempt['a'], attempt['stages']
             previous = [p for p in attempts[:index] if not p.get('invalid_reason')]
@@ -433,83 +427,3 @@ def canonical_attempt(attempts, materials):
             if isinstance(exc, UnknownAttempt): raise
             continue
     raise ValueError('no_canonical_attempt')
-
-
-class BundleReplay:
-    """Only evaluation route: jobs bind a frozen I2c bundle and candidate tree.
-
-    Jobs for reference contain the reference-applied tree prepared by the
-    benchmark adapter. A real call can run containers; invoke only with approval.
-    """
-    def __init__(self, jobs):
-        self.jobs = jobs
-
-    def __call__(self, number, task_id, variant):
-        bundle, assignment, candidate = self.jobs[number, task_id, variant]
-        envelope = public.freeze_candidate(bundle, assignment, candidate)
-        return public.evaluate_assignment(bundle, assignment, assignment['worker_export'], candidate, envelope)
-
-
-def verify_cohort(history, materials, used_number, beacon, records, proofs, replay):
-    result = {'status': 'invalid_cohort', 'canonical_attempt': None, 'checks': {'1': False, '2': False, '3': False}}
-    try:
-        if type(used_number) is not int: raise ValueError('attempt_number_invalid')
-        attempts = enumerate_attempts(history, proofs)
-        attempt = canonical_attempt(attempts, materials)
-        result['canonical_attempt'] = attempt['number']
-        if used_number != attempt['number']: raise ValueError('noncanonical_attempt_used')
-        a, stages = attempt['a'], attempt['stages']
-        seed = proofs.verify_beacon(a['chain'], a['round'], beacon)
-        if type(seed) is not bytes or len(seed) != 32 or seed.hex() != beacon['randomness']:
-            raise ValueError('beacon_randomness_mismatch')
-        manifest = json.loads(stages['B']['raw'])
-        selection = json.loads(stages['C']['raw'])
-        if not before(stages['C'] | {'time': stages['C']['merged_at']}, stages['D']['merged_at']): raise ValueError('selection_timestamp_invalid')
-        if stages['C']['merged_at'] < cutoff(attempt) + a['margin']: raise ValueError('selection_before_beacon')
-        if canonical(select(seed, manifest, ARMS)) != stages['C']['raw']:
-            raise ValueError('selection_mismatch')
-        d = json.loads(stages['D']['raw'])
-        minimum = materials[used_number]['minimum_k']
-        if type(minimum) is not int or minimum < 1 or d['K'] < minimum: raise ValueError('K_below_power_plan')
-        confirmation = confirm(seed, selection, stages['C']['sha'], d['K'], d['arms'])
-        if canonical(confirmation) != stages['D']['raw']: raise ValueError('confirmation_mismatch')
-        primary = [selection['primary'][u] for u in selection['ranking'][:d['K']]]
-        result['checks']['1'] = True
-        result['lineage_digest'] = manifest['lineage_digest']
-        declared = [line.removeprefix(b'lineage_digest: ').decode() for line in stages['P']['raw'].splitlines() if line.startswith(b'lineage_digest: ')]
-        result['checks']['2'] = (digest(canonical(manifest['lineage'])) == manifest['lineage_digest']
-                                 and declared == [manifest['lineage_digest']])
-        if not result['checks']['2']: raise ValueError('lineage_digest_mismatch')
-        pilot_units = set(selection['pilot']); confirm_units = set(selection['ranking'][:d['K']])
-        confirmation_records = [r for r in records if r['unit_id'] in confirm_units]
-        if not confirmation_records: raise ValueError('confirmation_records_missing')
-        if any(type(r['started_at']) is not int or r['started_at'] < 0 for r in records):
-            raise ValueError('worker_time_invalid')
-        first = min(r['started_at'] for r in confirmation_records)
-        if not before(stages['D'], first): raise ValueError('confirmation_timestamp_invalid')
-        for r in records:
-            if r['unit_id'] not in pilot_units | confirm_units: raise ValueError('unselected_worker_run')
-            if r['task_id'] != selection['primary'][r['unit_id']]: raise ValueError('unselected_task_run')
-            arms = d['arms'] if r['unit_id'] in confirm_units else selection['arms']
-            if r['arm'] not in arms: raise ValueError('unplanned_arm_run')
-            if r['started_at'] <= stages['C']['merged_at']: raise ValueError('worker_before_selection')
-            if r['package'] != a['packages'][r['arm']]: raise ValueError('package_mismatch')
-        chosen = primary + [selection['primary'][u] for u in selection['pilot']]
-        mode = a['det_mode']
-        if mode not in ('all', 'audit'): raise ValueError('det_mode_invalid')
-        selected = (audit_tasks(seed, manifest, chosen) if mode == 'audit'
-                    else [t['task_id'] for t in materials[used_number]['snapshot']
-                          if all(v for _, v, _ in criteria(t, a, materials[used_number]['scope'], None)[:3])])
-        tasks = {t['task_id']: t for t in materials[used_number]['snapshot']}
-        rows = {r['task_id']: r for r in manifest['tasks']}
-        for task_id in selected:
-            for variant in ('starter', 'reference'):
-                observed = case_values(replay(used_number, task_id, variant), tasks[task_id]['checks'])
-                if any(observed != case_values(r, tasks[task_id]['checks']) for r in rows[task_id]['det'][variant]):
-                    raise ValueError('det_replay_mismatch')
-        return result | {'status': 'valid', 'checks': {'1': True, '2': True, '3': True},
-                         'reason': None, 'det_replayed': selected,
-                         'evidence_digest': digest(canonical({'attempt': used_number, 'manifest': digest(stages['B']['raw']),
-                             'selection': digest(stages['C']['raw']), 'confirmation': digest(stages['D']['raw'])}))}
-    except (KeyError, TypeError, ValueError, UnicodeError, OverflowError, OSError) as exc:
-        return result | {'reason': str(exc)}

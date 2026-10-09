@@ -1,14 +1,30 @@
 """Offline preregistration contracts; no model, network, or container execution."""
+
+
 import copy
+
+
 import hashlib
+
+
 import importlib.util
+
+
 import json
+
+
 from pathlib import Path
+
+
 import sys
+
 
 import pytest
 
+
 BENCH = Path(__file__).resolve().parents[3] / 'benchmarks/mission-vs-goal'
+
+
 sys.path.insert(0, str(BENCH))
 
 
@@ -20,11 +36,15 @@ def m():
     return module
 
 
-# Fixture-only RSA PKCS#1 v1.5/SHA-256. Two known Mersenne primes,
-# deterministic key, real signature verification, no subprocess/dependency.
 P, Q, E = 2**521 - 1, 2**607 - 1, 65537
+
+
 N = P * Q
+
+
 D = pow(E, -1, (P - 1) * (Q - 1))
+
+
 SIZE = (N.bit_length() + 7) // 8
 
 
@@ -97,25 +117,27 @@ def pool(m, data):
     return m.generate_pool(*data, commit_a='a' * 40)
 
 
-def fixture(m, count=16):
+def fixture(m, count=16, *, pilot_arms=None, confirmatory_arms=None):
     data = inputs(m, count)
     snapshot, config, scope, observations = data
     a = config | {'number': 1, 'round': 100, 'margin': 100,
                   'chain': {'hash': 'neutral-chain', 'public_key': str(N), 'genesis': 10, 'period': 10},
                   'packages': {arm: {'sha': str(i) * 40, 'digest': m.digest(arm.encode())} for i, arm in enumerate(m.ARMS, 1)},
-                  'prior_attempts_digest': m.digest(m.canonical([]))}
+                  'prior_attempts_digest': m.digest(m.canonical([])),
+                  'pilot_arms': list(m.ARMS if pilot_arms is None else pilot_arms),
+                  'confirmatory_arms': list(m.ARMS if confirmatory_arms is None else confirmatory_arms)}
+    history = {'commits': [], 'prs': [], 'current_files': {}, 'reachable': [], 'total_prs': 0,
+               'protection': {'force_push': False, 'deletion': False}}
+    put(m, history, 1, 'A', 'a' * 40, m.canonical(a), 100)
+    b = pool(m, data)  # collect the pool only after A; its lineage cannot be known in P
+    put(m, history, 1, 'B', 'b' * 40, b, 200)
     signature = sign(a['chain']['hash'].encode() + a['round'].to_bytes(8, 'big'))
     beacon = {'signature': signature, 'randomness': hashlib.sha256(bytes.fromhex(signature)).hexdigest()}
     seed = bytes.fromhex(beacon['randomness'])
-    b = pool(m, data)
-    a['lineage_digest'] = json.loads(b)['lineage_digest']
-    c = m.canonical(m.select(seed, json.loads(b), m.ARMS))
-    d = m.canonical(m.confirm(seed, json.loads(c), 'c' * 40, 4, m.ARMS))
-    history = {'commits': [], 'prs': [], 'current_files': {}, 'reachable': [], 'total_prs': 0,
-               'protection': {'force_push': False, 'deletion': False}}
-    for stage, sha, content, when in [('A', 'a' * 40, m.canonical(a), 100), ('B', 'b' * 40, b, 200),
-                                      ('C', 'c' * 40, c, 1001), ('D', 'd' * 40, d, 1100)]:
-        put(m, history, 1, stage, sha, content, when)
+    c = m.canonical(m.select(seed, json.loads(b), a['pilot_arms']))
+    d = m.canonical(m.confirm(seed, json.loads(c), 'c' * 40, 4, a['confirmatory_arms']))
+    put(m, history, 1, 'C', 'c' * 40, c, 1001)
+    put(m, history, 1, 'D', 'd' * 40, d, 1100)
     records = [{'task_id': r['task_id'], 'unit_id': r['unit_id'], 'arm': r['arm'],
                 'package': a['packages'][r['arm']], 'started_at': 1200 + i}
                for i, r in enumerate(json.loads(d)['assignments'])]
@@ -132,9 +154,7 @@ def put(m, history, number, stage, sha, content, when):
     commit = {'sha': sha, 'files': {path: content}}
     if stage == 'A':
         document = f'{m.ATTEMPT_PATH}/{number:04}/preregistration.md'
-        try: lineage = json.loads(content).get('lineage_digest', '')
-        except (ValueError, AttributeError): lineage = ''
-        commit['files'][document] = b'# Frozen registration\nattempt_digest: ' + m.digest(content).encode() + b'\nlineage_digest: ' + lineage.encode()
+        commit['files'][document] = b'# Frozen registration\nattempt_digest: ' + m.digest(content).encode() + b'\n'
     history['commits'].append(commit)
     proofs = {p: {'time': when + 1, 'signature': sign((m.digest(raw) + ':' + str(when + 1)).encode())}
               for p, raw in commit['files'].items()}
@@ -142,13 +162,6 @@ def put(m, history, number, stage, sha, content, when):
     history['reachable'].append(sha)
     history['current_files'].update(commit['files'])
     history['total_prs'] += 1
-
-
-def check(m, f, used=1, rerun=None):
-    h, materials, beacon, records = f
-    if rerun is None:
-        rerun = lambda number, task_id, variant: materials[number]['observations'][task_id][variant][0]
-    return m.verify_cohort(h, materials, used, beacon, records, Proofs(), rerun)
 
 
 def update_file(m, history, stage, value, number=1):
@@ -164,7 +177,7 @@ def update_file(m, history, stage, value, number=1):
             pr['proofs'][path]['signature'] = sign((m.digest(raw) + ':' + str(time)).encode())
     if stage == 'A':
         document = f'{m.ATTEMPT_PATH}/{number:04}/preregistration.md'
-        document_raw = b'# Frozen registration\nattempt_digest: ' + m.digest(raw).encode() + b'\nlineage_digest: ' + json.loads(raw).get('lineage_digest', '').encode()
+        document_raw = b'# Frozen registration\nattempt_digest: ' + m.digest(raw).encode() + b'\n'
         for c in history['commits'] + history['prs']:
             if document in c['files']: c['files'][document] = document_raw
         history['current_files'][document] = document_raw
@@ -172,13 +185,6 @@ def update_file(m, history, stage, value, number=1):
             if document in pr['proofs']:
                 time = pr['proofs'][document]['time']
                 pr['proofs'][document]['signature'] = sign((m.digest(document_raw) + ':' + str(time)).encode())
-
-
-def test_complete_recalculation_produces_checks_one_to_three(m):
-    result = check(m, fixture(m))
-    assert result['status'] == 'valid' and result['canonical_attempt'] == 1
-    assert result['checks'] == {'1': True, '2': True, '3': True}
-    assert result['lineage_digest'].startswith('sha256:')
 
 
 @pytest.mark.parametrize('stage,field,value', [(s, f, v) for s in ('A', 'B')
@@ -191,7 +197,7 @@ def test_missing_or_late_either_timestamp_invalidates_attempt(m, stage, field, v
     elif field == 'proof_time':
         pr['proofs'][path] = {'time': value, 'signature': sign((m.digest(pr['files'][path]) + ':' + str(value)).encode())}
     else: pr[field] = value
-    assert check(m, f)['status'] == 'invalid_cohort'
+    with pytest.raises(ValueError): canonical_trial(m, f)
 
 
 @pytest.mark.parametrize('defect', ['unreachable', 'changed-file', 'direct-commit', 'missing-commit',
@@ -214,9 +220,8 @@ def test_history_requires_complete_append_only_main_pr_bijection(m, defect):
     if defect == 'wrong-B-reference':
         b = json.loads(h['prs'][1]['files'][next(iter(h['prs'][1]['files']))]); b['commit_a'] = 'wrong'
         update_file(m, h, 'B', b)
-    result = check(m, f)
-    assert result['status'] == 'invalid_cohort'
-    if defect in ('direct-commit', 'outside-path'): assert result['reason'] == ('history_incomplete' if defect == 'direct-commit' else 'history_path_invalid')
+    reason = 'history_incomplete' if defect == 'direct-commit' else 'history_path_invalid' if defect == 'outside-path' else None
+    with pytest.raises(ValueError, match=reason): canonical_trial(m, f)
 
 
 def second(m, f, *, withdrawal=None, a_time=1300, round_number=200, new_pool=False):
@@ -233,9 +238,9 @@ def second(m, f, *, withdrawal=None, a_time=1300, round_number=200, new_pool=Fal
         material['snapshot'][-1] = task(999)
         material['observations']['task-999'] = material['observations'].pop(old_id)
         a['snapshot_digest'] = m.snapshot_digest(material['snapshot'])
-    b = m.generate_pool(material['snapshot'], a, material['scope'], material['observations'], commit_a='1' * 40)
-    a['lineage_digest'] = material['lineage_digest'] = json.loads(b)['lineage_digest']
     put(m, h, 2, 'A', '1' * 40, m.canonical(a), a_time)
+    b = m.generate_pool(material['snapshot'], a, material['scope'], material['observations'], commit_a='1' * 40)
+    material['lineage_digest'] = json.loads(b)['lineage_digest']
     put(m, h, 2, 'B', '2' * 40, b, a_time + 30)
     return m.enumerate_attempts(h, Proofs())
 
@@ -243,7 +248,6 @@ def second(m, f, *, withdrawal=None, a_time=1300, round_number=200, new_pool=Fal
 def test_earliest_valid_attempt_wins_even_when_two_rounds_are_valid(m):
     f = fixture(m); attempts = second(m, f)
     assert m.canonical_attempt(attempts, f[1])['number'] == 1
-    assert check(m, f, used=2)['status'] == 'invalid_cohort'
 
 
 @pytest.mark.parametrize('defect', ['round-reuse', 'round-decrease', 'overlap', 'prior-digest', 'withdrawal-order'])
@@ -269,7 +273,7 @@ def test_withdrawal_requires_both_times_before_cutoff_and_a_merged_pr(m, when, m
         f[0]['commits'].pop(); f[0]['reachable'].pop()
         f[0]['current_files'].pop(next(p for p in f[0]['current_files'] if p.endswith('withdrawal.json')))
     # 899 merged + 900 attested is already too late (strict inequality).
-    assert check(m, f)['status'] == 'valid'
+    assert canonical_trial(m, f)['number'] == 1
 
 
 def test_valid_withdrawal_allows_next_attempt_only_after_both_times(m):
@@ -292,55 +296,7 @@ def test_manifest_regeneration_detects_every_form_of_pool_edit(m, defect):
     else: update_file(m, h, 'B', b)
     with pytest.raises(ValueError, match='no_canonical_attempt|det_observations_missing'):
         m.canonical_attempt(m.enumerate_attempts(h, Proofs()), f[1])
-    assert check(m, f)['status'] == 'invalid_cohort'
-
-
-def test_det_rerun_mismatch_never_promotes_a_later_attempt(m):
-    f = fixture(m); second(m, f)
-    result = check(m, f, rerun=lambda *args: observed(True))
-    assert result['status'] == 'invalid_cohort' and result['canonical_attempt'] == 1
-    assert result['reason'] == 'det_replay_mismatch'
-
-
-def test_audit_contains_all_selected_and_59_per_det_stratum_by_key(m):
-    data = inputs(m, 150)
-    for t in data[0][75:]: data[3][t['task_id']]['starter'] = [observed(True)] * 3
-    manifest = json.loads(pool(m, data)); seed = b'seed'
-    chosen = [next(t['task_id'] for t in manifest['tasks'] if t['task_id'] not in m.audit_tasks(seed, manifest, []))]
-    ids = m.audit_tasks(seed, manifest, chosen)
-    expected = set(chosen)
-    for rows in (manifest['tasks'][:75], manifest['tasks'][75:]):
-        expected.update(t['task_id'] for t in sorted(rows, key=lambda t: (m.key(seed, 'det-audit', t['task_id']), t['task_id'].encode()))[:59])
-    assert set(ids) == expected
-    assert len(m.audit_tasks(seed, json.loads(pool(m, inputs(m, 16))), [])) == 16
-
-
-@pytest.mark.parametrize('defect', ['signature', 'randomness', 'package', 'selection', 'D-recalculation',
-    'D-merged-time', 'D-proof-time', 'pre-C-worker', 'pre-D-worker', 'duplicate-assignment'])
-def test_postseed_failure_invalidates_cohort_without_fallback(m, defect):
-    f = fixture(m); h, _, beacon, records = f
-    if defect == 'signature': beacon['signature'] = '00' * SIZE
-    if defect == 'randomness': beacon['randomness'] = '00' * 32
-    if defect == 'package': records[0]['package']['digest'] = 'sha256:' + '0' * 64
-    if defect in ('selection', 'D-recalculation', 'duplicate-assignment'):
-        stage, index = ('C', 2) if defect == 'selection' else ('D', 3)
-        value = json.loads(h['prs'][index]['files'][next(iter(h['prs'][index]['files']))])
-        if defect == 'selection': value['pilot'].reverse()
-        elif defect == 'duplicate-assignment': value['assignments'][1]['assignment_id'] = value['assignments'][0]['assignment_id']
-        else: value['control'].reverse()
-        update_file(m, h, stage, value)
-    if defect == 'D-merged-time': h['prs'][3]['merged_at'] = 1200
-    if defect == 'D-proof-time':
-        path = next(iter(h['prs'][3]['files'])); h['prs'][3]['proofs'][path] = {
-            'time': 1200, 'signature': sign((m.digest(h['prs'][3]['files'][path]) + ':1200').encode())}
-    if defect == 'pre-C-worker':
-        pilot = json.loads(h['prs'][2]['files'][next(iter(h['prs'][2]['files']))])['assignments'][0]
-        records.append({k: pilot[k] for k in ('task_id', 'unit_id', 'arm')} | {'package': records[0]['package'], 'started_at': 1000})
-        records[-1]['package'] = json.loads(h['prs'][0]['files'][next(iter(h['prs'][0]['files']))])['packages'][pilot['arm']]
-    if defect == 'pre-D-worker': records[0]['started_at'] = 1099
-    result = check(m, f)
-    assert result['status'] == 'invalid_cohort'
-    if defect == 'pre-C-worker': assert result['reason'] == 'worker_before_selection'
+    with pytest.raises(ValueError): canonical_trial(m, f)
 
 
 def test_key_length_prefix_and_ties_use_utf8_identifiers(m, monkeypatch):
@@ -412,55 +368,9 @@ def test_pool_is_canonical_complete_and_snapshot_scope_bound(m):
     with pytest.raises(ValueError, match='scope_digest_mismatch'): pool(m, data)
 
 
-def test_det_transport_delegates_to_i2c_with_bound_candidate(m, monkeypatch, tmp_path):
-    import public_benchmark as public
-    calls = []
-    monkeypatch.setattr(public, 'freeze_candidate', lambda b, a, c: {'candidate_digest': 'frozen'})
-    def evaluate(bundle, assignment, worker, candidate, envelope):
-        calls.append((bundle, assignment, worker, candidate, envelope)); return observed()
-    monkeypatch.setattr(public, 'evaluate_assignment', evaluate)
-    jobs = {(1, 'task-a', 'starter'): ('bundle', {'worker_export': 'worker'}, tmp_path)}
-    assert m.BundleReplay(jobs)(1, 'task-a', 'starter') == observed()
-    assert calls == [('bundle', {'worker_export': 'worker'}, 'worker', tmp_path, {'candidate_digest': 'frozen'})]
-
-
-@pytest.mark.parametrize('stage', ['A', 'B', 'D'])
-def test_timestamp_proof_is_bound_to_exact_file_digest(m, stage):
-    f = fixture(m); pr = f[0]['prs'][{'A': 0, 'B': 1, 'D': 3}[stage]]
-    proof = pr['proofs'][next(iter(pr['files']))]
-    proof['signature'] = sign(('sha256:' + '0' * 64 + ':' + str(proof['time'])).encode())
-    assert check(m, f)['status'] == 'invalid_cohort'
-
-
-@pytest.mark.parametrize('defect', ['late-A-proof', 'round-reuse', 'pool-reuse', 'lineage-binding',
-                                   'C-before-beacon', 'generator-binding', 'minimum-K'])
-def test_frozen_inputs_and_preregistration_evidence_cannot_be_replaced(m, defect):
-    f = fixture(m)
-    if defect in ('late-A-proof', 'round-reuse', 'pool-reuse'):
-        attempts = second(m, f, withdrawal=600, a_time=700)
-        if defect == 'late-A-proof': attempts[1]['stages']['A']['time'] = 600
-        if defect == 'round-reuse': attempts[1]['a']['round'] = 100
-        if defect == 'pool-reuse':
-            # Same withdrawn pool despite a fresh round is not a fresh trial.
-            attempts[1]['a']['snapshot_digest'] = attempts[0]['a']['snapshot_digest']
-            f[1][2] = copy.deepcopy(f[1][1])
-            a = attempts[1]['a']
-            attempts[1]['stages']['A']['raw'] = m.canonical(a)
-            attempts[1]['stages']['P']['raw'] = b'# Frozen registration\nattempt_digest: ' + m.digest(m.canonical(a)).encode()
-            attempts[1]['stages']['B']['raw'] = m.generate_pool(f[1][1]['snapshot'], a, f[1][1]['scope'],
-                f[1][1]['observations'], commit_a=attempts[1]['stages']['A']['sha'])
-        with pytest.raises(ValueError, match='no_canonical_attempt'): m.canonical_attempt(attempts, f[1])
-    else:
-        if defect == 'lineage-binding': update_file(m, f[0], 'P', next(v for p, v in f[0]['current_files'].items() if p.endswith('preregistration.md')).replace(b'lineage_digest: sha256:', b'lineage_digest: wrong:'))
-        if defect == 'C-before-beacon': f[0]['prs'][2]['merged_at'] = 999
-        if defect == 'generator-binding': f[1][1]['generator_sha'] = '0' * 40
-        if defect == 'minimum-K': f[1][1]['minimum_k'] = 5
-        assert check(m, f)['status'] == 'invalid_cohort'
-
-
 def test_valid_withdrawal_without_next_attempt_invalidates_cohort(m):
     f = fixture(m); put(m, f[0], 1, 'W', 'e' * 40, m.canonical({'reason': 'package_change'}), 600)
-    assert check(m, f)['status'] == 'invalid_cohort'
+    with pytest.raises(ValueError): canonical_trial(m, f)
 
 
 def test_con_source_matches_require_three_contiguous_lines_in_one_source_file(m):
@@ -523,95 +433,6 @@ def test_canonical_json_uses_utf16_keys_and_normalized_snapshot_tar(m):
     assert m.snapshot_digest([{'a': 1, 'b': 2}]) == m.snapshot_digest([{'b': 2, 'a': 1}])
 
 
-def test_all_mode_replays_every_det_task_including_deterministic_rejections(m):
-    f = fixture(m, 18); material = f[1][1]
-    t = material['snapshot'][-1]
-    material['observations'][t['task_id']]['starter'] = [observed(True)] * 3
-    regenerate_committed(m, f)
-    calls = []
-    def replay(number, task_id, variant):
-        calls.append((task_id, variant)); return material['observations'][task_id][variant][0]
-    result = check(m, f, rerun=replay)
-    assert result['status'] == 'valid' and len(calls) == 36
-    assert (t['task_id'], 'starter') in calls
-
-
-def regenerate_committed(m, f):
-    h, materials, beacon, records = f
-    a = json.loads(h['prs'][0]['files'][next(iter(h['prs'][0]['files']))]); material = materials[1]
-    b = json.loads(m.generate_pool(material['snapshot'], a, material['scope'], material['observations'], commit_a='a' * 40))
-    a['lineage_digest'] = b['lineage_digest']; update_file(m, h, 'A', a)
-    c = m.select(bytes.fromhex(beacon['randomness']), b, m.ARMS)
-    d = m.confirm(bytes.fromhex(beacon['randomness']), c, 'c' * 40, 4, m.ARMS)
-    for stage, value in [('B', b), ('C', c), ('D', d)]: update_file(m, h, stage, value)
-    material['lineage_digest'] = b['lineage_digest']
-    records[:] = [{'task_id': r['task_id'], 'unit_id': r['unit_id'], 'arm': r['arm'],
-                  'package': a['packages'][r['arm']], 'started_at': 1200 + i} for i, r in enumerate(d['assignments'])]
-
-
-def test_audit_mode_replays_selected_and_stratified_tasks_only(m):
-    f = fixture(m, 130); h, materials, beacon, _ = f
-    a = json.loads(h['prs'][0]['files'][next(iter(h['prs'][0]['files']))]); a['det_mode'] = 'audit'
-    update_file(m, h, 'A', a)
-    calls = []
-    def replay(number, task_id, variant):
-        calls.append(task_id); return materials[1]['observations'][task_id][variant][0]
-    result = check(m, f, rerun=replay)
-    assert result['status'] == 'valid'
-    b = json.loads(h['prs'][1]['files'][next(iter(h['prs'][1]['files']))])
-    c = json.loads(h['prs'][2]['files'][next(iter(h['prs'][2]['files']))])
-    chosen = [c['primary'][u] for u in c['pilot'] + c['ranking'][:4]]
-    assert set(calls) == set(m.audit_tasks(bytes.fromhex(beacon['randomness']), b, chosen))
-    assert len(calls) < 260
-
-
-def test_collect_det_uses_i2c_provider_three_times_per_variant_after_early_filters(m):
-    data = inputs(m, 3); data[0][0]['benchmark_license'] = 'unknown'
-    data[1]['snapshot_digest'] = m.snapshot_digest(data[0]); calls = []
-    def replay(number, task_id, variant):
-        calls.append((number, task_id, variant)); return observed(variant == 'reference')
-    actual = m.collect_det(data[0], data[1], data[2], 1, replay)
-    assert set(actual) == {'task-001', 'task-002'} and len(calls) == 12
-    assert calls.count((1, 'task-001', 'starter')) == 3
-
-
-@pytest.mark.parametrize('defect', ['proof-error', 'replay-error', 'missing-document', 'document-binding',
-                                   'empty-records', 'unknown-unit', 'invalid-det-mode'])
-def test_unavailable_or_missing_evidence_fails_closed(m, defect):
-    f = fixture(m, 18 if defect == 'unknown-unit' else 16)
-    if defect == 'replay-error':
-        def replay(*args): raise OSError('unavailable evaluator')
-        assert check(m, f, rerun=replay)['status'] == 'invalid_cohort'; return
-    if defect == 'proof-error': f[0]['prs'][0]['proofs'][next(iter(f[0]['prs'][0]['files']))]['signature'] = 'not-hex'
-    if defect in ('missing-document', 'document-binding'):
-        path = next(p for p in f[0]['current_files'] if p.endswith('preregistration.md'))
-        if defect == 'missing-document':
-            for c in f[0]['prs'] + f[0]['commits']:
-                c['files'].pop(path, None)
-            f[0]['current_files'].pop(path)
-        else:
-            for c in f[0]['prs'] + f[0]['commits']:
-                if path in c['files']: c['files'][path] = b'different registration'
-            f[0]['current_files'][path] = b'different registration'
-    if defect == 'empty-records': f[3].clear()
-    if defect == 'unknown-unit':
-        c = json.loads(f[0]['prs'][2]['files'][next(iter(f[0]['prs'][2]['files']))]); f[3][0].update(unit_id=c['ranking'][4], task_id=c['primary'][c['ranking'][4]])
-    if defect == 'invalid-det-mode':
-        a = json.loads(f[0]['prs'][0]['files'][next(iter(f[0]['prs'][0]['files']))]); a['det_mode'] = 'none'
-        update_file(m, f[0], 'A', a)
-    result = check(m, f)
-    assert result['status'] == 'invalid_cohort'
-    if defect == 'unknown-unit': assert result['reason'] == 'unselected_worker_run'
-
-
-def test_beacon_signature_is_checked_even_when_randomness_matches_bad_signature(m):
-    f = fixture(m)
-    f[2]['signature'] = '00' * SIZE
-    f[2]['randomness'] = hashlib.sha256(bytes(SIZE)).hexdigest()
-    result = check(m, f)
-    assert result['reason'] == 'beacon_signature_invalid'
-
-
 @pytest.mark.parametrize('value', [0, -1, True, '3'])
 def test_invalid_frozen_thresholds_cannot_accept_tasks(m, value):
     data = inputs(m); data[1]['cx_lines'] = value
@@ -637,42 +458,13 @@ def test_provider_adapter_drains_pages_and_freezes_one_main_snapshot(m, defect):
             assert path == m.ATTEMPT_PATH; calls.append(cursor)
             index = 0 if cursor is None else int(cursor)
             return {'items': h['prs'][index:index + 2],
-                    'total': 4.0 if defect == 'invalid-total' else 5 if defect == 'total-changed' and index else 4,
+                    'total': 4.0 if defect == 'invalid-total' else 5 if defect == 'total-changed' and not index else 4,
                     'next': cursor if defect == 'repeat-cursor' and index else
                             None if index or defect == 'missing-page' else '2'}
     if defect:
-        with pytest.raises(ValueError, match='pagination_total_invalid' if defect == 'invalid-total' else 'main_moved' if defect == 'head-moved' else 'pagination_'): m.acquire_history(Provider())
+        with pytest.raises(ValueError, match='pagination_total_invalid' if defect == 'invalid-total' else 'main_moved' if defect == 'head-moved' else 'pagination_total_changed' if defect == 'total-changed' else 'pagination_'): m.acquire_history(Provider())
     else:
         assert m.acquire_history(Provider()) == h and calls == [None, '2']
-
-
-@pytest.mark.parametrize('defect', ['wrong-task', 'unplanned-arm', 'float-start', 'pool-reuse-new-snapshot', 'status-case-mismatch'])
-def test_declared_metadata_cannot_replace_execution_or_pool_identity(m, defect):
-    f = fixture(m)
-    if defect == 'pool-reuse-new-snapshot':
-        attempts = second(m, f, withdrawal=600, a_time=700)
-        material = copy.deepcopy(f[1][1]); material['snapshot'][0]['natural_request'] = True
-        # Change only reference text: snapshot digest changes but admitted task identities are the same.
-        material['snapshot'][0]['changes'][0]['added'][0] += ' harmless whitespace'
-        a = attempts[1]['a']; a['snapshot_digest'] = m.snapshot_digest(material['snapshot'])
-        a['prior_attempts_digest'] = m.prior_digest(attempts[:1], before=700)
-        attempts[1]['stages']['A']['raw'] = m.canonical(a)
-        attempts[1]['stages']['P']['raw'] = b'# Frozen registration\nattempt_digest: ' + m.digest(m.canonical(a)).encode()
-        attempts[1]['stages']['B']['raw'] = m.generate_pool(material['snapshot'], a, material['scope'], material['observations'], commit_a='1' * 40)
-        f[1][2] = material
-        with pytest.raises(ValueError, match='no_canonical_attempt'): m.canonical_attempt(attempts, f[1])
-        return
-    if defect == 'status-case-mismatch':
-        result = observed(True); result['status'] = 'failed'; result['reason'] = 'contract_mismatch'
-        with pytest.raises(ValueError, match='det_cases_invalid'): m.case_values(result, task(0)['checks'])
-        return
-    if defect == 'wrong-task': f[3][0]['task_id'] = 'unselected'
-    if defect == 'unplanned-arm':
-        f[3][0]['arm'] = 'other'; a = json.loads(f[0]['prs'][0]['files'][next(iter(f[0]['prs'][0]['files']))]); a['packages']['other'] = f[3][0]['package']; update_file(m, f[0], 'A', a)
-    if defect == 'float-start': f[3][0]['started_at'] = 1200.5
-    result = check(m, f)
-    assert result['status'] == 'invalid_cohort'
-    if defect == 'unplanned-arm': assert result['reason'] == 'unplanned_arm_run'
 
 
 @pytest.mark.parametrize('finding', ['H1', 'M1', 'M2', 'L1', 'L2', 'L3-case-count', 'L3-row', 'L5', 'empty-source', 'deleted-source'])
@@ -711,7 +503,83 @@ def test_exploration_pool_regressions(m, finding):
     if finding in ('L2', 'deleted-source'): assert row['criteria']['Cx']['values']['source_files'] == 2
 
 
-@pytest.mark.parametrize('finding', ['M4', 'L3-protection', 'L3-total', 'L3-used', 'L3-C', 'L4', 'L6a', 'H1-cohort'])
+@pytest.mark.parametrize('defect', ['B-only', 'W-only', 'broken-A', 'duplicate-A', 'wrong-number', 'missing-chain-key'])
+def test_later_v1_invalid_attempt_does_not_poison_canonical_attempt(m, defect):
+    f = fixture(m)
+    stage = 'B' if defect == 'B-only' else 'W' if defect == 'W-only' else 'A'
+    raw = b'{' if defect == 'broken-A' else b'{"number":2,"number":2}' if defect == 'duplicate-A' else m.canonical({'number': 9})
+    if defect == 'missing-chain-key':
+        a = json.loads(f[0]['prs'][0]['files'][next(iter(f[0]['prs'][0]['files']))]); del a['chain']['hash']; raw = m.canonical(a | {'number': 2, 'round': 200})
+    if defect == 'wrong-number': raw = m.canonical(json.loads(f[0]['prs'][0]['files'][next(iter(f[0]['prs'][0]['files']))]) | {'number': 9, 'round': 200})
+    put(m, f[0], 2, stage, '2' * 40, raw, 2000)
+    if defect in ('wrong-number', 'missing-chain-key'): put(m, f[0], 2, 'B', '3' * 40, f[0]['prs'][1]['files'][next(iter(f[0]['prs'][1]['files']))], 2030)
+    attempts = m.enumerate_attempts(f[0], Proofs())
+    assert attempts[1]['invalid_reason'] and canonical_trial(m, f)['number'] == 1
+
+
+@pytest.mark.parametrize('defect', ['separate-P', 'B-before-A', 'merge-order', 'missing-A-key'])
+def test_review_attempt_route_and_missing_keys(m, defect):
+    f = fixture(m)
+    if defect == 'missing-A-key':
+        a = json.loads(f[0]['prs'][0]['files'][next(iter(f[0]['prs'][0]['files']))]); del a['snapshot_digest']; update_file(m, f[0], 'A', a)
+        attempts = second(m, f, new_pool=True)
+        assert attempts[0]['invalid_reason'] == 'V1_invalid_A' and m.canonical_attempt(attempts, f[1])['number'] == 2
+    elif defect == 'merge-order':
+        put(m, f[0], 2, 'B', '2' * 40, b'{}', 50)
+        with pytest.raises(ValueError, match='attempt_order_invalid'): m.enumerate_attempts(f[0], Proofs())
+    else:
+        attempts = m.enumerate_attempts(f[0], Proofs()); stages = attempts[0]['stages']
+        if defect == 'separate-P': stages['P']['sha'] = '9' * 40
+        else: stages['A']['merged_at'] = stages['B']['merged_at'] + 1
+        with pytest.raises(ValueError, match='no_canonical_attempt'): m.canonical_attempt(attempts, f[1])
+
+
+def canonical_trial(m, f):
+    return m.canonical_attempt(m.enumerate_attempts(f[0], Proofs()), f[1])
+
+
+@pytest.mark.parametrize('defect', ['late-A-proof', 'round-reuse', 'pool-reuse'])
+def test_frozen_inputs_and_preregistration_evidence_cannot_be_replaced(m, defect):
+    f = fixture(m)
+    if defect in ('late-A-proof', 'round-reuse', 'pool-reuse'):
+        attempts = second(m, f, withdrawal=600, a_time=700)
+        if defect == 'late-A-proof': attempts[1]['stages']['A']['time'] = 600
+        if defect == 'round-reuse': attempts[1]['a']['round'] = 100
+        if defect == 'pool-reuse':
+            # Same withdrawn pool despite a fresh round is not a fresh trial.
+            attempts[1]['a']['snapshot_digest'] = attempts[0]['a']['snapshot_digest']
+            f[1][2] = copy.deepcopy(f[1][1])
+            a = attempts[1]['a']
+            attempts[1]['stages']['A']['raw'] = m.canonical(a)
+            attempts[1]['stages']['P']['raw'] = b'# Frozen registration\nattempt_digest: ' + m.digest(m.canonical(a)).encode()
+            attempts[1]['stages']['B']['raw'] = m.generate_pool(f[1][1]['snapshot'], a, f[1][1]['scope'],
+                f[1][1]['observations'], commit_a=attempts[1]['stages']['A']['sha'])
+        with pytest.raises(ValueError, match='no_canonical_attempt'): m.canonical_attempt(attempts, f[1])
+
+
+@pytest.mark.parametrize('defect', ['pool-reuse-new-snapshot', 'status-case-mismatch'])
+def test_declared_metadata_cannot_replace_execution_or_pool_identity(m, defect):
+    f = fixture(m)
+    if defect == 'pool-reuse-new-snapshot':
+        attempts = second(m, f, withdrawal=600, a_time=700)
+        material = copy.deepcopy(f[1][1]); material['snapshot'][0]['natural_request'] = True
+        # Change only reference text: snapshot digest changes but admitted task identities are the same.
+        material['snapshot'][0]['changes'][0]['added'][0] += ' harmless whitespace'
+        a = attempts[1]['a']; a['snapshot_digest'] = m.snapshot_digest(material['snapshot'])
+        a['prior_attempts_digest'] = m.prior_digest(attempts[:1], before=700)
+        attempts[1]['stages']['A']['raw'] = m.canonical(a)
+        attempts[1]['stages']['P']['raw'] = b'# Frozen registration\nattempt_digest: ' + m.digest(m.canonical(a)).encode()
+        attempts[1]['stages']['B']['raw'] = m.generate_pool(material['snapshot'], a, material['scope'], material['observations'], commit_a='1' * 40)
+        f[1][2] = material
+        with pytest.raises(ValueError, match='no_canonical_attempt'): m.canonical_attempt(attempts, f[1])
+        return
+    if defect == 'status-case-mismatch':
+        result = observed(True); result['status'] = 'failed'; result['reason'] = 'contract_mismatch'
+        with pytest.raises(ValueError, match='det_cases_invalid'): m.case_values(result, task(0)['checks'])
+        return
+
+
+@pytest.mark.parametrize('finding', ['M4', 'L3-protection', 'L3-total', 'L4', 'L6a', 'H1-cohort'])
 def test_exploration_verification_regressions(m, finding):
     f = fixture(m)
     if finding == 'M4':
@@ -724,7 +592,6 @@ def test_exploration_verification_regressions(m, finding):
     if finding == 'L3-total':
         with pytest.raises(ValueError): m.enumerate_attempts(f[0], Proofs())
         return
-    if finding == 'L3-C': f[0]['prs'][2]['merged_at'] = 1001.5
     if finding == 'L4':
         path = next(p for p in f[0]['current_files'] if p.endswith('preregistration.md'))
         raw = b'# incidental digest\n' + m.digest(f[0]['prs'][0]['files'][next(iter(f[0]['prs'][0]['files']))]).encode()
@@ -743,64 +610,106 @@ def test_exploration_verification_regressions(m, finding):
         else:
             with pytest.raises(ValueError, match='attempt_materials_unknown'): m.canonical_attempt(attempts, f[1])
         return
-    assert check(m, f, used=True if finding == 'L3-used' else 1)['status'] == 'invalid_cohort'
+    with pytest.raises(ValueError): canonical_trial(m, f)
 
 
-@pytest.mark.parametrize('defect', ['B-only', 'W-only', 'broken-A', 'duplicate-A', 'wrong-number', 'missing-chain-key'])
-def test_later_v1_invalid_attempt_does_not_poison_canonical_attempt(m, defect):
-    f = fixture(m)
-    stage = 'B' if defect == 'B-only' else 'W' if defect == 'W-only' else 'A'
-    raw = b'{' if defect == 'broken-A' else b'{"number":2,"number":2}' if defect == 'duplicate-A' else m.canonical({'number': 9})
-    if defect == 'missing-chain-key':
-        a = json.loads(f[0]['prs'][0]['files'][next(iter(f[0]['prs'][0]['files']))]); del a['chain']['hash']; raw = m.canonical(a | {'number': 2})
-    if defect == 'wrong-number': raw = m.canonical(json.loads(f[0]['prs'][0]['files'][next(iter(f[0]['prs'][0]['files']))]) | {'number': 9})
-    put(m, f[0], 2, stage, '2' * 40, raw, 2000)
-    if defect in ('wrong-number', 'missing-chain-key'): put(m, f[0], 2, 'B', '3' * 40, f[0]['prs'][1]['files'][next(iter(f[0]['prs'][1]['files']))], 2030)
+@pytest.mark.parametrize('missing', ['number', 'margin', 'chain', 'snapshot_digest', 'scope_digest', 'generator_sha',
+    'prior_attempts_digest', 'licenses', 'store_contents', 'cx_files', 'cx_checks', 'cx_lines', 'con_length',
+    'con_lines', 'g3_percent', 'det_mode', 'packages', 'pilot_arms', 'confirmatory_arms',
+    'chain.hash', 'chain.public_key', 'chain.genesis', 'chain.period'])
+@pytest.mark.parametrize('next_round', [99, 100, 200])
+def test_v1_invalid_attempt_still_reserves_readable_round(m, missing, next_round):
+    f = fixture(m); second(m, f, new_pool=True, round_number=next_round, a_time=700)
+    a = json.loads(f[0]['prs'][0]['files'][next(iter(f[0]['prs'][0]['files']))])
+    if missing.startswith('chain.'): del a['chain'][missing.split('.')[1]]
+    else: del a[missing]
+    update_file(m, f[0], 'A', a)
     attempts = m.enumerate_attempts(f[0], Proofs())
-    assert attempts[1]['invalid_reason'] and check(m, f)['status'] == 'valid'
+    attempts[1]['a']['prior_attempts_digest'] = m.prior_digest(attempts[:1], before=700)
+    raw = m.canonical(attempts[1]['a']); attempts[1]['stages']['A']['raw'] = raw
+    attempts[1]['stages']['P']['raw'] = b'attempt_digest: ' + m.digest(raw).encode()
+    assert attempts[0]['invalid_reason'] == 'V1_invalid_A'
+    if next_round <= 100:
+        with pytest.raises(ValueError, match='attempt_chain_invalid'): m.canonical_attempt(attempts, f[1])
+    else: assert m.canonical_attempt(attempts, f[1])['number'] == 2
 
 
-@pytest.mark.parametrize('mode', ['all', 'audit'])
-def test_replay_eligibility_does_not_trust_missing_b_observations(m, monkeypatch, mode):
-    f = fixture(m, 18); a = json.loads(f[0]['prs'][0]['files'][next(iter(f[0]['prs'][0]['files']))]); a['det_mode'] = mode
-    update_file(m, f[0], 'A', a); b = json.loads(f[0]['prs'][1]['files'][next(iter(f[0]['prs'][1]['files']))]); c = json.loads(f[0]['prs'][2]['files'][next(iter(f[0]['prs'][2]['files']))]); next(r for r in b['tasks'] if r['unit_id'] == c['ranking'][4])['det'] = None
-    update_file(m, f[0], 'B', b)
-    monkeypatch.setattr(m, 'generate_pool', lambda *args, **kwargs: m.canonical(b))  # faulty self-consistent regenerator
-    assert check(m, f)['status'] == 'invalid_cohort'
+@pytest.mark.parametrize('round_value', [None, True, 0, '100', 100.5, 'broken-json', 'duplicate-json', 'B-only'])
+def test_unreadable_earlier_round_blocks_promotion_as_unknown(m, round_value):
+    f = fixture(m); second(m, f, new_pool=True)
+    a = json.loads(f[0]['prs'][0]['files'][next(iter(f[0]['prs'][0]['files']))])
+    if round_value is None: del a['round']
+    else: a['round'] = round_value
+    raw = (b'{' if round_value == 'broken-json' else b'{"round":100,"round":200}' if round_value == 'duplicate-json'
+           else json.dumps(a).encode())
+    update_file(m, f[0], 'A', raw)
+    if round_value == 'B-only':
+        for c in f[0]['commits'] + f[0]['prs']:
+            c['files'] = {p: v for p, v in c['files'].items() if not p.endswith(('attempt.json', 'preregistration.md')) or '/0002/' in p}
+        f[0]['commits'] = [c for c in f[0]['commits'] if c['files']]
+        f[0]['prs'] = [c for c in f[0]['prs'] if c['files']]
+        f[0]['total_prs'] = len(f[0]['prs']); f[0]['reachable'] = [c['sha'] for c in f[0]['commits']]
+        f[0]['current_files'] = {p: v for c in f[0]['commits'] for p, v in c['files'].items()}
+    attempts = m.enumerate_attempts(f[0], Proofs()); a2 = attempts[1]['a']
+    a2['prior_attempts_digest'] = m.prior_digest(attempts[:1], before=1300); update_file(m, f[0], 'A', a2, number=2)
+    with pytest.raises(m.UnknownAttempt, match='attempt_round_unknown'): canonical_trial(m, f)
 
 
-@pytest.mark.parametrize('defect', ['pilot-arms', 'pilot-generator', 'lineage-missing', 'lineage-mismatch', 'lineage-incidental', 'lineage-duplicate'])
-def test_review_pilot_and_lineage_are_bound_to_preregistration(m, defect):
-    f = fixture(m); h = f[0]; c = json.loads(h['prs'][2]['files'][next(iter(h['prs'][2]['files']))])
-    if defect == 'pilot-generator':
-        with pytest.raises(ValueError, match='arms_invalid'): m.select(bytes.fromhex(f[2]['randomness']), json.loads(h['prs'][1]['files'][next(iter(h['prs'][1]['files']))]), ['native_goal', 'mission_verified_complex'])
-        return
-    if defect == 'pilot-arms':
-        c['arms'].remove('mission_baseline'); c['assignments'] = [r for r in c['assignments'] if r['arm'] != 'mission_baseline']
-        update_file(m, h, 'C', c); update_file(m, h, 'D', m.confirm(bytes.fromhex(f[2]['randomness']), c, 'c' * 40, 4, c['arms']))
-        f[3][:] = [r for r in f[3] if r['arm'] != 'mission_baseline']
-    else:
-        raw = next(v for p, v in h['current_files'].items() if p.endswith('preregistration.md')); declaration = raw.splitlines()[-1]
-        if defect == 'lineage-missing': raw = raw.replace(b'\n' + declaration, b'')
-        if defect == 'lineage-mismatch': raw = raw.replace(declaration, b'lineage_digest: sha256:' + b'0' * 64)
-        if defect == 'lineage-incidental': raw = raw.replace(declaration, b'incidental ' + declaration)
-        if defect == 'lineage-duplicate': raw += b'\n' + declaration
-        update_file(m, h, 'P', raw)
-    assert check(m, f)['reason'] == ('selection_mismatch' if defect == 'pilot-arms' else 'lineage_digest_mismatch')
+@pytest.mark.parametrize('declaration', ['pilot_arms', 'confirmatory_arms'])
+@pytest.mark.parametrize('value', [[], ['unknown'], ['native_goal', 'native_goal'], 'native_goal', [True], {'native_goal': True}])
+def test_a_requires_nonempty_known_unique_arm_declarations(m, declaration, value):
+    f = fixture(m); a = json.loads(f[0]['prs'][0]['files'][next(iter(f[0]['prs'][0]['files']))]); a[declaration] = value
+    update_file(m, f[0], 'A', a)
+    assert m.enumerate_attempts(f[0], Proofs())[0]['invalid_reason'] == 'V1_invalid_A'
+    with pytest.raises(ValueError, match='no_canonical_attempt'): canonical_trial(m, f)
 
 
-@pytest.mark.parametrize('defect', ['separate-P', 'B-before-A', 'merge-order', 'missing-A-key'])
-def test_review_attempt_route_and_missing_keys(m, defect):
-    f = fixture(m)
-    if defect == 'missing-A-key':
-        a = json.loads(f[0]['prs'][0]['files'][next(iter(f[0]['prs'][0]['files']))]); del a['snapshot_digest']; update_file(m, f[0], 'A', a)
-        attempts = second(m, f, new_pool=True)
-        assert attempts[0]['invalid_reason'] == 'V1_invalid_A' and m.canonical_attempt(attempts, f[1])['number'] == 2
-    elif defect == 'merge-order':
-        put(m, f[0], 2, 'B', '2' * 40, b'{}', 50)
-        assert check(m, f)['reason'] == 'attempt_order_invalid'
-    else:
-        attempts = m.enumerate_attempts(f[0], Proofs()); stages = attempts[0]['stages']
-        if defect == 'separate-P': stages['P']['sha'] = '9' * 40
-        else: stages['A']['merged_at'] = stages['B']['merged_at'] + 1
-        with pytest.raises(ValueError, match='no_canonical_attempt'): m.canonical_attempt(attempts, f[1])
+def test_p_binding_requires_declaration_not_just_available_digest(m):
+    f = fixture(m); update_file(m, f[0], 'P', b'# Frozen registration\n')
+    with pytest.raises(ValueError, match='no_canonical_attempt'): canonical_trial(m, f)
+
+
+def test_snapshot_reuse_is_rejected_when_thresholds_change_pool_identity(m):
+    f = fixture(m); attempts = second(m, f, withdrawal=600, a_time=700)
+    f[1][2] = copy.deepcopy(f[1][1]); a = attempts[1]['a']
+    a.update(snapshot_digest=attempts[0]['a']['snapshot_digest'], cx_lines=100)
+    raw = m.canonical(a); attempts[1]['stages']['A']['raw'] = raw
+    attempts[1]['stages']['P']['raw'] = b'attempt_digest: ' + m.digest(raw).encode()
+    material = f[1][2]; attempts[1]['stages']['B']['raw'] = m.generate_pool(material['snapshot'], a, material['scope'], material['observations'], commit_a='1' * 40)
+    assert m.pool_identity(json.loads(attempts[0]['stages']['B']['raw'])) != m.pool_identity(json.loads(attempts[1]['stages']['B']['raw']))
+    with pytest.raises(ValueError, match='no_canonical_attempt'): m.canonical_attempt(attempts, f[1])
+
+
+@pytest.mark.parametrize('stage', ['A', 'B'])
+def test_timestamp_proof_binds_selection_stage_bytes(m, stage):
+    f = fixture(m); pr = f[0]['prs'][0 if stage == 'A' else 1]; proof = pr['proofs'][next(iter(pr['files']))]
+    proof['signature'] = sign(('sha256:' + '0' * 64 + ':' + str(proof['time'])).encode())
+    with pytest.raises(ValueError, match='no_canonical_attempt'): canonical_trial(m, f)
+
+
+def test_selection_imports_and_verifies_without_cohort(m, monkeypatch):
+    import builtins
+    original = builtins.__import__
+    def isolated(name, *args, **kwargs):
+        if 'bench_cohort' in name: raise ImportError('second PR is absent')
+        return original(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, '__import__', isolated)
+    spec = importlib.util.spec_from_file_location('isolated_selection', BENCH / 'bench_selection.py')
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    assert canonical_trial(module, fixture(module))['number'] == 1
+
+
+def test_frozen_generator_revision_must_match_loaded_materials(m):
+    f = fixture(m); f[1][1]['generator_sha'] = '0' * 40
+    with pytest.raises(ValueError, match='no_canonical_attempt'): canonical_trial(m, f)
+
+
+@pytest.mark.parametrize('arms', [['native_goal'], ['mission_baseline'], ['mission_verified_complex'],
+    ['native_goal', 'mission_baseline'], ['native_goal', 'mission_verified_complex'],
+    ['mission_baseline', 'mission_verified_complex'], list(('native_goal', 'mission_baseline', 'mission_verified_complex'))])
+def test_selection_generators_allow_each_nonempty_registered_arm_subset(m, arms):
+    manifest = json.loads(pool(m, inputs(m))); selection = m.select(b'seed', manifest, arms)
+    confirmation = m.confirm(b'seed', selection, 'c' * 40, 4, arms)
+    assert len(selection['assignments']) == 24 * len(arms)
+    assert len(confirmation['assignments']) == 6 * len(arms)
+    assert {r['arm'] for r in selection['assignments']} == {r['arm'] for r in confirmation['assignments']} == set(arms)
