@@ -163,6 +163,32 @@ def test_latest_attempt_and_observed_bindings_control_completion(clean, case, re
     rejected(state, command, 'acceptance-' + reason)
 
 
+@pytest.mark.parametrize('status', ['blocked', 'abandoned-unknown', 'pending', 'dispatch-unknown', 'running'])
+@pytest.mark.parametrize('superseded', [True, False])
+def test_only_latest_attempt_state_affects_completion(clean, status, superseded):
+    state, command = clean
+    record = state.fresh_review.requests[0]
+    other, _ = bound_record(record, command.fresh_review_evidence[0].coverage.thaw(),
+                           request_id='other', nonce='other-nonce')
+    if status in ('pending', 'dispatch-unknown', 'running'):
+        other = replace(other, status=status, result=None)
+    else:
+        from .test_issue909_fresh_review_receipts import terminal_document
+        raw = other.result.thaw()
+        terminal = terminal_document(status, launched=False, output=False)
+        terminal.update({key: raw[key] for key in ('request_id', 'request_digest', 'candidate_digest', 'nonce')})
+        other = replace(other, status=status, result=freeze_json_value(terminal))
+    rows = (other, record) if superseded else (record, other)
+    state = replace(state, fresh_review=FreshReviewProjection(rows))
+    command = command_for(state, command.fresh_review_evidence)
+    if superseded:
+        assert acceptance_completion_rejection(state, command) is None
+        assert decide(state, command).accepted
+    else:
+        reason = 'coverage-open' if status in ('blocked', 'abandoned-unknown') else 'fresh-review-pending'
+        rejected(state, command, 'acceptance-' + reason)
+
+
 def with_contract(clean, change):
     state, command = clean
     document = state.legacy_passthrough.thaw()
@@ -175,7 +201,8 @@ def with_contract(clean, change):
 
 
 @pytest.mark.parametrize('case', ['historical-non-independent', 'historical-open', 'partial-open', 'blocked-search'])
-def test_all_attempts_retain_independence_search_and_open_obligations(clean, case):
+@pytest.mark.parametrize('superseded', [True, False])
+def test_superseded_whole_receipts_are_ignored_but_partial_obligations_remain(clean, case, superseded):
     state, command = clean
     if case in ('partial-open', 'blocked-search'):
         state, command = with_contract(clean, lambda c: c['criteria'].append(
@@ -205,9 +232,15 @@ def test_all_attempts_retain_independence_search_and_open_obligations(clean, cas
                 changes = dict(criterion_ids=('ACopt',), candidate_bindings=tuple(
                     replace(b, criterion_id='ACopt') for b in older.request.candidate_bindings))
             older, evidence = bound_record(older, coverage, **changes)
-    state = replace(state, fresh_review=FreshReviewProjection((older, record)))
-    rejected(state, command_for(state, (evidence, *command.fresh_review_evidence)),
-             'acceptance-fresh-review-non-independent' if case == 'historical-non-independent' else 'acceptance-coverage-open')
+    rows = (older, record) if superseded else (record, older)
+    state = replace(state, fresh_review=FreshReviewProjection(rows))
+    command = command_for(state, (evidence, *command.fresh_review_evidence))
+    if case == 'partial-open' or not superseded:
+        reason = 'fresh-review-non-independent' if case == 'historical-non-independent' else 'coverage-open'
+        rejected(state, command, 'acceptance-' + reason)
+    else:
+        assert acceptance_completion_rejection(state, command) is None
+        assert decide(state, command).accepted
 
 
 @pytest.mark.parametrize('severity', ['High', 'Medium', 'Low'])
@@ -367,9 +400,10 @@ def test_latest_partial_criterion_uses_the_same_table_as_whole_coverage(clean, c
     rejected(state, command, 'acceptance-' + reason)
 
 
-@pytest.mark.parametrize('case,reason', [('running', 'fresh-review-pending'),
-    ('non-independent', 'fresh-review-non-independent'), ('open', 'coverage-open')])
-def test_conditions_three_four_five_have_stable_priority(clean, published, case, reason):
+@pytest.mark.parametrize('case,reason,superseded', [('running', 'fresh-review-pending', False),
+    ('non-independent', 'fresh-review-non-independent', False), ('open', 'coverage-open', False),
+    ('non-independent', 'unresolved-finding', True), ('open', 'unresolved-finding', True)])
+def test_conditions_three_four_five_have_stable_priority(clean, published, case, reason, superseded):
     state, command = clean
     coverage = command.fresh_review_evidence[0].coverage.thaw()
     finding = json.loads(published[4][0])
@@ -389,7 +423,8 @@ def test_conditions_three_four_five_have_stable_priority(clean, published, case,
     if case == 'running':
         latest = replace(latest, status='running', result=None)
         carried = (evidence,)
-    state = replace(state, fresh_review=FreshReviewProjection((older, latest)))
+    rows = (older, latest) if case == 'running' or superseded else (latest, older)
+    state = replace(state, fresh_review=FreshReviewProjection(rows))
     rejected(state, command_for(state, carried), 'acceptance-' + reason)
 
 

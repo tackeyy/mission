@@ -213,11 +213,13 @@ def judge_completion(projection, evidence, bindings, contract, contract_digest, 
 
     Condition 3 uses missing > stale > pending > non-independent > coverage-open
     across whole coverage and every required criterion, irrespective of their
-    iteration order. Condition 4 checks all attempts' independence before search
-    and open obligations; condition 5 checks unresolved bound findings last.
+    iteration order. Condition 4 checks independence and search only for the
+    latest whole attempt and each required criterion's latest attempt. Earlier
+    whole receipts are superseded; partial receipts' open obligations remain.
+    Condition 5 checks unresolved bound findings from every attempt last.
     """
     from .fresh_review import FreshReviewRecord
-    from .fresh_review_coverage import FreshReviewAttempt, judge_fresh_review, FreshReviewReason, REASON_ORDER
+    from .fresh_review_coverage import FreshReviewAttempt, judge_fresh_review, judge_criterion, FreshReviewReason, REASON_ORDER
     from .fresh_review_receipts import decode_terminal_receipt
     if bindings is None:
         raise FreshReviewError(INCOMPLETE)
@@ -237,15 +239,22 @@ def judge_completion(projection, evidence, bindings, contract, contract_digest, 
         reasons.append(FreshReviewReason.STALE)
     if reasons:
         raise FreshReviewError(min(reasons, key=REASON_ORDER.index).value)
+    selected_ids = {decision.request_id}
+    selected_ids.update(judge_criterion(attempts, key, bindings).request_id for key in required)
     from .fresh_review_receipts import ContextMode
-    for item in attempts:
+    for item in (attempt for attempt in attempts if attempt.request.request_id in selected_ids):
         launch = getattr(item.terminal_receipt, 'launch_receipt', None)
         if (launch is None or launch.context_mode != ContextMode.FRESH
                 or launch.child_identity == launch.parent_identity
                 or launch.context_identity == launch.parent_identity):
             raise FreshReviewError('acceptance-fresh-review-non-independent')
-    if (any(item.status != 'valid' for item in facts)
-            or any(result['status'] != 'searched' for item in evidence
+    # Partial receipts cannot establish whole coverage, but their open
+    # obligations still block completion even after a clean whole review.
+    required_ids = frozenset(required)
+    coverage_ids = selected_ids | {item.request.request_id for item in attempts
+        if not required_ids.issubset(item.request.criterion_ids)}
+    if (any(fact.status != 'valid' for item, fact in zip(evidence, facts) if item.request_id in coverage_ids)
+            or any(result['status'] != 'searched' for item in evidence if item.request_id in selected_ids
                    for result in item.coverage.thaw()['criterion_results'])):
         raise FreshReviewError('acceptance-coverage-open')
     if any(item.open_finding_ids for item in facts):
