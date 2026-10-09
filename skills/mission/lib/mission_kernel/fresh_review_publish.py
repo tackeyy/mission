@@ -29,6 +29,7 @@ def validate_failed_import(record, command):
         if reference is not None or command.effect is not None:
             raise FreshReviewError('fresh-review-output-effect-invalid')
     elif (reference is None or type(command.effect) is not FreshReviewInputEffectClaim
+            or (reference.digest, reference.size) != (decision.diagnostic_digest, len(expected))
             or (command.effect.kind, command.effect.target, command.effect.digest, command.effect.size) !=
             (reference.kind, reference.relative_path, decision.diagnostic_digest, len(expected))):
         raise FreshReviewError('fresh-review-output-effect-invalid')

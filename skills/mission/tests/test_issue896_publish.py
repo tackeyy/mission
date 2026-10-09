@@ -136,7 +136,7 @@ def test_rejected_report_and_valid_unimplemented_import_leave_running_unchanged(
         stored['output'] = canonical_bytes(bound_output(request)).decode()
         stored['budget_used']['output_bytes'] = len(stored['output'].encode())
     journal.write_text(json.dumps(stored))
-    code = {'sender': 'fresh-review-output-sender-mismatch', 'unfinished': 'fresh-review-output-sender-mismatch',
+    code = {'sender': 'fresh-review-output-sender-mismatch', 'unfinished': 'fresh-review-output-observation-invalid',
             'valid': 'fresh-review-completed-import-unavailable'}[case]
     _reject_unchanged(run_cli, root, ['fresh-review', 'import', '--request', request['request_id'],
         '--adapter', 'neutral'], code, env={**env, 'MISSION_OPERATION_ID': 'import-one'})
@@ -336,6 +336,9 @@ def test_old_writer_fence_and_forged_effect_are_rejected_by_public_transition(re
     typed = _legacy_command_state(state, prepared.command)
     decision = decide(typed, prepared.command)
     assert decision.accepted
+    for mutation in ('size', 'digest-and-path'):
+        forged = _forge_diagnostic_reference(prepared.command, mutation)
+        assert decide(typed, forged).rejection.code == 'fresh-review-output-effect-invalid'
     with pytest.raises(TransitionTableError, match='invalid-transition-effect-binding'):
         bind_transition_effects(decision.transition, ())
     with pytest.raises(TransitionTableError, match='invalid-transition-effect-binding'):
@@ -351,3 +354,104 @@ def test_import_schema_exposes_only_request_and_adapter():
     assert set(schema['required']) == {'request', 'adapter'}
     assert schema['closed'] is True
     assert schema['terminal_outcomes'] == ['failed']
+
+
+@pytest.mark.parametrize('command', ['import', 'reconcile'])
+@pytest.mark.parametrize('exit_code,reason', [(7, 'child-failed'), (0, 'output-invalid')])
+def test_confirmed_exit_without_output_has_same_failed_terminal(reviewer, run_cli, command, exit_code, reason):
+    root, request, env, journal = reviewer
+    invoke(run_cli, reviewer)
+    stored = json.loads(journal.read_text())
+    stored.update(output=None, process_exited=True, exit_code=exit_code,
+                  budget_used=dict(wall_time_sec=1, tool_calls=0, replays=0, output_bytes=0))
+    journal.write_text(json.dumps(stored))
+    result = run_cli('fresh-review', command, '--request', request['request_id'], '--adapter', 'neutral',
+        cwd=root, env_extra={**env, 'MISSION_OPERATION_ID': 'consume-one'})
+    assert result.returncode == 0, result.stderr
+    record = json.loads(result.stdout)['record']
+    assert record['status'] == 'failed' and record['result']['reason'] == reason
+    assert 'output_ref' not in record['result'] and 'output_digest' not in record['result']
+    _reject_unchanged(run_cli, root, ['mark-passes'], 'acceptance-coverage-pending')
+
+
+@pytest.mark.parametrize('process_exited', [True, False], ids=['exited', 'live'])
+@pytest.mark.parametrize('field', ['operation_id', 'fencing_epoch', 'request_id', 'nonce', 'child_identity'])
+@pytest.mark.parametrize('status', ['dispatch-unknown', 'running'])
+def test_reconcile_rejects_foreign_sender_before_any_launch_commit(reviewer, run_cli, field, status, process_exited):
+    root, request, env, journal = reviewer
+    invoke(run_cli, reviewer, **({'FIXTURE_REVIEW_MODE': 'crash'} if status == 'dispatch-unknown' else {}))
+    exited(journal)
+    stored = json.loads(journal.read_text())
+    stored['process_exited'] = process_exited
+    stored['observation_updates'] = {field: 999 if field == 'fencing_epoch' else 'foreign'}
+    journal.write_text(json.dumps(stored))
+    _reject_unchanged(run_cli, root, ['fresh-review', 'reconcile', '--request', request['request_id'],
+        '--adapter', 'neutral'], 'fresh-review-output-sender-mismatch',
+        env={**env, 'MISSION_OPERATION_ID': 'reconcile-one'})
+    assert not journal.with_suffix('.cancel').exists()
+
+
+@pytest.mark.parametrize('size', [3, 262145], ids=['small', 'over-import-limit'])
+@pytest.mark.parametrize('cancel', ['cancelled', 'unknown'])
+def test_live_output_does_not_bypass_deadline_or_confirmed_cancellation(reviewer, run_cli, size, cancel):
+    from .test_issue912_fresh_review_dispatch import _expire_dispatch
+    from .test_issue879_completion_cli import _public_bytes
+    root, request, env, journal = reviewer
+    running = invoke(run_cli, reviewer)
+    stored = json.loads(journal.read_text())
+    stored.update(output='x'*size, process_exited=False)
+    journal.write_text(json.dumps(stored))
+    before = _public_bytes(root)
+    assert invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one') == running
+    assert _public_bytes(root) == before
+    _expire_dispatch(reviewer)
+    if cancel == 'unknown':
+        _reject_unchanged(run_cli, root, ['fresh-review', 'reconcile', '--request', request['request_id'],
+            '--adapter', 'neutral'], 'fresh-review-kill-unconfirmed',
+            env={**env, 'MISSION_OPERATION_ID': 'reconcile-two', 'FIXTURE_CANCEL': cancel})
+    else:
+        result = invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-two', FIXTURE_CANCEL=cancel)
+        assert result['status'] == 'abandoned-unknown'
+        assert result['result']['reason'] == 'output-unobservable'
+        assert 'output_ref' not in result['result']
+    assert journal.with_suffix('.cancel').read_text() == 'running'
+
+
+def test_import_checks_entire_launch_receipt_beyond_sender_fields(reviewer, run_cli):
+    root, request, env, journal = reviewer
+    invoke(run_cli, reviewer)
+    exited(journal)
+    stored = json.loads(journal.read_text())
+    receipt = dict(stored['launch'], started_at='2027-01-01T00:00:00.000000Z')
+    assert receipt != stored['launch']
+    stored['observation_updates'] = {'launch_receipt': receipt}
+    journal.write_text(json.dumps(stored))
+    _reject_unchanged(run_cli, root, ['fresh-review', 'import', '--request', request['request_id'],
+        '--adapter', 'neutral'], 'fresh-review-output-sender-mismatch',
+        env={**env, 'MISSION_OPERATION_ID': 'import-one'})
+
+
+def _forge_diagnostic_reference(command, mutation):
+    from dataclasses import replace
+    from mission_kernel.json_codec import freeze_json_value
+    raw = command.receipt.thaw()
+    effect = command.effect
+    if mutation == 'size':
+        raw['output_ref']['size'] = 1
+    else:
+        digest = 'sha256:'+'b'*64
+        target = 'evidence/fresh-review/'+'b'*64+'.json'
+        raw['output_ref'].update(digest=digest, relative_path=target)
+        raw['output_digest'] = digest
+        effect = replace(effect, target=target)
+    return replace(command, receipt=freeze_json_value(raw), effect=effect)
+
+
+@pytest.mark.parametrize('mutation', ['size', 'digest-and-path'])
+def test_failed_import_binds_reference_size_and_digest_to_diagnostic(prepared_failure, mutation):
+    from mission_kernel.fresh_review import FreshReviewError
+    from mission_kernel.fresh_review_publish import validate_failed_import
+    record, prepare = prepared_failure
+    forged = _forge_diagnostic_reference(prepare().command, mutation)
+    with pytest.raises(FreshReviewError, match='fresh-review-output-effect-invalid'):
+        validate_failed_import(record, forged)

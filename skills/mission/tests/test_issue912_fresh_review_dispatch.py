@@ -626,8 +626,8 @@ def test_invalid_parent_observation_has_identity_reason(monkeypatch, parent):
         host.observe(None)
 
 
-@pytest.mark.parametrize('exited', [True, False, 'true', 1])
-def test_only_confirmed_exact_child_exit_can_abandon_before_deadline(reviewer, run_cli, exited):
+@pytest.mark.parametrize('exited', [False, 'true', 1])
+def test_unconfirmed_child_exit_does_not_abandon_before_deadline(reviewer, run_cli, exited):
     from .test_issue879_completion_cli import _public_bytes
     root, _, _, journal = reviewer
     running = invoke(run_cli, reviewer)
@@ -636,12 +636,8 @@ def test_only_confirmed_exact_child_exit_can_abandon_before_deadline(reviewer, r
     journal.write_text(json.dumps(stored))
     before = _public_bytes(root)
     record = invoke(run_cli, reviewer, 'reconcile', MISSION_OPERATION_ID='reconcile-one', FIXTURE_CANCEL='unknown')
-    if exited is True:
-        assert record['status'] == 'abandoned-unknown'
-        assert journal.with_suffix('.cancel').read_text() == 'running'
-    else:
-        assert record == running and _public_bytes(root) == before
-        assert not journal.with_suffix('.cancel').exists()
+    assert record == running and _public_bytes(root) == before
+    assert not journal.with_suffix('.cancel').exists()
 
 
 def test_reconcile_capacity_refuses_before_adapter_recover(reviewer, run_cli):

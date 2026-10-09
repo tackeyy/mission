@@ -1,6 +1,7 @@
 """Fenced fresh-review dispatch using the existing provider saga primitives."""
 from __future__ import annotations
 from pathlib import Path
+from dataclasses import replace
 import json
 import secrets
 import base64
@@ -20,6 +21,7 @@ from mission_kernel.fresh_review import (
 )
 from mission_kernel.fresh_review_receipts import decode_terminal_receipt, receipt_document, TERMINAL_SCHEMA
 from mission_kernel.fresh_review_dispatch import validate_launch, reservation_id_for_operation, budget_class_for_fresh_review_dispatch
+from mission_kernel.fresh_review_output import validate_output_sender
 from mission_kernel.json_codec import freeze_json_value
 
 
@@ -242,7 +244,7 @@ def _reconcile(record, args, operation, repo, root, services, host):
         # A saved launch rejects foreign reports. Before launch persistence,
         # binding mismatch can become blocked only after confirmed cancellation.
         try:
-            launch, _ = validate_launch(record.request, record.dispatch.thaw(), raw)
+            launch, independent = validate_launch(record.request, record.dispatch.thaw(), raw)
             if record.launch is not None and raw != record.launch.thaw():
                 raise FreshReviewError('fresh-review-launch-binding-mismatch')
         except FreshReviewError as exc:
@@ -258,13 +260,17 @@ def _reconcile(record, args, operation, repo, root, services, host):
             output = base64.b64decode(observed['output'], validate=True)
         except (KeyError, TypeError, ValueError):
             output = None
+        # Validate the report against a tentative running record before any
+        # launch publication. Stage-one rejection must preserve dispatch-unknown.
+        validate_output_sender(replace(record, status='running', launch=freeze_json_value(raw),
+                                       independent=independent), observation)
         if record.status == 'dispatch-unknown':
             record_provider_receipt([record.dispatch.thaw()], _saga_intent(record),
                                     {'kind': 'provider', 'identity': launch.child_identity})
             record = _execute(repo(':running'), lambda state: RecordFreshReviewLaunch(
                 args.request, operation, state['fencing_epoch'], freeze_json_value(raw),
                 _candidate(state, root, record.request, services)))
-        if output is not None and observation.get('process_exited') is True:
+        if observation.get('process_exited') is True:
             from mission_application.fresh_review_publish import publish_failed_output
             # Child-facing identity remains the saved dispatch. The writer's
             # epoch comes from an independent current lease admission.
@@ -275,7 +281,7 @@ def _reconcile(record, args, operation, repo, root, services, host):
                 operation=operation, epoch=epoch, observation=observation, raw=output,
                 root=root, services=services)
             return json.dumps({'ok': True, 'record': _wire(record)})
-        if output is not None:
+        if output is not None and _utc(services.now()) < record.dispatch.thaw()['deadline_at']:
             reader = repo(':candidate', False)
             with reader.transaction():
                 _candidate(reader.load(), root, record.request, services)
