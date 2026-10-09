@@ -13,6 +13,7 @@ import tempfile
 import time
 import selectors
 import signal
+import sys
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from dataclasses import dataclass
@@ -276,7 +277,7 @@ def _executed_count(command, root: Path) -> tuple[int | None, bool]:
     return root_stats["tests"] - root_stats["skipped"], root_stats["failures"] == root_stats["errors"] == 0
 
 
-def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
+def execute_candidate(candidate, command, *, relative_cwd, repro_input=None, budget_deadline=None):
     """Run one frozen argv in a materialized candidate and return facts only.
 
     No caller supplied shell text or ambient environment reaches the child.
@@ -302,10 +303,18 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
             raise VerificationRunnerError("test-report-input-conflict")
     before = candidate.digest
     started = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-    if not _toolchain_matches(command):
-        return {"started_at": started, "finished_at": started, "exit_code": None, "timed_out": False, "executed_count": None, "output_digest": "sha256:" + hashlib.sha256(b"").hexdigest(), "observed_output_bytes": 0, "output_truncated": False, "status": "blocked", "block_reason": "toolchain-stale", "repro_input_digest": None}
+    block_reason = None
+    if budget_deadline is not None:
+        from mission_application.verification_exec import deadline_is_valid
+        if not deadline_is_valid(budget_deadline):
+            block_reason = "process-unavailable"
+    if block_reason is None and not _toolchain_matches(command):
+        block_reason = "toolchain-stale"
+    if block_reason is not None:
+        return {"started_at": started, "finished_at": started, "exit_code": None, "timed_out": False, "executed_count": None, "output_digest": "sha256:" + hashlib.sha256(b"").hexdigest(), "observed_output_bytes": 0, "output_truncated": False, "status": "blocked", "block_reason": block_reason, "repro_input_digest": None}
     timed_out = False
-    with materialize_candidate(candidate) as root:
+    with contextlib.ExitStack() as descriptors, materialize_candidate(candidate) as root:
+        control_receiver = None
         repro_digest = None
         if repro_input is not None:
             artifact_kind, path, content = repro_input
@@ -326,11 +335,23 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
         if not cwd.is_dir():
             raise VerificationRunnerError("verifier-cwd-missing")
         try:
-            child = subprocess.Popen(
-                argv, cwd=cwd, shell=False, stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
-            env={"PATH": str(Path(command["toolchain"]["path"]).parent) if command.get("toolchain") else os.defpath, **command.get("env", {})},
-            )
+            env = {"PATH": str(Path(command["toolchain"]["path"]).parent) if command.get("toolchain") else os.defpath, **command.get("env", {})}
+            if budget_deadline is None:
+                child = subprocess.Popen(argv, cwd=cwd, shell=False, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True, env=env)
+            else:
+                from budgeted_exec import spawn_exec
+                # A separate owned group lets us kill the verifier's descendants
+                # while retaining the supervisor that reports output and exit.
+                control_receiver, control_sender = os.pipe()
+                descriptors.callback(os.close, control_receiver)
+                os.set_blocking(control_receiver, False)
+                try:
+                    child = spawn_exec([sys.executable, '-I', '-S', str(Path(__file__).with_name('verification_exec.py')),
+                        str(budget_deadline), str(control_sender), *argv], pass_fds=(control_sender,),
+                        cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
+                finally:
+                    os.close(control_sender)
         except OSError:
             return {
                 "started_at": started,
@@ -353,10 +374,32 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
         assert child.stdout is not None
         stdout = child.stdout
         selector.register(stdout, selectors.EVENT_READ)
-        deadline = time.monotonic() + timeout
-        while selector.get_map() or child.poll() is None:
-            remaining = deadline - time.monotonic()
+        frozen_deadline = time.monotonic() + timeout
+        deadline = min(frozen_deadline, budget_deadline) if budget_deadline is not None else frozen_deadline
+        budget_limited = budget_deadline is not None and budget_deadline <= frozen_deadline
+        from budgeted_exec import observe_exit, cleanup_group
+        group_cleaned = False
+        def exited():
+            nonlocal timed_out
+            if budget_deadline is None:
+                return child.poll() is not None
+            if group_cleaned:
+                return True
+            observed = observe_exit(child.pid)
+            if observed and time.monotonic() >= deadline:
+                timed_out = True
+            return observed
+        while selector.get_map() or not exited():
+            if budget_deadline is not None and not group_cleaned and exited():
+                if not cleanup_group(child, term_grace=0, kill_wait=.2):
+                    raise VerificationRunnerError('kill-unconfirmed')
+                group_cleaned = True
+            remaining = deadline + (1 if group_cleaned else 0) - time.monotonic()
             if remaining <= 0:
+                if group_cleaned:
+                    output_truncated = True
+                    selector.close(); stdout.close()
+                    break
                 if not timed_out:
                     timed_out = True
                     try:
@@ -378,6 +421,9 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
                         output.extend(chunk[:limit - len(output)])
                     if len(output) < observed_output_bytes:
                         output_truncated = True
+        if budget_deadline is not None and not group_cleaned:
+            if not cleanup_group(child, term_grace=0, kill_wait=.2):
+                raise VerificationRunnerError('kill-unconfirmed')
         try:
             child.wait(timeout=0.2)
         except subprocess.TimeoutExpired:
@@ -389,6 +435,16 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
             exit_code = child.poll()
         else:
             exit_code = child.returncode
+        exec_failed = False
+        if control_receiver is not None:
+            try:
+                control = os.read(control_receiver, 2)
+            except BlockingIOError:
+                control = b''
+            timed_out = timed_out or b'T' in control
+            exec_failed = b'E' in control
+            if exec_failed:
+                exit_code = None
         selector.close()
         stdout.close()
         count, report_successful = _executed_count(command, root)
@@ -404,7 +460,7 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
     if before != after:
         raise VerificationRunnerError("candidate-mutated")
     toolchain_stale = not _toolchain_matches(command)
-    passed = not timed_out and not candidate_stale and not toolchain_stale and exit_code == 0 and (command.get("kind") != "test" or (count is not None and count > 0 and report_successful))
+    passed = not timed_out and not exec_failed and not candidate_stale and not toolchain_stale and exit_code == 0 and (command.get("kind") != "test" or (count is not None and count > 0 and report_successful))
     return {
         "started_at": started,
         "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
@@ -414,7 +470,7 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None):
         "output_digest": "sha256:" + output_hash.hexdigest(),
         "observed_output_bytes": observed_output_bytes,
         "output_truncated": output_truncated,
-        "status": "passed" if passed else "blocked" if timed_out or candidate_stale or toolchain_stale else "failed",
-        "block_reason": "timeout" if timed_out else observation_reason if candidate_stale else "toolchain-stale" if toolchain_stale else None,
+        "status": "passed" if passed else "blocked" if timed_out or exec_failed or candidate_stale or toolchain_stale else "failed",
+        "block_reason": "process-unavailable" if exec_failed else ("budget-deadline" if budget_limited else "timeout") if timed_out else observation_reason if candidate_stale else "toolchain-stale" if toolchain_stale else None,
         "repro_input_digest": repro_digest,
     }

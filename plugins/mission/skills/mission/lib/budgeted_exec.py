@@ -22,7 +22,8 @@ _UNREAPED_CHILDREN = []  # retain ownership if the OS cannot confirm leader exit
 
 
 def _has_waitid():
-    return all(hasattr(os, name) for name in ('waitid', 'WEXITED', 'WNOWAIT', 'WNOHANG', 'P_PID'))
+    return all(hasattr(os, name) for name in ('waitid', 'WEXITED', 'WNOWAIT', 'WNOHANG', 'P_PID',
+                                             'CLD_EXITED', 'CLD_KILLED', 'CLD_DUMPED'))
 
 
 def _has_kqueue():
@@ -41,7 +42,10 @@ def spawn_exec(argv, *, pass_fds=(), stdin=subprocess.DEVNULL,
 
 def observe_exit(pid):
     if _has_waitid():
-        return os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is not None
+        info = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT | os.WNOHANG)
+        # Darwin can return non-exit siginfo for a stopped child despite WEXITED.
+        return (info is not None and info.si_pid == pid
+                and info.si_code in (os.CLD_EXITED, os.CLD_KILLED, os.CLD_DUMPED))
     if not _has_kqueue():
         raise ValueError('budget-deadline-unenforceable')
     # Owned, unreaped children cannot reuse their PID. Darwin returns ESRCH
