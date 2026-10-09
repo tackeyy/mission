@@ -181,12 +181,11 @@ def test_output_cannot_turn_nonindependent_observations_into_independent_evidenc
     assert result.outcome == 'completed' and result.independent is False
 
 
-def test_import_limit_has_fixed_failed_decision_and_bounded_diagnostic_bytes():
+def test_raw_budget_overrun_never_claims_a_truncated_import_diagnostic():
     from mission_kernel.fresh_review import FRESH_REVIEW_EVIDENCE_MAX_BYTES as limit
     result = inspect(b'x' * (limit + 1))
-    assert (result.outcome, result.reason, result.output) == ('failed', 'output-over-import-limit', None)
-    assert len(result.diagnostic_bytes) == limit
-    assert len(result.diagnostic_digest) == 71
+    assert (result.outcome, result.reason, result.output) == ('failed', 'budget-exceeded', None)
+    assert result.diagnostic_bytes is None and result.diagnostic_digest is None
 
 
 def test_finding_limit_is_global_across_all_criteria():
@@ -249,24 +248,56 @@ def test_coverage_shape_cannot_hide_invalid_classification_or_reference(path, va
     assert inspect(canonical_bytes(raw)).reason == 'output-invalid'
 
 
-def test_replay_eligibility_is_bound_to_frozen_request_not_an_arbitrary_command():
-    from mission_kernel.fresh_review_output import decode_output, replay_eligibility
+def replay_fixture(path='repro.txt'):
     from mission_kernel.fresh_review import candidate_identity
+    from mission_kernel.fresh_review_output import decode_output
+    command = dict(id='command-1', argv=['/usr/bin/fixture'], relative_cwd='.',
+        timeout_sec=1, output_limit=1024, kind='command', env={}, declared_untracked=[],
+        toolchain={'path': '/usr/bin/fixture', 'digest': ADAPTER}, external_inputs=[],
+        replay=dict(command_id='replay-1', allowed_artifact_kinds=['text'],
+                    max_bytes=1, relative_path=path))
+    target = {key: copy.deepcopy(value) for key, value in command.items() if key != 'replay'}
+    target['id'] = 'replay-1'
+    policy = dict(digest=ADAPTER, commands={'command-1': command, 'replay-1': target})
     record = running()
-    binding = replace(record.request.candidate_bindings[0], role='replay', command_id='replay-1')
-    request = replace(record.request, candidate_bindings=(*record.request.candidate_bindings, binding),
-                      candidate_digest=candidate_identity({'command-1': ADAPTER, 'replay-1': ADAPTER}))
+    binding = record.request.candidate_bindings[0]
+    request = replace(record.request, candidate_bindings=(
+        replace(binding, definition_digest=canonical_digest(command)),
+        replace(binding, role='replay', command_id='replay-1', definition_digest=canonical_digest(target))),
+        candidate_digest=candidate_identity({'command-1': ADAPTER, 'replay-1': ADAPTER}))
     raw = output_document()
     raw['criterion_results'][0]['findings'] = [finding()]
-    hypothesis = decode_output(raw).criterion_results[0].findings[0]
-    policy = dict(command_id='replay-1', allowed_artifact_kinds=['text'], max_bytes=1, relative_path='repro.txt')
+    return request, decode_output(raw).criterion_results[0].findings[0], policy
+
+
+def test_replay_eligibility_is_bound_to_frozen_request_not_an_arbitrary_command():
+    from mission_kernel.fresh_review_output import replay_eligibility
+    request, hypothesis, policy = replay_fixture()
     assert replay_eligibility(request, hypothesis, policy) is None
-    for bad in ({**policy, 'command_id': 'arbitrary'}, {**policy, 'allowed_artifact_kinds': ['json']},
-                {**policy, 'max_bytes': 0}, None):
-        assert replay_eligibility(request, hypothesis, bad) == 'replay-unsupported'
     assert replay_eligibility(request, replace(hypothesis, repro_input=freeze_json_value(
         {'artifact_kind': 'text', 'content': '00'})), policy) == 'replay-input-invalid'
-    assert replay_eligibility(record.request, hypothesis, policy) == 'replay-unsupported'
+    assert replay_eligibility(running().request, hypothesis, policy) == 'replay-unsupported'
+
+
+@pytest.mark.parametrize('field,value', [('max_bytes', 2), ('relative_path', 'other.txt'),
+    ('allowed_artifact_kinds', ['text', 'json']), ('command_id', 'command-1'),
+    ('policy-digest', 'sha256:' + 'b' * 64), ('target-definition', 'changed')])
+def test_same_command_id_cannot_replace_frozen_replay_policy(field, value):
+    from mission_kernel.fresh_review_output import replay_eligibility
+    request, hypothesis, policy = replay_fixture()
+    if field == 'policy-digest':
+        policy['digest'] = value
+    elif field == 'target-definition':
+        policy['commands']['replay-1']['argv'].append(value)
+    else:
+        policy['commands']['command-1']['replay'][field] = value
+    assert replay_eligibility(request, hypothesis, policy) == 'replay-unsupported'
+
+
+def test_hypothesis_cannot_select_another_command_with_an_unchanged_frozen_policy():
+    from mission_kernel.fresh_review_output import replay_eligibility
+    request, hypothesis, policy = replay_fixture()
+    assert replay_eligibility(request, replace(hypothesis, command_id='command-1'), policy) == 'replay-unsupported'
 
 
 def test_new_kernel_has_no_cli_activation_or_outer_layer_import():
@@ -275,6 +306,7 @@ def test_new_kernel_has_no_cli_activation_or_outer_layer_import():
     source = Path(__file__).parents[1] / 'lib/mission_kernel/fresh_review_output.py'
     tree = ast.parse(source.read_text())
     imports = [node.module or '' for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
+    imports.extend(alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names)
     assert not any(name.startswith(('mission_application', 'mission_persistence', 'fresh_review_host'))
                    for name in imports)
     assert 'fresh_review_output' not in (source.parents[2] / 'bin/mission-state.py').read_text()
@@ -383,33 +415,18 @@ def test_standalone_coverage_judgement_rechecks_every_output_binding(field):
 @pytest.mark.parametrize('path', ['../escape', '/absolute', 'a/../escape', 'a//b', 'a\\b', 'C:/file', ''])
 def test_replay_policy_cannot_materialize_outside_a_portable_relative_file(path):
     from mission_kernel.fresh_review_output import decode_output, replay_eligibility
-    request, raw, _ = coverage_fixture()
-    request = replace(request, candidate_bindings=(*request.candidate_bindings,
-        replace(request.candidate_bindings[0], role='replay', command_id='replay-1')))
-    from mission_kernel.fresh_review import candidate_identity
-    request = replace(request, candidate_digest=candidate_identity({'command-1': ADAPTER, 'replay-1': ADAPTER}))
-    raw['criterion_results'][0]['findings'] = [finding()]
-    h = decode_output(raw).criterion_results[0].findings[0]
-    policy = dict(command_id='replay-1', allowed_artifact_kinds=['text'], max_bytes=1, relative_path=path)
-    assert replay_eligibility(request, h, policy) == 'replay-unsupported'
+    request, hypothesis, policy = replay_fixture(path)
+    assert replay_eligibility(request, hypothesis, policy) == 'replay-unsupported'
 
 
 @pytest.mark.parametrize('repro', [{}, {'artifact_kind': 'text'}, {'artifact_kind': 'text', 'content': 1},
                                   {'artifact_kind': 'text', 'content': '\ud800'}])
 def test_typed_hypothesis_cannot_bypass_repro_validation(repro):
     from mission_kernel.fresh_review_output import decode_output, replay_eligibility
-    record = running()
-    request = record.request
-    from mission_kernel.fresh_review import candidate_identity
-    request = replace(request, candidate_bindings=(*request.candidate_bindings,
-        replace(request.candidate_bindings[0], role='replay', command_id='replay-1')),
-        candidate_digest=candidate_identity({'command-1': ADAPTER, 'replay-1': ADAPTER}))
-    raw = output_document()
-    raw['criterion_results'][0]['findings'] = [finding()]
-    h = replace(decode_output(raw).criterion_results[0].findings[0], repro_input=freeze_json_value(repro))
+    request, hypothesis, policy = replay_fixture()
+    h = replace(hypothesis, repro_input=freeze_json_value(repro))
     with pytest.raises(FreshReviewError):
-        replay_eligibility(request, h, dict(command_id='replay-1', allowed_artifact_kinds=['text'],
-                                          max_bytes=1, relative_path='repro.txt'))
+        replay_eligibility(request, h, policy)
 
 
 @pytest.mark.parametrize('kind', ['text', 'application/json', 'évidence'])
@@ -422,3 +439,83 @@ def test_repro_preserves_utf8_bytes_and_registered_kind_names(kind, content):
     assert result.outcome == 'completed'
     assert result.output.criterion_results[0].findings[0].repro_input.thaw() == {
         'artifact_kind': kind, 'content': content}
+
+
+@pytest.mark.parametrize('case,reason', [('schema', 'output-invalid'),
+    ('finding', 'output-invalid'), ('coverage', 'output-invalid'),
+    ('binding', 'binding-mismatch'), ('budget', 'budget-exceeded'),
+    ('child', 'child-failed'), ('limit', 'output-over-import-limit')])
+def test_import_limit_follows_schema_binding_and_budget_and_retains_complete_output(case, reason):
+    import hashlib
+    raw = output_document()
+    raw['criterion_results'][0]['findings'] = [finding(i) for i in range(62)]
+    used = dict(wall_time_sec=1, tool_calls=0, replays=0, output_bytes=0)
+    observed = observation()
+    if case == 'schema':
+        raw['schema'] = 'unknown'
+    elif case == 'finding':
+        raw['criterion_results'][0]['findings'][-1]['severity'] = 'unknown'
+    elif case == 'coverage':
+        raw['coverage'][0]['classification_confirmed'] = 1
+    elif case == 'binding':
+        raw['candidate_digest'] = 'sha256:' + 'b' * 64
+    elif case == 'budget':
+        used['tool_calls'] = 65
+    elif case == 'child':
+        observed['exit_code'] = 1
+    body = canonical_bytes(raw)
+    used['output_bytes'] = len(body)
+    result = inspect(body, used=used, observed=observed)
+    assert (result.outcome, result.reason, result.output) == ('failed', reason, None)
+    assert result.diagnostic_bytes == body
+    assert result.diagnostic_digest == 'sha256:' + hashlib.sha256(body).hexdigest()
+
+
+@pytest.mark.parametrize('selected', [True, False])
+def test_child_cannot_omit_a_contract_required_criterion_to_hide_an_open_obligation(selected):
+    from acceptance_contract import canonical_contract_digest
+    from mission_kernel.fresh_review import request_document
+    request, raw, contract = coverage_fixture()
+    contract['criteria'].append({**contract['criteria'][0], 'id': 'AC3'})
+    request = replace(request, contract_digest=canonical_contract_digest(contract))
+    if selected:
+        request = replace(request, criterion_ids=('AC1', 'AC3'), candidate_bindings=(
+            *request.candidate_bindings, replace(request.candidate_bindings[0], criterion_id='AC3')))
+        raw['criterion_results'].append(dict(criterion_id='AC3', status='blocked',
+                                            reason_code='budget-exhausted', findings=[]))
+    raw.update(contract_digest=request.contract_digest, request_digest=canonical_digest(request_document(request)))
+    # Child lists only AC1 even though contract also requires AC3 for R1.
+    result = coverage(raw, request, contract)
+    assert result.status == 'open' and result.open_requirement_ids == ('R1',)
+
+
+@pytest.mark.parametrize('severity', ['High', 'Medium', 'Low'])
+def test_required_criterion_finding_is_open_even_when_child_omits_its_requirement_ids(severity):
+    request, raw, contract = coverage_fixture()
+    raw['criterion_results'][0]['findings'] = [{**finding(), 'severity': severity,
+        'requirement_ids': [], 'prohibited_side_effect_ids': []}]
+    assert coverage(raw, request, contract).open_finding_ids == ('finding-1',)
+
+
+@pytest.mark.parametrize('statement', ['import mission_persistence',
+    'import mission_application as application', 'import fresh_review_host',
+    'from mission_persistence import repository'])
+def test_kernel_layer_guard_detects_both_import_forms(monkeypatch, statement):
+    from pathlib import Path
+    read = Path.read_text
+    def injected(path, *args, **kwargs):
+        source = read(path, *args, **kwargs)
+        return source + '\n' + statement if path.name == 'fresh_review_output.py' else source
+    monkeypatch.setattr(Path, 'read_text', injected)
+    with pytest.raises(AssertionError):
+        test_new_kernel_has_no_cli_activation_or_outer_layer_import()
+
+
+@pytest.mark.parametrize('case,reason', [('schema', 'output-invalid'), ('binding', 'binding-mismatch')])
+def test_schema_and_binding_failure_precede_measured_budget_failure(case, reason):
+    raw = output_document()
+    raw['schema' if case == 'schema' else 'candidate_digest'] = (
+        'unknown' if case == 'schema' else 'sha256:' + 'b' * 64)
+    body = canonical_bytes(raw)
+    assert inspect(body, used=dict(wall_time_sec=301, tool_calls=0, replays=0,
+                                   output_bytes=len(body))).reason == reason

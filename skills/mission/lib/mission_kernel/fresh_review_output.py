@@ -22,6 +22,7 @@ from .fresh_review_dispatch import validate_launch
 from .fresh_review_receipts import BudgetUsed, TerminalOutcome, TerminalReason
 from .json_codec import freeze_json_value
 from .model import FrozenJsonObject
+from verifier_command import VerifierPolicyError, validate_command, validate_command_links
 from acceptance_contract import AcceptanceContractError, canonical_contract_digest, validate as validate_contract
 
 OUTPUT_SCHEMA = 'mission-fresh-review-output/1'
@@ -86,8 +87,9 @@ class FreshReviewOutput:
 class FreshReviewOutputDecision:
     """An import preflight, not a terminal receipt or permission to complete.
 
-    diagnostic_bytes is the bounded prefix of the exact received bytes, including
-    invalid JSON. Its digest describes that prefix, never the discarded suffix.
+    diagnostic_bytes contains the complete received bytes, including invalid JSON.
+    Bytes exceeding the evidence budget have no diagnostic pair; no prefix is
+    presented as the output. Its digest always describes the complete output.
     A writer must store it with output-over-import-limit in the same terminal
     commit. No finding or coverage effects are authorized by a failed decision.
     """
@@ -148,15 +150,16 @@ def _hypothesis(value, criterion_id):
 
 
 def decode_output(value):
-    """Decode a closed, bounded hypothesis envelope without trusting its claims.
+    """Decode a closed hypothesis envelope without trusting its claims.
+
+    Import limits are applied by inspect_output after schema, binding and budget.
 
     The later importer must validate all ledger IDs and expected references
     against the frozen contract and replace authored actual with replay facts.
     """
     _json_builtins(value, 'output-invalid')
     raw = dict(_closed(value, FreshReviewOutput.__dataclass_fields__, 'fresh-review-output-invalid'))
-    if len(canonical_bytes(value)) > FRESH_REVIEW_EVIDENCE_MAX_BYTES:
-        raise FreshReviewError('fresh-review-output-over-import-limit')
+    canonical_bytes(value)
     if raw['schema'] != OUTPUT_SCHEMA:
         raise FreshReviewError('fresh-review-output-invalid')
     for key in _BINDINGS + ('request_digest',):
@@ -179,8 +182,6 @@ def decode_output(value):
         _identifier(item['reason_code'])
         if item['status'] == 'blocked' and item['reason_code'] == 'none':
             raise FreshReviewError('fresh-review-output-invalid')
-        if len(finding_ids) + len(item['findings']) > FRESH_REVIEW_FINDINGS_LIMIT:
-            raise FreshReviewError('fresh-review-output-over-import-limit')
         findings = tuple(_hypothesis(finding, identifier) for finding in item['findings'])
         for finding in findings:
             if finding.finding_id in finding_ids:
@@ -271,8 +272,10 @@ def _constant(_):
 def inspect_output(record, observation, output_bytes, *, candidate_digest, budget_used):
     """Stage 2: failures from the bound child's content are terminal intentions.
 
-    Deterministic priority: import limit, child failure, budget, closed shape,
-    bindings. This does not certify coverage or replay and cannot publish state.
+    Deterministic priority: child failure, raw-byte budget safety preflight,
+    closed schema, bindings, measured budget, then import limits. The raw-byte
+    preflight bounds decoding; over-budget bytes never become import diagnostics.
+    This does not certify coverage or replay and cannot publish state.
     None output is allowed only as a failed diagnostic with no output reference.
     """
     independent = validate_output_sender(record, observation)
@@ -286,29 +289,24 @@ def inspect_output(record, observation, output_bytes, *, candidate_digest, budge
     used = _closed(budget_used, BudgetUsed.__dataclass_fields__, 'fresh-review-output-observation-invalid')
     for value in used.values():
         _integer(value, 'fresh-review-output-observation-invalid')
-    diagnostic = None if output_bytes is None else output_bytes[:FRESH_REVIEW_EVIDENCE_MAX_BYTES]
+    diagnostic = (output_bytes if output_bytes is not None
+                  and len(output_bytes) <= FRESH_REVIEW_EVIDENCE_MAX_BYTES else None)
     digest = None if diagnostic is None else 'sha256:' + hashlib.sha256(diagnostic).hexdigest()
     def decision(reason, output=None):
         return FreshReviewOutputDecision(TerminalOutcome.COMPLETED if reason == TerminalReason.NONE
             else TerminalOutcome.FAILED, reason, output, diagnostic, digest, independent)
-    if output_bytes is not None and len(output_bytes) > FRESH_REVIEW_EVIDENCE_MAX_BYTES:
-        return decision(TerminalReason.OUTPUT_OVER_IMPORT_LIMIT)
     if observation['exit_code'] != 0:
         return decision(TerminalReason.CHILD_FAILED)
     limits = record.launch.thaw()['enforced_budget']
-    if (output_bytes is not None and len(output_bytes) > limits['max_output_bytes']
-            or any(used[key] > limits[limit] for key, limit in (
-                ('wall_time_sec', 'wall_time_sec'), ('tool_calls', 'max_tool_calls'),
-                ('replays', 'max_replays'), ('output_bytes', 'max_output_bytes')))):
+    if output_bytes is not None and len(output_bytes) > limits['max_output_bytes']:
         return decision(TerminalReason.BUDGET_EXCEEDED)
     if output_bytes is not None and used['output_bytes'] < len(output_bytes):
         raise FreshReviewError('fresh-review-output-observation-invalid')
     try:
         value = json.loads(output_bytes.decode('utf-8'), object_pairs_hook=_pairs, parse_constant=_constant)
         output = decode_output(value)
-    except FreshReviewError as exc:
-        return decision(TerminalReason.OUTPUT_OVER_IMPORT_LIMIT if exc.code == 'fresh-review-output-over-import-limit'
-                        else TerminalReason.OUTPUT_INVALID)
+    except FreshReviewError:
+        return decision(TerminalReason.OUTPUT_INVALID)
     except (AttributeError, UnicodeError, ValueError, RecursionError):
         return decision(TerminalReason.OUTPUT_INVALID)
     request = record.request
@@ -316,23 +314,51 @@ def inspect_output(record, observation, output_bytes, *, candidate_digest, budge
         return decision(TerminalReason.BINDING_MISMATCH)
     if {item.criterion_id for item in output.criterion_results} != set(request.criterion_ids):
         return decision(TerminalReason.OUTPUT_INVALID)
+    if any(used[key] > limits[limit] for key, limit in (
+            ('wall_time_sec', 'wall_time_sec'), ('tool_calls', 'max_tool_calls'),
+            ('replays', 'max_replays'), ('output_bytes', 'max_output_bytes'))):
+        return decision(TerminalReason.BUDGET_EXCEEDED)
+    if (len(output_bytes) > FRESH_REVIEW_EVIDENCE_MAX_BYTES
+            or sum(len(item.findings) for item in output.criterion_results) > FRESH_REVIEW_FINDINGS_LIMIT):
+        return decision(TerminalReason.OUTPUT_OVER_IMPORT_LIMIT)
     return decision(TerminalReason.NONE, output)
 
 
-def replay_eligibility(request, hypothesis, replay_policy):
+def replay_eligibility(request, hypothesis, frozen_policy):
     """Select only the frozen replay command; a reason retains an open hypothesis.
 
-    The policy is supplied by the later importer from the validated contract,
-    never by the child. This helper neither executes nor accepts replay evidence.
+    The importer supplies the entire frozen verifier policy. Both its policy
+    digest and source/target command definition digests must match the request;
+    the replay limits and materialization path are part of the source definition.
+    This helper neither executes nor accepts replay evidence.
     """
     request = decode_request(request_document(request))
     if not isinstance(hypothesis, FindingHypothesis):
         raise FreshReviewError('fresh-review-output-invalid')
     hypothesis = _hypothesis(_wire(hypothesis), hypothesis.criterion_id)
-    _json_builtins(replay_policy, 'output-invalid')
+    _json_builtins(frozen_policy, 'output-invalid')
     binding = next((item for item in request.candidate_bindings if item.role == 'replay'
                     and item.criterion_id == hypothesis.criterion_id), None)
-    if (binding is None or type(replay_policy) is not dict
+    source = next((item for item in request.candidate_bindings if item.role == 'verification'
+                   and item.criterion_id == hypothesis.criterion_id), None)
+    if (binding is None or source is None or type(frozen_policy) is not dict
+            or set(frozen_policy) != {'digest', 'commands'}
+            or frozen_policy['digest'] != request.verifier_policy_digest
+            or type(frozen_policy['commands']) is not dict):
+        return 'replay-unsupported'
+    commands = frozen_policy['commands']
+    try:
+        for item in (source, binding):
+            definition = commands.get(item.command_id)
+            validate_command(definition)
+            if (definition['id'] != item.command_id
+                    or canonical_digest(definition) != item.definition_digest):
+                return 'replay-unsupported'
+        validate_command_links({item.command_id: commands[item.command_id] for item in (source, binding)})
+    except (VerifierPolicyError, FreshReviewError):
+        return 'replay-unsupported'
+    replay_policy = commands[source.command_id].get('replay')
+    if (type(replay_policy) is not dict
             or set(replay_policy) != {'command_id', 'allowed_artifact_kinds', 'max_bytes', 'relative_path'}
             or replay_policy['command_id'] != binding.command_id
             or hypothesis.command_id != binding.command_id
@@ -361,6 +387,7 @@ def replay_eligibility(request, hypothesis, replay_policy):
 def derive_output_coverage(output, request, contract):
     """Check the entire immutable ledger and retain open hypotheses separately.
 
+    Required mappings come from the contract, never from child-authored subsets.
     Structural coverage validity is not a clean finding verdict. No authored
     severity, actual, or later clean attempt resolves a required hypothesis.
     Unconfirmed context retains its original requirement ID as an open obligation.
@@ -396,10 +423,12 @@ def derive_output_coverage(output, request, contract):
         if not item.classification_confirmed or item.status == 'open':
             open_requirements.add(item.requirement_id)
         if requirement['classification'] == 'obligation':
-            required = [key for key in item.criterion_ids if criteria[key]['required']]
+            required = [key for key, criterion in criteria.items() if criterion['required']
+                        and item.requirement_id in criterion['requirement_ids']]
             # Every mapped required criterion must be searched in this output;
             # unselected or blocked searches leave an explicit open obligation.
-            if not required or any(key not in searched or searched[key].status != 'searched' for key in required):
+            if (not required or not set(required).issubset(item.criterion_ids)
+                    or any(key not in searched or searched[key].status != 'searched' for key in required)):
                 open_requirements.add(item.requirement_id)
     for result in output.criterion_results:
         criterion = criteria[result.criterion_id]
@@ -410,7 +439,7 @@ def derive_output_coverage(output, request, contract):
                     or not set(finding.prohibited_side_effect_ids).issubset(side_effects)):
                 raise FreshReviewError('fresh-review-finding-binding-invalid')
             if finding.prohibited_side_effect_ids or any(
-                    requirements[key]['classification'] == 'obligation' for key in finding.requirement_ids):
+                    requirements[key]['classification'] == 'obligation' for key in criterion['requirement_ids']):
                 open_findings.add(finding.finding_id)
     return OutputCoverageDecision('open' if open_requirements else 'valid',
                                   tuple(sorted(open_requirements)), tuple(sorted(open_findings)))
