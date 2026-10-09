@@ -570,7 +570,7 @@ from mission_persistence.administrative import (  # noqa: E402
 )
 from mission_persistence.strict_reader import (  # noqa: E402
     read_stable_bytes as _read_stable_bytes,
-    read_stable_bytes_beneath as _read_stable_bytes_beneath,
+    read_stable_payload_beneath as _read_stable_payload_beneath,
 )
 
 SCHEMA_VERSION = 4  # v4: structured scoring provenance is mandatory for new sessions
@@ -14115,10 +14115,7 @@ def cmd_mark_passes(args):
                 selection_id=_current_selection_id,
                 capture_acceptance_candidates=AcceptanceCandidateServices(cwd, load_verifier_policy),
                 capture_fresh_review_completion=FreshReviewCompletionServices(
-                    cwd, load_verifier_policy,
-                    lambda root, relative_path, limit: _read_stable_bytes_beneath(
-                        root, relative_path, limit=limit).payload,
-                ),
+                    cwd, load_verifier_policy, _read_stable_payload_beneath),
                 early_stop_evaluation=lambda data, latest, at: _early_stop_evaluation(
                     cwd, data, latest, at, getattr(args, "early_stop_rationale", None)
                 ),
