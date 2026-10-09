@@ -128,7 +128,7 @@ def _object(value):
     return freeze_json_value(value)
 
 
-def _hypothesis(value, criterion_id):
+def _hypothesis(value, criterion_id, *, published=False):
     _json_builtins(value, 'output-invalid')
     canonical_bytes(value)
     raw = dict(_closed(value, FindingHypothesis.__dataclass_fields__, 'fresh-review-output-invalid'))
@@ -145,7 +145,10 @@ def _hypothesis(value, criterion_id):
     if type(repro['content']) is not str:
         raise FreshReviewError('fresh-review-output-invalid')
     raw['repro_input'] = freeze_json_value(repro)
-    raw['actual'] = _object(raw['actual'])
+    # Published blocked findings have no observation when replay did not run.
+    # Child output still requires a nonempty authored counterexample claim.
+    raw['actual'] = (freeze_json_value(raw['actual']) if published and type(raw['actual']) is dict
+                     else _object(raw['actual']))
     raw['expected'] = _object(raw['expected'])
     return FindingHypothesis(**raw)
 
