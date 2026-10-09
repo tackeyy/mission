@@ -30,7 +30,7 @@ def test_unregistered_launch_is_consumed_blocked_not_completed(completion_sessio
     assert record['result']['launch_attempted'] is False
     assert record['dispatch']['operation_id'] == record['result']['dispatch_operation_id']
     assert record['result']['commit_operation_id'] == record['dispatch']['operation_id']
-    _reject_unchanged(run_cli, root, ['mark-passes'], 'acceptance-coverage-pending')
+    _reject_unchanged(run_cli, root, ['mark-passes'], 'acceptance-receipt-missing')
     _reject_unchanged(run_cli, root, ['fresh-review', 'reconcile', '--request', request['request_id'], '--adapter', 'neutral'],
                       'operation-conflict', env={'MISSION_OPERATION_ID': 'dispatch-one'})
 
@@ -88,7 +88,7 @@ def test_registered_child_reaches_running_once_and_does_not_complete(reviewer, r
     assert invoke(run_cli, reviewer) == record
     assert json.loads(journal.read_text())['count'] == 1
     assert record['result'] is None  # Completed requires #896's output import.
-    _reject_unchanged(run_cli, root, ['mark-passes'], 'acceptance-coverage-pending')
+    _reject_unchanged(run_cli, root, ['mark-passes'], 'acceptance-receipt-missing')
 
 
 @pytest.mark.parametrize('unconfirmed', [False, True])

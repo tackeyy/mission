@@ -203,7 +203,7 @@ def _reject_unchanged(run_cli, root, args, reason, *, env=None, raw_control=Fals
 def test_pending_contract_rejects_public_completion_atomically(completion_session, run_cli, command):
     root, state, schema = completion_session
     _persist_fixture(root, state, schema)
-    result = _reject_unchanged(run_cli, root, [command], "acceptance-coverage-pending")
+    result = _reject_unchanged(run_cli, root, [command], "acceptance-receipt-missing")
     if command == "closeout":
         assert json.loads(result.stdout)["ok"] is False
 
@@ -534,7 +534,7 @@ def test_contractless_completion_and_already_passed_closeout_remain_usable(compl
 
 
 @pytest.mark.parametrize("receipt_case,reason", [
-    ("matching", "acceptance-fresh-review-pending"),
+    ("matching", "acceptance-fresh-review-missing"),
     ("missing", "acceptance-receipt-missing"),
     ("invalid", "acceptance-receipt-invalid"),
     ("latest-failed", "acceptance-receipt-not-passed"),
@@ -549,8 +549,7 @@ def test_contractless_completion_and_already_passed_closeout_remain_usable(compl
 ])
 def test_public_completion_revalidates_latest_receipt(completion_session, run_cli, receipt_case, reason):
     root, state, schema = completion_session
-    # Runner receipt is real; only coverage has no producer in this stage.
-    state["acceptance_contract"]["coverage"] = {"status": "valid"}
+    # Runner receipt is real; no fresh-review attempt has been prepared.
     if receipt_case == "missing-second":
         state["acceptance_contract"]["criteria"].append({**state["acceptance_contract"]["criteria"][0], "id": "AC2"})
     (root / ".mission-state" / "sessions" / "test.json").write_text(json.dumps(state))
@@ -644,7 +643,7 @@ def test_observations_and_caller_boolean_cannot_supply_acceptance_evidence(compl
     assert public["verification_history"][-1]["status"] == "passed"
     assert "verification_receipts" not in public
     assert public["acceptance_contract"] == state["acceptance_contract"]
-    _reject_unchanged(run_cli, root, ["mark-passes"], "acceptance-coverage-pending")
+    _reject_unchanged(run_cli, root, ["mark-passes"], "acceptance-receipt-missing")
 
 
 def test_contract_import_cannot_produce_valid_coverage(completion_session, run_cli):
@@ -702,7 +701,7 @@ def test_valid_force_approval_cannot_override_acceptance(completion_session, run
     args, env = _force_provider(root)
     isolated_provider_python(Path(env["PYTHONPATH"]))
     if contract_enabled:
-        _reject_unchanged(run_cli, root, args, "acceptance-coverage-pending", env=env)
+        _reject_unchanged(run_cli, root, args, "acceptance-receipt-missing", env=env)
     else:
         result = run_cli(*args, cwd=root, env_extra=env)
         assert result.returncode == 0, result.stderr
@@ -717,7 +716,7 @@ def test_codecs_keep_contract_and_receipt_evidence(completion_session, run_cli, 
     from mission_persistence.fenced_commit import LocalFencedRepository
 
     root, state, schema = completion_session
-    expected = "acceptance-coverage-pending"
+    expected = "acceptance-receipt-not-passed"
     if stored_case == "null":
         state["acceptance_contract"] = None
         expected = "acceptance-contract-invalid"
@@ -740,7 +739,9 @@ def test_codecs_keep_contract_and_receipt_evidence(completion_session, run_cli, 
         assert projected[field] == state[field]
     from mission_kernel.commands import MarkPass
     from mission_kernel.transitions import decide
-    decision = decide(decode_mission_state(raw), MarkPass())
+    from mission_kernel.json_codec import freeze_json_value
+    decision = decide(decode_mission_state(raw), MarkPass(acceptance_candidate_digests=
+        freeze_json_value({"AC1": "sha256:" + "a" * 64})))
     assert decision.rejection.code == expected
     assert decision.transition is None
     if schema == 5:

@@ -1225,7 +1225,15 @@ def _maximum_agreement_delta(payload: dict[str, object]) -> float | None:
 
 
 def _acceptance_completion_ready(state: MissionState, command: MarkPass) -> None:
-    """Authenticate optional completion inputs while retaining the pending gate."""
+    """One pure completion guard: contract/policy (1), normal receipts (2),
+    authenticated carriers and latest review attempts (3), independent completed
+    searches/closed obligations (4), then unresolved bound findings (5).
+
+    Within fresh-review conditions the section 4 table has priority:
+    missing > stale > pending > non-independent > coverage-open; this also
+    applies across criterion decisions, never criterion iteration order.
+    Missing contract keys keep the legacy gates; an explicit null is invalid.
+    """
     document = (
         state.legacy_passthrough.thaw()
         if state.legacy_passthrough is not None
@@ -1236,21 +1244,19 @@ def _acceptance_completion_ready(state: MissionState, command: MarkPass) -> None
     contract = document["acceptance_contract"]
     if not isinstance(contract, dict):
         raise _Rejected("acceptance-contract-invalid")
-    from acceptance_contract import AcceptanceContractError, frozen_verifier_commands
+    from acceptance_contract import (AcceptanceContractError, frozen_verifier_commands,
+        validate as validate_contract, canonical_contract_digest, verifier_definition_digest)
     try:
         commands = frozen_verifier_commands(contract)
     except AcceptanceContractError as exc:
         raise _Rejected(str(exc)) from exc
-    from .fresh_review_completion import validate_completion_carriers
-    from .fresh_review import FreshReviewError
-    from acceptance_contract import canonical_contract_digest
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise _Rejected("acceptance-contract-invalid") from exc
     try:
-        validate_completion_carriers(state.fresh_review, command.fresh_review_evidence,
-                                     command.fresh_review_bindings, canonical_contract_digest(contract))
-    except FreshReviewError as exc:
-        raise _Rejected(exc.code) from exc
-    if contract.get("coverage") != {"status": "valid"}:
-        raise _Rejected("acceptance-coverage-pending")
+        validate_contract({key: value for key, value in contract.items() if key != "imported_at"})
+        contract_digest = canonical_contract_digest(contract)
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise _Rejected("acceptance-contract-invalid") from exc
     criteria = contract.get("criteria")
     if not isinstance(criteria, list):
         raise _Rejected("acceptance-contract-invalid")
@@ -1270,11 +1276,6 @@ def _acceptance_completion_ready(state: MissionState, command: MarkPass) -> None
     policy = contract.get("verifier_policy")
     policy_digest = policy.get("digest") if isinstance(policy, dict) else None
     if not isinstance(commands, dict) or not isinstance(policy_digest, str):
-        raise _Rejected("acceptance-contract-invalid")
-    try:
-        from acceptance_contract import canonical_contract_digest, verifier_definition_digest
-        contract_digest = canonical_contract_digest(contract)
-    except (TypeError, ValueError):
         raise _Rejected("acceptance-contract-invalid")
     try:
         candidates = command.acceptance_candidate_digests.thaw()
@@ -1297,7 +1298,14 @@ def _acceptance_completion_ready(state: MissionState, command: MarkPass) -> None
             raise _Rejected("acceptance-receipt-stale")
         if latest.get("candidate_digest") != candidates[criterion_id]:
             raise _Rejected("acceptance-receipt-stale")
-    raise _Rejected("acceptance-fresh-review-pending")
+    from .fresh_review_completion import judge_completion
+    from .fresh_review import FreshReviewError
+    try:
+        judge_completion(state.fresh_review, command.fresh_review_evidence,
+                         command.fresh_review_bindings, contract, contract_digest,
+                         tuple(item["id"] for item in required), candidates)
+    except FreshReviewError as exc:
+        raise _Rejected(exc.code) from exc
 
 
 def acceptance_completion_rejection(state: MissionState, command: MarkPass) -> str | None:

@@ -178,6 +178,7 @@
       "lib/mission_kernel/budget_decisions.py:settle:system": 3,
       "lib/mission_kernel/codec_v4.py:project_legacy_document:executor_handoff": 1,
       "lib/mission_kernel/evidence.py:project_verification_receipt:executed_count": 2,
+      "lib/mission_kernel/fresh_review_completion.py:judge_completion:launch": 6,
       "lib/mission_kernel/fresh_review_coverage.py:_validated:launch": 12,
       "lib/mission_kernel/fresh_review_publish.py:validate_failed_import:launch": 1,
       "lib/mission_kernel/fresh_review_receipts.py:decode_terminal_receipt:launch": 11,

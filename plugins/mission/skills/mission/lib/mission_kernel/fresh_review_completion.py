@@ -1,4 +1,4 @@
-"""Inert, immutable completion inputs bound to published review evidence.
+"""Immutable completion evidence authentication and pure completion judgement.
 
 Decoding is not a clean-review verdict. Search/coverage/finding facts, including
 blocked replays and open Low findings, remain exactly as published.
@@ -153,3 +153,100 @@ def validate_completion_carriers(projection, evidence, bindings, contract_digest
             raise FreshReviewError(code)
     except (ValueError, TypeError, AttributeError) as exc:
         raise FreshReviewError(code) from exc
+
+
+def _completion_facts(item, request, contract):
+    """Cross-check published IDs and replay facts without trusting open lists.
+
+    Ledger classification uses the importer's shared pure rules. Replay failure
+    can verify a counterexample; a completed command alone cannot. An executed
+    but unconfirmed replay remains a blocked, unresolved finding.
+    """
+    from dataclasses import replace
+    from .fresh_review_output import decode_output, _hypothesis, _coverage_facts, replay_eligibility
+    from .fresh_review_publish import _replay_supports_hypothesis
+    coverage = item.coverage.thaw()
+    findings = tuple(f.thaw() for f in item.findings)
+    raw = {key: getattr(request, key) for key in ('mission_id', 'session_id', 'requirement_digest',
+        'contract_digest', 'verifier_policy_digest', 'candidate_digest', 'input_digest',
+        'adapter_registration_digest', 'iteration', 'nonce', 'request_id')}
+    raw.update(schema='mission-fresh-review-output/1', request_digest=canonical_digest(request_document(request)),
+        criterion_results=[dict(r, findings=[]) for r in coverage['criterion_results']], coverage=coverage['requirements'])
+    output = decode_output(raw)
+    hypotheses = []
+    for finding in findings:
+        hypothesis = {k: v for k, v in finding.items() if k not in ('schema', 'request_id',
+            'request_digest', 'candidate_digest', 'status', 'reason_code', 'resolution', 'replay')}
+        hypothesis['replay_evidence_ref'] = None
+        hypotheses.append(_hypothesis(hypothesis, finding['criterion_id'], published=True))
+    output = replace(output, criterion_results=tuple(replace(result,
+        findings=tuple(h for h in hypotheses if h.criterion_id == result.criterion_id))
+        for result in output.criterion_results))
+    facts = _coverage_facts(output, request, contract)
+    if (coverage['status'] != facts.status
+            or set(coverage['open_requirement_ids']) != set(facts.open_requirement_ids)
+            or set(coverage['open_finding_ids']) != set(facts.open_finding_ids)):
+        raise FreshReviewError(INVALID)
+    for finding, hypothesis in zip(findings, hypotheses):
+        replay = finding['replay']
+        if replay is None:
+            eligibility = replay_eligibility(request, hypothesis, contract['verifier_policy'], published=True)
+            allowed = (eligibility,) if eligibility else ('replay-budget-exceeded', 'replay-unavailable', 'replay-input-path-conflict')
+            if finding['status'] != 'blocked' or finding['actual'] != {} or finding['reason_code'] not in allowed:
+                raise FreshReviewError(INVALID)
+            continue
+        # Reuse the publisher's receipt/binding/eligibility checks. Published
+        # actual is measured; an originally unconfirmed hypothesis may now
+        # match it, so blocked is retained rather than promoted to verified.
+        supported = _replay_supports_hypothesis(request, hypothesis, contract, replay)
+        actual = {key: replay[key] for key in ('status', 'exit_code', 'timed_out', 'executed_count',
+                                               'output_digest', 'observed_output_bytes', 'output_truncated')}
+        if (canonical_bytes(finding['actual']) != canonical_bytes(actual)
+                or finding['status'] == 'verified' and (not supported or finding['reason_code'] != 'none')
+                or finding['status'] == 'blocked' and finding['reason_code'] != (replay['block_reason'] or 'replay-claim-unconfirmed')):
+            raise FreshReviewError(INVALID)
+    return facts
+
+
+def judge_completion(projection, evidence, bindings, contract, contract_digest, required, candidates):
+    """Require carriers, authenticate bytes/inner facts, then conditions 3, 4, 5.
+
+    Condition 3 uses missing > stale > pending > non-independent > coverage-open
+    across whole coverage and every required criterion, irrespective of their
+    iteration order. Condition 4 checks all attempts' independence before search
+    and open obligations; condition 5 checks unresolved bound findings last.
+    """
+    from .fresh_review import FreshReviewRecord
+    from .fresh_review_coverage import FreshReviewAttempt, judge_fresh_review, FreshReviewReason, REASON_ORDER
+    from .fresh_review_receipts import decode_terminal_receipt
+    if bindings is None:
+        raise FreshReviewError(INCOMPLETE)
+    validate_completion_carriers(projection, evidence, bindings, contract_digest)
+    records = tuple(item for item in projection.requests if isinstance(item, FreshReviewRecord))
+    attempts = tuple(FreshReviewAttempt(item.request, item.status,
+        None if item.result is None else decode_terminal_receipt(item.result.thaw())) for item in records)
+    try:
+        facts = tuple(_completion_facts(item, next(r.request for r in records if r.request.request_id == item.request_id),
+                                        contract) for item in evidence)
+    except (ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
+        raise FreshReviewError(INVALID) from exc
+    decision = judge_fresh_review(attempts, required, bindings)
+    reasons = [] if decision.reason_code is None else [decision.reason_code]
+    snapshots = dict(bindings.candidate_snapshots)
+    if any(snapshots.get(c['command_id']) != candidates[c['id']] for c in contract['criteria'] if c['required']):
+        reasons.append(FreshReviewReason.STALE)
+    if reasons:
+        raise FreshReviewError(min(reasons, key=REASON_ORDER.index).value)
+    from .fresh_review_receipts import ContextMode
+    for item in attempts:
+        launch = getattr(item.terminal_receipt, 'launch_receipt', None)
+        if (launch is None or launch.context_mode != ContextMode.FRESH
+                or launch.child_identity == launch.parent_identity
+                or launch.context_identity == launch.parent_identity):
+            raise FreshReviewError('acceptance-fresh-review-non-independent')
+    if (any(item.status != 'valid' for item in facts)
+            or any(result['status'] != 'searched' for item in evidence
+                   for result in item.coverage.thaw()['criterion_results'])):
+        raise FreshReviewError('acceptance-coverage-open')
+    if any(item.open_finding_ids for item in facts):
+        raise FreshReviewError('acceptance-unresolved-finding')
