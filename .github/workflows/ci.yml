@@ -21,20 +21,21 @@ env:
   # work takes ~344s on 10 cores locally but ~1019s on a CI runner. Splitting it
   # across independent runners shortens feedback almost linearly.
   #
-  # 6 is where three constraints meet:
+  # 8 is where three constraints meet (raised from 6 in #967, after shards hit
+  # the 15-minute timeout as the suite grew):
   #
   # 1. The slowest shard keeps shrinking: measured 369s at 4 shards, 250s at 6.
   #    Going further still helps but the marginal gain halves at every step.
   # 2. The docs-only fast path must list at least SHARD_TOTAL files, or a shard
-  #    ends up empty. It currently lists 7, so the margin is one;
+  #    ends up empty. It currently lists 9, so the margin is one;
   #    test_docs_only_fast_path_never_produces_an_empty_shard is the tripwire.
   #    Shrinking the fast path is what breaks this, not raising SHARD_TOTAL alone.
-  # 3. Concurrency: peak is shell + shards = 7 jobs per run (quality is gated
+  # 3. Concurrency: peak is shell + shards = 9 jobs per run (quality is gated
   #    behind needs, so it never overlaps them). Two runs at once stay inside
   #    the 20-concurrent-job cap; three do not - but three-at-once was measured
   #    at 3.4% of the time, and that threshold is identical at 8 shards, so the
   #    cap is not what stops us from going higher. Constraint 2 is.
-  SHARD_TOTAL: '6'
+  SHARD_TOTAL: '8'
 
 jobs:
   # ShellCheck costs ~0s, so it runs unconditionally and in parallel with the
@@ -71,7 +72,7 @@ jobs:
       # failures in the others, or the next iteration needs another full run.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
