@@ -130,15 +130,13 @@ def test_mark_pass_rejects_receipt_without_fresh_candidate_observation(tmp_path)
     from acceptance_contract import canonical_contract_digest, verifier_definition_digest
     from mission_application.review import MarkPassRequest, ReviewFailure, mark_pass
 
-    from .test_issue878_verification_runner import _policy
+    from .test_issue878_verification_runner import _contract, _policy
     command = _policy()["commands"][0]
-    contract = {
-        "schema": "mission-acceptance-contract/2",
-        "coverage": {"status": "valid"},
-        "criteria": [{"id": "AC1", "required": True, "command_id": "project-test"}],
-        "verifier_policy": {"digest": "sha256:" + "a" * 64, "commands": {"project-test": command}},
-    }
     state = _review_state(tmp_path)
+    contract = _contract(state["mission_id"])
+    policy_digest = "sha256:" + "a" * 64
+    contract.update(verifier_policy_digest=policy_digest,
+                    verifier_policy={"digest": policy_digest, "commands": {"project-test": command}})
     state["acceptance_contract"] = contract
     state["verification_receipts"] = [{
         "criterion_id": "AC1", "status": "passed", "contract_digest": canonical_contract_digest(contract),
