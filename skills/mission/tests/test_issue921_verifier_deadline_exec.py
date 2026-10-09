@@ -67,21 +67,25 @@ def _marked_group(marker):
                     os.killpg(pids[0], signal.SIGKILL)
 
 
-def _faulty_watchdog(marker, fault, deadline):
+def _faulty_watchdog(marker, fault, deadline, *, target=None, watchdog_marker=None):
     """Inject a real watchdog process, leaving bootstrap/target unmocked."""
     import budgeted_exec
     helper = Path(runner.__file__).with_name('verification_exec.py')
     receiver, sender = os.pipe()
     script = f'''
 import runpy,subprocess,sys
+from pathlib import Path
 namespace=runpy.run_path({str(helper)!r})
 original=subprocess.Popen
 def injected(argv, **kwargs):
-    if argv[-1] == '--watchdog':
-        return original([sys.executable,'-c',{fault!r}], **kwargs)
+    if '--watchdog' in argv:
+        child=original([sys.executable,'-c',{fault!r}] if {fault!r} is not None else argv, **kwargs)
+        if {str(watchdog_marker)!r} != 'None':
+            Path({str(watchdog_marker)!r}).write_text(str(child.pid))
+        return child
     return original(argv, **kwargs)
 subprocess.Popen=injected
-sys.argv=['bootstrap',{str(deadline)!r},{str(sender)!r},sys.executable,'-c',{_program(marker)!r}]
+sys.argv=['bootstrap',{str(deadline)!r},{str(sender)!r},*{(target or [sys.executable, '-c', _program(marker)])!r}]
 raise SystemExit(namespace['main']())
 '''
     try:
@@ -168,6 +172,40 @@ def test_watchdog_must_be_ready_before_target_exec(tmp_path, fault, reason, seco
             os.close(receiver)
 
 
+def test_deadline_rechecked_after_watchdog_ready_before_target_exec(monkeypatch):
+    from types import SimpleNamespace
+    from mission_application import verification_exec as bootstrap
+    deadline, now, launches = time.monotonic()+5, [], []
+    receiver, sender = os.pipe()
+    ready_receiver, ready_sender = os.pipe()
+    os.write(ready_sender, b'R'); os.close(ready_sender)
+    ready = os.fdopen(ready_receiver, 'rb')
+    def spawn(argv, **kwargs):
+        launches.append(argv)
+        if '--watchdog' not in argv:
+            pytest.fail('target started after deadline reached during readiness')
+        return SimpleNamespace(stdout=ready, poll=lambda: None)
+    read = os.read
+    def consume(fd, count):
+        data = read(fd, count)
+        if fd == ready_receiver:
+            now.append(deadline)
+        return data
+    monkeypatch.setattr(bootstrap.sys, 'argv', ['bootstrap', str(deadline), str(sender), 'neutral-target'])
+    monkeypatch.setattr(bootstrap, 'time', SimpleNamespace(monotonic=lambda: now[-1] if now else deadline-1))
+    monkeypatch.setattr(bootstrap.subprocess, 'Popen', spawn)
+    monkeypatch.setattr(bootstrap.os, 'read', consume)
+    def kill(*args):
+        raise SystemExit('owned group reclaimed')
+    monkeypatch.setattr(bootstrap.os, 'killpg', kill)
+    try:
+        with pytest.raises(SystemExit, match='owned group reclaimed'):
+            bootstrap.main()
+        assert len(launches) == 1 and os.read(receiver, 1) == b'T'
+    finally:
+        ready.close(); os.close(receiver); os.close(sender)
+
+
 def test_watchdog_exit_kills_verifier_group(tmp_path):
     marker = tmp_path / 'owned-pids'
     with _marked_group(marker):
@@ -180,6 +218,29 @@ def test_watchdog_exit_kills_verifier_group(tmp_path):
             assert os.read(receiver, 1) == b'E'
         finally:
             os.close(receiver)
+
+
+@pytest.mark.parametrize('terminal', ['passed', 'failed', 'unstarted'])
+def test_watchdog_exits_after_bootstrap_terminal(tmp_path, terminal):
+    import budgeted_exec
+    marker, watchdog_marker = tmp_path / 'owned-pids', tmp_path / 'watchdog-pid'
+    target = [str(tmp_path / 'missing-target')] if terminal == 'unstarted' else [sys.executable, '-c',
+        _program(marker).removesuffix('time.sleep(60)') + f'raise SystemExit({int(terminal == "failed")})']
+    with _marked_group(marker):
+        child, receiver = _faulty_watchdog(marker, None, time.monotonic()+30,
+            target=target, watchdog_marker=watchdog_marker)
+        try:
+            _wait(watchdog_marker.exists)
+            watchdog_pid = int(watchdog_marker.read_text())
+            _wait(lambda: budgeted_exec.observe_exit(child.pid) and _absent(watchdog_pid))
+            if terminal != 'unstarted':
+                assert marker.exists()
+                _wait(lambda: all(_absent(pid) for pid in json.loads(marker.read_text())[1:]))
+        finally:
+            os.close(receiver)
+            if watchdog_marker.exists():
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(int(watchdog_marker.read_text()), signal.SIGKILL)
 
 
 def test_exit_observed_after_budget_deadline_cannot_pass(monkeypatch):
@@ -228,6 +289,61 @@ execute_candidate(CandidateSnapshot((),_digest(())),{command!r},relative_cwd='.'
             # SIGKILL guarantee from the bootstrap's redundant deadline guard.
             os.kill(pids[0], signal.SIGKILL)
         _wait(lambda: time.monotonic() >= deadline and all(_absent(pid) for pid in pids[1:]), 4)
+
+
+@pytest.mark.parametrize('supervisor_signal', [signal.SIGKILL, signal.SIGSTOP])
+def test_stopped_group_is_reclaimed_without_reporting_supervisor(tmp_path, supervisor_signal):
+    import budgeted_exec
+    marker, watchdog_marker = tmp_path / 'owned-pids', tmp_path / 'watchdog-pid'
+    helper = Path(runner.__file__).with_name('verification_exec.py')
+    deadline = time.monotonic()+3
+    program = _program(marker).removesuffix('time.sleep(60)') + \
+        'os.killpg(os.getpgrp(),signal.SIGSTOP); time.sleep(60)'
+    program = 'import signal; ' + program
+    bootstrap_script = f'''
+import runpy,subprocess,sys
+from pathlib import Path
+namespace=runpy.run_path({str(helper)!r})
+original=subprocess.Popen
+def record(argv, **kwargs):
+    child=original(argv, **kwargs)
+    if '--watchdog' in argv:
+        Path({str(watchdog_marker)!r}).write_text(str(child.pid))
+    return child
+subprocess.Popen=record
+raise SystemExit(namespace['main']())
+'''
+    stopped_marker = tmp_path / 'stopped-leader'
+    supervisor_script = f'''
+import os,subprocess,sys,time
+from pathlib import Path
+receiver,sender=os.pipe()
+child=subprocess.Popen([sys.executable,'-I','-S','-c',{bootstrap_script!r},
+    {str(deadline)!r},str(sender),sys.executable,'-c',{program!r}],
+    pass_fds=(sender,),start_new_session=True)
+os.close(sender)
+_,state=os.waitpid(child.pid,os.WUNTRACED)
+assert os.WIFSTOPPED(state)
+Path({str(stopped_marker)!r}).write_text('stopped')
+child.wait()
+'''
+    with _marked_group(marker):
+        supervisor = budgeted_exec.spawn_exec([sys.executable, '-I', '-S', '-c', supervisor_script])
+        try:
+            _wait(lambda: marker.exists() and watchdog_marker.exists() and stopped_marker.exists())
+            pids = json.loads(marker.read_text())
+            watchdog_pid = int(watchdog_marker.read_text())
+            os.kill(supervisor.pid, supervisor_signal)
+            _wait(lambda: time.monotonic() >= deadline and
+                all(_absent(pid) for pid in [*pids[1:], watchdog_pid]), 4)
+        finally:
+            # Markers identify only our processes, including the detached guard.
+            if watchdog_marker.exists():
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(int(watchdog_marker.read_text()), signal.SIGKILL)
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(supervisor.pid, signal.SIGKILL)
+            supervisor.wait(timeout=1)
 
 
 def test_legacy_timeout_reclaims_grandchild(tmp_path):

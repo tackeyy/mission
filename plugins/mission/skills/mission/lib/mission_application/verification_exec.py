@@ -1,7 +1,8 @@
 """Launch a verifier in its owned group with an independent absolute deadline.
 
 The supervisor owns and pins this group leader until cleanup before reap.
-The watchdog shares the group; its SIGKILL also kills itself and descendants.
+The watchdog uses a separate group in the same session, pinning the session
+leader ID until its last group signal. Parent exit also ends its lifetime.
 Use -I -S for this bootstrap so site hooks cannot precede watchdog admission.
 """
 from __future__ import annotations
@@ -24,12 +25,12 @@ def deadline_is_valid(value):
             and math.isfinite(value))
 
 
-def _stop(control, reason):
+def _stop(control, reason, pgid=None):
     try:
         os.write(control, reason)  # nonblocking; never a payload channel
     except OSError:
         pass
-    os.killpg(os.getpgrp(), signal.SIGKILL)
+    os.killpg(os.getpgrp() if pgid is None else pgid, signal.SIGKILL)
 
 
 def main():
@@ -50,13 +51,19 @@ def main():
             pass
         return 2
     if sys.argv[3] == '--watchdog':
+        pgid = int(sys.argv[4])
+        # Detach before ready; keep the session so its leader ID cannot be reused.
+        os.setpgid(0, 0)
         os.write(1, b'R')  # private readiness pipe; target has not started
-        while time.monotonic() < deadline:
+        while time.monotonic() < deadline and os.getppid() == pgid:
             time.sleep(min(.01, max(0, deadline - time.monotonic())))
-        _stop(control, b'T')
-        return 2
+        try:
+            _stop(control, b'T' if time.monotonic() >= deadline else b'', pgid)
+        except ProcessLookupError:
+            pass  # reporting supervisor already reclaimed the group
+        return 0
     try:
-        watchdog = subprocess.Popen([sys.executable, '-I', '-S', __file__, sys.argv[1], sys.argv[2], '--watchdog'],
+        watchdog = subprocess.Popen([sys.executable, '-I', '-S', __file__, sys.argv[1], sys.argv[2], '--watchdog', str(os.getpgrp())],
             pass_fds=(control,), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, close_fds=True)
         with watchdog.stdout as ready:
             readable, _, _ = select.select([ready], [], [], max(0, deadline-time.monotonic()))
@@ -72,7 +79,7 @@ def main():
             return 2
         target = subprocess.Popen(sys.argv[3:], close_fds=True)
         # Keep the group leader alive: watchdog death must fail closed even if
-        # the reporting supervisor has crashed. Both guards own this group.
+        # the reporting supervisor has crashed. The detached guard also reclaims it on bootstrap exit.
         while True:
             if watchdog.poll() is not None:
                 _stop(control, b'E')

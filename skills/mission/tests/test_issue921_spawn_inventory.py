@@ -31,7 +31,7 @@ os.environ.get os.fchmod os.fdopen os.fspath os.fstat os.fsync os.getpid os.getp
 os.getuid os.getpgrp os.kill os.killpg os.link os.listdir os.lstat os.mkdir os.open os.path
 os.path.abspath os.path.basename os.path.lexists os.path.normpath os.pathsep
 os.pathsep.join os.pipe os.read os.readlink os.rename os.replace os.rmdir os.scandir
-os.sep os.set_blocking os.set_inheritable os.setsid os.stat os.stat_result os.unlink
+os.sep os.set_blocking os.set_inheritable os.setpgid os.setsid os.stat os.stat_result os.unlink
 os.waitid os.walk os.write subprocess.DEVNULL subprocess.PIPE subprocess.STDOUT
 subprocess.TimeoutExpired multiprocessing.connection multiprocessing.connection.wait""".split())
 CAPABILITIES = {'subprocess', 'os', 'posix', '_posixsubprocess', 'multiprocessing',
