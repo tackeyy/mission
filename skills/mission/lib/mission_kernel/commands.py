@@ -382,6 +382,9 @@ class ImportFreshReviewOutput:
     candidate_digest: str
     output_base64: Optional[str]
     effect: Optional[FreshReviewInputEffectClaim]
+    coverage_effect: Optional[FreshReviewInputEffectClaim] = None
+    findings_effect: tuple[FreshReviewInputEffectClaim, ...] = ()
+    replay_results: tuple[FrozenJsonObject, ...] = ()
 
 
 @dataclass(frozen=True)

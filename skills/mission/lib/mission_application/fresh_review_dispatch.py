@@ -243,7 +243,7 @@ def _reconcile(record, args, operation, repo, root, services, host):
         raise FreshReviewError('fresh-review-operation-conflict')
     if record.dispatch is None or record.dispatch.thaw()['adapter_id'] != args.adapter:
         raise FreshReviewError('fresh-review-adapter-pin-changed')
-    if record.status in ('blocked', 'abandoned-unknown', 'failed'):
+    if record.status in ('blocked', 'abandoned-unknown', 'failed', 'completed'):
         if record.result.thaw()['commit_operation_id'] != operation:
             raise FreshReviewError('fresh-review-operation-conflict')
         return json.dumps({'ok': True, 'record': _wire(record)})
@@ -282,8 +282,11 @@ def _reconcile(record, args, operation, repo, root, services, host):
         except FreshReviewError as exc:
             if exc.code == 'fresh-review-launch-binding-mismatch':
                 if record.launch is not None:
-                    raise
-                reason = 'binding-mismatch'
+                    if before_deadline:
+                        raise
+                    observation = {}
+                else:
+                    reason = 'binding-mismatch'
             raw = None
     if raw is not None:
         # Dispatch epoch identifies the child; the current epoch is the writer.

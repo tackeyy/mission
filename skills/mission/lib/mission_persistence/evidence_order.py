@@ -165,6 +165,10 @@ def _publication_claims(command, command_type):
 
     if command_type not in PUBLICATION_PATH_FIELD_BY_COMMAND_TYPE:
         return ()
+    if command_type == 'fresh-review-output-import':
+        return tuple((field, claim) for field in EFFECT_FIELDS_BY_COMMAND_TYPE[command_type]
+            for claim in (getattr(command, field) if field == 'findings_effect' else (getattr(command, field),))
+            if claim is not None)
     return tuple(
         (field, getattr(command, field))
         for field in EFFECT_FIELDS_BY_COMMAND_TYPE.get(command_type, ())

@@ -2592,6 +2592,8 @@ def bind_transition_effects(
     claims: tuple[object, ...] | None = None
     if isinstance(command, (PrepareFreshReview, ImportFreshReviewOutput)):
         claims = () if command.effect is None else (command.effect,)
+        if isinstance(command, ImportFreshReviewOutput):
+            claims += (() if command.coverage_effect is None else (command.coverage_effect,)) + command.findings_effect
     elif isinstance(command, (InitializeArtifact, RenderArtifact, RecordArtifactPublication)):
         claims = (command.effect,)
     elif isinstance(command, AppendArtifactBlock):
