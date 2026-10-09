@@ -1,4 +1,21 @@
 {
+  "benchmarks/mission-vs-goal/native_goal_benchmark.py": {
+    "_digest_tree:open-write": 1,
+    "create_immutable_package:replace": 1,
+    "create_immutable_package:unlink": 1,
+    "create_worker_export:open-write": 1,
+    "create_worker_export:rmtree": 1,
+    "create_worker_export:unlink": 1,
+    "initialize_worker_export_repository:write_text": 1,
+    "write_record:open-write": 1,
+    "write_record:write": 1
+  },
+  "benchmarks/mission-vs-goal/public_benchmark.py": {
+    "_archive_files:open-write": 1,
+    "_copy_candidate:copy2": 1,
+    "_normalized_digest:open-write": 1,
+    "_write_tree:write_bytes": 1
+  },
   "bin/mission-migrate.py": {
     "migrate_one:copy2": 1,
     "migrate_one:unlink": 1

@@ -131,8 +131,8 @@ def _digest_file(path: Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _digest_tree(root: Path, *, exclude_git: bool = False) -> str:
-    """Hash a stable regular-file tree without following links."""
+def _digest_tree(root: Path, *, exclude_git: bool = False, include_executable: bool = False) -> str:
+    """Hash a stable regular-file tree; opt-in exec-v1 preserves H v1 bytes."""
     try:
         root_stat = root.lstat()
     except OSError as exc:
@@ -164,6 +164,7 @@ def _digest_tree(root: Path, *, exclude_git: bool = False) -> str:
             else:
                 raise ValueError("candidate tree contains link or special entry")
     digest = hashlib.sha256()
+    if include_executable: digest.update(b"mission-tree-exec-v1\0")
     for path, before in sorted(files):
         relative = path.relative_to(root)
         rel = relative.as_posix().encode("utf-8")
@@ -176,6 +177,10 @@ def _digest_tree(root: Path, *, exclude_git: bool = False) -> str:
             raise ValueError("candidate tree changed during snapshot") from exc
         if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns):
             raise ValueError("candidate tree changed during snapshot")
+        if include_executable:
+            if after.st_mode != before.st_mode:
+                raise ValueError("candidate tree changed during snapshot")
+            digest.update((before.st_mode & 0o111).to_bytes(2, "big"))
         digest.update(len(rel).to_bytes(8, "big")); digest.update(rel)
         digest.update(len(content).to_bytes(8, "big")); digest.update(content)
     for path, before in directories:
@@ -185,7 +190,7 @@ def _digest_tree(root: Path, *, exclude_git: bool = False) -> str:
             raise ValueError("candidate tree changed during snapshot") from exc
         if (after.st_dev, after.st_ino, after.st_mtime_ns) != (before.st_dev, before.st_ino, before.st_mtime_ns):
             raise ValueError("candidate tree changed during snapshot")
-    return "sha256:" + digest.hexdigest()
+    return ("sha256-tree-exec-v1:" if include_executable else "sha256:") + digest.hexdigest()
 
 
 def immutable_manifest(starting_commit: str, source_dir: Path, package_path: Path, conditions: dict[str, Any]) -> dict[str, Any]:
@@ -201,6 +206,15 @@ def immutable_manifest(starting_commit: str, source_dir: Path, package_path: Pat
         "package": {"path": package_path.name, "sha256": _digest_file(package_path)},
         "conditions": dict(conditions),
     }
+
+
+def _git_environment():
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.startswith("GIT_CONFIG_")}
+    environment.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1",
+                       GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.hooksPath",
+                       GIT_CONFIG_VALUE_0=os.devnull)
+    return environment
 
 
 def create_immutable_package(repo_root: Path, starting_commit: str, output_path: Path) -> Path:
@@ -219,7 +233,7 @@ def create_immutable_package(repo_root: Path, starting_commit: str, output_path:
         tmp_path = Path(temporary.name)
         result = subprocess.run(
             ["git", "archive", "--format=tar", starting_commit, "plugins/mission", "skills/mission"],
-            cwd=repo_root, stdout=temporary, stderr=subprocess.PIPE, check=False,
+            env=_git_environment(), cwd=repo_root, stdout=temporary, stderr=subprocess.PIPE, check=False,
         )
     if result.returncode != 0:
         tmp_path.unlink(missing_ok=True)
@@ -244,7 +258,7 @@ def create_worker_export(repo_root: Path, starting_commit: str, output_path: Pat
     archive: Path | None = None
     with tempfile.NamedTemporaryFile(prefix=".worker-export-", suffix=".tar", dir=output_path.parent, delete=False) as temporary:
         archive = Path(temporary.name)
-        result = subprocess.run(["git", "archive", "--format=tar", starting_commit], cwd=repo_root, stdout=temporary, stderr=subprocess.PIPE, check=False)
+        result = subprocess.run(["git", "archive", "--format=tar", starting_commit], env=_git_environment(), cwd=repo_root, stdout=temporary, stderr=subprocess.PIPE, check=False)
     try:
         if result.returncode != 0:
             raise RuntimeError("task export archive failed")
@@ -284,18 +298,30 @@ def worker_export_manifest(worker_root: Path) -> dict[str, Any]:
     return {"schema": "mission-worker-export/1", "sha256": _digest_tree(worker_root, exclude_git=True)}
 
 
-def initialize_worker_export_repository(worker_root: Path) -> str:
-    """Give the filtered export its own history-free revision scope."""
+def initialize_worker_export_repository(worker_root: Path, *, literal_snapshot: bool = False) -> str:
+    """Give the filtered export its own history-free revision scope.
+
+    literal_snapshot is for an already digest-verified upstream snapshot:
+    retain ignored files and prevent attributes from transforming source bytes
+    or excluding/substituting them during archive. The default is unchanged.
+    """
     commands = (
         ["git", "init", "--quiet"],
-        ["git", "add", "--all"],
+        ["git", "add", *(["--force"] if literal_snapshot else []), "--all"],
         ["git", "-c", "user.name=benchmark", "-c", "user.email=benchmark@invalid", "commit", "--quiet", "-m", "benchmark export"],
     )
     for command in commands:
-        result = subprocess.run(command, cwd=worker_root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        result = subprocess.run(command, env=_git_environment(), cwd=worker_root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
         if result.returncode != 0:
             raise RuntimeError("worker export repository initialization failed")
-    result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=worker_root, text=True, capture_output=True, check=False)
+        if literal_snapshot and command[:2] == ["git", "init"]:
+            attributes = worker_root / ".git" / "info" / "attributes"
+            attributes.parent.mkdir(parents=True, exist_ok=True)
+            attributes.write_text(
+                "* -text -filter -ident -working-tree-encoding -export-ignore -export-subst\n",
+                encoding="utf-8",
+            )
+    result = subprocess.run(["git", "rev-parse", "HEAD"], env=_git_environment(), cwd=worker_root, text=True, capture_output=True, check=False)
     commit = result.stdout.strip()
     if result.returncode != 0 or not _COMMIT_RE.fullmatch(commit):
         raise RuntimeError("worker export commit unavailable")
