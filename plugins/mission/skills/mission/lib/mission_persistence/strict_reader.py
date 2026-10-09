@@ -218,3 +218,8 @@ def read_stable_bytes_beneath(
                 os.close(descriptor)
             except OSError:
                 pass
+
+
+def read_stable_payload_beneath(root: Path | str, relative_path: str, limit: int) -> bytes:
+    """Return only the bytes of a pinned read, for injection into application readers."""
+    return read_stable_bytes_beneath(root, relative_path, limit=limit).payload
