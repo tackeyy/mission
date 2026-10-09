@@ -43,6 +43,8 @@ def _read(root, reference):
 def observe_completion_inputs(state, *, root, load_policy):
     """Observe all non-withdrawn requests, including partial and older attempts.
 
+    Filtering for FreshReviewRecord excludes withdrawn tombstones represented
+    by WithdrawnFreshReviewRecord.
     Capture the union of bound commands once, then compute each request's input
     from its command subset and perspective using the same packet as prepare.
     Never substitute a saved request digest for a new observation.

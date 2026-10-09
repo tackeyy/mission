@@ -292,6 +292,9 @@ immutable typed carrier として MarkPass へ渡す。kernel は carrier の ca
 state の ref と再照合し、filesystem を読まない。request ごとの input digest と verification/replay を含む
 command ごとの candidate snapshot は application が prepare と同じ計算で再観測し、typed bindings で運ぶ。
 preflight と MarkPass は同じ carrier 検証を共有する。この先行 PR は完了判定を変えず、既存の pending gate を維持する。
+carrier を一つも渡さない既定値（evidence が空 tuple、bindings が None）だけは検証を省略する。
+入力を渡した場合は両方を必要とし、省略は `acceptance-fresh-review-completion-carrier-incomplete` で拒否する。
+bindings とともに渡した空 evidence も completed request の集合と照合する。
 
 ## 6. C から引き継ぐ Low の処理
 

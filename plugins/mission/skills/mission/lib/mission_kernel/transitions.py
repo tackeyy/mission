@@ -1244,12 +1244,11 @@ def _acceptance_completion_ready(state: MissionState, command: MarkPass) -> None
     from .fresh_review_completion import validate_completion_carriers
     from .fresh_review import FreshReviewError
     from acceptance_contract import canonical_contract_digest
-    if command.fresh_review_evidence != () or command.fresh_review_bindings is not None:
-        try:
-            validate_completion_carriers(state.fresh_review, command.fresh_review_evidence,
-                                         command.fresh_review_bindings, canonical_contract_digest(contract))
-        except FreshReviewError as exc:
-            raise _Rejected(exc.code) from exc
+    try:
+        validate_completion_carriers(state.fresh_review, command.fresh_review_evidence,
+                                     command.fresh_review_bindings, canonical_contract_digest(contract))
+    except FreshReviewError as exc:
+        raise _Rejected(exc.code) from exc
     if contract.get("coverage") != {"status": "valid"}:
         raise _Rejected("acceptance-coverage-pending")
     criteria = contract.get("criteria")

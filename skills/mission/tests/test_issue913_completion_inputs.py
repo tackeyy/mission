@@ -5,7 +5,7 @@ from dataclasses import replace
 
 import pytest
 
-from mission_kernel.fresh_review import canonical_bytes, FreshReviewError
+from mission_kernel.fresh_review import canonical_bytes, canonical_digest, FreshReviewError
 from mission_kernel.json_codec import freeze_json_value
 from .test_issue896_completed import completed_carrier
 from .test_issue879_completion_cli import completion_session
@@ -17,6 +17,110 @@ def evidence_carrier(published):
     record, terminal, _, coverage, findings = published
     return decode_completion_evidence(record.request, terminal, json.loads(coverage),
                                       tuple(json.loads(item) for item in findings))
+
+
+@pytest.fixture
+def completion_bindings(published):
+    from mission_kernel.fresh_review_coverage import FreshReviewBindings
+    request = published[0].request
+    return FreshReviewBindings(request.contract_digest, ((request.request_id, request.input_digest),),
+        tuple((item.command_id, item.snapshot_digest) for item in request.candidate_bindings))
+
+
+def test_evidence_without_bindings_is_an_incomplete_carrier(gate_state, evidence_carrier):
+    from mission_kernel.fresh_review_completion import validate_completion_carriers
+    with pytest.raises(FreshReviewError, match='^acceptance-fresh-review-completion-carrier-incomplete$'):
+        validate_completion_carriers(gate_state.fresh_review, (evidence_carrier,), None,
+                                     gate_state.fresh_review.requests[0].request.contract_digest)
+
+
+def test_empty_evidence_cannot_omit_a_completed_request(gate_state, completion_bindings):
+    from mission_kernel.fresh_review_completion import validate_completion_carriers
+    with pytest.raises(FreshReviewError, match='^acceptance-fresh-review-evidence-invalid$'):
+        validate_completion_carriers(gate_state.fresh_review, (), completion_bindings,
+                                     completion_bindings.contract_digest)
+
+
+def test_bindings_without_an_evidence_tuple_are_incomplete(gate_state, completion_bindings):
+    from mission_kernel.fresh_review_completion import validate_completion_carriers
+    with pytest.raises(FreshReviewError, match='^acceptance-fresh-review-completion-carrier-incomplete$'):
+        validate_completion_carriers(gate_state.fresh_review, None, completion_bindings,
+                                     completion_bindings.contract_digest)
+
+
+def test_empty_tuple_subclass_cannot_skip_carrier_authentication(gate_state):
+    from mission_kernel.commands import MarkPass
+    from mission_kernel.transitions import acceptance_completion_rejection, decide
+    class UntypedEvidence(tuple):
+        pass
+    command = MarkPass(fresh_review_evidence=UntypedEvidence())
+    reason = 'acceptance-fresh-review-completion-carrier-incomplete'
+    assert acceptance_completion_rejection(gate_state, command) == reason
+    assert decide(gate_state, command).rejection.code == reason
+
+
+def test_bound_nested_finding_is_rejected_with_an_evidence_reason(published):
+    import sys
+    from mission_kernel.fresh_review_completion import decode_completion_evidence
+    record, terminal, _, coverage, findings = published
+    finding = json.loads(findings[0])
+    nested = {}
+    for _ in range(sys.getrecursionlimit() // 2 + 20):
+        nested = {'child': nested}
+    finding['replay'] = nested
+    reference = replace(terminal.findings[0], digest=canonical_digest(finding),
+                        size=len(canonical_bytes(finding)))
+    terminal = replace(terminal, findings=(reference,))
+    with pytest.raises(FreshReviewError, match='^acceptance-fresh-review-evidence-invalid$'):
+        try:
+            decode_completion_evidence(record.request, terminal, json.loads(coverage), (finding,))
+        except RecursionError:
+            pytest.fail('kernel evidence recursion escaped the reason-code boundary', pytrace=False)
+
+
+@pytest.mark.parametrize('scope', ['coverage', 'finding'])
+def test_nested_typed_carrier_cannot_escape_before_evidence_decode(gate_state, evidence_carrier, completion_bindings, scope):
+    import sys
+    from mission_kernel.model import FrozenJsonObject
+    from mission_kernel.commands import MarkPass
+    from mission_kernel.transitions import acceptance_completion_rejection, decide
+    nested = FrozenJsonObject(())
+    for _ in range(sys.getrecursionlimit() // 2 + 20):
+        nested = FrozenJsonObject((('child', nested),))
+    carrier = (replace(evidence_carrier, coverage=nested) if scope == 'coverage'
+               else replace(evidence_carrier, findings=(nested,)))
+    command = MarkPass(fresh_review_evidence=(carrier,), fresh_review_bindings=completion_bindings)
+    try:
+        assert acceptance_completion_rejection(gate_state, command) == 'acceptance-fresh-review-evidence-invalid'
+        result = decide(gate_state, command)
+    except RecursionError:
+        pytest.fail('carrier thaw recursion escaped the reason-code boundary', pytrace=False)
+    assert result.rejection.code == 'acceptance-fresh-review-evidence-invalid'
+    assert result.transition is None and result.effects == () and result.events == ()
+
+
+def test_withdrawn_requests_are_excluded_from_documented_completion_inputs(published, tmp_path, monkeypatch):
+    from mission_application import fresh_review_completion as app
+    from mission_kernel.fresh_review import FreshReviewRecord, FreshReviewProjection, projection_document, withdraw_request
+    from mission_kernel.fresh_review_completion import validate_completion_carriers
+    record, _, contract, _, _ = published
+    pending = FreshReviewRecord(record.request, 'prepare', record.prepare_intent_digest, record.prepare_payload_digest)
+    projection = withdraw_request(FreshReviewProjection((pending,)), request_id=record.request.request_id,
+                                  operation_id='withdraw', fencing_epoch=1)
+    data = dict(acceptance_contract=contract, fresh_review=projection_document(projection))
+    def capture(_, commands):
+        assert commands == {}
+        return {}
+    monkeypatch.setattr(app.prepare, '_capture', capture)
+    monkeypatch.setattr(app, '_read', lambda *_: pytest.fail('withdrawn request tried to read evidence'))
+    observed = app.observe_completion_inputs(data, root=tmp_path, load_policy=lambda _: contract['verifier_policy'])
+    assert observed.evidence == ()
+    assert observed.bindings.input_digests == observed.bindings.candidate_snapshots == ()
+    assert validate_completion_carriers(projection, observed.evidence, observed.bindings,
+                                        observed.bindings.contract_digest) is None
+    # Keep the public observation contract explicit about the tombstone filter.
+    for name in ('FreshReviewRecord', 'WithdrawnFreshReviewRecord'):
+        assert name in app.observe_completion_inputs.__doc__
 
 
 @pytest.fixture
@@ -95,7 +199,7 @@ def gate_state(published):
                    legacy_passthrough=freeze_json_value(document))
 
 
-def test_gate_and_preflight_reject_tampered_carrier_without_changing_state(gate_state, published):
+def test_gate_and_preflight_reject_tampered_carrier_without_changing_state(gate_state, published, completion_bindings):
     import copy
     from mission_kernel.commands import MarkPass
     from mission_kernel.fresh_review_completion import decode_completion_evidence
@@ -105,7 +209,8 @@ def test_gate_and_preflight_reject_tampered_carrier_without_changing_state(gate_
                                          tuple(json.loads(item) for item in findings))
     forged = carrier.coverage.thaw()
     forged['open_finding_ids'] = []
-    command = MarkPass(fresh_review_evidence=(replace(carrier, coverage=freeze_json_value(forged)),))
+    command = MarkPass(fresh_review_evidence=(replace(carrier, coverage=freeze_json_value(forged)),),
+                       fresh_review_bindings=completion_bindings)
     before = copy.deepcopy(gate_state)
     assert acceptance_completion_rejection(gate_state, command) == 'acceptance-fresh-review-evidence-mismatch'
     decision = decide(gate_state, command)
@@ -179,7 +284,7 @@ def test_application_carries_identical_inputs_to_preflight_and_authoritative_com
 
 @pytest.mark.parametrize('scope', ['coverage', 'finding'])
 @pytest.mark.parametrize('value', [None, True, [], {}, '', 'forged', 0, 1])
-def test_content_tampering_cannot_supply_a_clean_verdict(gate_state, evidence_carrier, scope, value):
+def test_content_tampering_cannot_supply_a_clean_verdict(gate_state, evidence_carrier, completion_bindings, scope, value):
     from mission_kernel.commands import MarkPass
     from mission_kernel.transitions import acceptance_completion_rejection, decide
     if scope == 'coverage':
@@ -190,7 +295,7 @@ def test_content_tampering_cannot_supply_a_clean_verdict(gate_state, evidence_ca
         raw = evidence_carrier.findings[0].thaw()
         raw['resolution'] = value
         forged = replace(evidence_carrier, findings=(freeze_json_value(raw),))
-    command = MarkPass(fresh_review_evidence=(forged,))
+    command = MarkPass(fresh_review_evidence=(forged,), fresh_review_bindings=completion_bindings)
     assert acceptance_completion_rejection(gate_state, command) == 'acceptance-fresh-review-evidence-mismatch'
     result = decide(gate_state, command)
     assert result.rejection.code == 'acceptance-fresh-review-evidence-mismatch'
@@ -199,7 +304,7 @@ def test_content_tampering_cannot_supply_a_clean_verdict(gate_state, evidence_ca
 
 @pytest.mark.parametrize('case', ['wrong-request', 'duplicate', 'missing-finding', 'untyped-coverage',
                                   'untyped-finding', 'list-findings', 'list-evidence', 'null-evidence'])
-def test_malformed_or_cross_request_carriers_are_not_ignored(gate_state, evidence_carrier, case):
+def test_malformed_or_cross_request_carriers_are_not_ignored(gate_state, evidence_carrier, completion_bindings, case):
     from mission_kernel.commands import MarkPass
     from mission_kernel.transitions import acceptance_completion_rejection
     changes = {'wrong-request': {'request_id': 'other'}, 'missing-finding': {'findings': ()},
@@ -212,31 +317,37 @@ def test_malformed_or_cross_request_carriers_are_not_ignored(gate_state, evidenc
         evidence = list(evidence)
     elif case == 'null-evidence':
         evidence = None
-    assert acceptance_completion_rejection(gate_state, MarkPass(fresh_review_evidence=evidence)) == (
-        'acceptance-fresh-review-evidence-invalid')
+    expected = ('acceptance-fresh-review-completion-carrier-incomplete' if case == 'null-evidence'
+                else 'acceptance-fresh-review-evidence-invalid')
+    assert acceptance_completion_rejection(gate_state, MarkPass(fresh_review_evidence=evidence,
+        fresh_review_bindings=completion_bindings)) == expected
 
 
 @pytest.mark.parametrize('identifier', [[], {}, True, None])
-def test_malformed_carrier_identity_rejects_before_dictionary_lookup(gate_state, evidence_carrier, identifier):
+def test_malformed_carrier_identity_rejects_before_dictionary_lookup(gate_state, evidence_carrier, completion_bindings, identifier):
     from mission_kernel.commands import MarkPass
     from mission_kernel.transitions import acceptance_completion_rejection
     assert acceptance_completion_rejection(gate_state, MarkPass(fresh_review_evidence=(
-        replace(evidence_carrier, request_id=identifier),))) == 'acceptance-fresh-review-evidence-invalid'
+        replace(evidence_carrier, request_id=identifier),),
+        fresh_review_bindings=completion_bindings)) == 'acceptance-fresh-review-evidence-invalid'
 
 
-def test_supplied_carrier_cannot_omit_an_older_completed_attempt(gate_state, evidence_carrier):
+def test_supplied_carrier_cannot_omit_an_older_completed_attempt(gate_state, evidence_carrier, completion_bindings):
     from mission_kernel.commands import MarkPass
     from mission_kernel.fresh_review import FreshReviewProjection
     from mission_kernel.transitions import acceptance_completion_rejection
     record = gate_state.fresh_review.requests[0]
     other = replace(record, request=replace(record.request, request_id='older-request', nonce='older-nonce'))
     state = replace(gate_state, fresh_review=FreshReviewProjection((other, record)))
-    assert acceptance_completion_rejection(state, MarkPass(fresh_review_evidence=(evidence_carrier,))) == (
+    bindings = replace(completion_bindings, input_digests=(*completion_bindings.input_digests,
+        (other.request.request_id, other.request.input_digest)))
+    assert acceptance_completion_rejection(state, MarkPass(fresh_review_evidence=(evidence_carrier,),
+        fresh_review_bindings=bindings)) == (
         'acceptance-fresh-review-evidence-invalid')
 
 
 @pytest.mark.parametrize('scope', ['coverage', 'finding'])
-def test_kernel_checks_ref_size_independently_of_digest(gate_state, evidence_carrier, scope):
+def test_kernel_checks_ref_size_independently_of_digest(gate_state, evidence_carrier, completion_bindings, scope):
     from mission_kernel.commands import MarkPass
     from mission_kernel.fresh_review import FreshReviewProjection
     from mission_kernel.transitions import acceptance_completion_rejection
@@ -246,25 +357,27 @@ def test_kernel_checks_ref_size_independently_of_digest(gate_state, evidence_car
     reference['size'] += 1
     state = replace(gate_state, fresh_review=FreshReviewProjection((
         replace(record, result=freeze_json_value(terminal)),)))
-    assert acceptance_completion_rejection(state, MarkPass(fresh_review_evidence=(evidence_carrier,))) == (
+    assert acceptance_completion_rejection(state, MarkPass(fresh_review_evidence=(evidence_carrier,),
+        fresh_review_bindings=completion_bindings)) == (
         'acceptance-fresh-review-evidence-mismatch')
 
 
-def test_same_size_finding_cannot_change_its_requirement_binding(gate_state, evidence_carrier):
+def test_same_size_finding_cannot_change_its_requirement_binding(gate_state, evidence_carrier, completion_bindings):
     from mission_kernel.commands import MarkPass
     from mission_kernel.transitions import acceptance_completion_rejection
     finding = evidence_carrier.findings[0].thaw()
     finding['requirement_ids'] = ['R2']
     assert len(canonical_bytes(finding)) == len(canonical_bytes(evidence_carrier.findings[0].thaw()))
     forged = replace(evidence_carrier, findings=(freeze_json_value(finding),))
-    assert acceptance_completion_rejection(gate_state, MarkPass(fresh_review_evidence=(forged,))) == (
+    assert acceptance_completion_rejection(gate_state, MarkPass(fresh_review_evidence=(forged,),
+        fresh_review_bindings=completion_bindings)) == (
         'acceptance-fresh-review-evidence-mismatch')
 
 
 @pytest.mark.parametrize('case', ['contract', 'input-missing', 'input-extra', 'input-duplicate',
     'replay-missing', 'snapshot-extra', 'snapshot-duplicate', 'input-shape', 'snapshot-shape',
     'input-digest', 'snapshot-digest', 'input-id', 'untyped'])
-def test_bindings_require_exact_request_and_command_keys(gate_state, published, case):
+def test_bindings_require_exact_request_and_command_keys(gate_state, published, evidence_carrier, case):
     from mission_kernel.commands import MarkPass
     from mission_kernel.fresh_review_coverage import FreshReviewBindings
     from mission_kernel.transitions import acceptance_completion_rejection, decide
@@ -283,7 +396,7 @@ def test_bindings_require_exact_request_and_command_keys(gate_state, published, 
         'snapshot-digest': {'candidate_snapshots': (('command-1', 'invalid'),)},
         'input-id': {'input_digests': (([], record.request.input_digest),)}}
     malformed = {} if case == 'untyped' else replace(bindings, **changes[case])
-    command = MarkPass(fresh_review_bindings=malformed)
+    command = MarkPass(fresh_review_evidence=(evidence_carrier,), fresh_review_bindings=malformed)
     assert acceptance_completion_rejection(gate_state, command) == 'acceptance-fresh-review-bindings-invalid'
     assert decide(gate_state, command).rejection.code == 'acceptance-fresh-review-bindings-invalid'
 
@@ -312,7 +425,14 @@ def test_valid_carriers_are_inert_and_absent_carriers_remain_compatible(gate_sta
         'acceptance-contract-invalid')
 
 
-def test_matching_carrier_does_not_enable_the_unconditional_fresh_review_gate(gate_state, evidence_carrier):
+@pytest.mark.parametrize('carriers,reason', [
+    ('both', 'acceptance-fresh-review-pending'), ('neither', 'acceptance-fresh-review-pending'),
+    ('evidence-only', 'acceptance-fresh-review-completion-carrier-incomplete'),
+    ('bindings-only', 'acceptance-fresh-review-evidence-invalid'),
+    ('no-evidence-tuple', 'acceptance-fresh-review-completion-carrier-incomplete'),
+])
+def test_matching_carrier_does_not_enable_the_unconditional_fresh_review_gate(gate_state, evidence_carrier, completion_bindings, carriers, reason):
+    import copy
     from acceptance_contract import canonical_contract_digest, verifier_definition_digest
     from mission_kernel.commands import MarkPass
     from mission_kernel.transitions import acceptance_completion_rejection, decide
@@ -328,10 +448,19 @@ def test_matching_carrier_does_not_enable_the_unconditional_fresh_review_gate(ga
         verifier_definition_digest=verifier_definition_digest(contract['verifier_policy']['commands']['command-1']),
         candidate_digest=candidate)]
     state = replace(gate_state, legacy_passthrough=freeze_json_value(document))
-    command = MarkPass(fresh_review_evidence=(evidence_carrier,),
+    evidence = (evidence_carrier,) if carriers in ('both', 'evidence-only') else ()
+    if carriers == 'no-evidence-tuple':
+        evidence = None
+    bindings = (replace(completion_bindings, contract_digest=digest)
+                if carriers in ('both', 'bindings-only', 'no-evidence-tuple') else None)
+    command = MarkPass(fresh_review_evidence=evidence, fresh_review_bindings=bindings,
                        acceptance_candidate_digests=freeze_json_value({'AC1': candidate}))
-    assert acceptance_completion_rejection(state, command) == 'acceptance-fresh-review-pending'
-    assert decide(state, command).rejection.code == 'acceptance-fresh-review-pending'
+    before = copy.deepcopy(state)
+    assert acceptance_completion_rejection(state, command) == reason
+    decision = decide(state, command)
+    assert decision.rejection.code == reason
+    assert decision.transition is None and decision.effects == () and decision.events == ()
+    assert state == before
 
 
 @pytest.mark.parametrize('case,reason', [

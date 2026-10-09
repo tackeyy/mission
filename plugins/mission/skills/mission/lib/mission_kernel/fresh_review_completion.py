@@ -17,6 +17,7 @@ from .model import FrozenJsonObject
 
 INVALID = 'acceptance-fresh-review-evidence-invalid'
 MISMATCH = 'acceptance-fresh-review-evidence-mismatch'
+INCOMPLETE = 'acceptance-fresh-review-completion-carrier-incomplete'
 
 
 @dataclass(frozen=True)
@@ -95,7 +96,7 @@ def decode_completion_evidence(request, terminal, coverage, findings):
     """Fail closed on malformed evidence with stable completion reason codes."""
     try:
         return _decode_completion_evidence(request, terminal, coverage, findings)
-    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+    except (ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
         if isinstance(exc, FreshReviewError) and exc.code == MISMATCH:
             raise
         raise FreshReviewError(INVALID) from exc
@@ -104,42 +105,51 @@ def decode_completion_evidence(request, terminal, coverage, findings):
 def validate_completion_carriers(projection, evidence, bindings, contract_digest):
     """Authenticate optional carriers; absent inputs retain pre-carrier behavior.
 
+    The default empty tuple with no bindings skips authentication. Once either
+    input is supplied, both are required; an empty evidence tuple with bindings
+    must still match the completed request set. Reject incomplete carriers before
+    evidence shape/content, then bindings shape/content.
     Current snapshots/input digests may differ from a request: those are facts
     for the later completion judgement, not a reason to enable completion here.
     """
     from .fresh_review import FreshReviewRecord, _digest
     from .fresh_review_receipts import decode_terminal_receipt
     from .fresh_review_coverage import FreshReviewBindings, _pairs
+    if type(evidence) is tuple and not evidence and bindings is None:
+        return
+    if evidence is None or bindings is None:
+        raise FreshReviewError(INCOMPLETE)
     if type(evidence) is not tuple:
         raise FreshReviewError(INVALID)
     records = tuple(item for item in projection.requests if isinstance(item, FreshReviewRecord))
-    if evidence:
-        completed = {item.request.request_id: item for item in records if item.status == 'completed'}
-        seen = set()
-        for item in evidence:
-            if (type(item) is not FreshReviewCompletionEvidence or type(item.request_id) is not str
-                    or type(item.coverage) is not FrozenJsonObject
-                    or type(item.findings) is not tuple
-                    or any(type(finding) is not FrozenJsonObject for finding in item.findings)
-                    or item.request_id not in completed or item.request_id in seen):
-                raise FreshReviewError(INVALID)
-            seen.add(item.request_id)
-            record = completed[item.request_id]
+    completed = {item.request.request_id: item for item in records if item.status == 'completed'}
+    seen = set()
+    for item in evidence:
+        if (type(item) is not FreshReviewCompletionEvidence or type(item.request_id) is not str
+                or type(item.coverage) is not FrozenJsonObject
+                or type(item.findings) is not tuple
+                or any(type(finding) is not FrozenJsonObject for finding in item.findings)
+                or item.request_id not in completed or item.request_id in seen):
+            raise FreshReviewError(INVALID)
+        seen.add(item.request_id)
+        record = completed[item.request_id]
+        try:
             decode_completion_evidence(record.request, decode_terminal_receipt(record.result.thaw()),
                 item.coverage.thaw(), tuple(finding.thaw() for finding in item.findings))
-        if seen != set(completed):
-            raise FreshReviewError(INVALID)
-    if bindings is not None:
-        code = 'acceptance-fresh-review-bindings-invalid'
-        try:
-            if type(bindings) is not FreshReviewBindings:
-                raise FreshReviewError(code)
-            _digest(bindings.contract_digest)
-            inputs, snapshots = _pairs(bindings.input_digests), _pairs(bindings.candidate_snapshots)
-            if (bindings.contract_digest != contract_digest
-                    or set(inputs) != {item.request.request_id for item in records}
-                    or set(snapshots) != {binding.command_id for item in records
-                                         for binding in item.request.candidate_bindings}):
-                raise FreshReviewError(code)
-        except (ValueError, TypeError, AttributeError) as exc:
-            raise FreshReviewError(code) from exc
+        except RecursionError as exc:
+            raise FreshReviewError(INVALID) from exc
+    if seen != set(completed):
+        raise FreshReviewError(INVALID)
+    code = 'acceptance-fresh-review-bindings-invalid'
+    try:
+        if type(bindings) is not FreshReviewBindings:
+            raise FreshReviewError(code)
+        _digest(bindings.contract_digest)
+        inputs, snapshots = _pairs(bindings.input_digests), _pairs(bindings.candidate_snapshots)
+        if (bindings.contract_digest != contract_digest
+                or set(inputs) != {item.request.request_id for item in records}
+                or set(snapshots) != {binding.command_id for item in records
+                                     for binding in item.request.candidate_bindings}):
+            raise FreshReviewError(code)
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise FreshReviewError(code) from exc
