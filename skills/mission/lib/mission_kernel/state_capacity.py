@@ -637,8 +637,20 @@ def residual_reservation(
     request's own bytes ("受付の段の Δ...受付時に確定している request の
     実際の encode 長とする").
     """
+    # F's terminal writes and settlement remain owed in either physical layout.
+    # Decode with the same closed v4/v5 contract as the budget reducers.
+    from .budget import BudgetError, decode_ledger
+    try:
+        ledger = decode_ledger(dict(document))
+    except BudgetError:
+        return STATE_LIMIT
+    held = list(ledger.reservations)
+    recovery = ledger.stop_slots.system_recovery.reservation
+    if recovery is not None:
+        held.append(recovery)
+    total = sum(row.reserved_bytes + BUDGET_SETTLEMENT_ROW_DELTA for row in held)
     if encoding is StateEncoding.LEGACY_PRETTY:
-        return 0
+        return total
     projection = fresh_review_projection(document)
     if projection is None:
         # An undecodable embedded projection cannot be reasoned about at
@@ -646,7 +658,6 @@ def residual_reservation(
         # physical limit -- not one pending request's reserve -- so
         # capacity admission fails closed rather than under-reserving.
         return STATE_LIMIT
-    total = 0
     for record in projection.requests:
         if isinstance(record, WithdrawnFreshReviewRecord):
             continue

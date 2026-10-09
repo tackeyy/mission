@@ -608,6 +608,7 @@ class SubprocessGateOperations:
             common_dir = self.repository_root / common_dir
         lock_path = common_dir.resolve() / "mission-gate-and-merge.lock"
         flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = None
         try:
             descriptor = os.open(os.fspath(lock_path), flags, 0o600)
             metadata = os.fstat(descriptor)
@@ -615,7 +616,7 @@ class SubprocessGateOperations:
                 raise OSError("repository lease path is unsafe")
             fcntl.flock(descriptor, fcntl.LOCK_EX)
         except OSError as exc:
-            if "descriptor" in locals():
+            if descriptor is not None:
                 os.close(descriptor)
             raise IntegrationGateError(1, "lease-failed", "repository lease acquisition failed") from exc
         try:
