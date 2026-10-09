@@ -16,7 +16,6 @@ from mission_kernel.fresh_review_completion import (
 from mission_kernel.fresh_review_coverage import FreshReviewBindings
 from mission_kernel.fresh_review_receipts import decode_terminal_receipt
 from mission_kernel.json_codec import decode_json_object
-from mission_persistence.strict_reader import read_stable_bytes_beneath
 from . import fresh_review as prepare
 
 
@@ -26,10 +25,9 @@ class FreshReviewCompletionInputs:
     bindings: FreshReviewBindings | None = None
 
 
-def _read(root, reference):
+def _read(root, reference, *, read_evidence):
     try:
-        raw = read_stable_bytes_beneath(root, reference.relative_path,
-                                       limit=FRESH_REVIEW_EVIDENCE_MAX_BYTES).payload
+        raw = read_evidence(root, reference.relative_path, FRESH_REVIEW_EVIDENCE_MAX_BYTES)
     except (OSError, ValueError) as exc:
         raise FreshReviewError('acceptance-fresh-review-evidence-unavailable') from exc
     if len(raw) != reference.size or 'sha256:' + hashlib.sha256(raw).hexdigest() != reference.digest:
@@ -40,7 +38,7 @@ def _read(root, reference):
         raise FreshReviewError(INVALID) from exc
 
 
-def observe_completion_inputs(state, *, root, load_policy):
+def observe_completion_inputs(state, *, root, load_policy, read_evidence):
     """Observe all non-withdrawn requests, including partial and older attempts.
 
     Filtering for FreshReviewRecord excludes withdrawn tombstones represented
@@ -59,8 +57,8 @@ def observe_completion_inputs(state, *, root, load_policy):
         if record.status == 'completed':
             terminal = decode_terminal_receipt(record.result.thaw())
             evidence.append(decode_completion_evidence(record.request, terminal,
-                _read(root, terminal.coverage_receipt.evidence_ref),
-                tuple(_read(root, ref) for ref in terminal.findings)))
+                _read(root, terminal.coverage_receipt.evidence_ref, read_evidence=read_evidence),
+                tuple(_read(root, ref, read_evidence=read_evidence) for ref in terminal.findings)))
     code = 'acceptance-fresh-review-bindings-unavailable'
     ids = {binding.command_id for item in records for binding in item.request.candidate_bindings}
     if not ids.issubset(commands):
@@ -89,6 +87,8 @@ def observe_completion_inputs(state, *, root, load_policy):
 class FreshReviewCompletionServices:
     project_root: object
     load_policy: Callable
+    read_evidence: Callable[[object, str, int], bytes]
 
     def __call__(self, state):
-        return observe_completion_inputs(state, root=self.project_root, load_policy=self.load_policy)
+        return observe_completion_inputs(state, root=self.project_root, load_policy=self.load_policy,
+                                         read_evidence=self.read_evidence)

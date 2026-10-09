@@ -568,7 +568,10 @@ from mission_persistence.administrative import (  # noqa: E402
     administrative_commit,
     restore_record as restore_administrative_record,
 )
-from mission_persistence.strict_reader import read_stable_bytes as _read_stable_bytes  # noqa: E402
+from mission_persistence.strict_reader import (  # noqa: E402
+    read_stable_bytes as _read_stable_bytes,
+    read_stable_bytes_beneath as _read_stable_bytes_beneath,
+)
 
 SCHEMA_VERSION = 4  # v4: structured scoring provenance is mandatory for new sessions
 NEW_SESSION_REPOSITORY_FORMAT = RepositoryFormat.V5
@@ -14111,7 +14114,11 @@ def cmd_mark_passes(args):
                 optional_unclosed_skills=_unclosed_optional_specialist_skills,
                 selection_id=_current_selection_id,
                 capture_acceptance_candidates=AcceptanceCandidateServices(cwd, load_verifier_policy),
-                capture_fresh_review_completion=FreshReviewCompletionServices(cwd, load_verifier_policy),
+                capture_fresh_review_completion=FreshReviewCompletionServices(
+                    cwd, load_verifier_policy,
+                    lambda root, relative_path, limit: _read_stable_bytes_beneath(
+                        root, relative_path, limit=limit).payload,
+                ),
                 early_stop_evaluation=lambda data, latest, at: _early_stop_evaluation(
                     cwd, data, latest, at, getattr(args, "early_stop_rationale", None)
                 ),

@@ -11,6 +11,34 @@ from .test_issue896_completed import completed_carrier
 from .test_issue879_completion_cli import completion_session
 
 
+def _read_evidence(root, relative_path, limit):
+    from mission_persistence.strict_reader import read_stable_bytes_beneath
+    return read_stable_bytes_beneath(root, relative_path, limit=limit).payload
+
+
+def test_mark_pass_adapter_injects_a_bounded_bytes_reader(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from .test_issue511_p1_repository_binding import _load_mission_state_module
+    adapter = _load_mission_state_module('issue913_reader_adapter')
+    state_path = tmp_path / 'state.json'
+    state_path.write_bytes(b'{}')
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(adapter, 'resolve_state_file', lambda _: state_path)
+    monkeypatch.setattr(adapter, '_legacy_lifecycle_repository', lambda *_args, **_kwargs: object())
+    captured = []
+    def mark_pass(_repository, _request, services):
+        captured.append(services.capture_fresh_review_completion)
+        return SimpleNamespace(unclosed_skills=(), forced=False)
+    monkeypatch.setattr(adapter, 'run_mark_pass', mark_pass)
+    adapter.cmd_mark_passes(SimpleNamespace(force=False))
+    payload = b'{"review":"fixture"}'
+    (tmp_path / 'coverage.json').write_bytes(payload)
+    reader = captured[0].read_evidence
+    assert reader(tmp_path, 'coverage.json', len(payload)) == payload
+    with pytest.raises(ValueError):
+        reader(tmp_path, 'coverage.json', len(payload) - 1)
+
+
 @pytest.fixture
 def evidence_carrier(published):
     from mission_kernel.fresh_review_completion import decode_completion_evidence
@@ -113,7 +141,7 @@ def test_withdrawn_requests_are_excluded_from_documented_completion_inputs(publi
         return {}
     monkeypatch.setattr(app.prepare, '_capture', capture)
     monkeypatch.setattr(app, '_read', lambda *_: pytest.fail('withdrawn request tried to read evidence'))
-    observed = app.observe_completion_inputs(data, root=tmp_path, load_policy=lambda _: contract['verifier_policy'])
+    observed = app.observe_completion_inputs(data, root=tmp_path, load_policy=lambda _: contract['verifier_policy'], read_evidence=_read_evidence)
     assert observed.evidence == ()
     assert observed.bindings.input_digests == observed.bindings.candidate_snapshots == ()
     assert validate_completion_carriers(projection, observed.evidence, observed.bindings,
@@ -220,9 +248,10 @@ def test_gate_and_preflight_reject_tampered_carrier_without_changing_state(gate_
 
 
 def test_application_reads_bound_evidence_and_reobserves_request_inputs(published, tmp_path, monkeypatch):
-    from mission_application.fresh_review_completion import observe_completion_inputs
+    from mission_application.fresh_review_completion import FreshReviewCompletionServices
     from mission_application import fresh_review as prepare
-    from mission_kernel.fresh_review import FreshReviewProjection, projection_document, canonical_digest
+    from mission_kernel.fresh_review import FreshReviewProjection, projection_document, canonical_digest, FRESH_REVIEW_EVIDENCE_MAX_BYTES
+    from mission_persistence.strict_reader import read_stable_bytes_beneath
     from types import SimpleNamespace
     record, terminal, contract, coverage, findings = published
     for ref, content in zip((terminal.coverage_receipt.evidence_ref, *terminal.findings), (coverage, *findings)):
@@ -236,7 +265,13 @@ def test_application_reads_bound_evidence_and_reobserves_request_inputs(publishe
                 for index, key in enumerate(sorted(commands), 1)}
     monkeypatch.setattr(prepare, '_capture', capture)
     data = dict(acceptance_contract=contract, fresh_review=projection_document(FreshReviewProjection((record,))))
-    result = observe_completion_inputs(data, root=tmp_path, load_policy=lambda _: contract['verifier_policy'])
+    reads = []
+    def read_evidence(root, relative_path, limit):
+        reads.append((root, relative_path, limit))
+        return read_stable_bytes_beneath(root, relative_path, limit=limit).payload
+    result = FreshReviewCompletionServices(tmp_path, lambda _: contract['verifier_policy'], read_evidence)(data)
+    assert reads == [(tmp_path, ref.relative_path, FRESH_REVIEW_EVIDENCE_MAX_BYTES)
+                     for ref in (terminal.coverage_receipt.evidence_ref, *terminal.findings)]
     assert result.evidence[0].findings[0].thaw()['resolution'] == 'open'
     assert set(dict(result.bindings.candidate_snapshots)) == {'command-1', 'replay-1'}
     snapshots = capture(tmp_path, contract['verifier_policy']['commands'])
@@ -469,6 +504,8 @@ def test_matching_carrier_does_not_enable_the_unconditional_fresh_review_gate(ga
     ('duplicate-key', 'invalid'), ('invalid-json', 'invalid'), ('non-object', 'invalid'),
     ('invalid-utf8', 'invalid'),
     ('deep-object', 'invalid'), ('deep-array', 'invalid'),
+    ('reader-oserror', 'unavailable'), ('reader-valueerror', 'unavailable'),
+    ('reader-digest', 'mismatch'), ('reader-size', 'mismatch'),
 ])
 def test_application_never_decodes_unbound_or_unsafe_bytes(published, tmp_path, case, reason):
     import hashlib
@@ -497,9 +534,20 @@ def test_application_never_decodes_unbound_or_unsafe_bytes(published, tmp_path, 
         path.mkdir()
     elif case != 'missing':
         path.write_bytes(raw)
+    def read_evidence(root, relative_path, limit):
+        if case == 'reader-oserror':
+            raise OSError('injected read failed')
+        if case == 'reader-valueerror':
+            raise ValueError('injected read rejected')
+        content = _read_evidence(root, relative_path, limit)
+        if case == 'reader-digest':
+            return content.replace(b'AC1', b'AC2')
+        if case == 'reader-size':
+            return content + b' '
+        return content
     with pytest.raises(FreshReviewError, match='^acceptance-fresh-review-evidence-' + reason + '$'):
         try:
-            _read(tmp_path, reference)
+            _read(tmp_path, reference, read_evidence=read_evidence)
         except RecursionError:
             pytest.fail('evidence recursion escaped the reason-code boundary', pytrace=False)
 
@@ -519,19 +567,19 @@ def test_real_prepare_packet_is_reobserved_and_candidate_change_is_not_hidden(co
         verifier_policy=dict(digest=canonical_digest(policy), commands={item['id']: item for item in policy['commands']}))
     root, request = _prepare((root, state, schema), run_cli)
     state = json.loads(run_cli('get', cwd=root).stdout)
-    observed = observe_completion_inputs(state, root=root, load_policy=load)
+    observed = observe_completion_inputs(state, root=root, load_policy=load, read_evidence=_read_evidence)
     assert observed.bindings.input_digests == ((request['request_id'], request['input_digest']),)
     assert dict(observed.bindings.candidate_snapshots) == {
         item['command_id']: item['snapshot_digest'] for item in request['candidate_bindings']}
     assert observed.evidence == ()
     assert len(set(dict(observed.bindings.candidate_snapshots).values())) == 2
     (root / 'replay-only.txt').write_text('changed replay input')
-    replay_changed = observe_completion_inputs(state, root=root, load_policy=load)
+    replay_changed = observe_completion_inputs(state, root=root, load_policy=load, read_evidence=_read_evidence)
     assert dict(replay_changed.bindings.candidate_snapshots)['project-test'] == dict(observed.bindings.candidate_snapshots)['project-test']
     assert dict(replay_changed.bindings.candidate_snapshots)['replay-test'] != dict(observed.bindings.candidate_snapshots)['replay-test']
     assert replay_changed.bindings.input_digests != observed.bindings.input_digests
     (root / 'app.txt').write_text('changed candidate')
-    changed = observe_completion_inputs(state, root=root, load_policy=load)
+    changed = observe_completion_inputs(state, root=root, load_policy=load, read_evidence=_read_evidence)
     assert changed.bindings.input_digests != observed.bindings.input_digests
     assert changed.bindings.candidate_snapshots != observed.bindings.candidate_snapshots
 
@@ -584,7 +632,7 @@ def test_observation_uses_each_request_subset_and_perspective(published, tmp_pat
                  for key in ('command-1', 'replay-1')}
     monkeypatch.setattr(prepare, '_capture', lambda *_: snapshots)
     data = dict(acceptance_contract=contract, fresh_review=projection_document(FreshReviewProjection((first, second))))
-    observed = observe_completion_inputs(data, root=tmp_path, load_policy=lambda _: contract['verifier_policy'])
+    observed = observe_completion_inputs(data, root=tmp_path, load_policy=lambda _: contract['verifier_policy'], read_evidence=_read_evidence)
     assert dict(observed.bindings.input_digests) == {
         first.request.request_id: canonical_digest(prepare.build_input_packet(contract, first.request.perspective, snapshots)),
         second.request.request_id: canonical_digest(prepare.build_input_packet(contract, second.request.perspective,
@@ -610,7 +658,7 @@ def test_contractless_observation_does_not_read_store_or_capture_candidates(tmp_
         pytest.fail('contractless completion must not invoke fresh-review observations')
     monkeypatch.setattr(app, '_read', unexpected)
     monkeypatch.setattr(app.prepare, '_capture', unexpected)
-    observed = app.observe_completion_inputs({'fresh_review': 'legacy diagnostic'}, root=tmp_path, load_policy=unexpected)
+    observed = app.observe_completion_inputs({'fresh_review': 'legacy diagnostic'}, root=tmp_path, load_policy=unexpected, read_evidence=_read_evidence)
     assert observed.evidence == () and observed.bindings is None
 
 
@@ -634,7 +682,7 @@ def test_unavailable_current_bindings_do_not_return_saved_request_digests(publis
     monkeypatch.setattr(app.prepare, '_capture', capture)
     policy = {'digest': 'sha256:' + '0' * 64} if case == 'policy-changed' else contract['verifier_policy']
     with pytest.raises(FreshReviewError, match='^acceptance-fresh-review-bindings-unavailable$'):
-        app.observe_completion_inputs(data, root=tmp_path, load_policy=lambda _: policy)
+        app.observe_completion_inputs(data, root=tmp_path, load_policy=lambda _: policy, read_evidence=_read_evidence)
 
 
 @pytest.mark.parametrize('policy', [None, [], 'policy', 1, {}, {'digest': None}, {'digest': []},
@@ -650,7 +698,7 @@ def test_policy_read_or_shape_failure_has_a_bindings_reason(published, tmp_path,
         return policy
     monkeypatch.setattr(app.prepare, '_capture', lambda *_: pytest.fail('invalid policy reached capture'))
     with pytest.raises(FreshReviewError, match='^acceptance-fresh-review-bindings-unavailable$'):
-        app.observe_completion_inputs(data, root=tmp_path, load_policy=load_policy)
+        app.observe_completion_inputs(data, root=tmp_path, load_policy=load_policy, read_evidence=_read_evidence)
 
 
 @pytest.fixture
@@ -696,5 +744,5 @@ def test_mark_pass_preserves_the_policy_bindings_failure(assert_capture_rejectio
     def load_policy(_):
         raise RuntimeError('policy read failed')
     assert_capture_rejection('capture_fresh_review_completion',
-                             FreshReviewCompletionServices(tmp_path, load_policy),
+                             FreshReviewCompletionServices(tmp_path, load_policy, read_evidence=_read_evidence),
                              'acceptance-fresh-review-bindings-unavailable')
