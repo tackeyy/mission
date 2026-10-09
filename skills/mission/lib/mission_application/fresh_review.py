@@ -55,6 +55,21 @@ def _capture(root, commands):
     return result
 
 
+def build_input_packet(contract, perspective, snapshots):
+    """Shared prepare/completion packet calculation from recaptured snapshots."""
+    criteria, policy = contract['criteria'], contract['verifier_policy']
+    packet = {
+        'schema': 'mission-fresh-review-input/1', 'requirement_text': contract['requirement_text'],
+        'requirements': contract['requirements'], 'criteria': criteria, 'verifier_policy': policy,
+        'perspective': perspective, 'reviewer_instructions_version': 'counterexamples/1',
+        'snapshots': {identifier: {'digest': snapshot.digest, 'files': [
+            {'path': item.path, 'mode': item.mode,
+             'content_base64': None if item.content is None else base64.b64encode(item.content).decode('ascii')}
+            for item in snapshot.files]} for identifier, snapshot in snapshots.items()},
+    }
+    return packet
+
+
 def prepare_fresh_review(state, *, root, options, operation_id, intent_digest, payload_digest, now, load_policy):
     historical = _historical(state, operation_id, intent_digest, payload_digest)
     if historical is not None:
@@ -97,15 +112,7 @@ def prepare_fresh_review(state, *, root, options, operation_id, intent_digest, p
     snapshots = _capture(root, commands)
     for item in bindings:
         item['snapshot_digest'] = snapshots[item['command_id']].digest
-    packet = {
-        'schema': 'mission-fresh-review-input/1', 'requirement_text': contract['requirement_text'],
-        'requirements': contract['requirements'], 'criteria': criteria, 'verifier_policy': policy,
-        'perspective': options['perspective'], 'reviewer_instructions_version': 'counterexamples/1',
-        'snapshots': {identifier: {'digest': snapshot.digest, 'files': [
-            {'path': item.path, 'mode': item.mode,
-             'content_base64': None if item.content is None else base64.b64encode(item.content).decode('ascii')}
-            for item in snapshot.files]} for identifier, snapshot in snapshots.items()},
-    }
+    packet = build_input_packet(contract, options['perspective'], snapshots)
     content = canonical_bytes(packet)
     if len(content) > options['max_packet_bytes']:
         raise FreshReviewError('fresh-review-packet-too-large')

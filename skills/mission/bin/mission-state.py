@@ -186,6 +186,7 @@ from mission_projection.stats import (  # noqa: E402
     project_stats,
 )
 from mission_application.ports import AuditMetadata, ExecutionRequest  # noqa: E402
+from mission_application.fresh_review_completion import FreshReviewCompletionServices  # noqa: E402
 from mission_application.review import (  # noqa: E402
     AcceptanceCandidateServices,
     MarkPassRequest,
@@ -14110,6 +14111,7 @@ def cmd_mark_passes(args):
                 optional_unclosed_skills=_unclosed_optional_specialist_skills,
                 selection_id=_current_selection_id,
                 capture_acceptance_candidates=AcceptanceCandidateServices(cwd, load_verifier_policy),
+                capture_fresh_review_completion=FreshReviewCompletionServices(cwd, load_verifier_policy),
                 early_stop_evaluation=lambda data, latest, at: _early_stop_evaluation(
                     cwd, data, latest, at, getattr(args, "early_stop_rationale", None)
                 ),

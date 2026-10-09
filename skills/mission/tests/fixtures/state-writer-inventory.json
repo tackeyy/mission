@@ -333,6 +333,9 @@
     "reserve_request:replace": 1,
     "visit:remove": 1
   },
+  "lib/mission_kernel/fresh_review_completion.py": {
+    "_decode_completion_evidence:dynamic": 1
+  },
   "lib/mission_kernel/fresh_review_coverage.py": {
     "_validated:dynamic": 2
   },
