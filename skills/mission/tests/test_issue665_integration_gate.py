@@ -897,3 +897,18 @@ def test_the_gate_reads_the_contract_from_the_base_not_the_head(tmp_path):
     # The base's command ran; the branch's did not replace it.
     assert any(c[:2] == ("make", "test") for c in commands), commands
     assert not any(c == ("true",) for c in commands), commands
+
+
+@pytest.mark.parametrize("failure", ["open", "metadata"])
+def test_lease_failure_closes_only_an_acquired_descriptor(monkeypatch, tmp_path, failure):
+    gate = _gate_module()
+    operations = gate.SubprocessGateOperations(tmp_path)
+    monkeypatch.setattr(operations, "_checked", lambda *args: type("Result", (), {"stdout": str(tmp_path)})())
+    closed = []
+    def fail(*args): raise OSError("lease probe")
+    monkeypatch.setattr(gate.os, "open", fail if failure == "open" else lambda *args: 73)
+    monkeypatch.setattr(gate.os, "fstat", fail)
+    monkeypatch.setattr(gate.os, "close", closed.append)
+    with pytest.raises(gate.IntegrationGateError, match="lease acquisition failed"):
+        with operations.lease(): pytest.fail("failed lease yielded")
+    assert closed == ([] if failure == "open" else [73])

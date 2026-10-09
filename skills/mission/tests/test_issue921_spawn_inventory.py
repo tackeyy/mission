@@ -1,7 +1,8 @@
 """Conservative AST spawn inventory bound to design 881 section 3.2.
 
 This freezes syntactic candidates, not arbitrary dynamically generated code.
-__import__ and importlib dynamic imports are outside this syntactic boundary.
+exec/eval, importlib, __import__, and getattr(*args) are outside the static
+boundary of design section 3.2; they can generate arbitrary code or names.
 Unresolved reflective access to capability modules is fail-closed, including
 references never invoked. Alias unions preserve capability across rebinding.
 Runtime entry tests establish reservation-before-spawn ordering separately.
@@ -19,33 +20,45 @@ MISSION = ROOT / 'skills/mission'
 FIXTURE = Path(__file__).parent / 'fixtures/budget-spawn-inventory.json'
 
 
+# Only non-spawning references observed in bin/mission-state.py and lib/.
+# Exact names (no prefix exemptions): a future API must be classified explicitly.
+SAFE = set("""os.O_CLOEXEC os.O_CREAT os.O_DIRECTORY os.O_EXCL os.O_NOFOLLOW os.O_NONBLOCK
+os.O_RDONLY os.O_RDWR os.O_WRONLY os.P_PID os.PathLike os.WEXITED os.WNOHANG
+os.WNOWAIT os.X_OK os.access os.chmod os.close os.defpath os.dup os.environ
+os.environ.get os.fchmod os.fdopen os.fspath os.fstat os.fsync os.getpid os.getppid
+os.getuid os.kill os.killpg os.link os.listdir os.lstat os.mkdir os.open os.path
+os.path.abspath os.path.basename os.path.lexists os.path.normpath os.pathsep
+os.pathsep.join os.pipe os.read os.readlink os.rename os.replace os.rmdir os.scandir
+os.sep os.set_blocking os.set_inheritable os.setsid os.stat os.stat_result os.unlink
+os.waitid os.walk os.write subprocess.DEVNULL subprocess.PIPE subprocess.STDOUT
+subprocess.TimeoutExpired multiprocessing.connection multiprocessing.connection.wait""".split())
+CAPABILITIES = {'subprocess', 'os', 'posix', '_posixsubprocess', 'multiprocessing',
+                'concurrent', 'asyncio', 'pty'}
+UNKNOWN = 'unclassified-spawn'
+SUBPROCESS_APIS = {'run', 'call', 'check_call', 'check_output', 'getoutput', 'getstatusoutput'}
+TAILS = set("""Popen Process Pool ProcessPoolExecutor get_context fork forkpty system
+popen launch collect cancel recover observe_parent run_job dispatch_prepared_packet""".split())
+
+
 def spawn_calls(source):
-    tree = ast.parse(source)
-    aliases = {}
+    tree, aliases = ast.parse(source), {}
     parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
-    def bind(name, values):
-        if not values:
-            return False
-        old = aliases.setdefault(name, set())
-        added = values - old
-        old.update(values)
-        return bool(added)
-    # A finite capability origin set and an absorbing unknown keep alias
-    # propagation bounded, including self-referential attribute assignments.
-    capability_modules = {'subprocess', 'os', 'multiprocessing', 'concurrent', 'pty', 'asyncio'}
-    module_origins = capability_modules | {'concurrent.futures', 'asyncio.subprocess'}
-    unknown = 'unclassified-spawn'
-    def capable(values):
-        return any(value == unknown or value.split('.')[0] in capability_modules for value in values)
+    def capable(name):
+        return name.split('.')[0] in CAPABILITIES
+    def tail_spawn(tail):
+        return tail in TAILS or tail.startswith(('spawn', 'exec', 'posix_spawn', 'create_subprocess_'))
+    def known_spawn(name):
+        return tail_spawn(name.rsplit('.', 1)[-1]) or (
+            name.startswith('subprocess.') and name.rsplit('.', 1)[-1] in SUBPROCESS_APIS)
     def attribute(values, key):
-        result = {unknown if value == unknown else value.split('.')[0] + '.' + key for value in values}
-        if key in {'__dict__', '__getattribute__', '__getattr__'} and capable(values):
-            result.add(unknown)
-        return result
+        # Unknown receivers still expose syntactic spawn tails. Collapse other
+        # origins so self-referential assignments have a finite fixed point.
+        return {value + '.' + key if capable(value) and value + '.' + key in SAFE
+                else value.split('.')[0] + '.' + key for value in values} or {'?.' + key}
     def lookup(values, key):
         if isinstance(key, ast.Constant) and isinstance(key.value, str):
             return attribute(values, key.value)
-        return {unknown} if capable(values) else set()
+        return {UNKNOWN} if any(capable(n) or n == UNKNOWN for n in values) else set()
     def names(node):
         if isinstance(node, ast.Name):
             return aliases.get(node.id, {node.id})
@@ -55,102 +68,72 @@ def spawn_calls(source):
             return lookup(names(node.value), node.slice)
         if isinstance(node, ast.Call):
             functions = names(node.func)
-            if any(name.rsplit('.', 1)[-1] == 'getattr' for name in functions) and len(node.args) >= 2:
-                values = names(node.args[0])
-                return lookup(values, node.args[1]) or {'dynamic-spawn'}
-            if any(name.rsplit('.', 1)[-1] == 'vars' for name in functions) and node.args:
-                return {unknown} if capable(names(node.args[0])) else set()
-            if 'operator.getitem' in functions and len(node.args) >= 2:
-                return lookup(names(node.args[0]), node.args[1])
-            # Unknown capability remains unknown through downstream calls.
-            if unknown in functions:
-                return {unknown}
+            if functions & {'getattr', 'builtins.getattr', 'operator.getitem'} and len(node.args) >= 2:
+                return lookup(names(node.args[0]), node.args[1]) or {'dynamic-spawn'}
+            if functions & {'vars', 'builtins.vars'} and node.args and any(capable(n) for n in names(node.args[0])):
+                return {UNKNOWN}
         return set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
             for item in node.names:
-                if capable({item.name}):
-                    module_origins.add(item.name)
-                bind(item.asname or item.name.split('.')[0], {item.name if item.asname else item.name.split('.')[0]})
-        elif isinstance(node, ast.ImportFrom):
-            for item in node.names:
-                bind(item.asname or item.name, {str(node.module) + '.' + item.name})
-    # Union aliases, including before-definition/rebound references. A rebinding
-    # must not erase a potential spawn capability from the inventory.
+                name = str(node.module) + '.' + item.name if isinstance(node, ast.ImportFrom) else item.name
+                aliases.setdefault(item.asname or item.name.split('.')[0], set()).add(name if item.asname or isinstance(node, ast.ImportFrom) else name.split('.')[0])
     changed = True
     while changed:
         changed = False
         for node in ast.walk(tree):
             if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
-                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                for target in targets:
+                for target in node.targets if isinstance(node, ast.Assign) else [node.target]:
                     if isinstance(target, ast.Name):
-                        changed |= bind(target.id, names(node.value))
-    def opaque_module_value(node, values):
-        if not values & module_origins:
-            return False
-        parent = parents.get(node)
-        # A static namespace receiver exposes a named API, not the entire module.
-        if isinstance(parent, ast.Attribute) and parent.value is node:
-            return False
-        if isinstance(parent, ast.Call) and parent.args and parent.args[0] is node:
-            functions = names(parent.func)
-            observer = functions and functions <= {'hasattr', 'builtins.hasattr'}
-            lookup_call = ('operator.getitem' in functions or
-                           any(name.rsplit('.', 1)[-1] == 'getattr' for name in functions))
-            static_key = (len(parent.args) >= 2 and isinstance(parent.args[1], ast.Constant)
-                          and isinstance(parent.args[1].value, str))
-            if observer or lookup_call and static_key:
-                return False
-        return True
+                        old = aliases.setdefault(target.id, set()); added = names(node.value) - old
+                        old.update(added); changed |= bool(added)
+    imported_capability = any(capable(n) for values in aliases.values() for n in values)
     found = Counter()
     class Inventory(ast.NodeVisitor):
         function = '<module>'
         def visit_FunctionDef(self, node):
             previous, self.function = self.function, node.name
-            self.generic_visit(node)
-            self.function = previous
+            self.generic_visit(node); self.function = previous
         visit_AsyncFunctionDef = visit_FunctionDef
-        def candidate(self, node, *, invoked=False):
-            values = names(node)
-            if opaque_module_value(node, values):
-                found[(self.function, unknown)] += 1
-            for name in values:
+        def candidate(self, node):
+            parent = parents.get(node)
+            # Namespace receivers are checked at the outer named reference;
+            # reflective dictionary access is never a safe namespace.
+            receiver = isinstance(parent, ast.Attribute) and parent.value is node
+            observer = (isinstance(parent, ast.Call) and parent.args and parent.args[0] is node
+                        and bool(names(parent.func)) and names(parent.func) <=
+                        {'hasattr', 'builtins.hasattr', 'getattr', 'builtins.getattr', 'operator.getitem'})
+            for name in names(node):
                 tail = name.rsplit('.', 1)[-1]
-                if name == unknown:
-                    found[(self.function, unknown)] += 1
+                if name in SAFE:
                     continue
-                if tail in {'dynamic-spawn', 'observe_parent', 'launch', 'collect', 'cancel', 'recover'} and not invoked:
-                    continue
-                if (name.startswith('subprocess.') and tail in {'Popen', 'run', 'call', 'check_call',
-                        'check_output', 'getoutput', 'getstatusoutput'}
-                    or name.startswith('os.') and (tail.startswith(('exec', 'spawn')) or tail in
-                        {'fork', 'forkpty', 'system', 'popen', 'posix_spawn', 'posix_spawnp'})
-                    or name.startswith('multiprocessing.')
-                    or name in {'pty.fork', 'pty.spawn'}
-                    or name.startswith('asyncio.create_subprocess_')
-                    or tail in {'Popen', 'Process', 'ProcessPoolExecutor', 'get_context', 'spawn_exec', 'run_job',
-                                'observe_parent', 'launch', 'collect', 'cancel', 'recover',
-                                'dispatch_prepared_packet', 'dynamic-spawn'}):
+                invoked_lookup = (tail == 'dynamic-spawn' and isinstance(parent, ast.Call)
+                                  and parent.func is node)
+                named_reference = (not isinstance(node, ast.Name) or '.' in name
+                                   or tail in {'spawn_exec', 'run_job', 'dispatch_prepared_packet'})
+                if invoked_lookup or known_spawn(name) and named_reference:
                     found[(self.function, tail)] += 1
+                elif name == UNKNOWN or capable(name) and (tail.startswith('__') or not (receiver and name in CAPABILITIES) and not (observer and name in CAPABILITIES)):
+                    found[(self.function, UNKNOWN)] += 1
+        def visit_ImportFrom(self, node):
+            for item in node.names:
+                name = str(node.module) + '.' + item.name
+                if capable(name) and name not in SAFE:
+                    tail = item.name
+                    found[(self.function, tail if known_spawn(name) else UNKNOWN)] += 1
         def visit_Call(self, node):
+            if imported_capability and names(node.func) & {'globals', 'locals', 'vars', 'builtins.globals', 'builtins.locals', 'builtins.vars'}:
+                found[(self.function, UNKNOWN)] += 1
             self.candidate(node)
-            self.candidate(node.func, invoked=True)
-            # Count the callable once, while still visiting nested expressions
-            # (partial arguments and adapter.observe_parent().thaw(), for example).
-            for child in ast.iter_child_nodes(node.func):
-                self.visit(child)
-            for argument in [*node.args, *node.keywords]:
-                self.visit(argument)
+            self.candidate(node.func)
+            for child in ast.iter_child_nodes(node.func): self.visit(child)
+            for argument in [*node.args, *node.keywords]: self.visit(argument)
         def visit_Attribute(self, node):
-            self.candidate(node)
-            self.visit(node.value)
+            self.candidate(node); self.visit(node.value)
         def visit_Name(self, node):
-            if isinstance(node.ctx, ast.Load):
-                self.candidate(node)
+            if isinstance(node.ctx, ast.Load): self.candidate(node)
         def visit_Subscript(self, node):
-            self.candidate(node)
-            self.generic_visit(node)
+            self.candidate(node); self.generic_visit(node)
     Inventory().visit(tree)
     return found
 
@@ -163,9 +146,15 @@ def inventory():
     return result
 
 
+def manifest_counts():
+    return {key: dict(count=count, rows=group['rows'], reason=group['reason'])
+            for group in json.loads(FIXTURE.read_text()).values()
+            for key, count in group['candidates'].items()}
+
+
 def test_spawn_inventory_matches_design_table_and_has_no_unclassified_call():
     actual = inventory()
-    manifest = json.loads(FIXTURE.read_text())
+    manifest = manifest_counts()
     assert not any(key.endswith(':unclassified-spawn') for key in actual)
     assert actual == {key: value['count'] for key, value in manifest.items()}
     text = (ROOT / 'docs/design/881-budget-reservation.md').read_text()
@@ -227,7 +216,7 @@ def test_self_referential_attribute_alias_reaches_a_finite_inventory():
        'execvpe', 'spawnv', 'spawnve', 'spawnvp', 'spawnvpe', 'spawnl',
        'spawnle', 'spawnlp', 'spawnlpe', 'popen', 'forkpty')],
     ('multiprocessing.Pool()', 'Pool'),
-    ('multiprocessing.context.SpawnProcess()', 'SpawnProcess'),
+    ('multiprocessing.context.SpawnProcess()', 'unclassified-spawn'),
     ('from concurrent.futures import ProcessPoolExecutor as pool\npool()', 'ProcessPoolExecutor'),
     ('concurrent.futures.ProcessPoolExecutor()', 'ProcessPoolExecutor'),
     ('functools.partial(subprocess.Popen, [])()', 'Popen'),
@@ -266,15 +255,15 @@ def test_unresolved_module_capability_is_unclassified_even_without_call(source):
 
 
 def test_imported_spawn_name_reference_is_a_candidate():
-    assert spawn_calls('from subprocess import Popen\nconsume(Popen)') == {('<module>', 'Popen'): 1}
+    assert spawn_calls('from subprocess import Popen\nconsume(Popen)') == {('<module>', 'Popen'): 2}
 
 
 def test_unclassified_capability_cannot_be_whitelisted(monkeypatch, tmp_path):
-    manifest = json.loads(FIXTURE.read_text())
+    manifest = manifest_counts()
     key = 'lib/example.py:example:unclassified-spawn'
     manifest[key] = dict(count=1, rows=[3], reason='unresolved capability')
     fixture = tmp_path / 'inventory.json'
-    fixture.write_text(json.dumps(manifest))
+    fixture.write_text(json.dumps({'probe': dict(candidates={k: v['count'] for k, v in manifest.items()}, rows=[3], reason='probe')}))
     monkeypatch.setitem(globals(), 'FIXTURE', fixture)
     monkeypatch.setitem(globals(), 'inventory', lambda: {k: v['count'] for k, v in manifest.items()})
     with pytest.raises(AssertionError):
@@ -282,11 +271,54 @@ def test_unclassified_capability_cannot_be_whitelisted(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize('source', [
-    'getattr(os, "getcwd")', 'getattr(subprocess, "PIPE")',
+    *[f'{name}' for name in sorted(SAFE)], 'getattr(os, "fspath")', 'getattr(subprocess, "PIPE")',
     'import os as operating\ngetattr(operating, "O_NOFOLLOW", 0)',
-    'operator.getitem(os, "getcwd")', 'hasattr(os, name)',
+    'operator.getitem(os, "fspath")', 'hasattr(os, name)',
     '__import__("subprocess").__dict__',
-    'importlib.import_module("subprocess").__dict__',
+    'importlib.import_module("subprocess").__dict__', 'exec(code)', 'eval(code)', 'getattr(*args)', 'globals()', 'locals()',
 ])
 def test_known_non_spawn_and_out_of_scope_dynamic_import_are_excluded(source):
     assert not spawn_calls(source)
+
+
+@pytest.mark.parametrize('source', [
+    *[f'from {module} import __dict__ as d\nd.get("Popen")([])' for module in
+      ('subprocess', 'os', 'concurrent.futures', 'asyncio', 'pty')],
+    'factory().Popen([])', 'x[i].Popen', '(a or b).Popen',
+    'adapter_for(e).launch(env)', 'self.adapters[name].launch(env)',
+    'import subprocess\nglobals()["subprocess"].Popen([])',
+    'import subprocess\nglobals().get("subprocess").Popen',
+    *[f'from subprocess import Popen as P\n{scope}()["P"]' for scope in ('globals', 'locals')],
+    'mp().get_context("spawn").Process(target=f)',
+    'from os import *\nsystem("x")', 'from subprocess import *\nrun([])',
+    'import subprocess\nsubprocess.future_api',
+    'import os as m\nglobals()', 'import subprocess as m\nlocals()',
+    'from os import future_api', 'subprocess.future_api.PIPE', 'os.future_api.environ', 'getattr(subprocess.future_api, "PIPE")',
+])
+def test_allowlist_boundary_rejects_unknown_capabilities_and_receivers(source):
+    assert spawn_calls(source)
+
+
+def test_safe_allowlist_contains_only_observed_runtime_names():
+    observed = set()
+    for path in [MISSION / 'bin/mission-state.py', *(MISSION / 'lib').rglob('*.py')]:
+        tree, aliases = ast.parse(path.read_text()), {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for item in node.names:
+                    aliases[item.asname or item.name.split('.')[0]] = item.name if item.asname else item.name.split('.')[0]
+            elif isinstance(node, ast.ImportFrom):
+                observed.add(str(node.module))
+                for item in node.names:
+                    aliases[item.asname or item.name] = str(node.module) + '.' + item.name
+        def origin(node):
+            if isinstance(node, ast.Name): return aliases.get(node.id, node.id)
+            if isinstance(node, ast.Attribute): return origin(node.value) + '.' + node.attr
+            return '?'
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Name, ast.Attribute)): observed.add(origin(node))
+            if isinstance(node, ast.Call) and origin(node.func) == 'getattr' and len(node.args) >= 2:
+                key = node.args[1]
+                if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    observed.add(origin(node.args[0]) + '.' + key.value)
+    assert SAFE <= observed
