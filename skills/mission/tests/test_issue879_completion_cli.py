@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from .completion_cli_fixtures import completion_cli_code, completion_template, run_cli
+
 from .conftest import canonical_review, write_canonical_review_aggregate
 from .test_issue878_candidate_snapshot import _commit_candidate
 from .test_issue878_verification_runner import _contract, _policy, _replay_policy
@@ -149,6 +151,12 @@ def _persist_fixture(root, state, schema, *, closed_v5=False, escaped_contract=F
 
 @pytest.fixture(params=[4, 5], ids=["v4-flat", "v5-container"])
 def completion_session(request, state_dir, run_cli):
+    # Only the two opt-in modules reuse setup. Imported fixtures in other
+    # suites keep their existing runner and uncached construction.
+    template = getattr(run_cli, "completion_template", None)
+    if template is not None:
+        from .completion_cli_fixtures import copy_completion_template
+        return copy_completion_template(template, state_dir, request.param)
     root = state_dir.parent
     _commit_candidate(root, {"app.txt": "candidate"})
     sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, check=True,
