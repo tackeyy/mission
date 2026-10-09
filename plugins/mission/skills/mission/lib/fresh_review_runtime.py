@@ -231,7 +231,8 @@ def _resolve_adapter(identifier):
             raise FreshReviewError('fresh-review-adapter-entry-point-invalid')
     except (AttributeError, AssertionError, TypeError, ValueError) as exc:
         raise FreshReviewError('fresh-review-adapter-entry-point-invalid') from exc
-    if not isinstance(module, str) or any(not part.isidentifier() for part in module.split('.')):
+    if not isinstance(module, str) or any(not part.isidentifier() or keyword.iskeyword(part)
+                                         for part in module.split('.')):
         raise FreshReviewError('fresh-review-adapter-entry-point-invalid')
     if _source_digest(module) != registration.source_digest:
         raise FreshReviewError('fresh-review-adapter-source-invalid')

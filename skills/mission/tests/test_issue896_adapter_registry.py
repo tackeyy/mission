@@ -635,6 +635,28 @@ def test_malformed_installed_entry_point_is_reason_coded(installed_adapter, valu
         resolve_adapter('neutral')
 
 
+@pytest.mark.parametrize('module', ['bad-name', '9adapter', 'class', 'neutral.class', 'neutral..adapter'])
+def test_module_components_are_identifiers_and_not_keywords_before_source_lookup(
+    installed_adapter, monkeypatch, module,
+):
+    import fresh_review_runtime as runtime
+
+    # Use metadata whose parsed module exposes malformed components directly;
+    # importlib's parser otherwise rejects some before our boundary is reached.
+    _, metadata, _, _ = installed_adapter
+    (metadata / 'entry_points.txt').write_text(
+        '[mission.fresh_review_adapters]\nneutral = ' + module + ':factory\n')
+    def source_lookup(value):
+        pytest.fail('invalid module reached source lookup: ' + value)
+    monkeypatch.setattr(runtime, '_source_digest', source_lookup)
+    # The real parser handles keywords, but cannot expose hyphens/double dots.
+    monkeypatch.setattr(runtime.importlib.metadata.EntryPoint, 'module', property(
+        lambda entry: entry.value.partition(':')[0]))
+    monkeypatch.setattr(runtime.importlib.metadata.EntryPoint, 'extras', property(lambda entry: []))
+    with pytest.raises(runtime.FreshReviewError, match='fresh-review-adapter-entry-point-invalid'):
+        runtime.resolve_adapter('neutral')
+
+
 @pytest.mark.parametrize('value', [
     'neutral_adapter', 'neutral_adapter:', 'neutral_adapter:factory()', 'neutral_adapter:factory..create',
     'neutral_adapter:9factory', 'neutral_adapter:factory extra', 'neutral_adapter:factory/other',
