@@ -184,6 +184,13 @@ def test_spawn_inventory_matches_design_table_and_has_no_unclassified_call():
         assert value['rows'] and set(value['rows']) <= rows and value['reason']
 
 
+def test_fresh_review_replay_is_classified_as_pending_d_dispatch():
+    from mission_kernel.budget import BUDGET_SPAWN_ENTRIES
+    replay = manifest_counts()['lib/mission_application/fresh_review_publish.py:_replay_hypotheses:run_contract_verifier']
+    assert replay['rows'] == [7]
+    assert BUDGET_SPAWN_ENTRIES['fresh-review-run'] == 'pending'
+
+
 def test_covered_provider_entries_leave_other_dispatch_entries_pending():
     from mission_kernel.budget import BUDGET_SPAWN_ENTRIES
     assert {key for key, status in BUDGET_SPAWN_ENTRIES.items() if status == 'covered'} == {'invoke-command', 'invoke-prepared', 'verification-run'}

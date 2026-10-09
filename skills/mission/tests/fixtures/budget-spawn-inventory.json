@@ -1,4 +1,13 @@
 {
+  "fresh-review-replay": {
+    "candidates": {
+      "lib/mission_application/fresh_review_publish.py:_replay_hypotheses:run_contract_verifier": 1
+    },
+    "reason": "D output-import replay (design 881 section 3.2 row 7), bounded by the request max_replays and remaining dispatch deadline/wall time. F reservation, deadline-bound collection and settlement remain pending in F2b (#922; section 7). No reservation coverage is claimed.",
+    "rows": [
+      7
+    ]
+  },
   "public-benchmark-tool": {
     "candidates": {
       "benchmarks/mission-vs-goal/public_benchmark.py:_completion_result:_run_bounded": 1,
