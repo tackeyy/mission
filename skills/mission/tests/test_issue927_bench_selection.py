@@ -503,11 +503,11 @@ def test_exploration_pool_regressions(m, finding):
     if finding in ('L2', 'deleted-source'): assert row['criteria']['Cx']['values']['source_files'] == 2
 
 
-@pytest.mark.parametrize('defect', ['B-only', 'W-only', 'broken-A', 'duplicate-A', 'wrong-number', 'missing-chain-key'])
+@pytest.mark.parametrize('defect', ['B-only', 'W-only', 'broken-A', 'utf8-A', 'duplicate-A', 'wrong-number', 'missing-chain-key'])
 def test_later_v1_invalid_attempt_does_not_poison_canonical_attempt(m, defect):
     f = fixture(m)
     stage = 'B' if defect == 'B-only' else 'W' if defect == 'W-only' else 'A'
-    raw = b'{' if defect == 'broken-A' else b'{"number":2,"number":2}' if defect == 'duplicate-A' else m.canonical({'number': 9})
+    raw = b'\xff' if defect == 'utf8-A' else b'{' if defect == 'broken-A' else b'{"number":2,"number":2}' if defect == 'duplicate-A' else m.canonical({'number': 9})
     if defect == 'missing-chain-key':
         a = json.loads(f[0]['prs'][0]['files'][next(iter(f[0]['prs'][0]['files']))]); del a['chain']['hash']; raw = m.canonical(a | {'number': 2, 'round': 200})
     if defect == 'wrong-number': raw = m.canonical(json.loads(f[0]['prs'][0]['files'][next(iter(f[0]['prs'][0]['files']))]) | {'number': 9, 'round': 200})
@@ -638,13 +638,13 @@ def test_v1_invalid_attempt_still_reserves_readable_round(m, missing, next_round
     else: assert m.canonical_attempt(attempts, f[1])['number'] == 2
 
 
-@pytest.mark.parametrize('round_value', [None, True, 0, '100', 100.5, 'broken-json', 'duplicate-json', 'B-only'])
+@pytest.mark.parametrize('round_value', [None, True, 0, '100', 100.5, 'broken-json', 'utf8-json', 'duplicate-json', 'B-only'])
 def test_unreadable_earlier_round_blocks_promotion_as_unknown(m, round_value):
     f = fixture(m); second(m, f, new_pool=True)
     a = json.loads(f[0]['prs'][0]['files'][next(iter(f[0]['prs'][0]['files']))])
     if round_value is None: del a['round']
     else: a['round'] = round_value
-    raw = (b'{' if round_value == 'broken-json' else b'{"round":100,"round":200}' if round_value == 'duplicate-json'
+    raw = (b'\xff' if round_value == 'utf8-json' else b'{' if round_value == 'broken-json' else b'{"round":100,"round":200}' if round_value == 'duplicate-json'
            else json.dumps(a).encode())
     update_file(m, f[0], 'A', raw)
     if round_value == 'B-only':
@@ -745,7 +745,7 @@ def test_v1_invalid_attempt_remains_in_overlap_and_reuse_checks(m, defect):
 
 
 @pytest.mark.parametrize('missing', ['margin', 'chain', 'chain.hash', 'chain.genesis', 'chain.period',
-    'snapshot_digest', 'snapshot-type', 'snapshot-format', 'B-missing', 'B-broken', 'B-duplicate',
+    'snapshot_digest', 'snapshot-type', 'snapshot-format', 'B-missing', 'B-broken', 'B-unicode', 'B-duplicate',
     'B-identity', 'B-identity-type', 'B-accepted', 'B-tasks-type'])
 def test_v1_invalid_prior_evidence_unknown_blocks_later_candidate(m, missing):
     f = fixture(m); second(m, f, new_pool=True)
@@ -754,6 +754,7 @@ def test_v1_invalid_prior_evidence_unknown_blocks_later_candidate(m, missing):
         raw = attempts[0]['stages']['B']['raw']; b = json.loads(raw)
         if missing == 'B-missing': del attempts[0]['stages']['B']
         elif missing == 'B-broken': attempts[0]['stages']['B']['raw'] = b'{'
+        elif missing == 'B-unicode': attempts[0]['stages']['B']['raw'] = b'\xff'
         elif missing == 'B-duplicate': attempts[0]['stages']['B']['raw'] = raw.replace(b'"tasks":', b'"tasks":[],"tasks":', 1)
         else:
             if missing == 'B-identity': del b['tasks'][0]['repository']
@@ -770,7 +771,9 @@ def test_v1_invalid_prior_evidence_unknown_blocks_later_candidate(m, missing):
     parsed[1]['a']['prior_attempts_digest'] = m.prior_digest(parsed[:1], before=1300)
     parsed[1]['stages']['A']['raw'] = m.canonical(parsed[1]['a'])
     parsed[1]['stages']['P']['raw'] = b'attempt_digest: ' + m.digest(parsed[1]['stages']['A']['raw']).encode()
-    with pytest.raises(m.UnknownAttempt, match='attempt_(history|pool)_unknown'): m.canonical_attempt(parsed, f[1])
+    if missing == 'B-missing': assert m.canonical_attempt(parsed, f[1])['number'] == 2
+    else:
+        with pytest.raises(m.UnknownAttempt, match='attempt_(history|pool)_unknown'): m.canonical_attempt(parsed, f[1])
 
 
 @pytest.mark.parametrize('withdrawal,proof_missing', [(600, False), (600, True), (899, False), (900, False)])
@@ -791,3 +794,26 @@ def test_documentation_labels_cohort_apis_as_second_pr_additions():
     document = (BENCH / 'bench-selection.md').read_text()
     for api in ('bench_cohort.py', 'bench_cohort.collect_det', 'bench_cohort.BundleReplay', 'bench_cohort.verify_cohort'):
         assert f'`{api}`（2本目で追加する）' in document
+
+
+@pytest.mark.parametrize('withdrawal,reuse', [(None, False), (600, False), (None, True), (600, True)])
+def test_unmerged_pool_allows_retry_but_preserves_snapshot_reuse_check(m, withdrawal, reuse):
+    f = fixture(m); h = f[0]; h['commits'] = h['commits'][:1]; h['prs'] = h['prs'][:1]
+    h.update(total_prs=1, reachable=['a' * 40], current_files=dict(h['commits'][0]['files']))
+    attempts = second(m, f, withdrawal=withdrawal, a_time=700 if withdrawal else 1300, new_pool=True)
+    if reuse:
+        material = f[1][2] = copy.deepcopy(f[1][1]); a = attempts[1]['a']; a['snapshot_digest'] = attempts[0]['a']['snapshot_digest']
+        update_file(m, h, 'A', a, number=2)
+        update_file(m, h, 'B', m.generate_pool(material['snapshot'], a, material['scope'], material['observations'], commit_a='1' * 40), number=2)
+        with pytest.raises(ValueError, match='^no_canonical_attempt$'): canonical_trial(m, f)
+    else: assert canonical_trial(m, f)['number'] == 2
+
+
+@pytest.mark.parametrize('failure', ['lookup', 'mismatch'])
+def test_v1_valid_schedule_failures_are_not_suppressed(m, failure):
+    class BadSchedule(Proofs):
+        def chain_schedule(self, chain_hash):
+            if failure == 'lookup': raise ValueError('schedule_unavailable')
+            return {'genesis': 11, 'period': 10}
+    with pytest.raises(ValueError, match='schedule_unavailable' if failure == 'lookup' else 'beacon_schedule_mismatch'):
+        m.enumerate_attempts(fixture(m)[0], BadSchedule())

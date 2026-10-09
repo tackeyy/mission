@@ -60,7 +60,7 @@ order, complete assignments and statistics; K planning, approval and acquisition
 CC決定: G3は比較対象0件なら結合しない（G1・G2は適用）。
 `chain_schedule(chain_hash)`はhashに結び付けて認証したgenesis・periodを返し、宣言値との不一致を拒否する。
 V1不成立は`invalid_reason`を記録するが、読めるround・cutoff・撤回・snapshot・poolは連鎖と再利用の検査に残す。
-後続候補の判定に必要な時刻境界・pool証拠が読めない場合はUNKNOWN（`attempt_history_unknown`・`attempt_pool_unknown`）で繰り上げない。
+B未作成は空のpoolとして扱うが、Aのsnapshot再利用は検査する。Bが存在して読めない場合や、後続候補の判定に必要な時刻境界・pool証拠が読めない場合はUNKNOWN（`attempt_history_unknown`・`attempt_pool_unknown`）で繰り上げない。
 読めないroundはUNKNOWN（`attempt_round_unknown`）で後続へ繰り上げない。
 より早い正準試行が決まった後のUNKNOWNは、その正準判定を変えない。round非増加・重なりはcohort全体を拒否する。
 必要なmaterialsの欠落はUNKNOWN（`attempt_materials_unknown`）で後続へ繰り上げない。

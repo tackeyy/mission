@@ -333,7 +333,7 @@ def enumerate_attempts(history, proofs):
             if type(a['chain']) is not dict or not {'hash', 'public_key', 'genesis', 'period'} <= a['chain'].keys(): raise ValueError('V1_invalid_A')
             validate_arms(a['pilot_arms']); validate_arms(a['confirmatory_arms'])
             if attempt_round(attempt) is None: raise ValueError('V1_invalid_A')
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, UnicodeError):
             attempt['invalid_reason'] = 'V1_invalid_A'
         if not attempt['invalid_reason'] and not {'A', 'P', 'B'} <= attempt['stages'].keys():
             attempt['invalid_reason'] = 'V1_missing_stage'
@@ -395,8 +395,9 @@ def pool_evidence(attempt):
     try:
         snapshot = attempt['a']['snapshot_digest']
         if type(snapshot) is not str or not re.fullmatch(r'sha256:[0-9a-f]{64}', snapshot): raise ValueError('snapshot_invalid')
+        if 'B' not in attempt['stages']: return snapshot, []
         return snapshot, pool_identity(json.loads(attempt['stages']['B']['raw'], object_pairs_hook=public._unique_object))
-    except (KeyError, TypeError, ValueError) as exc:
+    except (KeyError, TypeError, ValueError, UnicodeError) as exc:
         raise UnknownAttempt('attempt_pool_unknown') from exc
 
 
