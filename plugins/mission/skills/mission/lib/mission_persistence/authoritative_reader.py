@@ -1015,7 +1015,6 @@ def read_authoritative_snapshot(
     """Read a legacy document or resolve a v5 head through verified lineage."""
 
     path = Path(session_path)
-    pinned_source = source
     source = source if source is not None else read_stable_bytes(path, limit=STATE_LIMIT)
     inspected = _inspect_repository_bytes(
         source, expected_session_id=expected_session_id
@@ -1029,10 +1028,9 @@ def read_authoritative_snapshot(
             raise ValueError("v5 head has no session identity")
         repository = LocalFencedRepository(path.parent.parent)
         try:
-            repository_snapshot = (
-                repository.read(selected_session_id) if pinned_source is None
-                else repository.read_pinned_head(selected_session_id, source)
-            )
+            # Resolve the captured head through immutable lineage without writer
+            # locks, layout creation or recovery, including ordinary live reads.
+            repository_snapshot = repository.read_pinned_head(selected_session_id, source)
         except FencedCommitError as error:
             if error.code.startswith("fresh-review-"):
                 raise FreshReviewError(error.code) from error
