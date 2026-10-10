@@ -52,7 +52,10 @@ V4 failures permit later candidates; post-seed failures never do. Reusing identi
 pools is forbidden even with changed snapshot serialization/reference metadata. Trusted materials supply
 snapshot, scope, loaded generator revision and pilot-derived `minimum_k`. Load this code from A's pinned
 revision; a matching SHA string alone does not establish provenance. Records supply task/unit, arm,
-package SHA/digest and integer start time. Check 2 recomputes the lineage record digest against B’s `lineage_digest`, bound before seed release.
+package SHA/digest and integer start time. Every A package must contain a 40-character lowercase
+hex `sha` and `sha256:<64 lowercase hex>` `digest`; null, empty or malformed values return
+`package_invalid` before record equality can establish a match. Both declared arm sets must have packages.
+Check 2 compares B's `lineage_digest` with authenticated document declarations or independent materials.
 Only status=valid with checks 1–3 true establishes selection evidence.
 Checks 4–5 (actual run separation and record execution order), complete assignment accounting and
 statistics belong to I1. K planning, approval and acquisition remain caller duties.
@@ -65,7 +68,11 @@ Commit these per-case observations in B before the beacon is released. During ve
 each such task once per variant, including Det rejections; early-filter rejections are skipped.
 Every such task must have exactly three committed observations in a list for each variant.
 Verification checks this throughout the Det pool, including tasks outside the audit sample;
-any other count returns `invalid_cohort` with `det_observation_count_invalid`.
+any other count or non-list value returns `invalid_cohort` with `det_observation_count_invalid`.
+Missing/non-object Det evidence, missing variants or malformed recorded I2c results return
+`det_observation_schema_invalid`, including rows outside the audit sample. Early-filter rejections
+are outside this Det schema check and audit strata. These are verification failures; pool generation
+continues to record malformed Det evidence as Det rejections under its existing selection rule.
 Only the named case booleans are compared, but case names/count, boolean types, status and reason must
 form a valid I2c result. Unavailable evaluation and differing case outcomes invalidate the cohort.
 
@@ -121,12 +128,29 @@ arm, start strictly after C, and match A's package SHA/digest. Pilot runs betwee
 These guards do not replace I1's accounting of missing runs, retry policy or observed record order.
 
 The returned `checks` records (1) unique confirmation units from regenerated B and C/D, (2) the
-recomputed lineage digest against B's pre-seed `lineage_digest`, and (3) complete selection/timing/replay
+independent lineage evidence against B's pre-seed `lineage_digest`, and (3) complete selection/timing/replay
 verification. A valid result includes `canonical_attempt`, `lineage_digest`, `det_replayed` and an
 `evidence_digest` binding the attempt and committed B/C/D bytes. The digest identifies committed inputs;
 it is not a signature or a digest of the supplied run records/replay transcript. Preserve those separately.
 Missing/malformed evidence (including decoder recursion failures) returns `invalid_cohort` with a reason.
 Any post-seed failure keeps the original canonical attempt and never promotes a later attempt.
+
+For check 2, an exact `lineage_digest: sha256:<64 lowercase hex>` declaration in the timestamp-bound
+P document must match B. Duplicate/malformed declarations return `lineage_declaration_invalid`.
+Materials may additionally supply `preregistration = {raw: bytes, proof, merged_at: integer}` for a
+supplemental document. Its exact `attempt_digest` declaration must bind A's bytes, and both its merge
+time and digest-bound verified timestamp must precede `t_R - margin`. Acquisition must authenticate
+the reported merge time. Invalid binding/proofs return `preregistration_evidence_invalid`.
+All document lineage declarations must agree; a supplemental document cannot hide a conflicting P.
+
+If neither document declares a lineage digest, the verifier recalculates eligible tasks from
+`materials.snapshot`, `scope` and per-task `observations`, then runs G1–G3 on their repository URLs,
+reachable roots and base file fingerprints using A's `g3_percent`. The resulting canonical pair-record
+digest must match B. These materials must be acquired independently from A's frozen inputs and retained
+I2c observations, not copied from B's lineage/acceptance rows. When `materials.lineage_digest` is present,
+it must also match the expected digest. Any disagreement returns `lineage_digest_mismatch`; B's
+self-consistency alone cannot pass check 2. A valid document declaration takes precedence over the
+fallback calculation; the optional materials digest must still agree.
 
 ## 解釈（owner確認待ち）
 
@@ -138,9 +162,12 @@ B未作成は空のpoolとして扱うが、Aのsnapshot再利用は検査する
 より早い正準試行が決まった後のUNKNOWNは、その正準判定を変えない。round非増加・重なりはcohort全体を拒否する。
 必要なmaterialsの欠落はUNKNOWN（`attempt_materials_unknown`）で後続へ繰り上げない。
 Pは独立した宣言行`attempt_digest: sha256:<AのbytesのSHA-256、64桁小文字hex>`を1行持つ。部分一致・重複を認めない。
-CC決定: 検査2の照合先はBの`lineage_digest`とする。§3.2.1の「事前登録の文書」は、
-seedより前（`t_R − Δ`より前）にcommitされるBを含むと読む。Aと同じcommitのPでは、
-後のpool収集で決まる系譜digestを宣言できないため。fixtureもA→pool収集→Bの順で作る。
+検査2は、時刻証明付きの事前登録文書に系譜digestがあれば必ずそれとBを照合する。
+文書に宣言が無い場合はmaterialsのsnapshot・scope・観測から系譜を独立に再計算し、
+Bの`lineage_digest`と照合する。materialsにもdigestがあれば一致を要求し、Bの自己整合を根拠にしない。
+§3.2.1の文言は事前登録文書との一致を求めるが、Aと同じcommitのPには、
+後のpool収集で決まるdigestを書けない。この時期に文書の宣言が無い場合の独立再計算による代替は、
+owner確認待ちの解釈として残す。事前登録文書への宣言を不要と確定したものではない。
 CC決定: pilot・確認のarm集合はseedより前のAで宣言させ、C・Dと照合する。
 §2の主比較arm（`native_goal`・`mission_verified_complex`）を両方必須とし、
 `mission_baseline`を加えるかだけを宣言で選ぶ。§8.1の3のowner判断はbaselineの追加に限る。

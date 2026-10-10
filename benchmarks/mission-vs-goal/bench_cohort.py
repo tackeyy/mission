@@ -1,5 +1,6 @@
 """Offline cohort evidence and I2c replay; depends only on selection core."""
 import json
+import re
 
 import bench_selection as selection_core
 import public_benchmark as public
@@ -67,6 +68,56 @@ class BundleReplay:
         return public.evaluate_assignment(bundle, assignment, assignment['worker_export'], candidate, envelope)
 
 
+def declared_lineage(raw):
+    """Read one exact declaration; malformed/duplicate declarations cannot vanish."""
+    lines = [line for line in raw.decode('utf-8').splitlines() if re.match(r'\s*lineage_digest\s*:', line)]
+    if not lines: return None
+    match = re.fullmatch(r'lineage_digest: (sha256:[0-9a-f]{64})', lines[0])
+    if len(lines) != 1 or not match: raise ValueError('lineage_declaration_invalid')
+    return match[1]
+
+
+def lineage_expectation(attempt, material, proofs):
+    """Use authenticated declarations, otherwise recompute solely from materials."""
+    a, stages = attempt['a'], attempt['stages']
+    declarations = [declared_lineage(stages['P']['raw'])]
+    if 'preregistration' in material:
+        try:
+            document = material['preregistration']
+            raw = document['raw']
+            if type(raw) is not bytes: raise ValueError('document_bytes_invalid')
+            time = proofs.verify_timestamp(selection_core.digest(raw), document['proof'])
+            if (not selection_core.before({'time': time, 'merged_at': document['merged_at']}, selection_core.cutoff(attempt))
+                    or raw.splitlines().count(b'attempt_digest: ' + selection_core.digest(stages['A']['raw']).encode()) != 1):
+                raise ValueError('document_binding_invalid')
+        except (KeyError, TypeError, ValueError):
+            raise ValueError('preregistration_evidence_invalid') from None
+        declarations.append(declared_lineage(raw))
+    declared = {value for value in declarations if value is not None}
+    if len(declared) > 1: raise ValueError('lineage_digest_mismatch')
+    if declared: return declared.pop()
+    included = [task for task in material['snapshot'] if all(accepted for _, accepted, _ in
+                selection_core.criteria(task, a, material['scope'], material['observations'].get(task['task_id'])))]
+    _, independent_pairs = selection_core.lineage(included, a['g3_percent'])
+    return selection_core.digest(selection_core.canonical(independent_pairs))
+
+
+def validate_det_rows(manifest, tasks):
+    """Check the whole Det pool's cheap schema, including unsampled rejections."""
+    for row in manifest['tasks']:
+        if not all(row['criteria'].get(c, {}).get('accepted') is True for c in ('Lic', 'Con', 'Cx')): continue
+        det = row.get('det')
+        if type(det) is not dict or not {'starter', 'reference'} <= det.keys():
+            raise ValueError('det_observation_schema_invalid')
+        for variant in ('starter', 'reference'):
+            runs = det[variant]
+            if type(runs) is not list or len(runs) != 3: raise ValueError('det_observation_count_invalid')
+            try:
+                for observation in runs: selection_core.case_values(observation, tasks[row['task_id']]['checks'])
+            except (KeyError, TypeError, ValueError):
+                raise ValueError('det_observation_schema_invalid') from None
+
+
 def verify_cohort(history, materials, used_number, beacon, records, proofs, replay):
     """Return evidence or invalid_cohort; unexpected replay errors are distinguished.
 
@@ -83,6 +134,14 @@ def verify_cohort(history, materials, used_number, beacon, records, proofs, repl
         result['canonical_attempt'] = attempt['number']
         if used_number != attempt['number']: raise ValueError('noncanonical_attempt_used')
         a, stages = attempt['a'], attempt['stages']
+        packages = a['packages']
+        if type(packages) is not dict or not set(a['pilot_arms'] + a['confirmatory_arms']) <= packages.keys():
+            raise ValueError('package_invalid')
+        for package in packages.values():
+            if (type(package) is not dict or type(package.get('sha')) is not str
+                    or not selection_core.SHA.fullmatch(package['sha'])
+                    or type(package.get('digest')) is not str or not public.DIGEST.fullmatch(package['digest'])):
+                raise ValueError('package_invalid')
         seed = proofs.verify_beacon(a['chain'], a['round'], beacon)
         if type(seed) is not bytes or len(seed) != 32 or seed.hex() != beacon['randomness']:
             raise ValueError('beacon_randomness_mismatch')
@@ -98,9 +157,14 @@ def verify_cohort(history, materials, used_number, beacon, records, proofs, repl
         confirmation = selection_core.confirm(seed, selection, stages['C']['sha'], d['K'], a['confirmatory_arms'])
         if selection_core.canonical(confirmation) != stages['D']['raw']: raise ValueError('confirmation_mismatch')
         primary = [selection['primary'][u] for u in selection['ranking'][:d['K']]]
+        tasks = {t['task_id']: t for t in materials[used_number]['snapshot']}
+        validate_det_rows(manifest, tasks)
         result['checks']['1'] = True
         result['lineage_digest'] = manifest['lineage_digest']
-        result['checks']['2'] = (selection_core.digest(selection_core.canonical(manifest['lineage'])) == manifest['lineage_digest'])
+        material = materials[used_number]
+        expected_lineage = lineage_expectation(attempt, material, proofs)
+        result['checks']['2'] = (expected_lineage == manifest['lineage_digest']
+                                and ('lineage_digest' not in material or material['lineage_digest'] == expected_lineage))
         if not result['checks']['2']: raise ValueError('lineage_digest_mismatch')
         pilot_units = set(selection['pilot']); confirm_units = set(selection['ranking'][:d['K']])
         confirmation_records = [r for r in records if r['unit_id'] in confirm_units]
@@ -122,15 +186,7 @@ def verify_cohort(history, materials, used_number, beacon, records, proofs, repl
         selected = (audit_tasks(seed, manifest, chosen) if mode == 'audit'
                     else [t['task_id'] for t in materials[used_number]['snapshot']
                           if all(v for _, v, _ in selection_core.criteria(t, a, materials[used_number]['scope'], None)[:3])])
-        tasks = {t['task_id']: t for t in materials[used_number]['snapshot']}
         rows = {r['task_id']: r for r in manifest['tasks']}
-        # Record shape is cheap to verify for the whole Det pool, even in audit mode.
-        for row in manifest['tasks']:
-            if not all(row['criteria'].get(c, {}).get('accepted') is True for c in ('Lic', 'Con', 'Cx')): continue
-            for variant in ('starter', 'reference'):
-                runs = row['det'][variant]
-                if type(runs) is not list or len(runs) != 3:
-                    raise ValueError('det_observation_count_invalid')
         if isinstance(replay, BundleReplay):
             replay.bind_snapshot(used_number, materials[used_number]['snapshot'], a['snapshot_digest'])
         for task_id in selected:

@@ -343,15 +343,23 @@ def test_postseed_arm_declarations_cannot_override_a(m, stage):
     assert check(m, f)['reason'] == ('selection_mismatch' if stage == 'C' else 'confirmation_mismatch')
 
 
-def test_lineage_evidence_is_bound_to_preseed_b_not_p_or_caller(m, monkeypatch):
-    f = fixture(m); h = f[0]; p = next(v for path, v in h['current_files'].items() if path.endswith('preregistration.md'))
-    assert b'lineage_digest' not in p
-    f[1][1]['lineage_digest'] = 'untrusted metadata'
-    assert check(m, f)['checks']['2'] and check(m, f)['status'] == 'valid'
-    b = json.loads(h['prs'][1]['files'][next(iter(h['prs'][1]['files']))]); b['lineage_digest'] = 'sha256:' + '0' * 64
-    update_file(m, h, 'B', b)
-    monkeypatch.setattr(m, 'generate_pool', lambda *args, **kwargs: m.canonical(b))
-    assert check(m, f)['reason'] == 'lineage_digest_mismatch'
+@pytest.mark.parametrize('source', ['B', 'materials-digest', 'materials-roots', 'materials-observations'])
+def test_lineage_evidence_must_match_independent_materials(m, monkeypatch, source):
+    f = fixture(m); material = f[1][1]
+    b = json.loads(next(iter(f[0]['prs'][1]['files'].values())))
+    if source == 'materials-digest': material['lineage_digest'] = 'sha256:' + '0' * 64
+    else: material.pop('lineage_digest')  # recomputation is required without a supplied digest
+    if source == 'B':
+        b['lineage'][0]['G1'] = not b['lineage'][0]['G1']
+        b['lineage_digest'] = m.digest(m.canonical(b['lineage']))
+        update_file(m, f[0], 'B', b)
+    if source == 'materials-roots': material['snapshot'][1]['roots'] = material['snapshot'][0]['roots']
+    if source in ('B', 'materials-roots'):
+        monkeypatch.setattr(m, 'generate_pool', lambda *args, **kwargs: m.canonical(b))  # faulty regenerator
+    if source == 'materials-observations': material['observations'][material['snapshot'][0]['task_id']]['starter'] = [observed(True)] * 3
+    result = check(m, f)
+    assert result['status'] == 'invalid_cohort' and result['reason'] == 'lineage_digest_mismatch'
+    assert result['checks']['2'] is False
 
 
 @pytest.mark.parametrize('defect', ['C-before-beacon', 'minimum-K', 'L3-used', 'L3-C', 'wrong-task', 'unplanned-arm', 'float-start', 'noncanonical'])
@@ -555,3 +563,127 @@ def test_replay_exceptions_return_a_distinct_failure_without_publishing_exceptio
 def test_replay_process_control_exceptions_propagate(m, error):
     def replay(*args): raise error()
     with pytest.raises(error): check(m, fixture(m), rerun=replay)
+
+
+@pytest.mark.parametrize('package', [None, {}, '', [], {'sha': '1' * 40}, {'digest': 'sha256:' + 'a' * 64},
+    {'sha': '', 'digest': 'sha256:' + 'a' * 64}, {'sha': '1' * 39, 'digest': 'sha256:' + 'a' * 64},
+    {'sha': 'G' * 40, 'digest': 'sha256:' + 'a' * 64}, {'sha': True, 'digest': 'sha256:' + 'a' * 64},
+    {'sha': '1' * 40, 'digest': ''}, {'sha': '1' * 40, 'digest': 'a' * 64},
+    {'sha': '1' * 40, 'digest': 'sha256:' + 'a' * 63}, {'sha': '1' * 40, 'digest': None}])
+def test_matching_invalid_package_evidence_is_rejected(m, package):
+    f = fixture(m); a = json.loads(next(iter(f[0]['prs'][0]['files'].values())))
+    a['packages'] = {arm: package for arm in m.ARMS}
+    update_file(m, f[0], 'A', a)
+    for record in f[3]: record['package'] = package
+    result = check(m, f)
+    assert result['status'] == 'invalid_cohort' and result['reason'] == 'package_invalid'
+
+
+@pytest.mark.parametrize('matches', [True, False])
+def test_lineage_digest_in_preregistration_must_match_b(m, matches):
+    f = fixture(m); h = f[0]
+    p = next(raw for path, raw in h['current_files'].items() if path.endswith('preregistration.md'))
+    expected = f[1][1]['lineage_digest'] if matches else 'sha256:' + '0' * 64
+    update_file(m, h, 'P', p + b'lineage_digest: ' + expected.encode() + b'\n')
+    result = check(m, f)
+    assert result['status'] == ('valid' if matches else 'invalid_cohort')
+    assert result['checks']['2'] is matches
+    if not matches: assert result['reason'] == 'lineage_digest_mismatch'
+
+
+@pytest.mark.parametrize('defect', [None, 'digest', 'proof', 'merge-time', 'proof-time', 'attempt-binding', 'conflicting-P'])
+def test_materials_preregistration_is_timestamp_bound_and_controls_lineage(m, defect):
+    f = fixture(m); h, materials = f[:2]
+    p = next(raw for path, raw in h['current_files'].items() if path.endswith('preregistration.md'))
+    expected = materials[1]['lineage_digest'] if defect != 'digest' else 'sha256:' + '0' * 64
+    raw = p + b'lineage_digest: ' + expected.encode() + b'\n'
+    if defect == 'attempt-binding': raw = raw.replace(b'attempt_digest: sha256:', b'other_digest: sha256:')
+    when = 900 if defect == 'proof-time' else 250
+    proof = {'time': when, 'signature': sign((m.digest(raw) + ':' + str(when)).encode())}
+    if defect == 'proof': proof['signature'] = '00' * SIZE
+    materials[1]['preregistration'] = {'raw': raw, 'proof': proof, 'merged_at': 900 if defect == 'merge-time' else 249}
+    if defect == 'conflicting-P': update_file(m, h, 'P', p + b'lineage_digest: sha256:' + b'0' * 64 + b'\n')
+    materials[1].pop('lineage_digest')
+    if defect is None: materials[1].pop('observations')  # a document declaration takes precedence over fallback
+    result = check(m, f, rerun=lambda *args: observed(args[-1] == 'reference'))
+    assert result['status'] == ('valid' if defect is None else 'invalid_cohort')
+    if defect in ('digest', 'conflicting-P'): assert result['reason'] == 'lineage_digest_mismatch'
+    if defect in ('proof', 'merge-time', 'proof-time', 'attempt-binding'): assert result['reason'] == 'preregistration_evidence_invalid'
+
+
+@pytest.mark.parametrize('det', [{}, {'starter': [observed()] * 3},
+    {'starter': [{}] * 3, 'reference': [observed(True)] * 3},
+    {'starter': [observed()] * 3, 'reference': [None] * 3}])
+def test_malformed_committed_det_rows_return_a_schema_reason(m, det):
+    f = fixture(m, 18); task_id = f[1][1]['snapshot'][-1]['task_id']
+    f[1][1]['observations'][task_id] = det
+    regenerate_committed(m, f)
+    result = check(m, f)
+    assert result['status'] == 'invalid_cohort' and result['reason'] == 'det_observation_schema_invalid'
+
+
+@pytest.mark.parametrize('stage', ['pilot', 'confirmation'])
+def test_records_cannot_use_an_arm_declared_only_for_the_other_stage(m, stage):
+    primary = ['native_goal', 'mission_verified_complex']
+    f = fixture(m, pilot_arms=primary + (['mission_baseline'] if stage == 'confirmation' else []),
+                confirmatory_arms=primary + (['mission_baseline'] if stage == 'pilot' else []))
+    assert check(m, f)['status'] == 'valid'
+    a = json.loads(next(iter(f[0]['prs'][0]['files'].values())))
+    if stage == 'pilot':
+        assignment = json.loads(next(iter(f[0]['prs'][2]['files'].values())))['assignments'][0]
+        f[3].append({k: assignment[k] for k in ('task_id', 'unit_id', 'arm')} | {'started_at': 1200})
+        record = f[3][-1]
+    else: record = f[3][0]
+    record.update(arm='mission_baseline', package=a['packages']['mission_baseline'])
+    assert check(m, f)['reason'] == 'unplanned_arm_run'
+
+
+@pytest.mark.parametrize('mode', ['all', 'audit'])
+@pytest.mark.parametrize('variant', ['starter', 'reference'])
+@pytest.mark.parametrize('position', [1, 2])
+def test_det_rejected_task_must_match_all_three_observations(m, mode, variant, position):
+    f = fixture(m, 18); material = f[1][1]; task_id = material['snapshot'][-1]['task_id']
+    material['observations'][task_id][variant][position] = observed(variant != 'reference')
+    a = json.loads(next(iter(f[0]['prs'][0]['files'].values()))); a['det_mode'] = mode
+    update_file(m, f[0], 'A', a); regenerate_committed(m, f); second(m, f)
+    manifest = json.loads(next(iter(f[0]['prs'][1]['files'].values())))
+    assert next(row for row in manifest['tasks'] if row['task_id'] == task_id)['reason'] == 'Det'
+    result = check(m, f)  # replay matches only the first committed observation
+    assert result['reason'] == 'det_replay_mismatch' and result['canonical_attempt'] == 1
+
+
+def test_det_audit_strata_exclude_cx_rejections(m):
+    data = inputs(m, 18)
+    data[0][-1]['natural_request'] = False
+    data[3][data[0][-2]['task_id']]['starter'] = [observed(True)] * 3
+    data[1]['snapshot_digest'] = m.snapshot_digest(data[0])
+    manifest = json.loads(pool(m, data))
+    assert manifest['tasks'][-1]['reason'] == 'Cx' and manifest['tasks'][-2]['reason'] == 'Det'
+    sample = cohort.audit_tasks(b'seed', manifest, [])
+    assert data[0][-1]['task_id'] not in sample and data[0][-2]['task_id'] in sample
+
+
+@pytest.mark.parametrize('stage', ['pilot', 'confirmation'])
+def test_a_requires_package_evidence_for_arms_used_only_in_one_stage(m, stage):
+    primary = ['native_goal', 'mission_verified_complex']
+    f = fixture(m, pilot_arms=primary + (['mission_baseline'] if stage == 'pilot' else []),
+                confirmatory_arms=primary + (['mission_baseline'] if stage == 'confirmation' else []))
+    a = json.loads(next(iter(f[0]['prs'][0]['files'].values()))); a['packages'].pop('mission_baseline')
+    update_file(m, f[0], 'A', a)
+    assert check(m, f)['reason'] == 'package_invalid'
+
+
+@pytest.mark.parametrize('declaration', [b'lineage_digest:\n', b'lineage_digest: sha256:bad\n',
+    b' lineage_digest: sha256:' + b'0' * 64 + b'\n',
+    (b'lineage_digest: sha256:' + b'0' * 64 + b'\n') * 2])
+def test_malformed_or_duplicate_lineage_declarations_cannot_trigger_fallback(m, declaration):
+    f = fixture(m)
+    p = next(raw for path, raw in f[0]['current_files'].items() if path.endswith('preregistration.md'))
+    update_file(m, f[0], 'P', p + declaration)
+    assert check(m, f)['reason'] == 'lineage_declaration_invalid'
+
+
+def test_independent_lineage_recalculation_succeeds_without_a_materials_digest(m):
+    f = fixture(m); f[1][1].pop('lineage_digest')
+    result = check(m, f)
+    assert result['status'] == 'valid' and result['checks']['2'] is True
