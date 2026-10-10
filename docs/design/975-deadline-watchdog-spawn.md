@@ -27,7 +27,9 @@ verifier と同じく、target と別の process group に置いた watchdog が
 5. **SIGTERM の猶予を保つ**: bootstrap は group への SIGTERM で自分だけ先に死なない（SIGTERM は同じ group の target に直接届く。bootstrap は target の終了を待って、その終了を伝える）。`cleanup_group` の term_grace の後の SIGKILL は従来どおり。
 6. **既存の契約を変えない**: packet の入出力（`exchange_provider` の stdin / stdout / stderr、frame の読み取り）、起動拒否の code、`cleanup_group` による回収と kill-unconfirmed の扱い、予約・精算への配線。
    `cleanup_group(child)` は bootstrap の group（target とその孫を含む）を回収する。watchdog は bootstrap の終了を見て自分も終わる。
-7. **予算の policy が無い経路（inert）の挙動は変えない**。helper を通すのは予算の締切がある起動だけ（予算の無い approval descriptor の run_job は従来の spawn_exec のまま）。
+7. **予算の policy が無い経路（inert）の挙動は変えない**。helper を通すのは締切がある起動だけ。approval descriptor（`run_approval`）は常に絶対の締切（`timeout` から求める）を `run_job` へ渡し、watchdog を通す（受け入れ条件 1 の経路。終了・拒否の扱いは変えない）。締切の無い `run_job` 呼出しは従来の spawn_exec のまま。
+8. **watchdog の締切は bootstrap の許容上限（現在から 86,400 秒）を超えない**。猶予を足した結果が上限を超えるなら、上限で切り詰める（run_job と同じ）。
+9. **verifier（verification_runner）も `W` を扱う**。起動後の watchdog の異常は、従来どおり `blocked`・`process-unavailable`（インフラの故障）として記録し、candidate の検証失敗として記録しない。
 
 ## やらないこと
 - 予算の公開 CLI の有効化、policy の形の変更。
