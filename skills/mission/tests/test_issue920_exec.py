@@ -2,7 +2,9 @@
 import hashlib
 import json
 import signal
+import subprocess
 import time
+import contextlib
 from types import SimpleNamespace
 import os
 from pathlib import Path
@@ -183,6 +185,87 @@ def test_registry_exec_does_not_run_parent_atfork_hooks(tmp_path, installed_veri
     assert not marker.exists()
     assert list((tmp_path / 'jobs').iterdir()) == []
 
+
+def test_approval_descriptor_run_job_uses_deadline_spawn(tmp_path, installed_verifier, monkeypatch):
+    import budgeted_exec as execution
+    pin, request, _, _ = installed_verifier
+    calls = []
+    actual = execution.spawn_deadline_exec
+    def watched(argv, deadline, **kwargs):
+        calls.append((argv, deadline))
+        return actual(argv, deadline, **kwargs)
+    monkeypatch.setattr(execution, 'spawn_deadline_exec', watched)
+    assert execution.run_job('approval-verifier', {'verifier': pin, 'request': request}, tmp_path / 'jobs') == {'verified': True}
+    assert len(calls) == 1 and 'spawn_trampoline.py' in calls[0][0][2]
+
+
+@pytest.mark.parametrize('supervisor_signal', [signal.SIGSTOP, signal.SIGKILL])
+def test_approval_descriptor_watchdog_reclaims_stopped_callback_after_supervisor_stops(
+        tmp_path, installed_verifier, supervisor_signal):
+    """The descriptor job keeps its deadline watchdog after its caller is lost."""
+    pin, request, source, _ = installed_verifier
+    marker = tmp_path / 'approval-stop.json'
+    source.write_text(
+        'import json, os, signal, subprocess, sys, time\n'
+        'from pathlib import Path\n'
+        'def verify(request):\n'
+        ' child=subprocess.Popen([sys.executable,"-c","import time; time.sleep(60)"])\n'
+        f' Path({str(marker)!r}).write_text(json.dumps([os.getpgrp(),os.getpid(),child.pid]))\n'
+        ' os.killpg(os.getpgrp(), signal.SIGSTOP)\n'
+        ' time.sleep(60)\n'
+    )
+    pin['source_digest'] = 'sha256:' + hashlib.sha256(source.read_bytes()).hexdigest()
+    driver = (
+        'import sys; '
+        f'sys.path.insert(0, {str(LIB)!r}); '
+        'from mission_application.approval_verifier import run_approval; '
+        f'run_approval({pin!r}, {request!r}, {str(tmp_path / "jobs")!r}, timeout=2)'
+    )
+    supervisor = subprocess.Popen([sys.executable, '-I', '-c', driver], cwd=tmp_path,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  start_new_session=True)
+    def marker_pids():
+        try:
+            value = json.loads(marker.read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+        return value if isinstance(value, list) and len(value) == 3 else None
+    def absent(pid):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        return False
+    def group_absent(pgid):
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return True  # Darwin can retain an unowned zombie group leader.
+        return False
+    try:
+        end = time.monotonic() + 5
+        while marker_pids() is None:
+            assert time.monotonic() < end
+            time.sleep(.01)
+        pgid, target, grandchild = marker_pids()
+        os.kill(supervisor.pid, supervisor_signal)
+        if supervisor_signal == signal.SIGKILL:
+            supervisor.wait(timeout=1)
+        end = time.monotonic() + 4
+        while not (absent(target) and absent(grandchild) and group_absent(pgid)):
+            assert time.monotonic() < end
+            time.sleep(.01)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(supervisor.pid, signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            supervisor.wait(timeout=1)
+        if marker_pids() is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(marker_pids()[0], signal.SIGKILL)
+
 @pytest.mark.parametrize('startup', ['pth', 'sitecustomize'])
 def test_startup_grandchild_stall_stays_in_group_and_is_swept(tmp_path, installed_verifier, startup, exit_backend):
     from budgeted_exec import run_job
@@ -205,7 +288,8 @@ def test_startup_grandchild_stall_stays_in_group_and_is_swept(tmp_path, installe
         assert time.monotonic() - began < 10
         assert marker.exists()
         grandchild, leader, group = json.loads(marker.read_text())
-        assert group == leader
+        # The job runs under the deadline bootstrap, which leads the owned group.
+        assert group != os.getpgrp() and group != leader
         with pytest.raises(ProcessLookupError):
             os.killpg(group, 0)
         assert list((tmp_path / 'jobs').iterdir()) == []
@@ -287,6 +371,34 @@ def test_exec_failure_removes_job_before_return(tmp_path, installed_verifier, mo
     with pytest.raises(OSError):
         execution.run_job('approval-verifier', {'verifier':pin, 'request':request}, tmp_path / 'jobs')
     assert list((tmp_path / 'jobs').iterdir()) == []
+
+
+def test_run_job_keeps_bootstrap_exec_refusal_distinct_from_target_nonzero(
+        tmp_path, installed_verifier, monkeypatch):
+    """An E control message is unstarted; a target exit is verifier rejection."""
+    import budgeted_exec as execution
+    pin, request, _, _ = installed_verifier
+    real_spawn = execution.spawn_exec
+    receivers = []
+    def target_exit(*args, **kwargs):
+        receiver, sender = os.pipe()
+        os.close(sender)
+        receivers.append(receiver)
+        return real_spawn([sys.executable, '-c', 'raise SystemExit(7)']), receiver
+    monkeypatch.setattr(execution, 'spawn_deadline_exec', target_exit)
+    with pytest.raises(ValueError, match='invalid result frame') as nonzero:
+        execution.run_job('approval-verifier', {'verifier': pin, 'request': request}, tmp_path / 'nonzero')
+    assert not getattr(nonzero.value, 'exec_unstarted', False)
+    def exec_refusal(*args, **kwargs):
+        receiver, sender = os.pipe()
+        os.write(sender, b'E')
+        os.close(sender)
+        receivers.append(receiver)
+        return real_spawn([sys.executable, '-c', 'raise SystemExit(2)']), receiver
+    monkeypatch.setattr(execution, 'spawn_deadline_exec', exec_refusal)
+    with pytest.raises(OSError, match='deadline exec failed') as refused:
+        execution.run_job('approval-verifier', {'verifier': pin, 'request': request}, tmp_path / 'refusal')
+    assert refused.value.exec_unstarted is True
 
 def test_kill_unconfirmed_cannot_return_success(tmp_path, installed_verifier, monkeypatch):
     import budgeted_exec as execution

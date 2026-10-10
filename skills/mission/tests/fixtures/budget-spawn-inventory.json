@@ -140,7 +140,7 @@
       "lib/mission_application/command_provider.py:_invoke_command_provider:execution_context": 3,
       "lib/mission_application/command_provider.py:_invoke_command_provider:execution_isolator": 2,
       "lib/mission_application/command_provider.py:_invoke_command_provider:exec_failed": 1,
-      "lib/mission_application/command_provider.py:_invoke_command_provider:spawn_failed_reason": 6,
+      "lib/mission_application/command_provider.py:_invoke_command_provider:spawn_failed_reason": 8,
       "lib/mission_application/command_provider.py:invoke_command_provider:execution": 1,
       "lib/mission_application/command_provider.py:pre_spawn_guard:execution": 1,
       "lib/mission_application/evidence.py:__init__:execute_retry_safe_evidence_plan": 1,

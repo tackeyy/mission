@@ -89,6 +89,20 @@ def test_budget_verification_deadline_retains_output_exit_and_cleans_group(run_c
     assert not list((tmp_path / '.mission-state/exec-jobs').glob('*.json'))
 
 
+def test_budget_verification_run_job_uses_deadline_spawn(run_cli, tmp_path, invoke_here, monkeypatch):
+    import budgeted_exec
+    _prepare_public_runner(tmp_path, run_cli)
+    _budget(tmp_path)
+    calls = []
+    actual = budgeted_exec.spawn_deadline_exec
+    def watched(argv, deadline, **kwargs):
+        calls.append((argv, deadline))
+        return actual(argv, deadline, **kwargs)
+    monkeypatch.setattr(budgeted_exec, 'spawn_deadline_exec', watched)
+    invoke_here(['verification', 'run', '--criterion', 'AC1'], {})
+    assert len(calls) == 1 and 'spawn_trampoline.py' in calls[0][0][2]
+
+
 def test_budget_reconcile_charges_crash_reservation_then_deletes_dead_owner_job(run_cli, tmp_path):
     from datetime import datetime, timedelta, timezone
     from mission_application.verification_budget import reserve_verification

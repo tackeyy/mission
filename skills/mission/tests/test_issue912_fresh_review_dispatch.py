@@ -1,5 +1,12 @@
 """D2c stops at running/blocked/abandoned: output import belongs to D2."""
+import contextlib
 import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
 
 import pytest
 
@@ -10,6 +17,39 @@ from .test_issue879_completion_cli import completion_session as _completion_sess
 def completion_session(request, state_dir, run_cli):
     return _completion_session.__wrapped__(request, state_dir, run_cli)
 from .test_issue895_fresh_review import _prepare
+
+
+def _wait_for(predicate, seconds=5):
+    end = time.monotonic() + seconds
+    while not predicate():
+        assert time.monotonic() < end, 'owned process did not reach expected state'
+        time.sleep(.01)
+
+
+def _marker_pids(marker):
+    try:
+        value = json.loads(marker.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, list) and len(value) == 3 else None
+
+
+def _absent(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
+def _group_absent(pgid):
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return True  # Darwin can retain an unowned zombie group leader.
+    return False
 
 
 @pytest.mark.parametrize("completion_session", [4, 5], indirect=True, ids=["v4-flat", "v5-container"])
@@ -412,6 +452,20 @@ def test_adapter_callbacks_share_exec_child_and_parent_never_loads_code(reviewer
     assert all(str(host.Path(host.__file__).resolve()) in command for command in calls)
 
 
+def test_adapter_exec_refusal_and_callback_nonzero_keep_base_unknown_result(monkeypatch):
+    """The adapter's historical unknown result covers both OS refusal and exit 7."""
+    import fresh_review_host as host
+    from budgeted_exec import spawn_exec
+    monkeypatch.setattr(host, 'spawn_deadline_exec', lambda *a, **k: (_ for _ in ()).throw(OSError('missing executable')))
+    assert host._call(None, 'resolve', {'identifier': 'neutral'}, timeout=.2) == {'unknown': True}
+    def nonzero(*args, **kwargs):
+        receiver, sender = os.pipe()
+        os.close(sender)
+        return spawn_exec([sys.executable, '-c', 'raise SystemExit(7)']), receiver
+    monkeypatch.setattr(host, 'spawn_deadline_exec', nonzero)
+    assert host._call(None, 'resolve', {'identifier': 'neutral'}, timeout=.2) == {'unknown': True}
+
+
 @pytest.mark.parametrize('operation', [None, 'w' * 128], ids=['generated-id', 'maximum-id'])
 def test_withdraw_pending_over_capacity_shrinks_and_replays_tombstone(reviewer, run_cli, operation):
     from .test_issue879_completion_cli import _rewrite_fixture_document, _public_bytes
@@ -461,6 +515,44 @@ def test_exec_timeout_kills_callback_descendants_without_success(reviewer, monke
     time.sleep(.08)
     assert heartbeat.read_bytes() == before
     assert not journal.exists()
+
+
+@pytest.mark.parametrize('supervisor_signal', [signal.SIGSTOP, signal.SIGKILL])
+def test_adapter_watchdog_reclaims_stopped_callback_after_supervisor_stops(reviewer, supervisor_signal):
+    """The host watchdog outlives a stopped or killed fresh-review CLI."""
+    root, request, environment, _ = reviewer
+    marker = root / 'adapter-stop.json'
+    process_env = {key: value for key, value in os.environ.items() if not key.startswith('MISSION_')}
+    process_env.update(environment)
+    process_env.update(MISSION_SESSION_ID='test', MISSION_LEASE_ID='test-lease',
+                       FIXTURE_REVIEW_MODE='watchdog-stop', FIXTURE_REVIEW_STOP_MARKER=str(marker))
+    driver = (
+        'import sys; '
+        f'sys.path.insert(0, {str(Path(__file__).parents[1] / "lib")!r}); '
+        'import fresh_review_host as host; '
+        'host._call(host.resolve("neutral"), "observe", {}, timeout=2)'
+    )
+    supervisor = subprocess.Popen(
+        [sys.executable, '-c', driver],
+        cwd=root, env=process_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        _wait_for(lambda: _marker_pids(marker) is not None)
+        pgid, target, grandchild = _marker_pids(marker)
+        os.kill(supervisor.pid, supervisor_signal)
+        if supervisor_signal == signal.SIGKILL:
+            supervisor.wait(timeout=1)
+        _wait_for(lambda: _absent(target) and _absent(grandchild) and _group_absent(pgid), seconds=4)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(supervisor.pid, signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            supervisor.wait(timeout=1)
+        pids = _marker_pids(marker)
+        if pids is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(pids[0], signal.SIGKILL)
 
 
 @pytest.mark.parametrize('explicit', [False, True], ids=['no-operation-id', 'maximum-operation-id'])

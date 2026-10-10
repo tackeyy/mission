@@ -30,6 +30,18 @@ def _absent(pid):
     return False
 
 
+def _group_absent(pgid):
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        # Darwin can retain an unowned zombie group leader after both owned
+        # members have gone. The PID checks below still prove no owned member.
+        return True
+    return False
+
+
 def _pids(marker):
     try:
         value = json.loads(marker.read_text())
@@ -124,7 +136,7 @@ def test_budgeted_provider_watchdog_reclaims_stopped_command_after_supervisor_st
         os.kill(supervisor.pid, supervisor_signal)
         if supervisor_signal == signal.SIGKILL:
             supervisor.wait(timeout=1)
-        _wait(lambda: _absent(target) and _absent(grandchild), seconds=4)
+        _wait(lambda: _absent(target) and _absent(grandchild) and _group_absent(pgid), seconds=4)
     finally:
         with contextlib.suppress(ProcessLookupError):
             os.kill(supervisor.pid, signal.SIGKILL)
@@ -428,7 +440,7 @@ def test_provider_terminal_probes_release_budget_and_deadline_prevents_late_spaw
     else:
         spawn = budgeted_exec.spawn_exec
         def inherited(*a, **kw):
-            assert 'cwd' not in kw  # Both provider routes inherit the invocation cwd.
+            assert kw.get('cwd') is None  # Both provider routes inherit the invocation cwd.
             return spawn(*a, **kw)
         monkeypatch.setattr(budgeted_exec, 'spawn_exec', inherited)
     settled = command_provider.settle_provider
