@@ -55,17 +55,22 @@ def execute_verification(document, root, criterion, repro_input, budget, command
         if receipt['block_reason'] == 'budget-deadline' and receipt['exit_code'] is not None and run_sec >= command['timeout_sec']:
             receipt['block_reason'] = 'timeout'
         return receipt
-    except Exception as exc:
+    except BaseException as exc:
         # Without a supervisor frame we cannot prove its nested verifier group
         # was reclaimed, even when the outer supervisor group was reclaimed.
         reason = 'kill-unconfirmed'
         contract = document['acceptance_contract']
-        if getattr(exc, 'exec_unstarted', False):
+        if getattr(exc, 'exec_unstarted', False) and getattr(exc, 'exec_cleanup_confirmed', False):
             reason = 'budget-deadline' if isinstance(exc, TimeoutError) else getattr(exc, 'reason_code', 'budget-deadline-unenforceable')
         receipt = _blocked_receipt(contract, contract['verifier_policy'], criterion, command, reason)
         receipt.update(started_at=budget.reservation.reserved_at,
             finished_at=datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
             timed_out=isinstance(exc, TimeoutError), output_truncated=isinstance(exc, TimeoutError))
+        if not isinstance(exc, Exception):
+            # The public caller persists this recovery state before propagating
+            # an interruption; a missing hold must not expire as unknown work.
+            exc.verification_receipt = receipt
+            raise
         return receipt
 
 

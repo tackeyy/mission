@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from mission_application.verifier_policy import explicit_paths_are_supported
+from exec_cleanup import cleanup_scope, finish_cleanup
 
 
 class VerificationRunnerError(ValueError):
@@ -180,8 +181,9 @@ def materialize_candidate(candidate):
     if not isinstance(candidate, CandidateSnapshot) or candidate.digest != _digest(candidate.files):
         raise VerificationRunnerError("candidate-digest-invalid")
     _validate_materialized_paths(candidate.files)
-    with tempfile.TemporaryDirectory(prefix="mission-verification-") as raw:
-        root = Path(raw).resolve()
+    temporary = tempfile.TemporaryDirectory(prefix="mission-verification-")
+    with cleanup_scope(temporary.cleanup):
+        root = Path(temporary.name).resolve()
         for item in candidate.files:
             if item.content is None:
                 continue
@@ -345,7 +347,7 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None, bud
                 # while retaining the supervisor that reports output and exit.
                 child, control_receiver = spawn_deadline_exec(argv, budget_deadline, cwd=cwd,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
-                descriptors.callback(os.close, control_receiver)
+                descriptors.enter_context(cleanup_scope(os.close, control_receiver))
         except OSError:
             return {
                 "started_at": started,
@@ -364,9 +366,11 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None, bud
         output_hash = hashlib.sha256()
         observed_output_bytes = 0
         output_truncated = False
-        selector = selectors.DefaultSelector()
         assert child.stdout is not None
         stdout = child.stdout
+        descriptors.enter_context(cleanup_scope(stdout.close))
+        selector = selectors.DefaultSelector()
+        descriptors.enter_context(cleanup_scope(selector.close))
         selector.register(stdout, selectors.EVENT_READ)
         frozen_deadline = time.monotonic() + timeout
         deadline = min(frozen_deadline, budget_deadline) if budget_deadline is not None else frozen_deadline
@@ -393,7 +397,8 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None, bud
                 if group_cleaned:
                     timed_out = True  # an escaped descendant still owns stdout
                     output_truncated = True
-                    selector.close(); stdout.close()
+                    finish_cleanup(selector.close)
+                    finish_cleanup(stdout.close)
                     break
                 if not timed_out:
                     timed_out = True
@@ -401,14 +406,14 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None, bud
                         os.killpg(child.pid, signal.SIGKILL)
                     except OSError:
                         pass
-                    selector.close()
-                    stdout.close()
+                    finish_cleanup(selector.close)
+                    finish_cleanup(stdout.close)
                     break
                 remaining = 0.1
             for key, _event in selector.select(min(remaining, 0.1)):
                 chunk = os.read(key.fd, 65536)
                 if not chunk:
-                    selector.unregister(key.fileobj)
+                    finish_cleanup(selector.unregister, key.fileobj)
                 else:
                     output_hash.update(chunk)
                     observed_output_bytes += len(chunk)
@@ -438,8 +443,8 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None, bud
             process_unavailable = b'E' in control or b'W' in control
             if b'E' in control:
                 exit_code = None
-        selector.close()
-        stdout.close()
+        finish_cleanup(selector.close)
+        finish_cleanup(stdout.close)
         count, report_successful = _executed_count(command, root)
         try:
             observed = tuple(_read(root, item.path, item.mode, required=True) for item in candidate.files)

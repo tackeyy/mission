@@ -2,7 +2,7 @@
 from __future__ import annotations
 from dataclasses import asdict
 import base64
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import hashlib
 import json
 from pathlib import Path
@@ -12,6 +12,7 @@ import tempfile
 import os
 import time
 from budgeted_exec import spawn_deadline_exec, observe_exit, cleanup_group, strict_json
+from exec_cleanup import cleanup_scope, finish_cleanup
 
 from fresh_review_runtime import AdapterPin, AdapterRegistration, validate_registry, REGISTRY_SCHEMA
 from mission_kernel.fresh_review import FreshReviewError, canonical_bytes, canonical_digest, request_document
@@ -30,10 +31,15 @@ def _call(pin, action, payload, *, cwd=None, timeout=10):
     envelope = {'pin': asdict(pin) if pin is not None else None, 'action': action, **payload}
     child, control_receiver, timed_out, confirmed = None, None, False, True
     try:
-        with tempfile.TemporaryFile() as incoming, tempfile.TemporaryFile() as outgoing:
+        with ExitStack() as files:
+            incoming = tempfile.TemporaryFile()
+            files.enter_context(cleanup_scope(incoming.close))
+            outgoing = tempfile.TemporaryFile()
+            files.enter_context(cleanup_scope(outgoing.close))
             incoming.write(canonical_bytes(envelope))
             incoming.seek(0)
             deadline = time.monotonic() + timeout
+            failure = None
             try:
                 child, control_receiver = spawn_deadline_exec([sys.executable, str(Path(__file__).resolve())], deadline,
                     stdin=incoming, stdout=outgoing, stderr=subprocess.DEVNULL, cwd=cwd)
@@ -42,11 +48,14 @@ def _call(pin, action, payload, *, cwd=None, timeout=10):
                         timed_out = True
                         break
                     time.sleep(min(.01, max(0, deadline - time.monotonic())))
+            except BaseException as error:
+                failure = error
+                raise
             finally:
                 if child is not None:
                     confirmed = cleanup_group(child, timed_out=timed_out)
                 if control_receiver is not None:
-                    os.close(control_receiver)
+                    finish_cleanup(os.close, control_receiver, original=failure)
                     control_receiver = None
             if not confirmed or timed_out or child.returncode != 0:
                 return {'unknown': True}
@@ -98,8 +107,9 @@ def materialize(root, request):
     if len(raw) != ref.size or 'sha256:' + hashlib.sha256(raw).hexdigest() != request.input_digest:
         raise FreshReviewError('fresh-review-input-unobservable')
     packet = json.loads(raw)
-    with tempfile.TemporaryDirectory(prefix='mission-fresh-') as directory:
-        folder = Path(directory)
+    temporary = tempfile.TemporaryDirectory(prefix='mission-fresh-')
+    with cleanup_scope(temporary.cleanup):
+        folder = Path(temporary.name)
         contents = [(ref, raw)]
         for command, snapshot in packet['snapshots'].items():
             content = canonical_bytes(snapshot)
