@@ -1339,7 +1339,7 @@ def _mark_pass(state: MissionState, raw_command: object) -> Transition:
     command = raw_command
     assert isinstance(command, MarkPass)
     if command.approval_settlement is not None:
-        from .budget_decisions import approval_result_digest, approval_progress_digest
+        from .budget_decisions import approval_result_digest, approval_progress_digest, approval_candidate_digest
         settlement = command.approval_settlement
         if not isinstance(settlement, SettleDispatchBudget):
             raise _Rejected('approval-settlement-binding-invalid')
@@ -1349,7 +1349,10 @@ def _mark_pass(state: MissionState, raw_command: object) -> Transition:
         if (not command.force or row is None or row.entry != 'force-approval' or row.target != 'force-pass'
                 or not isinstance(approval_request, dict) or not isinstance(envelope.get('response'), dict)
                 or settlement.at != command.at
-                or settlement.candidate_digest != approval_request.get('terminal_object_digest')
+                or settlement.approval_terminal_digest != approval_request.get('terminal_object_digest')
+                or settlement.candidate_digest != approval_candidate_digest(
+                    settlement.approval_terminal_digest, approval_request.get('approval_evidence_ref'),
+                    envelope['response'].get('verifier_id'))
                 or settlement.result_digest != approval_result_digest(envelope.get('response'))
                 or settlement.progress_digest != approval_progress_digest(envelope.get('response'))
                 or settlement.outcome != 'settled' or settlement.completed is not True

@@ -14030,6 +14030,8 @@ def cmd_mark_passes(args):
                 approved_by_user=bool(getattr(args, "approved_by_user", False)),
                 specialist_waiver=specialist_waiver,
                 at=iso_now(),
+                approval_evidence_ref=getattr(args, "approval_evidence_ref", None),
+                approval_verifier=getattr(args, "approval_verifier", None),
             ),
             MarkPassServices(
                 verify_force_approval=lambda data, budget=None: _verify_force_pass_approval(data, args, cwd, budget=budget),

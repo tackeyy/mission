@@ -103,6 +103,11 @@ def approval_result_digest(response):
     return _digest(response)
 
 
+def approval_candidate_digest(object_digest, evidence_ref, verifier_name):
+    return _digest({'object_digest': object_digest, 'evidence_ref': evidence_ref,
+                    'verifier_name': verifier_name})
+
+
 def approval_progress_digest(response):
     # Design 881 §3.4: request freshness is not new verifier evidence.
     volatile = {'event_nonce', 'single_use_nonce', 'request_digest', 'receipt_ref',

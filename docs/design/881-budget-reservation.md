@@ -198,6 +198,8 @@ final latch は `budget enter-final`（明示）か `at ≥ repair の締切`（
 
 承認verifier（§3.2の#5・#6）は、実際に得た結果を承認の成否によらず計数する。進展判定用digestからは、要求・receiptの鮮度だけを表すトップレベルの`event_nonce`・`single_use_nonce`・`request_digest`・`receipt_ref`・`verified_at`・`expires_at`を除く。その他の結果内容と候補が同じなら、不正な承認結果でも連続回数を増やす。verifierの起動失敗・タイムアウト・回収不能など、結果を得ていない試行は計数せず、既存の連続回数も維持する。精算とforce承認envelopeの結び付きには、これとは別に結果全体のdigestを用いる。
 
+承認の候補digestには、#5のoutbound packet digestまたは#6のterminal object digestに加え、evidence refとverifier名を含める。同じ対象でもevidenceまたはverifierが変われば新しい候補として予約でき、結果取得後の連続回数は1から始まる。force承認のterminal objectへの結び付きは、精算の`approval_terminal_digest`で保持し、候補digestとの一致もevidence ref・verifier名を含めてkernelで検査する。
+
 ### 3.5 有効化の fail-closed（設計レビュー round 1 の High 1）
 
 決定: 予算の有効化（policy を持つ session を作ること）は、**main 上の全 spawn 入口に admission が入っていることを code で確かめてから**でないと成立しない。

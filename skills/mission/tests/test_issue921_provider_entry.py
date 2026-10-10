@@ -707,3 +707,29 @@ def test_provider_cleanup_exception_cannot_release_unconfirmed_reservation(
     finally:
         for child in children:
             assert cleanup(child, term_grace=.2, kill_wait=2)
+
+
+@pytest.mark.parametrize('error_type', [KeyboardInterrupt, SystemExit])
+def test_unstarted_provider_interruption_is_persisted_then_propagated(
+        run_cli, tmp_path, prepare_approved_invocation, invoke_here, monkeypatch, error_type):
+    import budgeted_exec
+    _, env = _prepare_command_provider(run_cli, tmp_path)
+    args, env, _ = prepare_approved_invocation(cwd=tmp_path, provider='guarded-command-provider',
+        iteration=1, phase='planning', env_extra=env)
+    _budget(tmp_path)
+    error = error_type('interrupted before spawn')
+    error.exec_unstarted = error.exec_cleanup_confirmed = True
+    def interrupted(*a, **kw):
+        raise error
+    monkeypatch.setattr(budgeted_exec, 'spawn_deadline_exec', interrupted)
+    with pytest.raises(error_type) as observed:
+        invoke_here(args, env)
+    assert observed.value is error
+    document = json.loads(_state_path(tmp_path).read_text())
+    entry = document['specialist_invocations'][-1]
+    assert entry['status'] == 'failed-before-start' and entry['proven_no_dispatch'] is True
+    assert 'child_pid' not in entry
+    ledger = document['budget_ledger']
+    assert not ledger['reservations']
+    assert ledger['settlements'][-1]['outcome'] == 'settled'
+    assert ledger['settlements'][-1]['charged_sec'] == 0

@@ -107,7 +107,10 @@ def test_approval_child_sees_reservation_and_terminal_settles_after_cleanup(
 
 def _replace_callback(source, env, text):
     from pathlib import Path
+    from importlib.util import cache_from_source
     source.write_text(text)
+    # Same-second, same-size fixture edits must execute the newly pinned source.
+    Path(cache_from_source(str(source))).unlink(missing_ok=True)
     config = Path(env['XDG_CONFIG_HOME']) / 'mission/approval-verifiers.json'
     registry = json.loads(config.read_text())
     registry['verifiers'][0]['source_digest'] = 'sha256:' + hashlib.sha256(source.read_bytes()).hexdigest()
@@ -294,11 +297,12 @@ def test_force_settlement_is_bound_to_pass_envelope_and_dispatch(
     changes = [
         {'reservation_id': 'reservation:foreign'}, {'result_digest': 'sha256:' + 'f' * 64},
         {'candidate_digest': 'sha256:' + 'f' * 64}, {'at': '2000-01-01T00:00:00Z'},
+        {'approval_terminal_digest': 'sha256:' + 'f' * 64},
         {'completed': False}, {'completed': 1}, {'outcome': 'kill-unconfirmed'},
         {'outcome': 'charged-full-unknown'}, {'refusal_reason': 'budget-deadline'},
         {'tool_calls': 0}, {'replays': 0}, {'output_bytes': 0},
     ]
-    changes += [{field: value} for field in ('reservation_id', 'candidate_digest', 'result_digest', 'progress_digest', 'at')
+    changes += [{field: value} for field in ('reservation_id', 'candidate_digest', 'result_digest', 'progress_digest', 'approval_terminal_digest', 'at')
                 for value in (None, {}, [], 1, False, '', 'invalid', 'sha256:' + '0' * 63, 'sha256:' + 'z' * 64)]
     failures = 0
     for change in changes:
@@ -314,7 +318,7 @@ def test_force_settlement_is_bound_to_pass_envelope_and_dispatch(
     foreign = replace(state.budget.reservations[0], entry='verification-run', target='AC1')
     result = decide(replace(state, budget=replace(state.budget, reservations=(foreign,))), command)
     assert not result.accepted and result.rejection.code == 'approval-settlement-binding-invalid'
-    assert failures == 63  # 57 field mutations + 6 missing/malformed settlements
+    assert failures == 73  # 67 field mutations + 6 missing/malformed settlements
     from mission_kernel.json_codec import freeze_json_value
     for value in (['invalid'], 'invalid', 1, False, None):
         payload = command.compatibility.upserts.thaw()
@@ -328,6 +332,27 @@ def test_force_settlement_is_bound_to_pass_envelope_and_dispatch(
         payload['force_approval']['response'] = value
         altered = replace(command, compatibility=replace(command.compatibility, upserts=freeze_json_value(payload)),
             approval_settlement=replace(settlement, result_digest=approval_result_digest(value)))
+        result = decide(state, altered)
+        assert not result.accepted and result.rejection.code == 'approval-settlement-binding-invalid'
+    from mission_kernel.budget_decisions import approval_candidate_digest, approval_progress_digest
+    original = command.compatibility.upserts.thaw()
+    envelope = original['force_approval']
+    forged_terminal = 'sha256:' + 'f' * 64
+    forged_candidate = approval_candidate_digest(forged_terminal,
+        envelope['request']['approval_evidence_ref'], envelope['response']['verifier_id'])
+    result = decide(state, replace(command, approval_settlement=replace(settlement,
+        approval_terminal_digest=forged_terminal, candidate_digest=forged_candidate)))
+    assert not result.accepted and result.rejection.code == 'approval-settlement-binding-invalid'
+    for changed in ('evidence', 'verifier'):
+        payload = command.compatibility.upserts.thaw()
+        envelope = payload['force_approval']
+        if changed == 'evidence':
+            envelope['request']['approval_evidence_ref'] = 'sha256:' + 'f' * 64
+        else:
+            envelope['response']['verifier_id'] = 'foreign-verifier'
+        altered = replace(command, compatibility=replace(command.compatibility, upserts=freeze_json_value(payload)),
+            approval_settlement=replace(settlement, result_digest=approval_result_digest(envelope['response']),
+                                        progress_digest=approval_progress_digest(envelope['response'])))
         result = decide(state, altered)
         assert not result.accepted and result.rejection.code == 'approval-settlement-binding-invalid'
 
@@ -537,16 +562,23 @@ def test_approval_unknown_recovery_keeps_full_charge_and_reservation(
             assert cleanup(child, term_grace=.2, kill_wait=2)
 
 
-def test_identical_invalid_approval_results_stop_repetition_despite_fresh_nonce(
-        approval_entry, tmp_path, invoke_here, monkeypatch, capsys):
-    from mission_application import approval_verifier
-    entry, args, env, source = approval_entry
-    text = source.read_text()
+def _invalid_approval_callback(entry, source, env):
+    original = source.read_text()
+    text = original
     if entry == 'verify-approval':
         text = text.replace("'single_use_nonce':nonce", "'single_use_nonce':'bad'")
     else:
         text = text.replace("'decision':'approved'", "'decision':'rejected'")
     _replace_callback(source, env, text)
+    return original
+
+
+@pytest.mark.parametrize('changed_input', ['evidence', 'verifier'])
+def test_identical_invalid_approval_results_stop_until_candidate_changes(
+        approval_entry, tmp_path, invoke_here, monkeypatch, capsys, changed_input):
+    from mission_application import approval_verifier
+    entry, args, env, source = approval_entry
+    original = _invalid_approval_callback(entry, source, env)
     job, results = approval_verifier.run_job, []
     def observed(*a, **kw):
         result = job(*a, **kw)
@@ -567,6 +599,59 @@ def test_identical_invalid_approval_results_stop_repetition_despite_fresh_nonce(
     assert rejected.value.code == 2
     assert 'budget-no-new-evidence' in capsys.readouterr().err
     assert len(json.loads(_state_path(tmp_path).read_text())['budget_ledger']['settlements']) == 2
+    # A corrected verifier can reconsider new evidence without changing the
+    # outbound packet or terminal object, or manually resetting the budget.
+    monkeypatch.setattr(approval_verifier, 'run_job', job)
+    changed = list(args)
+    if changed_input == 'evidence':
+        evidence_option = '--evidence-ref' if entry == 'verify-approval' else '--approval-evidence-ref'
+        changed[changed.index(evidence_option) + 1] = 'sha256:' + 'b' * 64
+    else:
+        from pathlib import Path
+        prior_name = args[args.index('--approval-verifier') + 1]
+        changed[changed.index('--approval-verifier') + 1] = 'replacement-verifier'
+        config = Path(env['XDG_CONFIG_HOME']) / 'mission/approval-verifiers.json'
+        registry = json.loads(config.read_text())
+        registry['verifiers'][0]['id'] = 'replacement-verifier'
+        config.write_text(json.dumps(registry))
+        original = original.replace(prior_name, 'replacement-verifier')
+    _replace_callback(source, env, original)
+    invoke_here(changed, env)
+    document = json.loads(_state_path(tmp_path).read_text())
+    assert not document['budget_ledger']['reservations']
+    progress = document['budget_ledger']['progress'][0]
+    assert progress['candidate_digest'] != ledger['progress'][0]['candidate_digest']
+    assert progress['consecutive_count'] == 1
+    if entry == 'verify-approval':
+        assert document['provider_preflights'][args[3]]['status'] == 'approved'
+    else:
+        assert document['passes'] is True
+
+
+def test_infrastructure_failure_preserves_invalid_approval_progress(
+        approval_entry, tmp_path, invoke_here, monkeypatch, capsys):
+    import budgeted_exec
+    from mission_application import approval_verifier
+    entry, args, env, source = approval_entry
+    _invalid_approval_callback(entry, source, env)
+    with pytest.raises(SystemExit):
+        invoke_here(args, env)
+    prior = json.loads(_state_path(tmp_path).read_text())['budget_ledger']['progress']
+    assert prior[0]['consecutive_count'] == 1
+    def unavailable(*a, **kw):
+        raise OSError('exec unavailable')
+    with monkeypatch.context() as patch:
+        patch.setattr(budgeted_exec.subprocess, 'Popen', unavailable)
+        with pytest.raises(SystemExit):
+            invoke_here(args, env)
+    assert json.loads(_state_path(tmp_path).read_text())['budget_ledger']['progress'] == prior
+    with pytest.raises(SystemExit):
+        invoke_here(args, env)
+    assert json.loads(_state_path(tmp_path).read_text())['budget_ledger']['progress'][0]['consecutive_count'] == 2
+    monkeypatch.setattr(approval_verifier, 'run_job', lambda *a, **kw: pytest.fail('progress reset allowed a spawn'))
+    with pytest.raises(SystemExit):
+        invoke_here(args, env)
+    assert 'budget-no-new-evidence' in capsys.readouterr().err
 
 
 def test_approval_pipe_failure_is_unstarted_zero_charge_and_refusal(

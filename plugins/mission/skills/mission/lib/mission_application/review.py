@@ -356,6 +356,8 @@ class MarkPassRequest:
     approved_by_user: bool
     specialist_waiver: str
     at: str
+    approval_evidence_ref: str | None = None
+    approval_verifier: str | None = None
 
 
 @dataclass(frozen=True)
@@ -643,7 +645,8 @@ def mark_pass(repository, request, services):
     if not request.force or not request.reason or request.approved_by_user is not True:
         return _mark_pass(repository, request, services)
     try:
-        budget = admit_approval(repository, 'force-approval', 'force-pass')
+        budget = admit_approval(repository, 'force-approval', 'force-pass',
+                               evidence_ref=request.approval_evidence_ref, verifier_name=request.approval_verifier)
     except ValueError as exc:
         raise ReviewFailure(str(exc), reason=str(exc)) from exc
     try:

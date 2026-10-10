@@ -600,6 +600,8 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
                 entry.update({"status": "failed-before-start", "lifecycle_state": "terminal", "transitioned_at": completed_at,
                               "completed_at": completed_at, "reason_code": spawn_failed_reason,
                               "proven_no_dispatch": True})
+                if not isinstance(exc, Exception):
+                    exchange_interruption = exc
         else:
             if budget is not None:
                 # No repository lock/commit may delay the child's deadline.

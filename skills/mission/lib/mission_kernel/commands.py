@@ -137,6 +137,7 @@ class SettleDispatchBudget:
     completed: bool = False
     refusal_reason: str | None = None
     progress_digest: str | None = None
+    approval_terminal_digest: str | None = None
 
 
 @dataclass(frozen=True)

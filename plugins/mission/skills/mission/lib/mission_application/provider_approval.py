@@ -67,7 +67,8 @@ def run_verify_provider_approval(args, services):
             return
     budget_repository = services.repository(cwd, sf, stamp=True, strict_read=True, session_id=session_id)
     try:
-        budget = admit_approval(budget_repository, 'verify-approval', args.preflight_id)
+        budget = admit_approval(budget_repository, 'verify-approval', args.preflight_id,
+                               evidence_ref=args.evidence_ref, verifier_name=args.approval_verifier)
     except KeyError:
         services.gate('approval-evidence-invalid')
     except ValueError as error:

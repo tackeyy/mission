@@ -23,6 +23,7 @@
   "rows-1-2": {
     "candidates": {
       "lib/mission_application/spawn_trampoline.py:main:run_contract_verifier": 1,
+      "lib/mission_application/verification_budget.py:execute_verification:exec_cleanup_confirmed": 1,
       "lib/mission_application/verification_budget.py:execute_verification:run_job": 1,
       "lib/mission_application/verification_exec.py:main:Popen": 2,
       "lib/mission_application/verification_execution.py:run_contract_verifier:execute_candidate": 1,
