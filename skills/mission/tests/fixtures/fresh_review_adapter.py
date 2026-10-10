@@ -3,8 +3,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 
 from fresh_review_runtime import CollectedReview
@@ -80,8 +82,13 @@ print(json.dumps(dict(digest='sha256:'+hashlib.sha256(raw).hexdigest(),output=ou
 
 class Adapter:
     def observe_parent(self):
+        if os.environ.get('FIXTURE_REVIEW_MODE') == 'watchdog-stop':
+            child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+            Path(os.environ['FIXTURE_REVIEW_STOP_MARKER']).write_text(
+                json.dumps([os.getpgrp(), os.getpid(), child.pid]))
+            os.killpg(os.getpgrp(), signal.SIGSTOP)
+            time.sleep(60)
         if os.environ.get('FIXTURE_REVIEW_MODE') == 'callback-timeout':
-            import time
             subprocess.Popen([sys.executable, '-c',
                 'import time,sys; from pathlib import Path; '
                 'p=Path(sys.argv[1]); i=0\n'

@@ -790,10 +790,12 @@ def test_v1_invalid_attempt_uses_only_proven_pre_cutoff_withdrawal(m, withdrawal
         with pytest.raises(ValueError, match='attempt_chain_invalid'): canonical_trial(m, f)
 
 
-def test_documentation_labels_cohort_apis_as_second_pr_additions():
+def test_documentation_describes_available_cohort_apis_and_i1_boundary():
     document = (BENCH / 'bench-selection.md').read_text()
     for api in ('bench_cohort.py', 'bench_cohort.collect_det', 'bench_cohort.BundleReplay', 'bench_cohort.verify_cohort'):
-        assert f'`{api}`（2本目で追加する）' in document
+        assert f'`{api}`' in document
+    assert '2本目で追加する' not in document
+    assert 'Checks 4–5' in document
 
 
 @pytest.mark.parametrize('withdrawal,reuse', [(None, False), (600, False), (None, True), (600, True)])
