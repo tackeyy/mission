@@ -530,13 +530,17 @@ def mark_pass(
         except (OSError, ValueError, KeyError, TypeError, RecursionError) as exc:
             raise ReviewFailure("acceptance candidate capture failed", reason="acceptance-candidate-unavailable") from exc
         frozen_candidates = freeze_json_value(acceptance_candidates)
-        reason = acceptance_completion_rejection(
-            decode_mission_state(json.dumps(data).encode("utf-8")),
-            MarkPass(acceptance_candidate_digests=frozen_candidates,
-                     fresh_review_evidence=fresh_inputs.evidence, fresh_review_bindings=fresh_inputs.bindings),
-        )
-        if reason is not None:
-            raise ReviewFailure(reason, reason=reason)
+        # The origin guard above runs for every session. Contractless legacy
+        # completion uses the repository's compatible decision view instead
+        # of decoding historical plan fields through this strict preflight.
+        if "acceptance_contract" in data:
+            reason = acceptance_completion_rejection(
+                decode_mission_state(json.dumps(data).encode("utf-8")),
+                MarkPass(acceptance_candidate_digests=frozen_candidates,
+                         fresh_review_evidence=fresh_inputs.evidence, fresh_review_bindings=fresh_inputs.bindings),
+            )
+            if reason is not None:
+                raise ReviewFailure(reason, reason=reason)
         verification = services.verify_force_approval(data) if request.force else None
         try:
             services.validate_artifact_gate(data)
