@@ -380,3 +380,14 @@ def test_repository_status_keeps_unicode_and_historical_nonfinite_scores(complet
         assert result.returncode == 0, result.stdout + result.stderr
         assert json.loads(result.stdout)['acceptance_contract']['criteria'][0]['expected'] == '日本語 café'
         assert _public_bytes(root) == before
+
+
+def test_acceptance_contract_status_keeps_the_encoding_detail(completion_session, run_cli):
+    root, state, schema = completion_session
+    state['acceptance_contract']['criteria'][0]['expected'] = '\ud800'
+    _persist_fixture(root, state, schema, escaped_contract=True)
+    result = _reject_unchanged(run_cli, root, ('acceptance-contract', 'status'),
+                               'canonical-json-invalid', raw_control=True)
+    output = result.stdout + result.stderr
+    assert 'state projection cannot be canonically encoded' in output
+    assert 'surrogates not allowed' not in output
