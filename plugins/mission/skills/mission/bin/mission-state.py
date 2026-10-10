@@ -245,6 +245,8 @@ from mission_application.evidence import (  # noqa: E402
 from mission_application.budget import run_budget_status_cli, run_budget_next, run_budget_reconcile_cli
 from mission_persistence.spawn_jobs import cleanup_jobs
 from mission_kernel.budget import BudgetError
+from mission_application.repair import run_repair_cli
+from mission_persistence.retry_loop import run_with_base_retry
 from mission_application.fresh_review import run_fresh_review_prepare_cli, run_fresh_review_status_cli, run_repair_origins_cli
 from mission_application.fresh_review_withdraw import run_fresh_review_withdraw_cli
 from mission_application.fresh_review_publish import run_fresh_review_import_cli
@@ -8309,6 +8311,7 @@ _ACCEPTANCE_CONTRACT_CLI_SERVICES = AcceptanceContractCliServices(
     load_verifier_policy,
     partial(state_capacity_status, load_snapshot=_load_authoritative_state),
     commit_errors=(CapacityWriteError,),
+    run_with_base_retry=run_with_base_retry,
     load_snapshot=_load_authoritative_state,
     read_evidence=_read_stable_payload_beneath,
 )
@@ -13824,6 +13827,10 @@ def cmd_fresh_review_import(args):
     print(run_fresh_review_import_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES, fresh_review_host))
 
 
+def cmd_repair(args):
+    print(run_repair_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES))
+
+
 def cmd_repair_origins(args):
     print(run_repair_origins_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES))
 
@@ -16350,6 +16357,15 @@ def _add_review_parsers(subparsers) -> None:
     p_budget_sub = p_budget.add_subparsers(dest="budget_command", required=True)
     p_budget_sub.add_parser("status", help="予算 policy と ledger の状態").set_defaults(func=cmd_budget_status)
     p_budget_sub.add_parser("reconcile", help="crash 後の予約を精算").set_defaults(func=cmd_budget_reconcile)
+    p_repair = sub.add_parser("repair", help="修復attemptの開始と未完了の回復（成功は未対応）")
+    p_repair_sub = p_repair.add_subparsers(dest="repair_command", required=True)
+    p_begin_repair = p_repair_sub.add_parser("begin", help="終端容量を予約して修復を開始")
+    p_begin_repair.add_argument("--finding", required=True)
+    p_begin_repair.add_argument("--plan-ref", required=True)
+    p_begin_repair.set_defaults(func=cmd_repair, command_outcome_tracking=True)
+    p_reconcile_repair = p_repair_sub.add_parser("reconcile", help="再実行せず未完了を終端化")
+    p_reconcile_repair.add_argument("--attempt", required=True)
+    p_reconcile_repair.set_defaults(func=cmd_repair, command_outcome_tracking=True)
     p_fresh = sub.add_parser("fresh-review", help="typed fresh-review request と起動を管理")
     p_fresh_sub = p_fresh.add_subparsers(dest="fresh_review_command", required=True)
     p_prepare = p_fresh_sub.add_parser("prepare", help="候補と入力を凍結し、一回使用の request を保存")
