@@ -340,18 +340,12 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None, bud
                 child = subprocess.Popen(argv, cwd=cwd, shell=False, stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True, env=env)
             else:
-                from budgeted_exec import spawn_exec
+                from budgeted_exec import spawn_deadline_exec
                 # A separate owned group lets us kill the verifier's descendants
                 # while retaining the supervisor that reports output and exit.
-                control_receiver, control_sender = os.pipe()
+                child, control_receiver = spawn_deadline_exec(argv, budget_deadline, cwd=cwd,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
                 descriptors.callback(os.close, control_receiver)
-                os.set_blocking(control_receiver, False)
-                try:
-                    child = spawn_exec([sys.executable, '-I', '-S', str(Path(__file__).with_name('verification_exec.py')),
-                        str(budget_deadline), str(control_sender), *argv], pass_fds=(control_sender,),
-                        cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
-                finally:
-                    os.close(control_sender)
         except OSError:
             return {
                 "started_at": started,
@@ -438,10 +432,8 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None, bud
             exit_code = child.returncode
         exec_failed = False
         if control_receiver is not None:
-            try:
-                control = os.read(control_receiver, 2)
-            except BlockingIOError:
-                control = b''
+            from budgeted_exec import read_deadline_control
+            control = read_deadline_control(control_receiver)
             timed_out = timed_out or b'T' in control
             exec_failed = b'E' in control
             if exec_failed:

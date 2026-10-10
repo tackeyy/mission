@@ -83,7 +83,10 @@ def main():
         if time.monotonic() >= deadline:
             _stop(control, b'T')
             return 2
-        target = subprocess.Popen(sys.argv[3:], close_fds=True)
+        # The outer spawn boundary has already closed every descriptor except
+        # its declared pass_fds.  Preserve those payload descriptors (for
+        # example run_job's result pipe) across this exec-only trampoline.
+        target = subprocess.Popen(sys.argv[3:], close_fds=False)
         # Keep the group leader alive: watchdog death must fail closed even if
         # the reporting supervisor has crashed. The detached guard also reclaims it on bootstrap exit.
         while True:

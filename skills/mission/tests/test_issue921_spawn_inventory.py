@@ -198,7 +198,7 @@ def test_covered_provider_entries_leave_other_dispatch_entries_pending():
     assert set(BUDGET_SPAWN_ENTRIES.values()) == {'covered', 'pending'}
     source = (MISSION / 'lib/mission_application/command_provider.py').read_text()
     calls = {node.func.id for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
-    assert {'reserve_provider', 'settle_provider', 'spawn_exec', 'exchange_provider'} <= calls
+    assert {'reserve_provider', 'settle_provider', 'spawn_deadline_exec', 'exchange_provider'} <= calls
     helper = ast.parse((MISSION / 'lib/budgeted_exec.py').read_text())
     for node in ast.walk(helper):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == 'Popen':

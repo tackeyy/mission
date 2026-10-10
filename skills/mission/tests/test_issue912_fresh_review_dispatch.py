@@ -395,11 +395,11 @@ def test_adapter_callbacks_share_exec_child_and_parent_never_loads_code(reviewer
         monkeypatch.setenv(key, value)
     monkeypatch.syspath_prepend(environment['PYTHONPATH'])
     calls = []
-    actual_spawn = host.spawn_exec
+    actual_spawn = host.spawn_deadline_exec
     def spawn(*args, **kwargs):
         calls.append(args[0])
         return actual_spawn(*args, **kwargs)
-    monkeypatch.setattr(host, 'spawn_exec', spawn)
+    monkeypatch.setattr(host, 'spawn_deadline_exec', spawn)
     monkeypatch.setattr(runtime, 'load_adapter', lambda _: pytest.fail('adapter loaded in parent'))
     monkeypatch.setattr(runtime, '_source_digest', lambda _: pytest.fail('adapter source read in parent'))
     pin = host.resolve('neutral')

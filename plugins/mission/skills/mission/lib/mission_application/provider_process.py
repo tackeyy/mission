@@ -26,10 +26,11 @@ class ProviderExchange:
     output_bytes: int
     output_truncated: bool
     output_complete: bool
+    exec_failed: bool
 
 
 def exchange_provider(child, packet, deadline, *, term_grace=.2, kill_wait=.2,
-                      collect_sec=2, output_limit=1024 * 1024):
+                      collect_sec=2, output_limit=1024 * 1024, control_receiver=None):
     """Consume exclusively owned pipes of an unreaped spawn_exec child.
 
     deadline is an absolute monotonic value captured before spawn, never a new
@@ -136,8 +137,10 @@ def exchange_provider(child, packet, deadline, *, term_grace=.2, kill_wait=.2,
         while selector.get_map() and time.monotonic() < collect_until:
             pump(collect_until)
         complete = not selector.get_map() and not unavailable
+        control = b'' if control_receiver is None else budgeted_exec.read_deadline_control(control_receiver)
         return ProviderExchange(bytes(outputs['stdout']), bytes(outputs['stderr']),
-                                child.returncode, timed_out, confirmed, observed, truncated, complete)
+                                None if b'E' in control else child.returncode, timed_out or b'T' in control,
+                                confirmed, observed, truncated, complete, b'E' in control)
     except BaseException:
         # Only exceptions raised by this exchange count, including collection.
         # An enclosing caller's except block is not an exchange failure.
@@ -149,3 +152,6 @@ def exchange_provider(child, packet, deadline, *, term_grace=.2, kill_wait=.2,
             close_stream(stream)
         if selector is not None:
             selector.close()
+        if control_receiver is not None:
+            with contextlib.suppress(OSError):
+                os.close(control_receiver)

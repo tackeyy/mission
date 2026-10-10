@@ -566,11 +566,11 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
             if budget is None:
                 process = execution.Popen(argv, stdin=execution.PIPE, stdout=execution.PIPE, stderr=execution.PIPE, env=command_env)
             else:
-                from budgeted_exec import spawn_exec
+                from budgeted_exec import spawn_deadline_exec
                 if time.monotonic() >= budget.deadline:
                     raise OSError("budget-child-deadline-expired")
-                process = spawn_exec(argv, stdin=execution.PIPE, stdout=execution.PIPE,
-                                     stderr=execution.PIPE, env=command_env)
+                process, control_receiver = spawn_deadline_exec(argv, budget.deadline,
+                    stdin=execution.PIPE, stdout=execution.PIPE, stderr=execution.PIPE, env=command_env)
         except (OSError, ValueError) as exc:
             if budget is None and not isinstance(exc, OSError):
                 raise
@@ -588,12 +588,18 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
                 try:
                     exchange = exchange_provider(process, packet, budget.deadline,
                         term_grace=budget.policy.term_grace_sec, kill_wait=budget.policy.kill_wait_sec,
-                        collect_sec=budget.policy.collect_sec)
+                        collect_sec=budget.policy.collect_sec, control_receiver=control_receiver)
                     exit_code = exchange.exit_code
                     stdout = execution.redact(exchange.stdout.decode("utf-8", errors="replace"))
                     stderr = execution.redact(exchange.stderr.decode("utf-8", errors="replace"))
                     kill_confirmed = exchange.kill_confirmed
-                    if not kill_confirmed:
+                    if exchange.exec_failed:
+                        spawn_failed_reason = "budget-deadline-unenforceable"
+                        completed_at = execution.clock()
+                        entry.update({"status": "failed-before-start", "lifecycle_state": "terminal",
+                                      "transitioned_at": completed_at, "completed_at": completed_at,
+                                      "reason_code": spawn_failed_reason, "proven_no_dispatch": True})
+                    elif not kill_confirmed:
                         budget_failure = "kill-unconfirmed"
                     elif exchange.timed_out:
                         budget_failure = "budget-child-timeout"
