@@ -388,7 +388,8 @@ def test_run_job_keeps_bootstrap_exec_refusal_distinct_from_target_nonzero(
         return real_spawn([sys.executable, '-c', 'raise SystemExit(7)']), receiver
     monkeypatch.setattr(execution, 'spawn_deadline_exec', target_exit)
     with pytest.raises(ValueError, match='invalid result frame') as nonzero:
-        execution.run_job('approval-verifier', {'verifier': pin, 'request': request}, tmp_path / 'nonzero')
+        execution.run_job('approval-verifier', {'verifier': pin, 'request': request}, tmp_path / 'nonzero',
+                          deadline=time.monotonic() + 5)
     assert not getattr(nonzero.value, 'exec_unstarted', False)
     def exec_refusal(*args, **kwargs):
         receiver, sender = os.pipe()
@@ -398,7 +399,8 @@ def test_run_job_keeps_bootstrap_exec_refusal_distinct_from_target_nonzero(
         return real_spawn([sys.executable, '-c', 'raise SystemExit(2)']), receiver
     monkeypatch.setattr(execution, 'spawn_deadline_exec', exec_refusal)
     with pytest.raises(OSError, match='deadline exec failed') as refused:
-        execution.run_job('approval-verifier', {'verifier': pin, 'request': request}, tmp_path / 'refusal')
+        execution.run_job('approval-verifier', {'verifier': pin, 'request': request}, tmp_path / 'refusal',
+                          deadline=time.monotonic() + 5)
     assert refused.value.exec_unstarted is True
 
 def test_kill_unconfirmed_cannot_return_success(tmp_path, installed_verifier, monkeypatch):
