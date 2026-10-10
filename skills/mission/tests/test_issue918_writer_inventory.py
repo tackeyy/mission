@@ -180,7 +180,8 @@ def test_writer_inventory_matches_baseline_manifest():
     # Public benchmark output/materialization is outside session state, but its
     # new raw I/O must also be explicitly inventoried.
     benchmarks = [mission.parents[1] / 'benchmarks/mission-vs-goal' / name
-                  for name in ('public_benchmark.py', 'native_goal_benchmark.py')]
+                  for name in ('public_benchmark.py', 'native_goal_benchmark.py', 'bench_selection.py', 'bench_cohort.py')
+                  if name != 'bench_cohort.py' or (mission.parents[1] / 'benchmarks/mission-vs-goal' / name).is_file()]
     for path in [*(mission / 'bin').rglob('*.py'), *(mission / 'lib').rglob('*.py'), *benchmarks]:
         calls = _writer_calls(path.read_text())
         if calls:
@@ -337,3 +338,19 @@ def test_inventory_retains_multiple_targets_without_counting_imports_twice():
 def test_inventory_preserves_sink_aliases_through_rebinding_and_cycles(source):
     calls = _writer_calls(source)
     assert calls[('<module>', 'truncate')] or calls[('<module>', 'unlink')]
+
+
+@pytest.mark.parametrize('present', [False, True])
+def test_inventory_scans_optional_second_pr_cohort(monkeypatch, present):
+    target = Path(__file__).resolve().parents[3] / 'benchmarks/mission-vs-goal/bench_cohort.py'
+    read, exists = Path.read_text, Path.is_file
+    monkeypatch.setattr(Path, 'is_file', lambda path: present if path == target else exists(path))
+    def read_source(path, *args, **kwargs):
+        if path == target:
+            assert present
+            return 'def publish(path):\n    path.write_text("unclassified")\n'
+        return read(path, *args, **kwargs)
+    monkeypatch.setattr(Path, 'read_text', read_source)
+    if present:
+        with pytest.raises(AssertionError): test_writer_inventory_matches_baseline_manifest()
+    else: test_writer_inventory_matches_baseline_manifest()
