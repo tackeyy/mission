@@ -16,6 +16,9 @@ other value falls back to the default rather than becoming a failure of its own.
 from __future__ import annotations
 
 import functools
+import io
+import json
+import sys
 import math
 import os
 import signal
@@ -239,6 +242,37 @@ def remaining_budget(deadline: float, *, now: Optional[float] = None) -> float:
     return deadline - (time.time() if now is None else now)
 
 
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError("invalid JSON constant: " + value)
+
+
+@contextmanager
+def _stop_hook_input(command: str, args: tuple, kwargs: dict) -> Iterator[bool]:
+    """Read only Stop-hook stdin, replaying it unchanged for the normal body.
+
+    A complete JSON object and a literal boolean are required. Malformed input
+    remains the command's responsibility. Reserve bounds this preflight even
+    when the execution budget is already spent; no state is read or changed.
+    """
+    command_args = args[0] if args else kwargs.get("args")
+    if command != "cmd_stop_verdict" or getattr(command_args, "hook_input", None) != "-":
+        yield False
+        return
+    original = sys.stdin
+    with guard_time_limit(RESERVE_SECONDS):
+        raw = original.read()
+        try:
+            payload = json.loads(raw, parse_constant=_reject_json_constant)
+        except (ValueError, TypeError, RecursionError):
+            payload = None
+    sys.stdin = io.StringIO(raw)
+    try:
+        yield type(payload) is dict and payload.get("stop_hook_active") is True
+    finally:
+        sys.stdin = original
+
+
 def bounded_by_guard_timeout(func: Callable[..., _T]) -> Callable[..., _T]:
     """Apply the guard's own limit around a command, where the platform allows it.
 
@@ -251,27 +285,45 @@ def bounded_by_guard_timeout(func: Callable[..., _T]) -> Callable[..., _T]:
 
     @functools.wraps(func)
     def _wrapper(*args: object, **kwargs: object) -> _T:
-        # A lost budget (continuation without a usable deadline) is not exhaustion;
-        # it is raised here, before anything is retained, and keeps its own path.
-        deadline = resolve_deadline()
-        # Retained for the whole call *including* the exhaustion report, so the
-        # `guard_deadline` written into a terminal verdict is the enforced one.
-        _ACTIVE_DEADLINE.append(deadline)
+        # Keep input preflight inside the original deadline. A lost continuation
+        # budget stays fail-closed unless the complete input proves reentry.
+        deadline = None
+        lost_budget = None
         try:
-            # The reserve is subtracted here, not only checked: with the full
-            # remainder as the limit a body that started with 2.1 s left could run
-            # into the reserve, and the tail the reserve exists for would not fit.
-            left = remaining_budget(deadline) - RESERVE_SECONDS
-            if left <= 0:
-                raise GuardTimeout(EXHAUSTED_REASON + ": the execution budget is spent")
-            with guard_time_limit(left):
-                return func(*args, **kwargs)
+            deadline = resolve_deadline()
+        except GuardBudgetLost as error:
+            lost_budget = error
+        if deadline is not None:
+            _ACTIVE_DEADLINE.append(deadline)
+        try:
+            with _stop_hook_input(func.__name__, args, kwargs) as reentry:
+                if reentry:
+                    # Same host reply as runtime_guard's stop-hook-reentry.
+                    sys.stdout.write(json.dumps({
+                        "schema": "mission-stop-verdict/1",
+                        "decision": "skip",
+                        "reason": "stop-hook-reentry",
+                        "outcome_kind": "expected-gate",
+                        "command": {"kind": "none"},
+                        "shell_text": "",
+                        "guard_deadline": deadline_token() if deadline is not None else "",
+                    }) + "\n")
+                    return None
+                if lost_budget is not None:
+                    raise lost_budget
+                # Reserve remains available for the terminal verdict.
+                left = remaining_budget(deadline) - RESERVE_SECONDS
+                if left <= 0:
+                    raise GuardTimeout(EXHAUSTED_REASON + ": the execution budget is spent")
+                with guard_time_limit(left):
+                    return func(*args, **kwargs)
         except GuardBudgetLost:
             raise
         except GuardTimeout as error:
             return _report_exhaustion(func.__name__, error)  # type: ignore[return-value]
         finally:
-            _ACTIVE_DEADLINE.pop()
+            if deadline is not None:
+                _ACTIVE_DEADLINE.pop()
 
     return _wrapper
 

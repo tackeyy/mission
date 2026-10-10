@@ -703,6 +703,13 @@ def _state_cli_invocations(source: str, callers: set[str]) -> list[tuple[str, st
     return invocations
 
 
+_STOP_REENTRY_PROBE = r"""if ! printf '%s' "$INPUT" | jq --raw-input --slurp --exit-status 'def standard_tokens:
+  gsub("\"(?:[^\"\\\\]|\\\\.)*\""; "null")
+  | [splits("[ \t\r\n{}\\[\\],:]+")]
+  | all(. == "" or test("\\A(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)\\z"));
+standard_tokens and (try (fromjson | type == "object" and .stop_hook_active == true) catch false)' >/dev/null 2>&1; then"""
+
+
 def analyze_guard_shell(source: str) -> list[Violation]:
     """Conservative detector for policy or open command execution in the hook."""
     violations = []
@@ -733,6 +740,10 @@ def analyze_guard_shell(source: str) -> list[Violation]:
         violations.append(Violation("jq-construction", source))
     for line in source.splitlines():
         dependency_probe = line.strip() == "if ! command -v jq >/dev/null 2>&1; then"
+        reentry_probe = (
+            line == _STOP_REENTRY_PROBE.splitlines()[0]
+            and _STOP_REENTRY_PROBE in source
+        )
         dependency_error = line.strip() == (
             "printf '%s\\n' '{\"decision\":\"block\",\"reason\":\"mission Stop guard "
             "requires jq; state verdict is unavailable\",\"outcome_kind\":\"expected-gate\"}'"
@@ -742,6 +753,7 @@ def analyze_guard_shell(source: str) -> list[Violation]:
             and "$GUARD_DECISION" not in line
             and not dependency_probe
             and not dependency_error
+            and not reentry_probe
         ):
             violations.append(Violation("jq-input-not-guard-decision", line))
         if re.search(r"\bjq\b", line) and re.search(
