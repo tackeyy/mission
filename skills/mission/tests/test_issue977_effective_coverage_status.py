@@ -457,3 +457,26 @@ def test_status_never_creates_locks_layout_or_recovers_transactions(tmp_path, st
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert state_tree_fingerprint(tmp_path) == before
+
+
+def test_fresh_review_status_reads_capacity_from_the_same_snapshot(tmp_path, monkeypatch):
+    # 要求一覧と capacity を同じ snapshot から作る。2 回目の読取りは別の状態（B）を返す。
+    from types import SimpleNamespace
+    from mission_application import fresh_review as module
+    state_file = tmp_path / 'state.json'
+    state_file.write_text('{}')
+    reads = []
+    def load_snapshot(path, *args, **kwargs):
+        reads.append(path)
+        return ('snapshot-A' if len(reads) == 1 else 'snapshot-B'), {}
+    def capacity_status(path, *, load_snapshot=load_snapshot):
+        return {'from': load_snapshot(path, legacy_compatibility=True)[0]}
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(module, 'decode_projection', lambda data: SimpleNamespace(requests=()))
+    def fail(code, status):
+        raise AssertionError(code)
+    services = SimpleNamespace(resolve_state_file=lambda root: state_file, load_snapshot=load_snapshot,
+                               capacity_status=capacity_status, fail=fail)
+    output = json.loads(module.run_fresh_review_status_cli(SimpleNamespace(), services))
+    assert output['capacity'] == {'from': 'snapshot-A'}
+    assert len(reads) == 1
