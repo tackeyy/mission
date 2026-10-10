@@ -176,6 +176,15 @@ def run_fresh_review_prepare_cli(args, services):
         services.fail(getattr(exc, 'code', str(exc)), 2)
 
 
+def snapshot_failure_message(exc):
+    """Keep the boundary's sanitized detail with its code, as the transactional reader did."""
+    code = getattr(exc, 'code', None) or 'repository-format-invalid'
+    detail = getattr(exc, 'detail', None)
+    if not isinstance(detail, str) or not detail:
+        return code
+    return detail if detail.startswith(code) else f'{code}: {detail}'
+
+
 def _same_snapshot(loaded, *_args, **_kwargs):
     return loaded
 
@@ -188,7 +197,7 @@ def run_fresh_review_status_cli(args, services):
     try:
         loaded = services.load_snapshot(state_file)
     except Exception as exc:
-        services.fail(getattr(exc, 'code', None) or 'repository-format-invalid', 2)
+        services.fail(snapshot_failure_message(exc), 2)
     try:
         projection = decode_projection(loaded[1])
         # capacity は同じ snapshot から計算し、要求一覧と別の状態を混ぜない。

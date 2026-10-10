@@ -17,6 +17,7 @@ from mission_kernel.fresh_review import decode_projection, FreshReviewError
 from mission_kernel.fresh_review_completion import coverage_attempts, validated_coverage_inputs
 from mission_kernel.fresh_review_coverage import derive_effective_coverage, FreshReviewBindings, FreshReviewReason
 from mission_application.verifier_policy import VerifierPolicyError, freeze as freeze_verifier_policy
+from mission_application.fresh_review import snapshot_failure_message
 from mission_application.fresh_review_completion import FreshReviewCompletionServices
 
 
@@ -171,7 +172,7 @@ def run_acceptance_contract_status_cli(args, services) -> str:
     try:
         _, data = services.load_snapshot(state_file)
     except Exception as exc:
-        services.fail(getattr(exc, 'code', None) or 'repository-format-invalid', 2)
+        services.fail(snapshot_failure_message(exc), 2)
     try:
         observation = FreshReviewCompletionServices(cwd, services.load_verifier_policy, services.read_evidence)
         return json.dumps(acceptance_contract_status(data, observe_fresh_review=observation), ensure_ascii=False, indent=2)
