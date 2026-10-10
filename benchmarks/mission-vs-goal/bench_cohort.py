@@ -78,7 +78,7 @@ def declared_lineage(raw):
 
 
 def lineage_expectation(attempt, material, proofs):
-    """Use authenticated declarations, otherwise recompute solely from materials."""
+    """Recompute from available observations and require declarations to agree."""
     a, stages = attempt['a'], attempt['stages']
     declarations = [declared_lineage(stages['P']['raw'])]
     if 'preregistration' in material:
@@ -95,11 +95,20 @@ def lineage_expectation(attempt, material, proofs):
         declarations.append(declared_lineage(raw))
     declared = {value for value in declarations if value is not None}
     if len(declared) > 1: raise ValueError('lineage_digest_mismatch')
-    if declared: return declared.pop()
+    declared_digest = next(iter(declared), None)
+    if declared_digest is not None and 'observations' not in material:
+        # Design 884 section 3.2.1 check 2 requires the document digest to match B.
+        # Without observations, retain that authenticated comparison; it cannot
+        # establish independent recalculation. A declaration never bypasses
+        # observations when they are supplied, even by a post-B document.
+        return declared_digest
     included = [task for task in material['snapshot'] if all(accepted for _, accepted, _ in
                 selection_core.criteria(task, a, material['scope'], material['observations'].get(task['task_id'])))]
     _, independent_pairs = selection_core.lineage(included, a['g3_percent'])
-    return selection_core.digest(selection_core.canonical(independent_pairs))
+    recomputed = selection_core.digest(selection_core.canonical(independent_pairs))
+    if declared_digest is not None and declared_digest != recomputed:
+        raise ValueError('lineage_digest_mismatch')
+    return recomputed
 
 
 def validate_det_rows(manifest, tasks):
