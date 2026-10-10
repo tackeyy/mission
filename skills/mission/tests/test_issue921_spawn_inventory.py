@@ -159,8 +159,7 @@ def spawn_calls(source):
 def inventory():
     result = {}
     benchmarks = [ROOT / 'benchmarks/mission-vs-goal' / name
-                  for name in ('public_benchmark.py', 'bench_selection.py', 'bench_cohort.py')
-                  if name != 'bench_cohort.py' or (ROOT / 'benchmarks/mission-vs-goal' / name).is_file()]
+                  for name in ('public_benchmark.py', 'bench_selection.py', 'bench_cohort.py')]
     for path in [MISSION / 'bin/mission-state.py', *(MISSION / 'lib').rglob('*.py'), *benchmarks]:
         for (function, call), count in spawn_calls(path.read_text()).items():
             relative = path.relative_to(ROOT) if path in benchmarks else path.relative_to(MISSION)
@@ -339,8 +338,7 @@ def test_allowlist_boundary_rejects_unknown_capabilities_and_receivers(source):
 def test_safe_allowlist_contains_only_observed_runtime_names():
     observed = set()
     benchmarks = [ROOT / 'benchmarks/mission-vs-goal' / name
-                  for name in ('public_benchmark.py', 'bench_selection.py', 'bench_cohort.py')
-                  if name != 'bench_cohort.py' or (ROOT / 'benchmarks/mission-vs-goal' / name).is_file()]
+                  for name in ('public_benchmark.py', 'bench_selection.py', 'bench_cohort.py')]
     for path in [MISSION / 'bin/mission-state.py', *(MISSION / 'lib').rglob('*.py'), *benchmarks]:
         tree, aliases = ast.parse(path.read_text()), {}
         for node in ast.walk(tree):
@@ -405,16 +403,13 @@ def test_contract_verifier_new_callers_cannot_escape_inventory(source):
     assert any(tail == 'run_contract_verifier' for _, tail in spawn_calls(source))
 
 
-@pytest.mark.parametrize('present', [False, True])
-def test_inventory_scans_optional_second_pr_cohort(monkeypatch, present):
+def test_inventory_scans_the_cohort_module(monkeypatch):
     target = ROOT / 'benchmarks/mission-vs-goal/bench_cohort.py'
-    read, exists = Path.read_text, Path.is_file
-    monkeypatch.setattr(Path, 'is_file', lambda path: present if path == target else exists(path))
+    read = Path.read_text
     def read_source(path, *args, **kwargs):
         if path == target:
-            assert present
             return 'import subprocess\ndef new_run():\n    subprocess.run([])\n'
         return read(path, *args, **kwargs)
     monkeypatch.setattr(Path, 'read_text', read_source)
     found = inventory()
-    assert any('bench_cohort.py:new_run:run' in key for key in found) is present
+    assert any('bench_cohort.py:new_run:run' in key for key in found)
