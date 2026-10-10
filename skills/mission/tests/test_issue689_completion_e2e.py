@@ -252,6 +252,22 @@ def test_public_completion_rejects_missing_or_superseded_evidence_atomically(ses
     _reject_unchanged(raw_run_cli, root, ['closeout'], reason)
 
 
+def test_public_completion_rejects_partial_open_before_clean_whole_review_atomically(session, raw_run_cli):
+    """A later clean whole review must not erase an earlier partial open obligation."""
+    root, _, _ = session
+    verify(raw_run_cli, session)
+    partial = review(raw_run_cli, session, 'completion-open', 'one', criteria=('AC1',))
+    assert partial['status'] == 'completed'
+    assert partial['request']['criterion_ids'] == ['AC1']
+    assert partial['result']['coverage_receipt']['status'] == 'open'
+    whole = review(raw_run_cli, session, 'completion-clean', 'two')
+    assert whole['status'] == 'completed'
+    assert whole['request']['criterion_ids'] == ['AC1', 'AC2']
+    assert whole['result']['coverage_receipt']['status'] == 'valid'
+    score(raw_run_cli, root)
+    _reject_unchanged(raw_run_cli, root, ['mark-passes'], 'acceptance-coverage-open')
+
+
 @pytest.mark.parametrize('schema', [4, 5], ids=['v4-flat', 'v5-container'])
 def test_public_contract_key_absent_legacy_still_completes(tmp_path, raw_run_cli, schema):
     _commit_candidate(tmp_path, {'app.txt': 'candidate'})
