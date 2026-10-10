@@ -105,7 +105,8 @@ v5だけは契約登録前の公開init結果を既存genesis helperでcontainer
 | 候補変更後にverificationだけを再実行 | 同関数`stale-review`: 全verificationが現候補でpassedでも、古いfresh reviewを`acceptance-fresh-review-stale`で拒否 |
 | clean全体review後の2回目prepare / failed import | 同関数`new-pending` / `new-failed`: pending / coverage-open。古いclean receiptへ戻らない |
 | clean全体review後のAC2だけの新しいpending attempt | 同関数`new-partial-pending`: 全体coverageがcleanでもrequired criterionの最新attemptで拒否 |
-| clean全体review後のAC1だけのopen import | 同関数`new-partial-open`: 部分attemptのopen義務を残し、`acceptance-coverage-open`で拒否 |
+| clean全体review後のAC1だけのopen import | 同関数`new-partial-open`: 選択済み部分attemptのopen coverageを`acceptance-coverage-open`で拒否 |
+| AC1だけのopen import後のclean全体review | `test_public_completion_rejects_partial_open_before_clean_whole_review_atomically`: 後のclean全体reviewで先行する部分attemptのopen obligationを消さず、`mark-passes`を`acceptance-coverage-open`で拒否。terminal flagsと公開bytes不変をv4/v5で確認 |
 | withdrawn tombstoneを含むadapterのprojection | `test_registered_fixture_launch_skips_withdrawn_tombstone`: typed tombstoneの後のrequestを選び、childを起動できることを確認 |
 | 1件の必須違反finding・後のclean全体review | 同関数`finding` / `old-finding`: severityがLowでも`acceptance-unresolved-finding`。古いfindingを新しいclean outputで消さない |
 | 契約キー欠落legacy | `test_public_contract_key_absent_legacy_still_completes`: 公開init・score・mark-passes・再closeoutがv4/v5で成立 |
