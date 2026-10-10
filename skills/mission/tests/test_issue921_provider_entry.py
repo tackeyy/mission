@@ -153,7 +153,8 @@ def test_budgeted_provider_watchdog_reclaims_stopped_command_after_supervisor_st
         os.kill(supervisor.pid, supervisor_signal)
         if supervisor_signal == signal.SIGKILL:
             supervisor.wait(timeout=1)
-        _wait(lambda: _absent(target) and _absent(grandchild) and _group_absent(pgid), seconds=8)
+        # The watchdog keeps the policy's SIGTERM grace and kill wait (2 + 1 s) plus 1 s.
+        _wait(lambda: _absent(target) and _absent(grandchild) and _group_absent(pgid), seconds=14)
     finally:
         with contextlib.suppress(ProcessLookupError):
             os.kill(supervisor.pid, signal.SIGKILL)
