@@ -1,8 +1,9 @@
 # Offline pool selection and preregistration verification
 
 `bench_selection.py` implements selection and canonical attempts in I2d in [the evaluation preregistration](../../docs/design/884-evaluation-aggregation.md),
-§5.0 and §5.1. `bench_cohort.py`（2本目で追加する）will depend on it for Det replay, C/D verification and
-§3.2.1 checks 1–3. Selection never imports cohort; it can be shipped independently. Inputs are injected; no transport or worker run is started.
+§5.0 and §5.1. `bench_cohort.py` depends on it for Det replay, C/D verification and
+§3.2.1 checks 1–3. Selection never imports cohort; it can be shipped independently.
+Inputs are injected. Selection starts no transport or worker; cohort replay can execute the I2c evaluator.
 
 ## Pool and assignments
 
@@ -20,8 +21,8 @@ acquisition must bind the data to the declared base commit and benchmark revisio
 and pinned `generator_sha`. `scope` groups all tracked texts at A and package texts as mission/packages.
 Acquisition owns corpus completeness and license/natural-request provenance, beyond supplied booleans.
 `observations[task_id]` contains three I2c results per starter/reference; missing early-filter observations
-are rejected. Invalid Det JSON schema is excluded with its sorted JSON digest. `bench_cohort.collect_det`（2本目で追加する）will capture
-observations after early filters. `bench_cohort.BundleReplay`（2本目で追加する）will use I2c freeze/evaluate with a reference-applied tree;
+are rejected. Invalid Det JSON schema is excluded with its sorted JSON digest. `bench_cohort.collect_det` captures
+observations after early filters. `bench_cohort.BundleReplay` uses I2c freeze/evaluate with a reference-applied tree;
 real container jobs require execution approval.
 
 `select(seed, manifest, arms)` produces C: 12 pilot units, remaining ranking, one primary per unit,
@@ -44,7 +45,7 @@ All files must remain immutable. Integer Unix times use strict pre-cutoff/pre-ru
 reported 32 randomness bytes. No fallback seed or boolean verification flag is accepted. Production
 transport/cryptography is injected; offline fixtures use real RSA/SHA-256, not production proofs.
 
-`bench_cohort.verify_cohort`（2本目で追加する）will accept
+`bench_cohort.verify_cohort` accepts
 `(history, materials, used_number, beacon, records, proofs, replay)`, regenerate B and pick
 the earliest seed-independent V1–V5 candidate, then verifies C/D, package, timing and Det replays.
 V4 failures permit later candidates; post-seed failures never do. Reusing identical invalid/withdrawn
@@ -52,8 +53,66 @@ pools is forbidden even with changed snapshot serialization/reference metadata. 
 snapshot, scope, loaded generator revision and pilot-derived `minimum_k`. Load this code from A's pinned
 revision; a matching SHA string alone does not establish provenance. Records supply task/unit, arm,
 package SHA/digest and integer start time. Check 2 recomputes the lineage record digest against B’s `lineage_digest`, bound before seed release.
-Only status=valid with checks 1–3 true establishes selection evidence. I1 still checks run separation,
-order, complete assignments and statistics; K planning, approval and acquisition remain caller duties.
+Only status=valid with checks 1–3 true establishes selection evidence.
+Checks 4–5 (actual run separation and record execution order), complete assignment accounting and
+statistics belong to I1. K planning, approval and acquisition remain caller duties.
+
+## Det collection and replay
+
+`collect_det(snapshot, config, scope, number, replay)` calls
+`replay(number, task_id, variant)` three times per starter/reference for every task passing Lic, Con and Cx.
+Commit these per-case observations in B before the beacon is released. During verification, `all` replays
+each such task once per variant, including Det rejections; early-filter rejections are skipped.
+Only the named case booleans are compared, but case names/count, boolean types, status and reason must
+form a valid I2c result. Unavailable evaluation and differing case outcomes invalidate the cohort.
+
+`audit_tasks(seed, manifest, selected)` takes the union of all selected pilot/confirmation primary tasks
+(controls reuse those primary tasks) and the first 59 tasks from each accepted/rejected Det stratum.
+Smaller strata are replayed in full. It uses the frozen length-prefixed `det-audit` key, resolves ties by
+UTF-8 task ID bytes and returns a deduplicated list in UTF-8 order. `audit` is allowed only when declared
+in A; its report must disclose that errors below 5% per stratum can be missed (§5.0, §3.3).
+
+`BundleReplay(jobs)` looks up `(attempt_number, task_id, variant)` in the caller's frozen jobs. Each job
+is `(I2c bundle, assignment, candidate_path)`; assignment includes matching `task_id` and `worker_export`.
+Use a bundle authenticated by I2c `load_bundle`, not an unchecked object. Each snapshot task used by
+this adapter supplies `det_binding`: `bundle_digest` (`sha256:<hex>`) plus `starter` and `reference`
+candidate digests (`sha256-tree-exec-v1:<hex>`). These values are part of A's frozen snapshot digest;
+acquisition must establish their base/reference provenance before A. This records existing frozen
+evaluation inputs and does not change §9's criteria or selection rules.
+
+Both `collect_det` and `verify_cohort` call `bind_snapshot(number, snapshot, expected_digest)` before
+using this adapter. The adapter verifies the snapshot digest, rejects duplicate task IDs and retains a canonical copy. Direct
+adapter calls must bind first. Before evaluation it compares bundle digest, task ID, benchmark/revision,
+repository/base commit, image/command and named checks with the snapshot, then compares the genuine
+I2c `freeze_candidate` envelope with the expected variant candidate digest. A wrong bundle/environment,
+swapped starter/reference or changed candidate is rejected before `evaluate_assignment` is called.
+I2c checks the envelope again during evaluation. Real container evaluation needs execution approval;
+offline tests replace evaluation and also exercise the genuine I2c freeze/digest path without containers.
+Other injected replay providers are trusted code and must honor the same frozen-input contract;
+accepting arbitrary case booleans from an untrusted provider does not establish Det reproduction.
+
+## Post-seed verification and evidence
+
+C is recomputed from the verified seed, regenerated B and A's `pilot_arms`, including pilot units,
+remaining ranking, primary tasks, assignment IDs and committed execution order. C must be merged at or
+after beacon release and strictly before D. D is recomputed from seed, C's exact SHA, integer K and A's
+`confirmatory_arms`; `materials[attempt_number].minimum_k` is a positive integer lower bound supplied by
+the pilot power plan. This verifier enforces that bound but does not derive or authenticate it from
+pilot outcomes or perform §6.3's power calculation; the caller must preserve that evidence. D must match canonical bytes, including controls, assignment IDs and execution
+order. Changing the committed order, duplicating an assignment ID or overriding A's arm sets is rejected.
+
+Both D's integer merge time and digest-bound timestamp proof must be strictly before the earliest
+record on any confirmation unit. Every supplied record must be on a selected primary task and declared
+arm, start strictly after C, and match A's package SHA/digest. Pilot runs between C and D are permitted.
+These guards do not replace I1's accounting of missing runs, retry policy or observed record order.
+
+The returned `checks` records (1) unique confirmation units from regenerated B and C/D, (2) the
+recomputed lineage digest against B's pre-seed `lineage_digest`, and (3) complete selection/timing/replay
+verification. A valid result includes `canonical_attempt`, `lineage_digest`, `det_replayed` and an
+`evidence_digest` binding the attempt and committed B/C/D bytes. The digest identifies committed inputs;
+it is not a signature or a digest of the supplied run records/replay transcript. Preserve those separately.
+Missing/malformed evidence (including decoder recursion failures) returns `invalid_cohort` with a reason.
+Any post-seed failure keeps the original canonical attempt and never promotes a later attempt.
 
 ## 解釈（owner確認待ち）
 
