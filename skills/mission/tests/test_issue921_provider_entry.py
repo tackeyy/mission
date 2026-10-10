@@ -436,3 +436,22 @@ def test_process_receipt_commit_failure_retains_unknown_reservation_for_reconcil
     state = json.loads(_state_path(tmp_path).read_text())
     assert marker.exists() and state['specialist_invocations'][-1]['status'] == 'dispatch-unknown'
     assert len(state['budget_ledger']['reservations']) == 1 and not state['budget_ledger']['settlements']
+
+
+def test_budget_provider_exec_failure_is_refused_and_settled_zero(
+        run_cli, tmp_path, prepare_approved_invocation, invoke_here, monkeypatch):
+    import budgeted_exec
+    marker, env = _prepare_command_provider(run_cli, tmp_path)
+    args, env, _ = prepare_approved_invocation(cwd=tmp_path, provider='guarded-command-provider',
+                                             iteration=1, phase='planning', env_extra=env)
+    _budget(tmp_path)
+    def fail(*a, **kw):
+        raise OSError('exec failed')
+    monkeypatch.setattr(budgeted_exec, 'spawn_exec', fail)
+    invoke_here(args, env)
+    state = json.loads(_state_path(tmp_path).read_text())
+    assert not marker.exists()
+    assert state['specialist_invocations'][-1]['reason_code'] == 'budget-deadline-unenforceable'
+    ledger = state['budget_ledger']
+    assert not ledger['reservations'] and ledger['settlements'][-1]['charged_sec'] == 0
+    assert ledger['stop_slots']['last_refusal'] == 'budget-deadline-unenforceable'

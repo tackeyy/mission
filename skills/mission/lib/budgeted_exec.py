@@ -135,7 +135,7 @@ def strict_json(raw):
                       parse_constant=constant, parse_float=finite)
 
 
-def read_frame(child, fd, deadline, *, exit_probe=observe_exit):
+def read_frame(child, fd, deadline, *, exit_probe=observe_exit, frame_limit=FRAME_LIMIT):
     """Nonblocking single frame; EOF is not required from surviving descendants."""
     os.set_blocking(fd, False)
     data = bytearray()
@@ -144,20 +144,20 @@ def read_frame(child, fd, deadline, *, exit_probe=observe_exit):
         while True:
             exited = exit_probe(child.pid)
             for _, _ in selector.select(0 if exited else min(.01, max(0, deadline - time.monotonic()))):
-                chunk = os.read(fd, FRAME_LIMIT + 5 - len(data))
+                chunk = os.read(fd, frame_limit + 5 - len(data))
                 if chunk:
                     data.extend(chunk)
                 else:
                     selector.unregister(fd)
             if len(data) >= 4:
                 size = struct.unpack('!I', data[:4])[0]
-                if size == 0 or size > FRAME_LIMIT or len(data) > size + 4:
+                if size == 0 or size > frame_limit or len(data) > size + 4:
                     raise ValueError('invalid result frame')
             if exited:
                 # Drain any buffered bytes without waiting for an inherited fd.
-                while len(data) <= FRAME_LIMIT + 4:
+                while len(data) <= frame_limit + 4:
                     try:
-                        chunk = os.read(fd, FRAME_LIMIT + 5 - len(data))
+                        chunk = os.read(fd, frame_limit + 5 - len(data))
                     except BlockingIOError:
                         break
                     if not chunk:
@@ -166,7 +166,7 @@ def read_frame(child, fd, deadline, *, exit_probe=observe_exit):
                 break
             if time.monotonic() >= deadline:
                 raise TimeoutError('approval verifier timed out')
-    if len(data) < 4 or len(data) != 4 + struct.unpack('!I', data[:4])[0] or len(data) > FRAME_LIMIT + 4:
+    if len(data) < 4 or len(data) != 4 + struct.unpack('!I', data[:4])[0] or len(data) > frame_limit + 4:
         raise ValueError('invalid result frame')
     result = strict_json(data[4:])
     if not isinstance(result, dict):
@@ -174,23 +174,34 @@ def read_frame(child, fd, deadline, *, exit_probe=observe_exit):
     return result
 
 
-def run_job(kind, payload, directory, *, timeout=5, term_grace=.2, kill_wait=.2, cwd=None):
-    deadline = time.monotonic() + timeout
+def run_job(kind, payload, directory, *, timeout=5, term_grace=.2, kill_wait=.2, cwd=None, deadline=None, reservation_id=None, collect_deadline=None, session_id=None):
+    absolute_deadline = deadline is not None
+    deadline = time.monotonic() + timeout if deadline is None else deadline
+    if collect_deadline is not None and (kind != 'verification' or not math.isfinite(collect_deadline) or collect_deadline < deadline):
+        raise ValueError('invalid verification collection deadline')
+    if time.monotonic() >= deadline:
+        error = TimeoutError('budget-child-timeout')
+        error.exec_unstarted = True
+        raise error
     receiver, sender = os.pipe()
     child, path, timed_out = None, None, False
     try:
-        job = {'schema': 'mission-exec-job/1', 'kind': kind, 'result_fd': sender, **payload}
+        job = {'schema': 'mission-exec-job/1', 'kind': kind, 'result_fd': sender, **payload,
+               'expires_at': time.time() + max(0, deadline - time.monotonic())}
         raw = json.dumps(job, allow_nan=False, separators=(',', ':')).encode()
         # Decode before writing as well as in the child (no arbitrary fields).
         from mission_application.spawn_trampoline import decode_job
         decode_job(raw)
-        path, digest = create_job(Path(directory), raw)
+        path, digest = create_job(Path(directory), raw, reservation_id=reservation_id, session_id=session_id)
         try:
+            if absolute_deadline and time.monotonic() >= deadline:
+                raise TimeoutError('budget-child-timeout')
             child = spawn_exec([sys.executable, '-I', str(Path(__file__).parent / 'mission_application' / 'spawn_trampoline.py'),
                                 str(path), digest], pass_fds=(sender,), cwd=cwd)
             os.close(sender)
             sender = None
-            result = read_frame(child, receiver, deadline)
+            result = read_frame(child, receiver, deadline if collect_deadline is None else collect_deadline,
+                                **({'frame_limit': JOB_LIMIT} if kind == 'verification' else {}))
         except TimeoutError:
             timed_out = True
             raise
@@ -201,6 +212,10 @@ def run_job(kind, payload, directory, *, timeout=5, term_grace=.2, kill_wait=.2,
         if child.returncode != 0 or set(result) != {'ok', 'result'} or result['ok'] is not True or not isinstance(result['result'], dict):
             raise ValueError('approval verifier rejected the evidence')
         return result['result']
+    except Exception as exc:
+        if child is None:
+            exc.exec_unstarted = True
+        raise
     finally:
         with contextlib.suppress(OSError):
             os.close(receiver)
@@ -211,9 +226,9 @@ def run_job(kind, payload, directory, *, timeout=5, term_grace=.2, kill_wait=.2,
             path.unlink(missing_ok=True)
 
 
-def write_frame(fd, result):
+def write_frame(fd, result, *, frame_limit=FRAME_LIMIT):
     raw = json.dumps(result, allow_nan=False, separators=(',', ':')).encode()
-    if len(raw) > FRAME_LIMIT:
+    if len(raw) > frame_limit:
         raise ValueError('result too large')
     frame = memoryview(struct.pack('!I', len(raw)) + raw)
     while frame:

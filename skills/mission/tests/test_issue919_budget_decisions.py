@@ -335,7 +335,7 @@ def test_spawn_entry_inventory_is_closed_and_inert_until_f2_coverage():
         'repair-disposition-run', 'recover', 'system-recover', 'repair-begin',
     }
     assert set(BUDGET_SPAWN_ENTRIES) == expected
-    assert {key for key, value in BUDGET_SPAWN_ENTRIES.items() if value == 'pending'} == expected - {'invoke-command', 'invoke-prepared'}
+    assert {key for key, value in BUDGET_SPAWN_ENTRIES.items() if value == 'pending'} == expected - {'invoke-command', 'invoke-prepared', 'verification-run'}
     with pytest.raises(TypeError):
         BUDGET_SPAWN_ENTRIES['verification-run'] = 'covered'
 
@@ -590,3 +590,12 @@ def test_other_writers_cannot_spend_open_budget_terminal_bytes(layout, system):
     assert not verdict.accepted
     with pytest.raises(CapacityWriteError, match='state-capacity-exhausted'):
         check_state_capacity(before, encode(), encoding=encoding)
+
+
+def test_only_verification_supervisor_can_reserve_before_candidate_observation():
+    state = _state()
+    # Inventory needs a child itself. Its reserved supervisor applies the real
+    # candidate gate before starting the verifier; other entries must know it.
+    assert _admit(state.budget, state, candidate_digest=None).reservation is not None
+    refusal = _admit(state.budget, state, entry='invoke-command', candidate_digest=None)
+    assert refusal.reason == 'budget-text-invalid'

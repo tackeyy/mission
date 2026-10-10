@@ -111,7 +111,7 @@ class ReserveDispatchBudget:
     fencing_epoch: int
     policy_timeout: int
     reserved_bytes: int
-    candidate_digest: str
+    candidate_digest: str | None  # only verification's reserved observation supervisor
     fallback_reason: str | None = None
     guidance: "GuidanceFacts | None" = None
 
@@ -134,6 +134,12 @@ class SettleDispatchBudget:
     replays: int | None = None
     output_bytes: int | None = None
     completed: bool = False
+    refusal_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class ReconcileDispatchBudget:
+    at: str
 
 
 @dataclass(frozen=True)
@@ -312,6 +318,7 @@ class RecordVerificationReceipt:
 
     at: str
     receipt: FrozenJsonObject
+    settlement: SettleDispatchBudget | None = None
 
 
 @dataclass(frozen=True)
@@ -577,6 +584,7 @@ Command = Union[
     ReserveDispatchBudget,
     RecordBudgetRefusal,
     SettleDispatchBudget,
+    ReconcileDispatchBudget,
     EnterFinalPhase,
     BudgetStop,
     Reactivate,
@@ -618,6 +626,7 @@ _COMMAND_TYPES = {
     ReserveDispatchBudget: "budget-reserve-dispatch",
     RecordBudgetRefusal: "budget-record-refusal",
     SettleDispatchBudget: "budget-settle-dispatch",
+    ReconcileDispatchBudget: "budget-reconcile",
     EnterFinalPhase: "budget-enter-final",
     BudgetStop: "budget-stop",
     Reactivate: "reactivate",
