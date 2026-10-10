@@ -109,6 +109,23 @@ def test_provider_sees_durable_reservation_and_timeout_is_settled_after_cleanup(
         os.killpg(entry['child_pid'], 0)
 
 
+def test_budgeted_provider_preserves_graceful_sigterm_output(run_cli, tmp_path, prepare_approved_invocation):
+    marker, env = _prepare_command_provider(run_cli, tmp_path)
+    command = tmp_path / 'commands' / 'provider-command'
+    command.write_text(f'#!{sys.executable}\n'
+        'import signal,time\n'
+        'def done(*_): print("graceful", flush=True); raise SystemExit(0)\n'
+        'signal.signal(signal.SIGTERM, done)\nwhile True: time.sleep(.1)\n')
+    command.chmod(0o700)
+    args, env, _ = prepare_approved_invocation(cwd=tmp_path, provider='guarded-command-provider',
+        iteration=1, phase='planning', env_extra=env)
+    _budget(tmp_path)
+    result = run_cli(*args, '--timeout', '3', cwd=tmp_path, env_extra=env)
+    assert result.returncode == 0
+    entry = json.loads(_state_path(tmp_path).read_text())['specialist_invocations'][-1]
+    assert entry['exit_code'] == 0 and entry['reason'] == 'budget-child-timeout'
+
+
 @pytest.mark.parametrize('supervisor_signal', [signal.SIGSTOP, signal.SIGKILL])
 def test_budgeted_provider_watchdog_reclaims_stopped_command_after_supervisor_stops(
         run_cli, tmp_path, prepare_approved_invocation, supervisor_signal):
@@ -525,13 +542,16 @@ def test_budget_provider_exec_failure_is_refused_and_settled_zero(
     args, env, _ = prepare_approved_invocation(cwd=tmp_path, provider='guarded-command-provider',
                                              iteration=1, phase='planning', env_extra=env)
     _budget(tmp_path)
-    def fail(*a, **kw):
-        raise OSError('exec failed')
-    monkeypatch.setattr(budgeted_exec, 'spawn_exec', fail)
+    actual = budgeted_exec.spawn_deadline_exec
+    missing = str(tmp_path / 'missing-provider-executable')
+    def fail(_argv, deadline, **kw):
+        return actual([missing], deadline, **kw)
+    monkeypatch.setattr(budgeted_exec, 'spawn_deadline_exec', fail)
     invoke_here(args, env)
     state = json.loads(_state_path(tmp_path).read_text())
     assert not marker.exists()
     assert state['specialist_invocations'][-1]['reason_code'] == 'budget-deadline-unenforceable'
+    assert state['specialist_invocations'][-1]['reason'] == 'executable not found'
     ledger = state['budget_ledger']
     assert not ledger['reservations'] and ledger['settlements'][-1]['charged_sec'] == 0
     assert ledger['stop_slots']['last_refusal'] == 'budget-deadline-unenforceable'

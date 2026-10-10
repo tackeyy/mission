@@ -71,3 +71,16 @@ time.sleep(60)
             pgid = json.loads(marker.read_text())[0]
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(pgid, signal.SIGKILL)
+
+
+def test_deadline_spawn_does_not_inherit_control_reader(tmp_path):
+    import budgeted_exec
+    marker = tmp_path / 'fds.json'
+    code = ('import json,os,sys; from pathlib import Path; '
+            f'Path({str(marker)!r}).write_text(json.dumps(os.listdir("/dev/fd")))')
+    child, control = budgeted_exec.spawn_deadline_exec([sys.executable, '-c', code], time.monotonic() + 5)
+    try:
+        assert child.wait(timeout=5) == 0
+        assert str(control) not in json.loads(marker.read_text())
+    finally:
+        os.close(control)

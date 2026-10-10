@@ -569,7 +569,8 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
                 from budgeted_exec import spawn_deadline_exec
                 if time.monotonic() >= budget.deadline:
                     raise OSError("budget-child-deadline-expired")
-                process, control_receiver = spawn_deadline_exec(argv, budget.deadline,
+                process, control_receiver = spawn_deadline_exec(
+                    argv, budget.deadline + budget.policy.term_grace_sec + budget.policy.kill_wait_sec + 1,
                     stdin=execution.PIPE, stdout=execution.PIPE, stderr=execution.PIPE, env=command_env)
         except (OSError, ValueError) as exc:
             if budget is None and not isinstance(exc, OSError):
@@ -597,6 +598,9 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
                         budget_failure = "kill-unconfirmed"
                     elif exchange.exec_failed:
                         spawn_failed_reason = "budget-deadline-unenforceable"
+                        # Bootstrap stderr may contain an absolute executable path;
+                        # retain the actionable class without publishing it.
+                        stderr = "executable not found"
                         completed_at = execution.clock()
                         entry.update({"status": "failed-before-start", "lifecycle_state": "terminal",
                                       "transitioned_at": completed_at, "completed_at": completed_at,

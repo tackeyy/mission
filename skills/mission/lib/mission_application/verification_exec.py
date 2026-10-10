@@ -103,7 +103,7 @@ def main():
             if watchdog.poll() is not None:
                 _stop(control, b'W')
                 return 2
-            if time.monotonic() >= deadline:
+            if time.monotonic() >= deadline and not term_received:
                 _stop(control, b'T')
                 return 2
             code = target.poll()
