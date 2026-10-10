@@ -103,7 +103,8 @@ class Adapter:
         request = json.loads(request_bytes)
         state_root = Path(os.environ['FIXTURE_REVIEW_STATE'])
         state = _state()
-        record = next(item for item in state['fresh_review']['requests'] if item['request']['request_id'] == request['request_id'])
+        record = next(item for item in state['fresh_review']['requests']
+                      if item['status'] != 'withdrawn' and item['request']['request_id'] == request['request_id'])
         assert record['status'] == 'dispatch-unknown' and record['dispatch'] == envelope
         if os.environ.get('FIXTURE_REVIEW_MODE') == 'intent-crash':
             os._exit(7)

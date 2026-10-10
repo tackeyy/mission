@@ -96,6 +96,7 @@ v5だけは契約登録前の公開init結果を既存genesis helperでcontainer
 | D3の経路 | 判定・証拠となるテスト |
 |---|---|
 | 全required receipt・独立探索・coverage・finding条件が成立 | `test_public_completion_requires_generated_receipts_and_keeps_score_gate`: 採点前は拒否、既存score経路後にmark-passes/初回closeoutでpasses=true |
+| fresh-review import後の通常review import・集計・採点・完了 | `test_public_review_import_aggregate_score_completion_preserves_fresh_receipt`: subprocessのreview-import→aggregate-reviews→push-score→mark-passesを通し、completed receiptの保持とpasses=trueをv4/v5で確認 |
 | 正常な契約付きsessionの再closeout | `test_public_already_passed_contract_closeout_has_no_success_shortcut`: Cの既pass shortcut拒否を維持し、exit 2・terminal flagsと公開bytes不変。初回closeoutの成功とは区別する |
 | AC2のverification欠落・最新failed・fresh reviewなし | `test_public_completion_rejects_missing_or_superseded_evidence_atomically`: `missing-second-verifier` / `latest-failed-verifier` / `missing-review` |
 | 全体reviewなし、部分AC1のみ | 同関数`partial-review`: `acceptance-fresh-review-missing`。部分receiptを全体coverageとして採用しない |
@@ -104,6 +105,8 @@ v5だけは契約登録前の公開init結果を既存genesis helperでcontainer
 | 候補変更後にverificationだけを再実行 | 同関数`stale-review`: 全verificationが現候補でpassedでも、古いfresh reviewを`acceptance-fresh-review-stale`で拒否 |
 | clean全体review後の2回目prepare / failed import | 同関数`new-pending` / `new-failed`: pending / coverage-open。古いclean receiptへ戻らない |
 | clean全体review後のAC2だけの新しいpending attempt | 同関数`new-partial-pending`: 全体coverageがcleanでもrequired criterionの最新attemptで拒否 |
+| clean全体review後のAC1だけのopen import | 同関数`new-partial-open`: 部分attemptのopen義務を残し、`acceptance-coverage-open`で拒否 |
+| withdrawn tombstoneを含むadapterのprojection | `test_registered_fixture_launch_skips_withdrawn_tombstone`: typed tombstoneの後のrequestを選び、childを起動できることを確認 |
 | 1件の必須違反finding・後のclean全体review | 同関数`finding` / `old-finding`: severityがLowでも`acceptance-unresolved-finding`。古いfindingを新しいclean outputで消さない |
 | 契約キー欠落legacy | `test_public_contract_key_absent_legacy_still_completes`: 公開init・score・mark-passes・再closeoutがv4/v5で成立 |
 
@@ -143,10 +146,11 @@ CI は `.github/workflows/ci.yml` の Python shards → `make test-shard` が `s
 `scripts/ci_shard_targets.py::expand_target` は tracked ファイルだけを列挙するため、
 C の回帰ファイルは PR 893 で tracked となり、required CI run 37093400756 で実行された。
 D0は同じtrackedファイルを拡張するため、その収集経路を共有する。
-D3の新規ファイルも同じPython shards→make test-shard→`expand_target`経路に置く。
-今回はgit操作を行わず、新規ファイルのGit登録・commitとrequired CIは未実施である。
-未登録ファイルはdirectory収集に入らないため、依頼元で登録してからCIを取得する必要がある。
-ローカルではファイルを明示して実行する。CI成功をローカルGreenで代替しない。
+D3の`skills/mission/tests/test_issue689_completion_e2e.py`はtrackedであり、
+Python shards→`make test-shard`→`scripts/ci_shard_targets.py::expand_target`の経路で収集される。
+正式review・独立Checker・required CI・mergeの結果は
+[D3統合PR 978](https://github.com/tackeyy/mission/pull/978)の記録を参照する。
+ローカルGreenをCI成功として扱わない。
 draft skip は検証成功と扱わない。
 
 ## C の Red と途中結果（履歴）
@@ -231,7 +235,7 @@ PR をさらに分けない理由は、C の completion authority、公開 CLI�
 
 ## 現在の未解決・範囲外
 
-- 新規D3テストのGit登録・正式review・独立Checker・required CI・mergeは依頼元の次工程。今回はローカル検証までであり、acceptedを主張しない。
+- D3テストはtrackedで、上記Python shardsの経路で収集される。正式review・独立Checker・required CI・mergeの結果は[D3統合PR 978](https://github.com/tackeyy/mission/pull/978)の記録を参照し、本書に複製しない。
 - 実host adapterとcontext分離のprobeは[D4: Issue 897](https://github.com/tackeyy/mission/issues/897)。fixture childの成功を実hostの独立性証明として扱わない。
 - closed schema 5の公開成功bridgeは[設計§5](../design/689-fresh-review-receipt.md)の対象外。v5 containerのv4 payloadとは区別する。
 - `acceptance-contract status`はimportされたcoverageを表示し、`imported_coverage`/`effective_coverage`を返さない。completedかつvalidな公開receiptを作ったsessionでも確認した。[status実装](../../skills/mission/lib/mission_application/acceptance.py)と[設計§4](../design/689-fresh-review-receipt.md)の表示契約の差分であり、D3では製品コードを修正しない。completion gateは保存されたreceiptから実効coverageを検証している。
@@ -240,8 +244,8 @@ PR をさらに分けない理由は、C の completion authority、公開 CLI�
 ## C当時の未解決・範囲外（履歴）
 
 1. fresh-review producer は後続 [Issue 689](https://github.com/tackeyy/mission/issues/689) の責務。
-   coverage を valid にする公開 producer も本 PR にはない。現段階では契約付き session の成功を主張しない。
-   caller boolean と legacy observation で補わない。
+   C当時のPRにはcoverageをvalidにする公開producerがなく、契約付きsessionの成功は未検証だった。
+   caller booleanとlegacy observationでは補わなかった。
 2. fenced v5 container と閉じた schema 5 payload は別物。通常 genesis は v4 payload を保持する。
    closed schema 5 payload の公開 compatibility read は
    `mission_kernel/codec_v4.py::project_legacy_document` の legacy passthrough 必須条件と
@@ -339,16 +343,16 @@ python3 -m pytest -q skills/mission/tests/test_issue879_completion_cli.py -k 'nu
 python3 -m pytest -q skills/mission/tests/test_issue879_completion_cli.py -k 'shared_validator or runner_and_replay or codecs' skills/mission/tests/test_issue632_transition_is_the_writer.py skills/mission/tests/test_issue626_thin_adapter_guard.py
 ```
 
-D0の正式review / 独立Checker / required CI / GitHubへの公開は実施していない。
-独立したread-only探索の結果を正式なacceptedへ読み替えない。
+D0の初回作業時点では正式review / 独立Checker / required CI / GitHubへの公開は実施していなかった。
+当時の独立したread-only探索の結果は正式なacceptedを示さない。
 初回作業時のHEADは基点`93c0833efc55a90f535d7c525ac533c7897b3cbf`だった。
 その時点のローカル`origin/main`は`93a631c68d23b8b9e9b5fac1a981347702580a08`
 （[設計文書PR 898](https://github.com/tackeyy/mission/pull/898)）へ1commit進んでいた。
 差分は`docs/design/689-fresh-review-receipt.md`のみ。Git操作禁止に従い統合はしていない。
-次工程では最新baseを確認してからcandidateをfreezeし、review / Checker / CIを同じheadで取得する。
-commit分割案: `fix: 永続completion gateの不正形とnull契約を拒否する`
+初回作業時の引き継ぎは、最新baseの確認後にcandidateをfreezeし、review / Checker / CIを同じheadで取得することだった。
+当時のcommit分割案: `fix: 永続completion gateの不正形とnull契約を拒否する`
 （実装・回帰・mirror）、`docs: completion gateの確定記録とD0の検証経路を更新する`（本書）。
-本作業はcommit / push / PR / mergeを行わない。
+初回作業ではcommit / push / PR / mergeを行わなかった。
 
 ## D0 status 追補: 同種検索とRed / Green（履歴）
 
@@ -431,8 +435,8 @@ python3 -m pytest -q \
 295 passed / 0 failed、exit 0、735.31秒。full suiteは実行していない。
 実行中の編集はなし。source / mirrorはbyte一致、thin adapterは変更なし。
 結果追記後の文書も既存の衛生・語彙scannerで確認し、`git diff --check`はexit 0。
-追補ではcommit / pushおよびレビューCLIを実行していない。正式review / Checker / CIは次工程で取得する。
-commit案は `fix: 契約参照経路の不正形とcanonicalエラーを拒否する`（実装・回帰・mirror）と
+status追補の作業時点ではcommit / pushおよびレビューCLIは未実施だった。正式review / Checker / CIの取得は当時の次工程だった。
+当時のcommit案は `fix: 契約参照経路の不正形とcanonicalエラーを拒否する`（実装・回帰・mirror）と
 `docs: status検証と同種検索結果を記録する`（本書）。
 
 ## D0 parser追補: 共有URL / state encoding境界（履歴）
@@ -504,8 +508,8 @@ locatorは特記しない限り `skills/mission/lib/` のpath:line。この追�
 | `mission_persistence/aggregate_index.py:312`; `mission_application/worktree_archive_specs.py:54` | aggregate / archive: shared snapshot errorをauthority-unreadableまたは公開rejectionへ変換。aggregateのlegacy直読はidentity captureで、契約解釈 / 出力経路ではない |
 
 別入力領域の未確認候補: `mission_application/verification_runner.py:65` はgit filename bytesの
-UTF-8 decodeで、command fieldのparserではない。不正UTF-8のtracked filenameは本追補の
-contract / policy入力とは別領域で、公開再現は未実施。範囲外として返し、修正しない。
+UTF-8 decodeで、command fieldのparserではない。不正UTF-8のtracked filenameは当時の追補の
+contract / policy入力とは別領域で、公開再現は未実施だった。範囲外として返し、この追補では修正しなかった。
 
 ### Red / Greenと検出価値
 
@@ -549,8 +553,8 @@ freshness / lane-reportは共有拒否を表示が消す欠陥を検出する。
 legacy、既存receipt動作は指定回帰を維持する。subprocess費用は上表の実測。
 thin adapterの2箇所はerror表示だけを変更し、baselineは増やさない。
 
-この追補でもcommit / push / review CLIを実行しない。正式review / Checkerの再確認とrequired CIは
-依頼元の次工程。commit案: `fix: verifier入力と永続状態のparser例外を理由付きで拒否する`
+parser追補の作業時点でもcommit / push / review CLIは未実施だった。正式review / Checkerの再確認とrequired CIは
+当時の引き継ぎ事項だった。commit案: `fix: verifier入力と永続状態のparser例外を理由付きで拒否する`
 （実装・回帰・mirror）、`docs: parser境界の回帰と同形検索結果を記録する`（本書）。
 
 指定11ファイルの最初の通し実行は343 passed / 3 failed、exit 1、304.73秒。
@@ -575,4 +579,4 @@ python3 -m pytest -q \
 最終結果: **347 passed / 0 failed、exit 0、309.17秒**。実行中の編集なし。
 正常policy / 契約キー欠落legacyの回帰、mirror一致、thin-adapter guard、module inventory、
 衛生 / 語彙検査を含む。thin-adapter baselineは変更なし。HEADは開始時の `79ca75a` のまま。
-正式review / Checker / required CIの再確認は未実施で、今回のローカルGreenをacceptedへ読み替えない。
+parser追補の最終ローカル検証時点では正式review / Checker / required CIの再確認は未実施だった。上記の当時のローカルGreenはacceptedを示さない。

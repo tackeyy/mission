@@ -8,7 +8,9 @@ host adapter; only fresh-review import publishes coverage and finding bytes.
 import copy
 import hashlib
 import json
+import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,6 +19,37 @@ from .conftest import canonical_review, write_canonical_review_aggregate
 from .test_issue878_candidate_snapshot import _commit_candidate
 from .test_issue878_verification_runner import _contract, _replay_policy
 from .test_issue879_completion_cli import _persist_fixture, _public_bytes, _reject_unchanged
+
+
+def test_registered_fixture_launch_skips_withdrawn_tombstone(tmp_path, monkeypatch):
+    """A withdrawn reservation must not break the next registered child launch."""
+    from mission_kernel.fresh_review import WithdrawnFreshReviewRecord, request_document, projection_document
+    from mission_kernel.json_codec import freeze_json_value
+    from .test_issue895_fresh_review import _pure_projection, ADAPTER
+
+    spec = importlib.util.spec_from_file_location('neutral_adapter',
+        Path(__file__).parent / 'fixtures/fresh_review_adapter.py')
+    adapter = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(adapter)
+    projection = _pure_projection()
+    request = request_document(projection.requests[0].request)
+    tombstone = WithdrawnFreshReviewRecord('old-request', 'old-nonce', 'prepare-old', ADAPTER,
+        ('AC1',), 'withdraw-old', 1)
+    envelope = dict(operation_id='dispatch-next', fencing_epoch=1)
+    record = projection_document(projection)['requests'][0]
+    record.update(status='dispatch-unknown', dispatch=envelope)
+    withdrawn = projection_document(type(projection)((tombstone,)))['requests'][0]
+    monkeypatch.setattr(adapter, '_state', lambda: dict(fresh_review=dict(requests=[withdrawn, record])))
+    monkeypatch.setenv('FIXTURE_REVIEW_STATE', str(tmp_path / '.mission-state'))
+    monkeypatch.setenv('FIXTURE_REVIEW_JOURNAL', str(tmp_path / 'journal.json'))
+    monkeypatch.setenv('FIXTURE_REVIEW_MODE', '')
+    packet = tmp_path / 'input.json'
+    packet.write_text('{}')
+    launch = adapter.Adapter().launch(json.dumps(request).encode(),
+        SimpleNamespace(relative_path=str(packet)), (), freeze_json_value(envelope)).thaw()
+    assert launch['request_id'] == request['request_id']
+    assert launch['context_mode'] == 'fresh'
+    assert launch['received_input_digest'] == canonical_digest({})
 
 
 @pytest.fixture(params=[4, 5], ids=['v4-flat', 'v5-container'])
@@ -108,6 +141,32 @@ def score(run, root):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_public_review_import_aggregate_score_completion_preserves_fresh_receipt(session, raw_run_cli):
+    """Ordinary score publication must retain D's completed receipt until completion."""
+    root, _, _ = session
+    verify(raw_run_cli, session)
+    completed = review(raw_run_cli, session)
+    source = root / 'ordinary-review.json'
+    source.write_text(json.dumps(canonical_review({}, perspective='quality')))
+    imported = raw_run_cli('review-import', '--iteration', '1', '--input', str(source),
+                           cwd=root, check=True)
+    reference = json.loads(imported.stdout)['review_evidence_ref']['path']
+    state = json.loads(raw_run_cli('get', cwd=root, check=True).stdout)
+    assert state['fresh_review']['requests'] == [completed]
+    head = (root / '.git/HEAD').read_text().strip()
+    reviewed_sha = (root / '.git' / head.removeprefix('ref: ')).read_text().strip()
+    scoring = root / 'public-score.json'
+    raw_run_cli('aggregate-reviews', '--iteration', '1', '--input-ref', reference,
+                '--min-reviewers', '1', '--base-sha', reviewed_sha, '--head-sha', reviewed_sha,
+                '--out', str(scoring), cwd=root, check=True)
+    raw_run_cli('push-score', '--iteration', '1', '--scoring-json', str(scoring), cwd=root, check=True)
+    raw_run_cli('mark-passes', cwd=root, check=True)
+    state = json.loads(raw_run_cli('get', cwd=root, check=True).stdout)
+    assert state['fresh_review']['requests'] == [completed]
+    assert (state['passes'], state['loop_active'], state['phase'], state['terminal_outcome']) == (
+        True, False, 'done', 'completed_pass')
+
+
 @pytest.mark.parametrize('command', ['mark-passes', 'closeout'])
 def test_public_completion_requires_generated_receipts_and_keeps_score_gate(session, raw_run_cli, command):
     root, _, _ = session
@@ -154,6 +213,7 @@ def test_public_already_passed_contract_closeout_has_no_success_shortcut(session
     ('new-pending', 'acceptance-fresh-review-pending'),
     ('new-failed', 'acceptance-coverage-open'),
     ('new-partial-pending', 'acceptance-fresh-review-pending'),
+    ('new-partial-open', 'acceptance-coverage-open'),
     ('old-finding', 'acceptance-unresolved-finding'),
 ])
 def test_public_completion_rejects_missing_or_superseded_evidence_atomically(session, raw_run_cli, case, reason):
@@ -182,6 +242,11 @@ def test_public_completion_rejects_missing_or_superseded_evidence_atomically(ses
     if case == 'new-failed':
         failed = review(raw_run_cli, session, 'completion-failed', 'two')
         assert failed['status'] == 'failed'
+    if case == 'new-partial-open':
+        partial = review(raw_run_cli, session, 'completion-open', 'two', criteria=('AC1',))
+        assert partial['status'] == 'completed'
+        assert partial['request']['criterion_ids'] == ['AC1']
+        assert partial['result']['coverage_receipt']['status'] == 'open'
     score(raw_run_cli, root)
     _reject_unchanged(raw_run_cli, root, ['mark-passes'], reason)
     _reject_unchanged(raw_run_cli, root, ['closeout'], reason)

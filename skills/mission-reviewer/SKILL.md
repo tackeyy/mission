@@ -44,7 +44,7 @@ validな実効coverage、必須違反の未解決findingが0件であること�
 通常のreview→aggregate→`push-score --scoring-json`も必要であり、fresh review receiptは採点を代替しない。
 完了のauthorityはmissionのgateにある。実hostのcontext分離はadapterの観測で確かめるもので、
 tests配下のfixture childによる回帰成功は実hostの保証ではない。
-入力・receipt・完了条件は[設計§2〜§5](../../docs/design/689-fresh-review-receipt.md)を参照する。
+入力・receipt・完了条件は[設計§2〜§5](https://github.com/tackeyy/mission/blob/8f845886b43814276d0cd25099d8056386618536/docs/design/689-fresh-review-receipt.md)を参照する。
 
 ## 行動指針
 
