@@ -79,7 +79,6 @@ class ProviderPolicyServices:
     reject_unbounded_orchestrator_execution: object
     current_selection_id: object
     reject_active_provider_mutation: object
-    enforce_session_lease_for_write: object
     resolve_session_id: object
     invocation_by_id: object
     validate_invocation_transition: object
@@ -229,6 +228,7 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
     def _make_repo_invoke(suffix):
         return state_effects.repository_factory(
             cwd, sf, stamp=True, strict_read=True, session_id=session_id,
+            pre_admit_lease=suffix == ":reserve",
             operation_id=_op_id_invoke + suffix,
             operation_command=_op_cmd_invoke,
             operation_command_type=_command_name_invoke,
@@ -321,7 +321,6 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
         if not getattr(_repo_invoke_reserve, "operation_replayed", False):
             provider_policy.validate_specialist_public_state(dispatch_state)
             provider_policy.reject_active_provider_mutation(dispatch_state, "invoke-command")
-            lease_decision = provider_policy.enforce_session_lease_for_write(sf, dispatch_state)
             provider = provider_policy.require_current_provider_application(
                 dispatch_state,
                 provider_policy.find_provider(dispatch_state, request.provider_id),
@@ -335,7 +334,7 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
             )
             entry["application_context_digest"] = provider.pop("_application_context_digest")
             entry["reservation_owner_session_id"] = str(dispatch_state.get("owner_session_id") or provider_policy.resolve_session_id())
-            entry["fencing_epoch"] = int(dispatch_state.get("fencing_epoch") or lease_decision.fencing_epoch)
+            entry["fencing_epoch"] = int(dispatch_state["fencing_epoch"])
             # The preflight ID is single-use and already bound to the immutable
             # outbound packet, so it is the caller-stable operation identity for
             # the non-rollbackable provider dispatch saga.

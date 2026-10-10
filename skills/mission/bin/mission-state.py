@@ -5687,7 +5687,6 @@ def cmd_invoke_command_provider(args):
         reject_unbounded_orchestrator_execution=_reject_unbounded_orchestrator_execution,
         current_selection_id=_current_selection_id,
         reject_active_provider_mutation=_reject_active_provider_mutation,
-        enforce_session_lease_for_write=_enforce_session_lease_for_write,
         resolve_session_id=resolve_session_id,
         invocation_by_id=invocation_by_id,
         validate_invocation_transition=validate_invocation_transition,
@@ -5774,7 +5773,7 @@ def cmd_reconcile_provider_invocation(args):
         print(f"ERROR: {_err_reconcile}", file=sys.stderr)
         sys.exit(2)
     _repo_reconcile = _legacy_lifecycle_repository(
-        cwd, sf, stamp=True, strict_read=True, session_id=session_id,
+        cwd, sf, stamp=True, strict_read=True, pre_admit_lease=True, session_id=session_id,
         operation_id=_op_id_reconcile, operation_command=_op_cmd_reconcile,
         operation_command_type=_command_name_reconcile,
     )
@@ -5791,7 +5790,6 @@ def cmd_reconcile_provider_invocation(args):
             archived_to = terminal.get("evidence_path", "")
         else:
             _validate_specialist_public_state(data)
-            lease_decision = _enforce_session_lease_for_write(sf, data)
             try:
                 existing = dict(invocation_by_id(data, args.invocation_id))
             except SpecialistLifecycleError as exc:
@@ -5799,7 +5797,7 @@ def cmd_reconcile_provider_invocation(args):
             if existing.get("status") not in {"dispatch-unknown", "running"}:
                 _provider_gate("invocation-not-reconcilable")
             reservation_epoch = existing.get("fencing_epoch")
-            current_epoch = int(data.get("fencing_epoch") or lease_decision.fencing_epoch)
+            current_epoch = int(data["fencing_epoch"])
             if args.expected_fencing_epoch != reservation_epoch or current_epoch < reservation_epoch:
                 _provider_gate("stale-fencing-epoch")
             reservation_owner = existing.get("reservation_owner_session_id")
@@ -10625,7 +10623,7 @@ def cmd_manual_score_capture(args):
         print(f"ERROR: {error}", file=sys.stderr)
         sys.exit(2)
     repository = _legacy_lifecycle_repository(
-        cwd, sf, stamp=True, strict_read=True, session_id=session_id,
+        cwd, sf, stamp=True, strict_read=True, pre_admit_lease=True, session_id=session_id,
         operation_id=operation_id, operation_command=operation_command,
         operation_command_type="manual-score-capture",
     )
@@ -10647,7 +10645,6 @@ def cmd_manual_score_capture(args):
             }))
             print(json.dumps({"ok": True, "scoring_json": args.out, "manual_evidence_ref": replay_ref}, ensure_ascii=False))
             return
-        _enforce_session_lease_for_write(sf, data)
         entry = {
             "iteration": payload.get("iteration"), "items": payload.get("items"),
             "composite": payload.get("composite"), "min_item": payload.get("min_item"),
@@ -12562,7 +12559,6 @@ def cmd_plan_import(args):
     )
     policy = PlanImportPolicyServices(
         provider_gate=_provider_gate,
-        enforce_session_lease_for_write=_enforce_session_lease_for_write,
         invocation_by_id=invocation_by_id,
         find_provider=_find_provider,
         require_current_provider_application=_require_current_provider_application,
