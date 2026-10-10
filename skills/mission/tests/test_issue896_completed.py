@@ -48,8 +48,14 @@ def replay_reviewer(completion_session, run_cli, tmp_path, request):
         policy['commands'][1].update(timeout_sec=1, argv=policy['commands'][1]['argv'][:1] + ['-c', 'import time; time.sleep(2)'])
     if case == 'stale-toolchain':
         policy['commands'][1]['toolchain']['digest'] = 'sha256:' + '0' * 64
-    if case == 'path-conflict':
+    if case in ('path-conflict', 'budget-path-conflict'):
         policy['commands'][0]['replay']['relative_path'] = 'app.txt'
+    if case == 'budget-path-conflict':
+        from datetime import datetime, timezone
+        from mission_kernel.budget import decode_policy, default_policy_document, ledger_document, new_ledger
+        state['budget_minutes'] = 30
+        state['budget_ledger'] = ledger_document(new_ledger(decode_policy(default_policy_document(1800)),
+            datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')))
     encoded = json.dumps(policy, sort_keys=True, separators=(',', ':')).encode()
     (root / '.mission/verifiers.json').write_bytes(encoded)
     digest = 'sha256:' + hashlib.sha256(encoded).hexdigest()
@@ -162,7 +168,7 @@ def test_unverified_replay_is_kept_as_an_open_finding(replay_reviewer, run_cli, 
 
 
 @pytest.mark.parametrize('replay_reviewer,reason', [('timeout','timeout'), ('stale-toolchain','toolchain-stale'),
-    ('path-conflict','replay-input-path-conflict')], indirect=['replay_reviewer'])
+    ('path-conflict','replay-input-path-conflict'), ('budget-path-conflict','replay-input-path-conflict')], indirect=['replay_reviewer'])
 def test_replay_execution_failure_retains_an_open_finding(replay_reviewer, run_cli, reason):
     root, _, _, _ = replay_reviewer
     invoke(run_cli, replay_reviewer, FIXTURE_REVIEW_MODE='counterexample')
@@ -172,6 +178,13 @@ def test_replay_execution_failure_retains_an_open_finding(replay_reviewer, run_c
     evidence = json.loads((root / receipt['findings'][0]['relative_path']).read_bytes())
     assert evidence['status'] == 'blocked' and evidence['reason_code'] == reason
     assert evidence['resolution'] == 'open'
+    if reason == 'replay-input-path-conflict':
+        from datetime import datetime
+        replay = evidence['replay']
+        parse = lambda value: datetime.fromisoformat(value.replace('Z', '+00:00'))
+        assert parse(receipt['launch_receipt']['started_at']).replace(microsecond=0) <= parse(replay['started_at'])
+        assert parse(replay['started_at']) <= parse(replay['finished_at']) <= parse(receipt['ended_at'])
+        assert replay['candidate_digest'] != 'sha256:' + '0'*64
 
 
 def test_completed_writer_maximum_shape_effects_and_remaining_reservation(replay_reviewer, run_cli, monkeypatch):

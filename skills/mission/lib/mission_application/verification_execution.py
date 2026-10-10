@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -55,23 +56,64 @@ def run_verification_receipt_cli(request, services) -> str:
             repro_input = json.loads(Path(request.repro_input_path).read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             raise EvidenceFailure("replay-input-invalid") from exc
-    receipt = run_contract_verifier(
-        state, project_root=cwd, criterion_id=request.criterion_id,
-        repro_input=repro_input,
-    )
-    caller_id, arguments = services.compatibility_arguments(
-        {"criterion_id": request.criterion_id, "candidate_digest": receipt["candidate_digest"], "receipt_status": receipt["status"]},
-        target_digest="", require_caller=False,
-    )
-    operation_id = operation_command = None
-    if caller_id is not None:
-        operation_id, operation_command = services.canonical_operation(
-            state_file.stem, "verification-receipt-record", arguments,
-            caller_operation_id=caller_id,
+    budget = None
+    from mission_kernel.budget import decode_ledger
+    if decode_ledger(state).policy is not None:
+        from .verification_budget import admit_verification, execute_verification
+        commands = _frozen_commands(contract)
+        criteria = [c for c in contract['criteria'] if c['id'] == request.criterion_id]
+        if len(criteria) != 1:
+            raise EvidenceFailure('verification-criterion-unavailable')
+        command = commands[criteria[0]['command_id']]
+        replay = command.get('replay')
+        if repro_input is not None and isinstance(replay, dict):
+            command = commands[replay['command_id']]
+        budget, admitted = admit_verification(services.repository(
+            cwd, state_file, stamp=True, strict_read=True, pre_admit_lease=True,
+            session_id=state_file.stem), request.criterion_id, command['timeout_sec'],
+            # Candidate inventory itself spawns git. Reserve its supervisor
+            # before observation; the supervisor applies the real-tree gate
+            # before spawning the verifier. No digest is claimed before capture.
+            services.now(), None, command)
+        if admitted.get('acceptance_contract') != contract:
+            from .verification_budget import settle_failed_verification
+            settle_failed_verification(services, cwd, state_file, budget, 'verification-contract-stale')
+            raise EvidenceFailure('verification-contract-stale')
+        receipt = execute_verification(admitted, cwd, request.criterion_id, repro_input, budget, command, session_id=state_file.stem)
+    else:
+        receipt = run_contract_verifier(
+            state, project_root=cwd, criterion_id=request.criterion_id,
+            repro_input=repro_input,
         )
+    try:
+        return _publish_receipt(request, services, cwd, state_file, receipt, budget)
+    except EvidenceFailure:
+        if budget is not None:
+            from .verification_budget import settle_collected_verification
+            settle_collected_verification(services, cwd, state_file, budget, receipt)
+        raise
+
+
+def _publish_receipt(request, services, cwd, state_file, receipt, budget):
+    try:
+        caller_id, arguments = services.compatibility_arguments(
+            {"criterion_id": request.criterion_id, "candidate_digest": receipt["candidate_digest"], "receipt_status": receipt["status"]},
+            target_digest="", require_caller=False,
+        )
+        operation_id = operation_command = None
+        if caller_id is not None:
+            operation_id, operation_command = services.canonical_operation(
+                state_file.stem, "verification-receipt-record", arguments,
+                caller_operation_id=caller_id,
+            )
+    except ValueError:
+        if budget is not None:
+            from .verification_budget import settle_collected_verification
+            settle_collected_verification(services, cwd, state_file, budget, receipt)
+        raise
     from mission_application.evidence import VerificationReceiptRequest, run_verification_receipt
     result = run_verification_receipt(
-        VerificationReceiptRequest(services.now(), receipt),
+        VerificationReceiptRequest(services.now(), receipt, budget),
         services.repository(
             cwd, state_file, stamp=True, pre_admit_lease=True,
             session_id=state_file.stem, operation_id=operation_id,
@@ -82,7 +124,7 @@ def run_verification_receipt_cli(request, services) -> str:
     return json.dumps({"ok": True, **result}, ensure_ascii=False, indent=2)
 
 
-def run_contract_verifier(state, *, project_root, criterion_id, repro_input=None):
+def run_contract_verifier(state, *, project_root, criterion_id, repro_input=None, budget_deadline=None, no_progress_candidate=None):
     """Execute one contract criterion without accepting caller-declared results."""
     if not isinstance(state, dict):
         raise EvidenceFailure("verification-state-invalid")
@@ -117,13 +159,15 @@ def run_contract_verifier(state, *, project_root, criterion_id, repro_input=None
         command = replay_command
     try:
         candidate = capture_candidate(project_root, declared_untracked=command["declared_untracked"], external_inputs=command["external_inputs"])
+        if candidate.digest == no_progress_candidate:
+            return _blocked_receipt(contract, policy, criterion_id, command, 'budget-no-new-evidence', candidate_digest=candidate.digest)
         replay_file = None if repro_input is None else (repro_input["artifact_kind"], replay["relative_path"], replay_content)
         if replay_file is not None and any(
             replay_file[1] == item.path or replay_file[1].startswith(item.path + "/") or item.path.startswith(replay_file[1] + "/")
             for item in candidate.files
         ):
-            return _blocked_receipt(contract, policy, criterion_id, command, "replay-input-path-conflict")
-        outcome = execute_candidate(candidate, command, relative_cwd=command["relative_cwd"], repro_input=replay_file)
+            return _blocked_receipt(contract, policy, criterion_id, command, "replay-input-path-conflict", candidate_digest=candidate.digest)
+        outcome = execute_candidate(candidate, command, relative_cwd=command["relative_cwd"], repro_input=replay_file, **({"budget_deadline": budget_deadline} if budget_deadline is not None else {}))
         # The source must still be the candidate after process execution.  A
         # mutable worktree never receives a successful receipt.
         current = capture_candidate(project_root, declared_untracked=command["declared_untracked"], external_inputs=command["external_inputs"])
@@ -167,6 +211,7 @@ def _frozen_commands(contract):
         raise EvidenceFailure(str(exc)) from exc
 
 
-def _blocked_receipt(contract, policy, criterion_id, command, reason):
+def _blocked_receipt(contract, policy, criterion_id, command, reason, *, candidate_digest=None):
     import hashlib
-    return {"schema": "mission-verification-receipt/1", "contract_digest": canonical_contract_digest(contract), "criterion_id": criterion_id, "candidate_digest": "sha256:" + "0" * 64, "verifier_policy_digest": policy["digest"], "verifier_definition_digest": verifier_definition_digest(command), "argv": list(command["argv"]), "relative_cwd": command["relative_cwd"], "started_at": "1970-01-01T00:00:00Z", "finished_at": "1970-01-01T00:00:00Z", "exit_code": None, "timed_out": False, "executed_count": None, "output_digest": "sha256:" + hashlib.sha256(reason.encode()).hexdigest(), "observed_output_bytes": 0, "output_truncated": False, "status": "blocked", "runner_provenance": "mission-public-cli/1", "repro_input_digest": None, "block_reason": reason}
+    observed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {"schema": "mission-verification-receipt/1", "contract_digest": canonical_contract_digest(contract), "criterion_id": criterion_id, "candidate_digest": candidate_digest or "sha256:" + "0" * 64, "verifier_policy_digest": policy["digest"], "verifier_definition_digest": verifier_definition_digest(command), "argv": list(command["argv"]), "relative_cwd": command["relative_cwd"], "started_at": observed_at, "finished_at": observed_at, "exit_code": None, "timed_out": False, "executed_count": None, "output_digest": "sha256:" + hashlib.sha256(reason.encode()).hexdigest(), "observed_output_bytes": 0, "output_truncated": False, "status": "blocked", "runner_provenance": "mission-public-cli/1", "repro_input_digest": None, "block_reason": reason}

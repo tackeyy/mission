@@ -298,6 +298,7 @@ def test_decide_and_guidance_share_one_named_transition_table():
         "budget-reserve-dispatch",
         "budget-settle-dispatch",
         "budget-stop",
+        "budget-reconcile",
         "claims-ledger-generate",
         "context-manifest-generate",
         "executor-handoff-abort",

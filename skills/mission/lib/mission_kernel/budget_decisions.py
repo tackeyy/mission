@@ -94,6 +94,22 @@ def _reservation_id(entry, target, operation_id, fencing_epoch, ordinal):
     return f'reservation:{ordinal}:' + hashlib.sha256(source).hexdigest()[:32]
 
 
+def stalled_candidate(ledger, entry, target):
+    matching = next((p for p in ledger.progress if p.entry == entry and p.target == target), None)
+    return matching.candidate_digest if matching and matching.consecutive_count >= ledger.policy.no_progress_limit else None
+
+
+def verification_result_digest(receipt):
+    return _digest({key: receipt.get(key) for key in ('status', 'exit_code', 'executed_count', 'output_digest')})
+
+
+def verification_refusal_reason(receipt):
+    reason = receipt.get('block_reason')
+    if reason in ('budget-job-write-failed', 'budget-deadline-unenforceable', 'budget-no-new-evidence'):
+        return reason
+    return reason if reason == 'budget-deadline' and receipt.get('exit_code') is None else None
+
+
 _RECOVERABLE_ADAPTER_ENTRIES = frozenset((
     'fresh-review-run', 'repair-disposition-run', 'repair-reverify',
 ))
@@ -148,7 +164,8 @@ def admit(ledger, state, at, *, entry, target, operation_id, fencing_epoch,
         _int(fencing_epoch, 1)
         _int(policy_timeout, 1)
         _int(reserved_bytes)
-        _text(candidate_digest, re.compile(r'sha256:[0-9a-f]{64}\Z'))
+        if candidate_digest is not None or entry != 'verification-run':
+            _text(candidate_digest, re.compile(r'sha256:[0-9a-f]{64}\Z'))
         if entry == 'system-recover':
             recovery = ledger.stop_slots.system_recovery
             if recovery.reservation is not None:
@@ -200,8 +217,7 @@ def admit(ledger, state, at, *, entry, target, operation_id, fencing_epoch,
         index = PHASES.index(budget)
         if ledger.phase_charges[index].reservation_count >= ledger.policy.max_dispatches_per_phase:
             return _reject('phase-limit', ledger, at)
-        matching = next((p for p in ledger.progress if p.entry == entry and p.target == target), None)
-        if matching and matching.candidate_digest == candidate_digest and matching.consecutive_count >= ledger.policy.no_progress_limit:
+        if candidate_digest is not None and stalled_candidate(ledger, entry, target) == candidate_digest:
             return _reject('no-new-evidence', ledger, at)
         timeout = min(policy_timeout, ledger.policy.adapter_call_sec) if entry == 'recover' else policy_timeout
         child, settle, seconds = child_deadlines(ledger, at, entry, budget, timeout)
@@ -265,7 +281,12 @@ def _retain_settlement(ledger, record):
 
 
 def settle(ledger, at, *, reservation_id, outcome, elapsed_sec, candidate_digest, result_digest,
-           tool_calls=None, replays=None, output_bytes=None, completed=False):
+           tool_calls=None, replays=None, output_bytes=None, completed=False, refusal_reason=None):
+    if refusal_reason is not None:
+        if (refusal_reason not in ('budget-job-write-failed', 'budget-deadline-unenforceable', 'budget-deadline', 'budget-no-new-evidence')
+                or outcome != 'settled' or completed
+                or refusal_reason != 'budget-no-new-evidence' and elapsed_sec != 0):
+            raise BudgetError('budget-unstarted-refusal-invalid')
     _text(reservation_id)
     _text(candidate_digest, re.compile(r'sha256:[0-9a-f]{64}\Z'))
     _text(result_digest, re.compile(r'sha256:[0-9a-f]{64}\Z'))
@@ -306,6 +327,9 @@ def settle(ledger, at, *, reservation_id, outcome, elapsed_sec, candidate_digest
                     or prior_settlement.telemetry != telemetry):
                 raise BudgetError('budget-settlement-duplicate')
             return ledger
+    if refusal_reason is not None:
+        ledger = replace(ledger, stop_slots=replace(ledger.stop_slots,
+            refusal_count=min(INT_MAX, ledger.stop_slots.refusal_count + 1), last_refusal=refusal_reason))
     charged = row.reserved_sec if outcome != 'settled' or elapsed_sec is None else min(row.reserved_sec, elapsed_sec)
     if prior_settlement is not None:
         charged = prior_settlement.charged_sec
@@ -344,6 +368,8 @@ def settle(ledger, at, *, reservation_id, outcome, elapsed_sec, candidate_digest
     prior = next((p for p in ledger.progress if (p.entry, p.target) == (row.entry, row.target)), None)
     count = prior.consecutive_count + 1 if prior and prior.candidate_digest == candidate_digest and prior.result_digest == result_digest else 1
     progress.append(ProgressSignature(row.entry, row.target, candidate_digest, result_digest, count))
+    if refusal_reason is not None:
+        progress = ledger.progress  # a refused verifier did not produce new evidence
     slots = ledger.stop_slots
     if row.budget_class == 'final' and outcome == 'settled' and completed and slots.final_latch is not None and at >= row.reserved_at:
         slots = replace(slots, final_run=FinalRun(row.reservation_id, at))
