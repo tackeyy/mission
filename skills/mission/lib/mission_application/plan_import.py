@@ -35,7 +35,6 @@ class PlanImportWorkspaceServices:
 @dataclass(frozen=True)
 class PlanImportPolicyServices:
     provider_gate: object
-    enforce_session_lease_for_write: object
     invocation_by_id: object
     find_provider: object
     require_current_provider_application: object
@@ -117,6 +116,7 @@ def _plan_import(request, workspace, policy, state_effects):
         sf,
         stamp=True,
         strict_read=True,
+        pre_admit_lease=True,
         session_id=session_id,
         operation_id=operation_id,
         operation_command=operation_command,
@@ -129,7 +129,6 @@ def _plan_import(request, workspace, policy, state_effects):
         if getattr(repository, "operation_replayed", False):
             existing = (data.get("provider_plan_imports") or {}).get(request.invocation_id)
             return {"ok": True, "plan_import": existing}
-        policy.enforce_session_lease_for_write(sf, data)
         invocation = policy.invocation_by_id(data, request.invocation_id)
         if (
             data.get("planning_policy_version") == 1

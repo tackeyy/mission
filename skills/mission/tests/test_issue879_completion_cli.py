@@ -541,6 +541,26 @@ def test_contractless_completion_and_already_passed_closeout_remain_usable(compl
     assert _public_bytes(root) == before
 
 
+@pytest.mark.parametrize("completion_session", [4], indirect=True, ids=["legacy-v4"])
+@pytest.mark.parametrize("command", ["mark-passes", "closeout"])
+def test_legacy_plan_without_origin_obligations_can_complete(completion_session, raw_run_cli, command):
+    root, state, schema = completion_session
+    state.pop("acceptance_contract")
+    assert "fresh_review" not in state and "repair_lineage" not in state
+    state.update(phase="reviewing", passes=False, canonical_plan={
+        "path": ".mission-state/plans/core.json",
+        "digest": "sha256:" + "a" * 64,
+        "source": "core", "source_id": "fixture-core",
+        "selection_source": "automatic", "iteration": 1, "generation": 1,
+    })
+    _persist_fixture(root, state, schema)
+    result = raw_run_cli(command, cwd=root)
+    assert result.returncode == 0, result.stdout + result.stderr
+    persisted = json.loads(raw_run_cli("get", cwd=root, check=True).stdout)
+    assert persisted["passes"] is True and persisted["phase"] == "done"
+    assert persisted["canonical_plan"] == state["canonical_plan"]
+
+
 @pytest.mark.parametrize("receipt_case,reason", [
     ("matching", "acceptance-fresh-review-missing"),
     ("missing", "acceptance-receipt-missing"),

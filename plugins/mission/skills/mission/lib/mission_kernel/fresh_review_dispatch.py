@@ -174,7 +174,20 @@ def dispatch_state(state, command):
             raise FreshReviewError('fresh-review-stale-fence')
         new = replace(record, status=receipt.outcome.value, result=command.receipt)
     projection = _replace_record(state.fresh_review, record, new)
-    return _publish_projection(state, document, projection)
+    result = _publish_projection(state, document, projection)
+    if isinstance(command, ImportFreshReviewOutput):
+        from .repair_lineage import import_origins
+        evidence = command.repair_evidence
+        if isinstance(receipt, CompletedFreshReview):
+            import base64, json
+            from .fresh_review_publish import completed_evidence
+            from .fresh_review_output import decode_output
+            from .fresh_review_completion import decode_completion_evidence
+            content, findings = completed_evidence(decode_output(json.loads(base64.b64decode(command.output_base64))),
+                request, document['acceptance_contract'], command.replay_results)
+            evidence = (*evidence, decode_completion_evidence(request, receipt, json.loads(content), tuple(map(json.loads, findings))))
+        result = import_origins(result, evidence)
+    return result
 
 
 def _publish_projection(state, document, projection):

@@ -129,7 +129,7 @@
     "_as_utc:replace": 1
   },
   "lib/budgeted_exec.py": {
-    "run_job:unlink": 1,
+    "run_job:unlink-ref": 1,
     "write_frame:write": 1
   },
   "lib/command_outcomes.py": {
@@ -237,7 +237,8 @@
     "receipt_decision:replace": 1
   },
   "lib/mission_application/guard_timeout.py": {
-    "_report_exhaustion:write": 2
+    "_report_exhaustion:write": 2,
+    "_wrapper:write": 1
   },
   "lib/mission_application/legacy_initialization.py": {
     "initialize_legacy_v4:atomic_write_bytes": 1,
@@ -397,6 +398,9 @@
     "_timestamp:replace": 1,
     "decode_terminal_receipt:dynamic": 2
   },
+  "lib/mission_kernel/repair_lineage.py": {
+    "import_origins:replace": 1
+  },
   "lib/mission_kernel/snapshot.py": {
     "decode_snapshot:replace": 1
   },
@@ -555,11 +559,11 @@
   },
   "lib/mission_persistence/spawn_jobs.py": {
     "_expired_job:open-write": 1,
-    "cleanup_jobs:unlink": 1,
-    "create_job:unlink": 1,
+    "cleanup_jobs:unlink-ref": 1,
+    "create_job:unlink-ref": 1,
     "read_job:open-write": 1,
     "write_private_file:open-write": 1,
-    "write_private_file:unlink": 1,
+    "write_private_file:unlink-ref": 1,
     "write_private_file:write": 1
   },
   "lib/mission_persistence/strict_reader.py": {

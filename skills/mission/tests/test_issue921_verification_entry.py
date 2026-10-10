@@ -11,6 +11,123 @@ def run_cli(legacy_run_cli):
     return legacy_run_cli
 
 
+def _prepare_boundary_verification(root, run_cli):
+    """Register the public route without candidate inventory for boundary faults."""
+    import hashlib
+    from .test_issue878_verification_runner import _contract, _policy
+    run_cli('init', 'verification boundary', '--force-mission', cwd=root, check=True)
+    encoded = json.dumps(_policy(), sort_keys=True, separators=(',', ':')).encode()
+    policy_dir = root / '.mission'
+    policy_dir.mkdir()
+    (policy_dir / 'verifiers.json').write_bytes(encoded)
+    contract = _contract(json.loads(_state_path(root).read_text())['mission_id'])
+    contract['verifier_policy_digest'] = 'sha256:' + hashlib.sha256(encoded).hexdigest()
+    source = root / 'contract.json'
+    source.write_text(json.dumps(contract))
+    run_cli('acceptance-contract', 'import', '--input', str(source), cwd=root, check=True)
+    _budget(root)
+
+
+@pytest.mark.parametrize('interrupted', [False, True])
+def test_verification_job_unlink_preserves_confirmed_result_or_original_interruption(
+        run_cli, tmp_path, invoke_here, monkeypatch, interrupted):
+    import errno
+    import sys
+    import time
+    from pathlib import Path
+    import budgeted_exec
+    from mission_application.verification_execution import _blocked_receipt
+    _prepare_boundary_verification(tmp_path, run_cli)
+    document = json.loads(_state_path(tmp_path).read_text())
+    contract = document['acceptance_contract']
+    receipt = _blocked_receipt(contract, contract['verifier_policy'], 'AC1',
+        contract['verifier_policy']['commands']['project-test'], 'budget-no-new-evidence')
+    receipt.update(status='passed', block_reason=None, exit_code=0, executed_count=1,
+        candidate_digest='sha256:' + 'b' * 64)
+    spawn, unlink = budgeted_exec.spawn_exec, Path.unlink
+    error = KeyboardInterrupt('original frame interrupted')
+    children, denied = [], []
+    def neutral_supervisor(argv, **kwargs):
+        child = spawn([sys.executable, '-I', '-c', 'pass'], **kwargs)
+        children.append(child)
+        return child
+    def frame(child, *a, **kw):
+        if interrupted:
+            raise error
+        until = time.monotonic() + 5
+        while not budgeted_exec.observe_exit(child.pid):
+            assert time.monotonic() < until
+            time.sleep(.01)
+        return {'ok': True, 'result': receipt}
+    def deny_job_unlink(path, **kwargs):
+        if path.parent == tmp_path / '.mission-state/exec-jobs':
+            denied.append(path)
+            raise OSError(errno.EACCES, 'job delete denied')
+        return unlink(path, **kwargs)
+    monkeypatch.setattr(budgeted_exec, 'spawn_exec', neutral_supervisor)
+    monkeypatch.setattr(budgeted_exec, 'read_frame', frame)
+    monkeypatch.setattr(Path, 'unlink', deny_job_unlink)
+    if interrupted:
+        with pytest.raises(KeyboardInterrupt) as observed:
+            invoke_here(['verification', 'run', '--criterion', 'AC1'], {})
+        assert observed.value is error and error.exec_cleanup_confirmed is True
+    else:
+        invoke_here(['verification', 'run', '--criterion', 'AC1'], {})
+    assert len(denied) == len(children) == 1
+    assert children[0].returncode is not None
+    state = json.loads(_state_path(tmp_path).read_text())
+    ledger = state['budget_ledger']
+    assert bool(ledger['reservations']) == interrupted
+    assert ledger['settlements'][-1]['outcome'] == ('kill-unconfirmed' if interrupted else 'settled')
+    if not interrupted:
+        assert state['verification_receipts'][-1]['status'] == 'passed'
+        assert state['verification_receipts'][-1]['candidate_digest'] == receipt['candidate_digest']
+
+
+@pytest.mark.parametrize('boundary', ['inner-spawn', 'run-job'])
+def test_verification_lost_spawn_handle_holds_reservation_after_reconcile(
+        run_cli, tmp_path, invoke_here, monkeypatch, boundary):
+    import os
+    import sys
+    import budgeted_exec
+    from datetime import datetime, timedelta
+    from mission_application.provider_budget import _apply
+    from mission_kernel.commands import ReconcileDispatchBudget
+    _prepare_boundary_verification(tmp_path, run_cli)
+    spawn, cleanup = budgeted_exec.spawn_exec, budgeted_exec.cleanup_group
+    children = []
+    error = KeyboardInterrupt('spawn returned before handle assignment')
+    def neutral_child(argv, **kwargs):
+        child = spawn([sys.executable, '-I', '-c', 'import time; time.sleep(60)'], **kwargs)
+        children.append(child)
+        if boundary == 'inner-spawn':
+            raise error
+        return child
+    monkeypatch.setattr(budgeted_exec, 'spawn_exec', neutral_child)
+    if boundary == 'run-job':
+        deadline_spawn = budgeted_exec.spawn_deadline_exec
+        def lose_outer_handle(*a, **kw):
+            child, control = deadline_spawn(*a, **kw)
+            os.close(control)
+            raise error
+        monkeypatch.setattr(budgeted_exec, 'spawn_deadline_exec', lose_outer_handle)
+    try:
+        with pytest.raises(KeyboardInterrupt) as observed:
+            invoke_here(['verification', 'run', '--criterion', 'AC1'], {})
+        assert observed.value is error and error.exec_cleanup_confirmed is False
+        document = json.loads(_state_path(tmp_path).read_text())
+        ledger = document['budget_ledger']
+        assert len(children) == len(ledger['reservations']) == 1
+        assert ledger['settlements'][-1]['outcome'] == 'kill-unconfirmed'
+        at = (datetime.fromisoformat(ledger['reservations'][0]['settle_by'].replace('Z', '+00:00'))
+              + timedelta(seconds=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        assert _apply(document, ReconcileDispatchBudget(at)).accepted
+        assert document['budget_ledger']['reservations'] == ledger['reservations']
+    finally:
+        for child in children:
+            assert cleanup(child, term_grace=.2, kill_wait=2)
+
+
 def test_verification_reservation_commit_failure_never_spawns(run_cli, tmp_path, invoke_here, monkeypatch):
     from mission_persistence.legacy_v4 import LegacyV4Repository
     from mission_application import verification_execution as execution

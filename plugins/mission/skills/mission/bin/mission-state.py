@@ -245,7 +245,7 @@ from mission_application.evidence import (  # noqa: E402
 from mission_application.budget import run_budget_status_cli, run_budget_next, run_budget_reconcile_cli
 from mission_persistence.spawn_jobs import cleanup_jobs
 from mission_kernel.budget import BudgetError
-from mission_application.fresh_review import run_fresh_review_prepare_cli, run_fresh_review_status_cli
+from mission_application.fresh_review import run_fresh_review_prepare_cli, run_fresh_review_status_cli, run_repair_origins_cli
 from mission_application.fresh_review_withdraw import run_fresh_review_withdraw_cli
 from mission_application.fresh_review_publish import run_fresh_review_import_cli
 from mission_application.fresh_review_dispatch import run_fresh_review_dispatch_cli
@@ -5610,7 +5610,6 @@ def cmd_invoke_command_provider(args):
         reject_unbounded_orchestrator_execution=_reject_unbounded_orchestrator_execution,
         current_selection_id=_current_selection_id,
         reject_active_provider_mutation=_reject_active_provider_mutation,
-        enforce_session_lease_for_write=_enforce_session_lease_for_write,
         resolve_session_id=resolve_session_id,
         invocation_by_id=invocation_by_id,
         validate_invocation_transition=validate_invocation_transition,
@@ -5697,7 +5696,7 @@ def cmd_reconcile_provider_invocation(args):
         print(f"ERROR: {_err_reconcile}", file=sys.stderr)
         sys.exit(2)
     _repo_reconcile = _legacy_lifecycle_repository(
-        cwd, sf, stamp=True, strict_read=True, session_id=session_id,
+        cwd, sf, stamp=True, strict_read=True, pre_admit_lease=True, session_id=session_id,
         operation_id=_op_id_reconcile, operation_command=_op_cmd_reconcile,
         operation_command_type=_command_name_reconcile,
     )
@@ -5714,7 +5713,6 @@ def cmd_reconcile_provider_invocation(args):
             archived_to = terminal.get("evidence_path", "")
         else:
             _validate_specialist_public_state(data)
-            lease_decision = _enforce_session_lease_for_write(sf, data)
             try:
                 existing = dict(invocation_by_id(data, args.invocation_id))
             except SpecialistLifecycleError as exc:
@@ -5722,7 +5720,7 @@ def cmd_reconcile_provider_invocation(args):
             if existing.get("status") not in {"dispatch-unknown", "running"}:
                 _provider_gate("invocation-not-reconcilable")
             reservation_epoch = existing.get("fencing_epoch")
-            current_epoch = int(data.get("fencing_epoch") or lease_decision.fencing_epoch)
+            current_epoch = int(data["fencing_epoch"])
             if args.expected_fencing_epoch != reservation_epoch or current_epoch < reservation_epoch:
                 _provider_gate("stale-fencing-epoch")
             reservation_owner = existing.get("reservation_owner_session_id")
@@ -10548,7 +10546,7 @@ def cmd_manual_score_capture(args):
         print(f"ERROR: {error}", file=sys.stderr)
         sys.exit(2)
     repository = _legacy_lifecycle_repository(
-        cwd, sf, stamp=True, strict_read=True, session_id=session_id,
+        cwd, sf, stamp=True, strict_read=True, pre_admit_lease=True, session_id=session_id,
         operation_id=operation_id, operation_command=operation_command,
         operation_command_type="manual-score-capture",
     )
@@ -10570,7 +10568,6 @@ def cmd_manual_score_capture(args):
             }))
             print(json.dumps({"ok": True, "scoring_json": args.out, "manual_evidence_ref": replay_ref}, ensure_ascii=False))
             return
-        _enforce_session_lease_for_write(sf, data)
         entry = {
             "iteration": payload.get("iteration"), "items": payload.get("items"),
             "composite": payload.get("composite"), "min_item": payload.get("min_item"),
@@ -12485,7 +12482,6 @@ def cmd_plan_import(args):
     )
     policy = PlanImportPolicyServices(
         provider_gate=_provider_gate,
-        enforce_session_lease_for_write=_enforce_session_lease_for_write,
         invocation_by_id=invocation_by_id,
         find_provider=_find_provider,
         require_current_provider_application=_require_current_provider_application,
@@ -13745,6 +13741,10 @@ def cmd_fresh_review_withdraw(args):
 
 def cmd_fresh_review_import(args):
     print(run_fresh_review_import_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES, fresh_review_host))
+
+
+def cmd_repair_origins(args):
+    print(run_repair_origins_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES))
 
 
 def cmd_fresh_review_status(args):
@@ -16284,6 +16284,7 @@ def _add_review_parsers(subparsers) -> None:
     p_prepare.add_argument("--max-output-bytes", type=int, default=262144)
     p_prepare.add_argument("--max-packet-bytes", type=int, default=1048576)
     p_prepare.set_defaults(func=cmd_fresh_review_prepare, command_outcome_tracking=True)
+    p_fresh_sub.add_parser("import-lineage", help="保存済み反例の来歴だけを初回取込み（解決は付与しない）").set_defaults(func=cmd_repair_origins, command_outcome_tracking=True)
     p_fresh_sub.add_parser("status", help="保存済み request と消費状態を表示").set_defaults(func=cmd_fresh_review_status)
 
     p_run = p_fresh_sub.add_parser("run", help="dispatch intent を保存して登録 adapter を起動")

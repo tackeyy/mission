@@ -25,6 +25,11 @@ def test_completed_output_and_coverage_share_one_public_commit(reviewer, run_cli
     assert receipt['coverage_receipt']['status'] == 'valid'
     coverage = json.loads((root / receipt['coverage_receipt']['evidence_ref']['relative_path']).read_bytes())
     assert len(coverage['open_finding_ids']) == finding_count
+    state = json.loads(run_cli('get', cwd=root).stdout)
+    assert len(state.get('repair_lineage', {}).get('lineages', [])) == finding_count
+    from mission_kernel.state_capacity import lineage_residual
+    from mission_kernel.fresh_review import decode_projection
+    assert lineage_residual(state, decode_projection(state).requests[0]) == 0
     head = json.loads((root / '.mission-state/sessions/test.json').read_text())
     manifest = json.loads((root / '.mission-state' / head['state_generation']['path']).read_text())
     assert len(manifest['blobs']) == 2 + finding_count <= 63
@@ -246,7 +251,7 @@ def test_completed_writer_maximum_shape_effects_and_remaining_reservation(replay
     after = json.loads(json.dumps(state))
     after['fresh_review']['requests'][0].update(status='completed', result=terminal)
     assert _diff_is_record_status_advance(state, after)
-    assert residual_reservation(after) == lineage_stage_delta(after, original.request) > 0
+    assert residual_reservation(after) == 0  # No finding origins need introduction.
 
 
 @pytest.fixture
@@ -540,6 +545,9 @@ def test_expanded_replay_evidence_overflow_preserves_only_failed_diagnostics(rep
     record = json.loads(result.stdout)['record']
     assert record['status'] == 'failed' and record['result']['reason'] == 'output-over-import-limit'
     assert 'coverage_receipt' not in record['result'] and 'findings' not in record['result']
+    repair = json.loads(run_cli('get', cwd=root).stdout)['repair_lineage']
+    assert len(repair['lineages']) == 1 and repair['lineages'][0]['kind'] == 'unimported-findings'
+    assert json.loads(run_cli('fresh-review', 'status', cwd=root).stdout)['repair']['unresolved_lineage_ids'] == [repair['lineages'][0]['lineage_id']]
     ref = record['result']['output_ref']
     assert (root / ref['relative_path']).read_bytes() == payload
     assert json.loads(import_output(run_cli, replay_reviewer).stdout)['record'] == record

@@ -487,6 +487,7 @@ class MissionState:
     legacy_passthrough: Optional[FrozenJsonObject]
     a4: "A4Projection" = field(default_factory=lambda: _empty_a4_projection())
     fresh_review: "FreshReviewProjection" = field(default_factory=lambda: _empty_fresh_review_projection())
+    repair: "RepairProjection" = field(default_factory=lambda: _empty_repair_projection())
     budget: "BudgetProjection" = field(default_factory=lambda: _empty_budget_projection())
     snapshot_provenance: Optional[SnapshotProvenance] = None
     _snapshot_binding: Optional[object] = field(
@@ -496,6 +497,11 @@ class MissionState:
     @property
     def terminal_outcome(self) -> Optional[TerminalOutcome]:
         return self.control.terminal_outcome
+
+
+def _empty_repair_projection():
+    from .repair_lineage import RepairProjection
+    return RepairProjection()
 
 
 def _empty_fresh_review_projection():

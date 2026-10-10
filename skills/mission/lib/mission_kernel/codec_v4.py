@@ -691,6 +691,7 @@ def _decode_v4_object(document: Mapping[str, Any], frozen: FrozenJsonObject) -> 
         legacy_passthrough=frozen,
         a4=_decode_a4_projection(document, handoff, "$.a4"),
         fresh_review=_decode_fresh_review_projection(document, "$.fresh_review"),
+        repair=_decode_repair_projection(document, "$.repair_lineage"),
         budget=_decode_budget_projection(document, "$.budget_ledger"),
     )
 
@@ -705,6 +706,15 @@ def _decode_budget_projection(document, path, *, embedded=False):
     try:
         return decode_ledger(document, embedded=embedded)
     except BudgetError as exc:
+        raise _fail(exc.code, path, exc.code) from exc
+
+
+def _decode_repair_projection(document, path):
+    from .repair_lineage import decode_projection
+    from .fresh_review import FreshReviewError
+    try:
+        return decode_projection(document)
+    except FreshReviewError as exc:
         raise _fail(exc.code, path, exc.code) from exc
 
 
@@ -947,6 +957,8 @@ def project_legacy_document(state: MissionState) -> bytes:
         document["executor_handoff"] = _handoff_json(state.handoff)
     from .fresh_review import validate_projection_backing
     validate_projection_backing(document, state.fresh_review)
+    from .repair_lineage import validate_projection_backing as validate_repair_backing
+    validate_repair_backing(document, state.repair)
     from .budget import validate_projection_backing as validate_budget_backing
     if state.schema_origin is SchemaOrigin.V5:
         from .budget import ledger_document

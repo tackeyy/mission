@@ -6,7 +6,6 @@ activate budget policy or mark any public spawn entry as covered.
 from __future__ import annotations
 
 from dataclasses import dataclass
-import contextlib
 import errno
 import math
 import os
@@ -14,6 +13,7 @@ import selectors
 import time
 
 import budgeted_exec
+from exec_cleanup import finish_cleanup
 
 
 @dataclass(frozen=True)
@@ -49,6 +49,7 @@ def exchange_provider(child, packet, deadline, *, term_grace=.2, kill_wait=.2,
     selector = None
     confirmed = None
     cleanup_grace, cleanup_wait = .2, .2
+    failure = body_error = None
 
     def close_stream(stream):
         if stream is None:
@@ -56,11 +57,9 @@ def exchange_provider(child, packet, deadline, *, term_grace=.2, kill_wait=.2,
         if selector is not None:
             for key in list(selector.get_map().values()):
                 if key.fileobj is stream:
-                    with contextlib.suppress(KeyError, OSError):
-                        selector.unregister(key.fd)
+                    finish_cleanup(selector.unregister, key.fd, suppress=(KeyError, OSError))
         if not stream.closed:
-            with contextlib.suppress(OSError):
-                stream.close()
+            finish_cleanup(stream.close, suppress=(OSError,))
 
     try:
         try:
@@ -130,8 +129,11 @@ def exchange_provider(child, packet, deadline, *, term_grace=.2, kill_wait=.2,
                 if budgeted_exec.observe_exit(child.pid):
                     break
                 pump(deadline)
+        except BaseException as error:
+            body_error = error
+            raise
         finally:
-            close_stream(child.stdin)
+            finish_cleanup(close_stream, child.stdin, original=body_error)
             confirmed = budgeted_exec.cleanup_group(child, term_grace=cleanup_grace,
                                                    kill_wait=cleanup_wait, timed_out=timed_out)
         collect_until = time.monotonic() + collect_sec
@@ -143,6 +145,7 @@ def exchange_provider(child, packet, deadline, *, term_grace=.2, kill_wait=.2,
                                 None if b'E' in control else child.returncode, timed_out or b'T' in control,
                                 confirmed, observed, truncated, complete, b'E' in control, b'W' in control)
     except BaseException as error:
+        failure = error
         # Only exceptions raised by this exchange count, including collection.
         # An enclosing caller's except block is not an exchange failure.
         error.exec_cleanup_confirmed = confirmed is True
@@ -153,9 +156,9 @@ def exchange_provider(child, packet, deadline, *, term_grace=.2, kill_wait=.2,
         raise
     finally:
         for stream in (child.stdin, child.stdout, child.stderr):
-            close_stream(stream)
+            finish_cleanup(close_stream, stream, original=failure)
         if selector is not None:
-            selector.close()
+            # Closing the selector cannot change the confirmed group outcome.
+            finish_cleanup(selector.close, original=failure, suppress=(OSError,))
         if control_receiver is not None:
-            with contextlib.suppress(OSError):
-                os.close(control_receiver)
+            finish_cleanup(os.close, control_receiver, original=failure, suppress=(OSError,))

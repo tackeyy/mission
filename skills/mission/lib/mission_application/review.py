@@ -26,11 +26,13 @@ from .ports import LegacyMissionRepository
 from .compatibility import compatibility_delta
 from .fresh_review_completion import FreshReviewCompletionInputs
 from mission_kernel.fresh_review import FreshReviewError
+from mission_kernel.repair_lineage import require_completion_contract
 from acceptance_contract import AcceptanceContractError, frozen_verifier_commands
 
 
 def capture_acceptance_candidates(project_root, data: dict, load_policy: Callable) -> dict[str, str]:
     """Recapture each required verifier candidate only under its frozen policy."""
+    require_completion_contract(data)
     if "acceptance_contract" not in data:
         return {}
     contract = data["acceptance_contract"]
@@ -88,7 +90,11 @@ class ReviewFailure(ValueError):
 
 
 def closeout_already_passed(data: dict) -> bool:
-    """Permit the legacy shortcut only when completion has no contract."""
+    """Permit the legacy shortcut only without a contract or origin obligations."""
+    try:
+        require_completion_contract(data)
+    except FreshReviewError as exc:
+        raise ReviewFailure(exc.code, reason=exc.code) from exc
     if data.get("passes") is not True:
         return False
     if "acceptance_contract" in data:
@@ -509,6 +515,7 @@ def _mark_pass(
     with repository.transaction():
         data = repository.load()
         try:
+            require_completion_contract(data)
             acceptance_candidates = (
                 services.capture_acceptance_candidates(data)
                 if services.capture_acceptance_candidates is not None
@@ -516,7 +523,7 @@ def _mark_pass(
             )
             fresh_inputs = (
                 services.capture_fresh_review_completion(data)
-                if services.capture_fresh_review_completion is not None and 'acceptance_contract' in data
+                if services.capture_fresh_review_completion is not None
                 else FreshReviewCompletionInputs()
             )
         except FreshReviewError as exc:
@@ -526,6 +533,9 @@ def _mark_pass(
         except (OSError, ValueError, KeyError, TypeError, RecursionError) as exc:
             raise ReviewFailure("acceptance candidate capture failed", reason="acceptance-candidate-unavailable") from exc
         frozen_candidates = freeze_json_value(acceptance_candidates)
+        # The origin guard above runs for every session. Contractless legacy
+        # completion uses the repository's compatible decision view instead
+        # of decoding historical plan fields through this strict preflight.
         if "acceptance_contract" in data:
             reason = acceptance_completion_rejection(
                 decode_mission_state(json.dumps(data).encode("utf-8")),
