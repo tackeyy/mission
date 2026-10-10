@@ -159,7 +159,7 @@ def test_terminal_uses_current_fence_and_cannot_grant_verified(repair_state):
         decode_projection(doc)
 
 
-@pytest.mark.parametrize('field,value', [('before_candidate', None), ('baseline_receipts', 'passed'),
+@pytest.mark.parametrize('field,value', [('before_candidate', None), 
     ('before_candidate', dict(contract_digest=None)), ('repro_input_digest', 'sha256:' + 'b' * 64)])
 def test_begin_refuses_unbound_history_body(repair_state, field, value):
     from mission_kernel.commands import FreshReviewInputEffectClaim
@@ -417,7 +417,7 @@ def test_reconcile_retries_only_before_publication(replay_reviewer, run_cli, mon
 
 
 @pytest.mark.parametrize('forged', ['reason', 'operation_id'])
-def test_terminal_reconcile_rejects_invalid_intent_before_noop(repair_state, forged):
+def test_terminal_reconcile_validates_intent_before_already_terminal_rejection(repair_state, forged):
     from mission_kernel.commands import ReconcileFindingRepair
     from mission_kernel.repair_attempts import terminal_operation
     from mission_kernel.transitions import decide
@@ -426,7 +426,8 @@ def test_terminal_reconcile_rejects_invalid_intent_before_noop(repair_state, for
     command = ReconcileFindingRepair(identifier, terminal_operation(identifier, 'blocked', 'publication-result-lost'))
     ended = decide(state, command).transition.new_state
     valid = decide(ended, command)
-    assert valid.accepted and valid.transition.new_state == ended
+    assert not valid.accepted and valid.rejection.code == 'repair-attempt-already-terminal'
+    assert valid.transition is None and valid.effects == ()
     result = decide(ended, replace(command, **{forged: 'forged'}))
     assert not result.accepted
     assert result.rejection.code == ('repair-attempt-invalid' if forged == 'reason' else 'repair-operation-conflict')
@@ -582,3 +583,137 @@ def test_peer_begin_before_admission_is_not_blocked_by_retry_read_failure(replay
         app.run_repair_cli(args, replace(services, repository=repository))
     assert peer and _public_bytes(root) == peer['bytes']
     assert json.loads(run_cli(*arguments, cwd=root, env_extra=env, check=True).stdout)['attempt'] == peer['attempt']
+
+
+@pytest.mark.parametrize('schema', [4, 5])
+@pytest.mark.parametrize('kind', ['begin', 'reconcile'])
+def test_competing_repair_writer_does_not_publish_a_second_generation(replay_reviewer, run_cli, monkeypatch, capsys, schema, kind):
+    from functools import partial
+    from .test_command_inventory import _load_mission_state_module
+    from .test_issue879_completion_cli import _public_bytes
+    from mission_application import repair as app
+    from mission_application.evidence import execute_evidence_operation
+    from mission_kernel.repair_attempts import terminal_operation
+    root = replay_reviewer[0]
+    invoke(run_cli, replay_reviewer, FIXTURE_REVIEW_MODE='counterexample')
+    assert import_output(run_cli, replay_reviewer).returncode == 0
+    state = json.loads(run_cli('get', cwd=root).stdout)
+    if schema == 4:
+        _persist_fixture(root, state, schema)
+    lineage = state['repair_lineage']['lineages'][0]['lineage_id']
+    (root / 'repair-plan.json').write_text('repair plan')
+    begin = ('repair', 'begin', '--finding', lineage, '--plan-ref', 'repair-plan.json')
+    env = {'MISSION_OPERATION_ID': 'competing-begin'}
+    if kind == 'reconcile':
+        item = json.loads(run_cli(*begin, cwd=root, env_extra=env, check=True).stdout)['attempt']
+    monkeypatch.chdir(root)
+    for key, value in dict(env, MISSION_SESSION_ID='test', MISSION_LEASE_ID='test-lease').items():
+        monkeypatch.setenv(key, value)
+    services = _load_mission_state_module()._ACCEPTANCE_CONTRACT_CLI_SERVICES
+    peer = {}
+    def repository(*args, **kwargs):
+        if kwargs.get('operation_command_type') == 'repair-' + kind and kwargs.get('operation_id') and not peer:
+            if kind == 'begin':
+                peer['attempt'] = json.loads(run_cli(*begin, cwd=root, env_extra=env, check=True).stdout)['attempt']
+            else:
+                operation = terminal_operation(item['attempt_id'], 'blocked', 'effects-unavailable')
+                _, intent = services.canonical_operation('test', 'repair-reconcile', dict(operation_id=operation), caller_operation_id=operation)
+                writer = services.repository(root, services.resolve_state_file(root), stamp=True, strict_read=True, pre_admit_lease=True,
+                    session_id='test', operation_id=operation, operation_command=intent, operation_command_type='repair-reconcile')
+                execute_evidence_operation(writer, partial(app.prepare_reconcile, identifier=item['attempt_id'], reason='effects-unavailable'))
+                peer['attempt'] = json.loads(run_cli('get', cwd=root).stdout)['repair_lineage']['lineages'][0]['attempts'][0]
+            peer['bytes'] = _public_bytes(root)
+        return services.repository(*args, **kwargs)
+    args = (SimpleNamespace(repair_command='begin', finding=lineage, plan_ref='repair-plan.json') if kind == 'begin'
+            else SimpleNamespace(repair_command='reconcile', attempt=item['attempt_id']))
+    if kind == 'begin' and schema == 5:  # Strict same-operation replay bypasses the reducer.
+        assert json.loads(app.run_repair_cli(args, replace(services, repository=repository)))['attempt'] == peer['attempt']
+    else:
+        with pytest.raises(SystemExit):
+            app.run_repair_cli(args, replace(services, repository=repository))
+        output = capsys.readouterr()
+        assert ('repair-attempt-already-terminal' if kind == 'reconcile' else 'repair-attempt-already-started') in output.out + output.err
+    assert peer and _public_bytes(root) == peer['bytes']  # Includes heads, generations, commits and operation records.
+    assert json.loads(run_cli(*begin, cwd=root, env_extra=env, check=True).stdout)['attempt'] == peer['attempt']
+    assert _public_bytes(root) == peer['bytes']
+
+
+@pytest.mark.parametrize('comparison,code', [('contract', 'repair-contract-stale'), ('iteration', 'repair-contract-stale'),
+    ('baseline', 'repair-attempt-invalid'), ('snapshot-keys', 'repair-attempt-invalid'),
+    ('plan-content', 'repair-effect-invalid'), ('repro-content', 'repair-effect-invalid')])
+def test_closed_history_reaches_each_binding_comparison(repair_state, comparison, code):
+    from mission_kernel.commands import FreshReviewInputEffectClaim
+    from mission_kernel.repair_attempts import reference
+    from mission_kernel.transitions import decide
+    state, evidence = repair_state
+    command = begin_command(state, evidence)
+    assert decide(state, command).accepted
+    body = command.history.thaw()
+    if comparison == 'contract':
+        body['before_candidate']['contract_digest'] = 'sha256:' + 'b' * 64
+    elif comparison == 'iteration':
+        body['before_candidate']['iteration'] += 1
+    elif comparison == 'baseline':
+        body['baseline_receipts'][0]['receipt_digest'] = 'sha256:' + 'b' * 64
+    elif comparison == 'snapshot-keys':
+        body['before_candidate']['snapshots'].pop(next(iter(body['before_candidate']['snapshots'])))
+    else:
+        kind = 'repair-plan' if comparison == 'plan-content' else 'repair-repro'
+        field = 'plan_ref' if comparison == 'plan-content' else 'repro_input_ref'
+        effect = 'plan_effect' if comparison == 'plan-content' else 'repro_effect'
+        body[field] = reference(kind, b'z' * body[field]['size'])
+        ref = body[field]
+        command = replace(command, **{effect: FreshReviewInputEffectClaim(ref['kind'], ref['relative_path'], ref['digest'], ref['size'])})
+    ref = reference('repair-attempt', canonical_bytes(body))
+    command = replace(command, history=freeze_json_value(body), history_effect=FreshReviewInputEffectClaim(
+        ref['kind'], ref['relative_path'], ref['digest'], ref['size']))
+    result = decide(state, command)
+    assert not result.accepted and result.rejection.code == code
+    assert result.transition is None and result.effects == ()
+
+
+def test_existing_begin_checks_history_conflict_before_duplicate_rejection(repair_state):
+    from mission_kernel.transitions import decide
+    state, command = begun_state(repair_state)
+    assert decide(state, command).rejection.code == 'repair-attempt-already-started'
+    body = command.history.thaw()
+    body['before_candidate']['iteration'] += 1
+    result = decide(state, replace(command, history=freeze_json_value(body)))
+    assert not result.accepted and result.rejection.code == 'repair-operation-conflict'
+    assert result.transition is None and result.effects == ()
+
+
+@pytest.mark.parametrize('schema', [4, 5])
+def test_undecodable_pending_reservation_blocks_state_writes(repair_state, schema):
+    from mission_kernel import state_capacity as sc
+    from mission_kernel.repair_attempts import REPAIR_TERMINAL_DELTA
+    from mission_persistence.capacity_gate import check_state_capacity, CapacityWriteError
+    state, _ = begun_state(repair_state)
+    document = state.legacy_passthrough.thaw()
+    surface = document if schema == 4 else dict(schema_version=5, extensions=document, lease={}, control={})
+    assert sc.repair_attempt_reserve(surface) == REPAIR_TERMINAL_DELTA
+    check_state_capacity(None, canonical_bytes(surface), encoding=sc.StateEncoding.CANONICAL)
+    document['repair_lineage']['lineages'][0]['attempts'][0]['status'] = 'unknown'
+    assert sc.repair_attempt_reserve(surface) == sc.STATE_LIMIT
+    with pytest.raises(CapacityWriteError, match='state-capacity-exhausted'):
+        check_state_capacity(None, canonical_bytes(surface), encoding=sc.StateEncoding.CANONICAL)
+
+
+@pytest.mark.parametrize('schema', [4, 5])
+def test_same_begin_operation_cannot_change_only_its_plan(replay_reviewer, run_cli, schema):
+    from .test_issue879_completion_cli import _public_bytes
+    root = replay_reviewer[0]
+    invoke(run_cli, replay_reviewer, FIXTURE_REVIEW_MODE='counterexample')
+    assert import_output(run_cli, replay_reviewer).returncode == 0
+    state = json.loads(run_cli('get', cwd=root).stdout)
+    if schema == 4:
+        _persist_fixture(root, state, schema)
+    (root / 'repair-plan.json').write_text('original plan')
+    args = ('repair', 'begin', '--finding', state['repair_lineage']['lineages'][0]['lineage_id'], '--plan-ref', 'repair-plan.json')
+    env = {'MISSION_OPERATION_ID': 'same-plan-operation'}
+    run_cli(*args, cwd=root, env_extra=env, check=True)
+    before = _public_bytes(root)
+    (root / 'repair-plan.json').write_text('changed plan')
+    result = run_cli(*args, cwd=root, env_extra=env)
+    assert result.returncode != 0 and 'repair-operation-conflict' in result.stdout + result.stderr
+    assert _public_bytes(root) == before

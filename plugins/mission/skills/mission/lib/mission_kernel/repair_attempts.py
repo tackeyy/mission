@@ -143,7 +143,7 @@ def mutate_attempt(state, command):
         if old is not None:
             if command.history is not None and old['history_ref'] != reference('repair-attempt', canonical_bytes(command.history.thaw())):
                 raise FreshReviewError('repair-operation-conflict')
-            return state
+            raise FreshReviewError('repair-attempt-already-started')
         if row['attempts'] and row['attempts'][-1]['status'] == 'pending':
             raise FreshReviewError('repair-attempt-pending')
         if type(command.history) is not FrozenJsonObject:
@@ -198,7 +198,7 @@ def mutate_attempt(state, command):
         if epoch < item['fencing_epoch']:
             raise FreshReviewError('repair-lineage-stale-fence')
         if item['status'] != 'pending':
-            return state
+            raise FreshReviewError('repair-attempt-already-terminal')
         item.update(status='blocked', terminal=terminal(command.attempt_id, 'blocked', command.reason, epoch))
         row['lifecycle'] = 'open'
     surface = document['repair_lineage']['lineages']

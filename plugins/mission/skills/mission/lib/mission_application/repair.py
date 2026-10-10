@@ -30,28 +30,28 @@ def prepare_begin(state, *, root, lineage_id, operation, plan, services):
     identifier = attempt_id(lineage_id, operation)
     old = next((a for a in row['attempts'] if a['attempt_id'] == identifier), None)
     evidence = observe_lineage_evidence(state, root=root, read_evidence=services.read_evidence)
+    finding = _read(root, ContentAddressedRef(**row['finding_ref']), read_evidence=services.read_evidence)
+    repro = canonical_bytes(finding['repro_input'])
     if old is not None:
         body = _read(root, ContentAddressedRef(**old['history_ref']), read_evidence=services.read_evidence)
         if body['plan_ref'] != reference('repair-plan', plan.encode('utf-8')):
             raise FreshReviewError('repair-operation-conflict')
-        return PreparedEvidenceOperation(BeginFindingRepair(lineage_id, operation, None, '', None, None, None, evidence), (), {})
-    contract = state['acceptance_contract']
-    commands = frozen_verifier_commands(contract)
-    if services.load_verifier_policy(root)['digest'] != contract['verifier_policy']['digest']:
-        raise FreshReviewError('repair-contract-stale')
-    finding = _read(root, ContentAddressedRef(**row['finding_ref']), read_evidence=services.read_evidence)
-    repro = canonical_bytes(finding['repro_input'])
-    ids = row['introduced_candidate']['snapshots']
-    snapshots = _capture(root, {key: commands[key] for key in ids})
-    candidates = {key: value.digest for key, value in snapshots.items()}
-    if candidates != {key: value.digest for key, value in _capture(root, {key: commands[key] for key in ids}).items()}:
-        raise FreshReviewError('repair-candidate-stale')
-    body = dict(schema='mission-repair-attempt/1', lineage_id=lineage_id, attempt_id=identifier,
-        before_candidate=dict(snapshots=candidates, contract_digest=canonical_contract_digest(contract),
-            requirement_digest=contract['requirement_digest'], verifier_policy_digest=contract['verifier_policy']['digest'],
-            iteration=state['iteration']), plan_ref=reference('repair-plan', plan.encode('utf-8')),
-        repro_input_ref=reference('repair-repro', repro), repro_input_digest=canonical_digest(finding['repro_input']),
-        baseline_receipts=baseline_receipts(state, row))
+    else:
+        contract = state['acceptance_contract']
+        commands = frozen_verifier_commands(contract)
+        if services.load_verifier_policy(root)['digest'] != contract['verifier_policy']['digest']:
+            raise FreshReviewError('repair-contract-stale')
+        ids = row['introduced_candidate']['snapshots']
+        snapshots = _capture(root, {key: commands[key] for key in ids})
+        candidates = {key: value.digest for key, value in snapshots.items()}
+        if candidates != {key: value.digest for key, value in _capture(root, {key: commands[key] for key in ids}).items()}:
+            raise FreshReviewError('repair-candidate-stale')
+        body = dict(schema='mission-repair-attempt/1', lineage_id=lineage_id, attempt_id=identifier,
+            before_candidate=dict(snapshots=candidates, contract_digest=canonical_contract_digest(contract),
+                requirement_digest=contract['requirement_digest'], verifier_policy_digest=contract['verifier_policy']['digest'],
+                iteration=state['iteration']), plan_ref=reference('repair-plan', plan.encode('utf-8')),
+            repro_input_ref=reference('repair-repro', repro), repro_input_digest=canonical_digest(finding['repro_input']),
+            baseline_receipts=baseline_receipts(state, row))
     contents = (canonical_bytes(body), plan.encode('utf-8'), repro)
     refs = (reference('repair-attempt', contents[0]), body['plan_ref'], body['repro_input_ref'])
     effects = tuple(make_evidence_effect(ref['kind'], ref['relative_path'], content) for ref, content in zip(refs, contents))
@@ -95,8 +95,8 @@ def run_repair_cli(args, services):
                 return prepare_begin(state, root=root, lineage_id=args.finding, operation=operation, plan=plan, services=services)
             # Observation failures on retries must not terminate an existing
             # obligation. Only a new attempt admitted below can need recovery.
-            existing = prepare(read())
-            if existing.command.history is None:
+            prepare(read())
+            if not started_here:
                 _, item = find_attempt(read(), identifier)
                 return json.dumps(dict(ok=True, attempt=item), ensure_ascii=False, indent=2)
             try:
