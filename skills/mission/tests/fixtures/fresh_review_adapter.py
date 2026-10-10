@@ -33,7 +33,7 @@ from pathlib import Path
 raw = Path(sys.argv[1]).read_bytes()
 packet = json.loads(raw)
 request = json.loads(sys.stdin.read())
-criterion = packet['criteria'][0]
+criterion = next(c for c in packet['criteria'] if c['id'] in request['criterion_ids'])
 replay = packet['verifier_policy']['commands'][criterion['command_id']]['replay']
 keys = ('request_id','nonce','mission_id','session_id','requirement_digest','contract_digest',
         'verifier_policy_digest','candidate_digest','input_digest','adapter_registration_digest','iteration')
@@ -47,6 +47,35 @@ output = dict(schema='mission-fresh-review-output/1', request_digest=sys.argv[2]
     coverage=[dict(requirement_id=item['id'],classification_confirmed=True,
     criterion_ids=[criterion['id']],status='valid',reason_code='none',reason='Registered criterion covers the span.')
     for item in packet['requirements']])
+output['criterion_results'].extend(dict(criterion_id=c['id'], status='searched', reason_code='none', findings=[])
+    for c in packet['criteria'] if c['id'] in request['criterion_ids'] and c['id'] != criterion['id'])
+for item in output['coverage']:
+    item['criterion_ids'] = [c['id'] for c in packet['criteria']
+        if c['id'] in request['criterion_ids'] and item['requirement_id'] in c['requirement_ids']]
+print(json.dumps(dict(digest='sha256:'+hashlib.sha256(raw).hexdigest(),output=output)))
+"""
+
+
+COMPLETION_CHILD = """
+import hashlib,json,sys
+from pathlib import Path
+raw = Path(sys.argv[1]).read_bytes()
+packet = json.loads(raw)
+request = json.loads(sys.stdin.read())
+keys = ('request_id','nonce','mission_id','session_id','requirement_digest','contract_digest',
+        'verifier_policy_digest','candidate_digest','input_digest','adapter_registration_digest','iteration')
+selected = [c for c in packet['criteria'] if c['id'] in request['criterion_ids']]
+opened = sys.argv[3] == 'completion-open'
+output = dict(schema='mission-fresh-review-output/1', request_digest=sys.argv[2],
+    **{key:request[key] for key in keys},
+    criterion_results=[dict(criterion_id=c['id'],status='searched',reason_code='none',findings=[])
+                       for c in selected],
+    coverage=[dict(requirement_id=r['id'],classification_confirmed=True,
+        criterion_ids=[c['id'] for c in selected if r['id'] in c['requirement_ids']],
+        status='open' if opened else 'valid',reason_code='unsearched' if opened else 'none',
+        reason='Fixture child checked the registered requirement span.') for r in packet['requirements']])
+if sys.argv[3] == 'completion-failed':
+    output = dict(diagnostic='Fixture child returned an invalid output.')
 print(json.dumps(dict(digest='sha256:'+hashlib.sha256(raw).hexdigest(),output=output)))
 """
 
@@ -81,7 +110,8 @@ class Adapter:
         request = json.loads(request_bytes)
         state_root = Path(os.environ['FIXTURE_REVIEW_STATE'])
         state = _state()
-        record = next(item for item in state['fresh_review']['requests'] if item['request']['request_id'] == request['request_id'])
+        record = next(item for item in state['fresh_review']['requests']
+                      if item['status'] != 'withdrawn' and item['request']['request_id'] == request['request_id'])
         assert record['status'] == 'dispatch-unknown' and record['dispatch'] == envelope
         if os.environ.get('FIXTURE_REVIEW_MODE') == 'intent-crash':
             os._exit(7)
@@ -110,6 +140,12 @@ class Adapter:
             child = subprocess.run([sys.executable, '-c', REVIEW_CHILD, input_handle.relative_path,
                                     canonical_digest(request)], input=request_bytes.decode(),
                                    capture_output=True, text=True, check=True)
+        mode = os.environ.get('FIXTURE_REVIEW_MODE', '')
+        completion = mode.startswith('completion-')
+        if completion:
+            child = subprocess.run([sys.executable, '-c', COMPLETION_CHILD, input_handle.relative_path,
+                                    canonical_digest(request), mode], input=request_bytes.decode(),
+                                   capture_output=True, text=True, check=True)
         launch = dict(schema='mission-fresh-review-launch/1', request_id=request['request_id'],
             request_digest=canonical_digest(request), nonce=request['nonce'], operation_id=envelope['operation_id'],
             fencing_epoch=envelope['fencing_epoch'], adapter_registration_digest=request['adapter_registration_digest'],
@@ -121,19 +157,19 @@ class Adapter:
         mode = os.environ.get('FIXTURE_REVIEW_MODE', '')
         if mode == 'binding-mismatch':
             launch['parent_identity'] = 'foreign-parent'
-        if mode == 'inline':
+        if mode in ('inline', 'completion-inline'):
             launch.update(context_mode='inline', child_identity='fixture-parent', context_identity='fixture-parent')
         if mode == 'unobservable':
             launch.pop('child_identity')
         if mode == 'provider-invalid':
             launch['child_identity'] = 'file:opaque'
         output = b'{"diagnostic":"import is out of scope"}'
-        if mode == 'counterexample':
+        if mode == 'counterexample' or completion:
             output = json.dumps(json.loads(child.stdout)['output'], sort_keys=True, separators=(',', ':')).encode()
         prior = json.loads(_journal().read_text()) if _journal().exists() else {'count': 0}
         _journal().write_text(json.dumps({'launch': launch, 'count': prior['count'] + 1,
                                         'output': output.decode(), **(dict(process_exited=True, exit_code=0,
-            budget_used=dict(wall_time_sec=1,tool_calls=0,replays=0,output_bytes=len(output))) if mode == 'counterexample' else {})}))
+            budget_used=dict(wall_time_sec=1,tool_calls=0,replays=0,output_bytes=len(output))) if mode == 'counterexample' or completion else {})}))
         if mode == 'crash':
             os._exit(7)
         return freeze_json_value(launch)
