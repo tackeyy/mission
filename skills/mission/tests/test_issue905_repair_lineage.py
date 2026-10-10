@@ -95,6 +95,9 @@ def test_stable_origin_and_dual_repro_digest(published, gate_state):
     row = state.repair.lineages[0].document.thaw()
     origin = row['origin']
     assert row['lineage_id'] == lineage_id(origin, row['criterion_id'])
+    # Reused local ids in different requests and criteria are distinct origins.
+    assert len({row['lineage_id'], lineage_id(dict(origin, request_id='another-request'), row['criterion_id']),
+                lineage_id(origin, 'another-criterion')}) == 3
     assert row['repro']['runner_repro_digest'] == json.loads(findings[0])['replay']['repro_input_digest']
     assert row['repro']['repro_digest'] != row['repro']['runner_repro_digest']
     assert import_origins(state, (evidence,)) == state
@@ -133,8 +136,101 @@ def test_public_terminal_persists_lineage_and_rejects_completion(replay_reviewer
     if wire_schema == 4:
         from .test_issue879_completion_cli import _persist_fixture
         _persist_fixture(root, json.loads(run_cli('get', cwd=root).stdout), 4)
+        _reject_unchanged(run_cli, root, ['init', 'replacement', '--force-mission'], 'repair-lineage-reinitialization-forbidden')
     _reject_unchanged(run_cli, root, ['mark-passes'], 'acceptance-unresolved-finding')
     _reject_unchanged(run_cli, root, ['set', 'repair_lineage=null'], 'dedicated')
+
+
+@pytest.mark.parametrize('wire_schema', [4, 5], ids=['v4-flat', 'v5-container'])
+@pytest.mark.parametrize('route', ['mark-passes', 'closeout', 'already-passed'])
+def test_missing_contract_cannot_bypass_public_completion(replay_reviewer, run_cli, wire_schema, route):
+    from .test_issue879_completion_cli import _persist_fixture, _reject_unchanged
+    root = replay_reviewer[0]
+    invoke(run_cli, replay_reviewer, FIXTURE_REVIEW_MODE='counterexample')
+    assert import_output(run_cli, replay_reviewer).returncode == 0
+    run_cli('verification', 'run', '--criterion', 'AC1', cwd=root, check=True)
+    state = json.loads(run_cli('get', cwd=root).stdout)
+    assert state['repair_lineage']['lineages'][0]['lifecycle'] == 'open'
+    state.pop('acceptance_contract')
+    if route == 'already-passed':
+        state.update(passes=True, loop_active=False, phase='done', terminal_outcome='completed_pass')
+    _persist_fixture(root, state, wire_schema, operation_id='missing-contract-fixture')
+    loaded = run_cli('get', cwd=root)
+    assert loaded.returncode == 0, loaded.stderr
+    args = ['closeout' if route == 'already-passed' else route]
+    _reject_unchanged(run_cli, root, args, 'acceptance-contract-missing')
+    # The same scored legacy session is still usable without either origin store.
+    state.pop('fresh_review'); state.pop('repair_lineage')
+    _persist_fixture(root, state, wire_schema, operation_id='legacy-without-origins')
+    result = run_cli(*args, cwd=root)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize('store', ['origin', 'overflow', 'projection', 'typed-lineage'])
+@pytest.mark.parametrize('closed', [False, True], ids=['v4-carrier', 'v5-extensions'])
+def test_missing_contract_rejects_kernel_completion(clean, published, store, closed):
+    from mission_kernel.fresh_review import FreshReviewProjection
+    from mission_kernel.repair_lineage import import_origins, RepairProjection
+    from mission_kernel.fresh_review_completion import decode_completion_evidence
+    state, command = clean
+    record, terminal, _, coverage, findings = published
+    evidence = decode_completion_evidence(record.request, terminal, json.loads(coverage), tuple(map(json.loads, findings)))
+    state = replace(state, fresh_review=FreshReviewProjection((record,)))
+    document = state.legacy_passthrough.thaw(); document['fresh_review'] = projection_document(state.fresh_review)
+    state = import_origins(replace(state, legacy_passthrough=freeze_json_value(document)), (evidence,))
+    document = state.legacy_passthrough.thaw(); document.pop('acceptance_contract')
+    if store in ('origin', 'typed-lineage', 'overflow'):
+        document.pop('repair_lineage')
+    if store == 'projection':
+        document['repair_lineage']['lineages'] = []; document.pop('fresh_review')
+        state = replace(state, fresh_review=FreshReviewProjection(), repair=RepairProjection())
+    elif store == 'typed-lineage':
+        document.pop('fresh_review')
+        state = replace(state, fresh_review=FreshReviewProjection())
+    elif store != 'typed-lineage':
+        state = replace(state, repair=RepairProjection())
+    if store == 'overflow':
+        result = record.result.thaw()
+        for key in ('coverage_receipt', 'findings', 'independent'):
+            result.pop(key)
+        result.update(outcome='failed', reason='output-over-import-limit')
+        state = replace(state, fresh_review=FreshReviewProjection((replace(record, status='failed', result=freeze_json_value(result)),)))
+        document['fresh_review'] = projection_document(state.fresh_review)
+    if closed:
+        from mission_kernel.model import SchemaOrigin
+        state = replace(state, schema_origin=SchemaOrigin.V5, legacy_passthrough=None, extensions=freeze_json_value(document))
+    else:
+        state = replace(state, legacy_passthrough=freeze_json_value(document))
+    rejected(state, command, 'acceptance-contract-missing')
+
+
+def test_prohibited_side_effect_blocks_even_context_findings(published):
+    from mission_kernel.repair_lineage import RepairProjection, effective_unresolved_findings
+    record, _, contract, coverage, findings = published
+    contract = copy.deepcopy(contract)
+    contract['requirements'][0]['classification'] = 'context'
+    finding = json.loads(findings[0])
+    def unresolved(finding):
+        changed, evidence = bound_record(record, json.loads(coverage), (finding,))
+        from mission_kernel.fresh_review import FreshReviewProjection
+        return effective_unresolved_findings(RepairProjection(), FreshReviewProjection((changed,)), (evidence,), contract)
+    assert len(unresolved(finding)) == 1
+    finding['prohibited_side_effect_ids'] = []
+    assert unresolved(finding) == ()
+
+
+@pytest.mark.parametrize('schema', [4, 5])
+def test_persistence_rejects_raw_duplicate_repair_keys(tmp_path, schema):
+    from mission_persistence.authoritative_reader import read_session_json
+    projection = dict(schema='mission-repair-lineage/1', lineages=[])
+    payload = dict(schema_version=schema, repair_lineage=projection)
+    if schema == 5:
+        payload = dict(schema_version=5, extensions=dict(repair_lineage=projection))
+    raw = canonical_bytes(payload).replace(b'"repair_lineage":', b'"repair_lineage":null,"repair_lineage":', 1)
+    path = tmp_path / 'session.json'; path.write_bytes(raw)
+    with pytest.raises(ValueError, match='duplicate'):
+        read_session_json(path)
+    assert path.read_bytes() == raw
 
 
 def test_initial_backfill_status_and_resume_keep_all_origins(replay_reviewer, run_cli):

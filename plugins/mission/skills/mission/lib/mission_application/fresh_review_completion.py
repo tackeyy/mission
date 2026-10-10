@@ -16,6 +16,7 @@ from mission_kernel.fresh_review_completion import (
 from mission_kernel.fresh_review_coverage import FreshReviewBindings
 from mission_kernel.fresh_review_receipts import decode_terminal_receipt
 from mission_kernel.json_codec import decode_json_object
+from mission_kernel.repair_lineage import require_completion_contract
 from . import fresh_review as prepare
 
 
@@ -60,6 +61,7 @@ def observe_completion_inputs(state, *, root, load_policy, read_evidence):
     from its command subset and perspective using the same packet as prepare.
     Never substitute a saved request digest for a new observation.
     """
+    require_completion_contract(state)
     if 'acceptance_contract' not in state:
         return FreshReviewCompletionInputs()
     contract = state['acceptance_contract']

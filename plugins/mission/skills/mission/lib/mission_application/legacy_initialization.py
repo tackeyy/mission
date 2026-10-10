@@ -364,7 +364,7 @@ def initialize_legacy_v4(request, services):
                     services.system_exit(2)
                 if "repair_lineage" in existing_data:
                     services.printer("ERROR: repair-lineage-reinitialization-forbidden", file=services.stderr)
-                    raise SystemExit(2)
+                    services.system_exit(2)
                 if "fresh_review" in existing_data:
                     services.printer("ERROR: fresh-review-reinitialization-forbidden", file=services.stderr)
                     services.system_exit(2)

@@ -37,6 +37,26 @@ def _overflow_id(request, output_digest):
         session_id=request.session_id, request_id=request.request_id, output_digest=output_digest))
 
 
+def require_completion_contract(document, *, reviews=None, repair=None):
+    """A missing contract cannot erase retained origin obligations."""
+    if 'acceptance_contract' in document:
+        return
+    if 'repair_lineage' in document or repair is not None and repair.lineages:
+        raise FreshReviewError('acceptance-contract-missing')
+    # Non-projection legacy diagnostics have no origins. Wire shape validation
+    # remains with the authoritative reader and state codecs.
+    if reviews is None and not isinstance(document.get('fresh_review'), dict):
+        return
+    reviews = decode_reviews(document) if reviews is None else reviews
+    for record in reviews.requests:
+        if not isinstance(record, FreshReviewRecord) or record.result is None:
+            continue
+        terminal = decode_terminal_receipt(record.result.thaw())
+        if (isinstance(terminal, CompletedFreshReview) and terminal.findings
+                or isinstance(terminal, FailedFreshReview) and terminal.reason == 'output-over-import-limit'):
+            raise FreshReviewError('acceptance-contract-missing')
+
+
 def projection_document(projection):
     return dict(schema=SCHEMA, lineages=[row.document.thaw() for row in projection.lineages])
 

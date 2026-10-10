@@ -1253,7 +1253,7 @@ def _acceptance_completion_ready(state: MissionState, command: MarkPass) -> None
     Within fresh-review conditions the section 4 table has priority:
     missing > stale > pending > non-independent > coverage-open; this also
     applies across criterion decisions, never criterion iteration order.
-    Missing contract keys keep the legacy gates; an explicit null is invalid.
+    Missing contract keys keep legacy gates only without origin obligations.
     """
     document = (
         state.legacy_passthrough.thaw()
@@ -1261,6 +1261,12 @@ def _acceptance_completion_ready(state: MissionState, command: MarkPass) -> None
         else state.extensions.thaw()
     )
     if "acceptance_contract" not in document:
+        from .repair_lineage import require_completion_contract
+        from .fresh_review import FreshReviewError
+        try:
+            require_completion_contract(document, reviews=state.fresh_review, repair=state.repair)
+        except FreshReviewError as exc:
+            raise _Rejected(exc.code) from exc
         return
     contract = document["acceptance_contract"]
     if not isinstance(contract, dict):

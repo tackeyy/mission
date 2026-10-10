@@ -26,11 +26,13 @@ from .ports import LegacyMissionRepository
 from .compatibility import compatibility_delta
 from .fresh_review_completion import FreshReviewCompletionInputs
 from mission_kernel.fresh_review import FreshReviewError
+from mission_kernel.repair_lineage import require_completion_contract
 from acceptance_contract import AcceptanceContractError, frozen_verifier_commands
 
 
 def capture_acceptance_candidates(project_root, data: dict, load_policy: Callable) -> dict[str, str]:
     """Recapture each required verifier candidate only under its frozen policy."""
+    require_completion_contract(data)
     if "acceptance_contract" not in data:
         return {}
     contract = data["acceptance_contract"]
@@ -88,7 +90,11 @@ class ReviewFailure(ValueError):
 
 
 def closeout_already_passed(data: dict) -> bool:
-    """Permit the legacy shortcut only when completion has no contract."""
+    """Permit the legacy shortcut only without a contract or origin obligations."""
+    try:
+        require_completion_contract(data)
+    except FreshReviewError as exc:
+        raise ReviewFailure(exc.code, reason=exc.code) from exc
     if data.get("passes") is not True:
         return False
     if "acceptance_contract" in data:
@@ -506,6 +512,7 @@ def mark_pass(
     with repository.transaction():
         data = repository.load()
         try:
+            require_completion_contract(data)
             acceptance_candidates = (
                 services.capture_acceptance_candidates(data)
                 if services.capture_acceptance_candidates is not None
@@ -513,7 +520,7 @@ def mark_pass(
             )
             fresh_inputs = (
                 services.capture_fresh_review_completion(data)
-                if services.capture_fresh_review_completion is not None and 'acceptance_contract' in data
+                if services.capture_fresh_review_completion is not None
                 else FreshReviewCompletionInputs()
             )
         except FreshReviewError as exc:
@@ -523,14 +530,13 @@ def mark_pass(
         except (OSError, ValueError, KeyError, TypeError, RecursionError) as exc:
             raise ReviewFailure("acceptance candidate capture failed", reason="acceptance-candidate-unavailable") from exc
         frozen_candidates = freeze_json_value(acceptance_candidates)
-        if "acceptance_contract" in data:
-            reason = acceptance_completion_rejection(
-                decode_mission_state(json.dumps(data).encode("utf-8")),
-                MarkPass(acceptance_candidate_digests=frozen_candidates,
-                         fresh_review_evidence=fresh_inputs.evidence, fresh_review_bindings=fresh_inputs.bindings),
-            )
-            if reason is not None:
-                raise ReviewFailure(reason, reason=reason)
+        reason = acceptance_completion_rejection(
+            decode_mission_state(json.dumps(data).encode("utf-8")),
+            MarkPass(acceptance_candidate_digests=frozen_candidates,
+                     fresh_review_evidence=fresh_inputs.evidence, fresh_review_bindings=fresh_inputs.bindings),
+        )
+        if reason is not None:
+            raise ReviewFailure(reason, reason=reason)
         verification = services.verify_force_approval(data) if request.force else None
         try:
             services.validate_artifact_gate(data)
