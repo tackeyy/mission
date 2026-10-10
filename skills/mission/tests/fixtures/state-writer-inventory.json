@@ -231,7 +231,8 @@
     "receipt_decision:replace": 1
   },
   "lib/mission_application/guard_timeout.py": {
-    "_report_exhaustion:write": 2
+    "_report_exhaustion:write": 2,
+    "_wrapper:write": 1
   },
   "lib/mission_application/legacy_initialization.py": {
     "initialize_legacy_v4:atomic_write_bytes": 1,
