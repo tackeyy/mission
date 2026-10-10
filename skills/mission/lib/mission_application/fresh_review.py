@@ -220,7 +220,9 @@ def run_fresh_review_status_cli(args, services):
         from .fresh_review_completion import observe_lineage_evidence
         repair = decode_repair(loaded[1])
         evidence = observe_lineage_evidence(loaded[1], root=root, read_evidence=services.read_evidence)
-        unresolved = effective_unresolved_findings(repair, projection, evidence, loaded[1].get('acceptance_contract', {'requirements': [], 'criteria': []}))
+        unresolved = ()
+        if 'acceptance_contract' in loaded[1] or projection.requests or repair.lineages:
+            unresolved = effective_unresolved_findings(repair, projection, evidence, loaded[1].get('acceptance_contract'))
         return json.dumps({'requests': requests, 'capacity': capacity, 'repair': dict(
             repair_document(repair), unresolved_lineage_ids=list(unresolved))}, ensure_ascii=False, indent=2)
     except FreshReviewError as exc:

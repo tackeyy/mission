@@ -1798,9 +1798,10 @@ def _prepare_fresh_review(state: MissionState, command: object) -> Transition:
 def _import_repair_origins(state: MissionState, command: ImportRepairOrigins) -> Transition:
     from .repair_lineage import import_origins
     from .fresh_review import FreshReviewError, _integer
+    from .model import FencedLease
     try:
         _integer(command.fencing_epoch, 'repair-lineage-fence-invalid')
-        if command.fencing_epoch != getattr(state.lease, 'fencing_epoch', 0):
+        if not isinstance(state.lease, FencedLease) or command.fencing_epoch != state.lease.fencing_epoch:
             raise FreshReviewError('repair-lineage-stale-fence')
         next_state = import_origins(state, command.evidence)
     except FreshReviewError as rejected:

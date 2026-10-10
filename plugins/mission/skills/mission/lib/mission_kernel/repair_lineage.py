@@ -265,7 +265,22 @@ def import_origins(state, evidence):
     return replace(state, repair=projection, snapshot_provenance=None, **{key: freeze_json_value(document)})
 
 
+def _obligation_indices(contract):
+    """Use the completion gate's contract boundary before origin/status lookup."""
+    from acceptance_contract import POLICY_BOUND_SCHEMA, frozen_verifier_commands, validate as validate_contract
+    try:
+        validated = validate_contract({key: value for key, value in contract.items() if key != 'imported_at'}
+            if isinstance(contract, dict) else contract)
+        if validated['schema'] == POLICY_BOUND_SCHEMA:
+            frozen_verifier_commands(validated)
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise FreshReviewError('acceptance-contract-invalid') from exc
+    return ({r['id']: r['classification'] for r in validated['requirements']},
+            {c['id']: c for c in validated['criteria']})
+
+
 def effective_unresolved_findings(projection, reviews, evidence, contract):
+    requirements, criteria = _obligation_indices(contract)
     rows = origin_documents(reviews, evidence, contract)
     if type(projection) is not RepairProjection or any(type(r) is not FindingLineage or type(r.document) is not FrozenJsonObject for r in projection.lineages):
         raise FreshReviewError(SHAPE)
@@ -275,8 +290,6 @@ def effective_unresolved_findings(projection, reviews, evidence, contract):
     expected = {r['lineage_id']: r for r in rows}
     if any(key not in expected or value != expected[key] for key, value in existing.items()):
         raise FreshReviewError(MISMATCH)
-    requirements = {r['id']: r['classification'] for r in contract['requirements']}
-    criteria = {c['id']: c for c in contract['criteria']}
     return tuple(row['lineage_id'] for row in rows if row['kind'] == 'unimported-findings'
         or row['prohibited_side_effect_ids'] or row['criterion_id'] not in criteria
         or any(requirements.get(key, 'unknown') != 'context' for key in criteria[row['criterion_id']]['requirement_ids']))

@@ -300,3 +300,83 @@ def test_backfill_consumes_only_existing_reservation(published, gate_state):
     assert not decide(state, replace(command, fencing_epoch=0)).accepted
     with pytest.raises(ValueError, match='invalid-transition-effect-binding'):
         bind_transition_effects(decision.transition, (object(),))
+
+
+@pytest.mark.parametrize('missing', ['requirements', 'criteria', 'classification',
+    'empty-requirements', 'empty-criteria', 'unknown-requirement'])
+def test_malformed_contract_rejects_with_reason(clean, replay_reviewer, run_cli, missing):
+    from mission_kernel.repair_lineage import RepairProjection, effective_unresolved_findings
+    from mission_kernel.fresh_review import FreshReviewProjection
+    from .test_issue879_completion_cli import _rewrite_fixture_document, _reject_unchanged
+    state, command = clean
+    document = state.legacy_passthrough.thaw()
+    contract = document['acceptance_contract']
+    def corrupt(value):
+        if missing == 'classification':
+            value['requirements'][0].pop('classification')
+        elif missing.startswith('empty-'):
+            value[missing.removeprefix('empty-')] = []
+        elif missing == 'unknown-requirement':
+            value['criteria'][0]['requirement_ids'] = ['unknown']
+        else:
+            value.pop(missing)
+    corrupt(contract)
+    with pytest.raises(FreshReviewError) as error:
+        effective_unresolved_findings(RepairProjection(), FreshReviewProjection(), (), contract)
+    assert error.value.code == 'acceptance-contract-invalid'
+    # The final transition and public status must reject without raw exceptions.
+    rejected(replace(state, legacy_passthrough=freeze_json_value(document)), command, 'acceptance-contract-invalid')
+    root = replay_reviewer[0]
+    _rewrite_fixture_document(root, lambda doc: corrupt(doc.get('extensions', doc)['acceptance_contract']))
+    _reject_unchanged(run_cli, root, ['fresh-review', 'status'], 'acceptance-contract-invalid')
+
+
+def test_status_without_contract_or_origins_remains_available(completion_session, run_cli):
+    from .test_issue879_completion_cli import _persist_fixture, _public_bytes
+    root, state, schema = completion_session
+    state.pop('acceptance_contract')
+    _persist_fixture(root, state, schema)
+    before = _public_bytes(root)
+    result = run_cli('fresh-review', 'status', cwd=root)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)['repair']['unresolved_lineage_ids'] == []
+    assert _public_bytes(root) == before
+
+
+def test_malformed_frozen_command_rejects_completed_origin(gate_state, published, replay_reviewer, run_cli):
+    from mission_kernel.repair_lineage import RepairProjection, effective_unresolved_findings
+    from mission_kernel.fresh_review_completion import decode_completion_evidence
+    from .test_issue879_completion_cli import _rewrite_fixture_document, _reject_unchanged
+    record, terminal, contract, coverage, findings = published
+    evidence = decode_completion_evidence(record.request, terminal, json.loads(coverage), tuple(map(json.loads, findings)))
+    def corrupt(value):
+        commands = value['verifier_policy']['commands']
+        commands[next(iter(commands))] = None
+    corrupt(contract)
+    with pytest.raises(FreshReviewError) as error:
+        effective_unresolved_findings(RepairProjection(), gate_state.fresh_review, (evidence,), contract)
+    assert error.value.code == 'acceptance-contract-invalid'
+    invoke(run_cli, replay_reviewer, FIXTURE_REVIEW_MODE='counterexample')
+    assert import_output(run_cli, replay_reviewer).returncode == 0
+    root = replay_reviewer[0]
+    _rewrite_fixture_document(root, lambda doc: corrupt(doc.get('extensions', doc)['acceptance_contract']))
+    _reject_unchanged(run_cli, root, ['fresh-review', 'status'], 'acceptance-contract-invalid')
+
+
+@pytest.mark.parametrize('absent', ['legacy-absent', 'none'])
+def test_origin_import_requires_present_fenced_lease(gate_state, absent):
+    from mission_kernel.commands import ImportRepairOrigins
+    from mission_kernel.model import LegacyAbsentLease
+    from mission_kernel.fresh_review import FreshReviewProjection
+    from mission_kernel.repair_lineage import RepairProjection
+    from mission_kernel.transitions import decide
+    document = gate_state.legacy_passthrough.thaw()
+    document.pop('fresh_review', None); document.pop('repair_lineage', None)
+    state = replace(gate_state, fresh_review=FreshReviewProjection(), repair=RepairProjection(),
+        lease=LegacyAbsentLease() if absent == 'legacy-absent' else None,
+        legacy_passthrough=freeze_json_value(document))
+    decision = decide(state, ImportRepairOrigins((), 0))
+    assert not decision.accepted
+    assert decision.rejection.code == 'repair-lineage-stale-fence'
+    assert decision.transition is None and decision.events == decision.effects == ()
+    assert state.legacy_passthrough.thaw() == document
