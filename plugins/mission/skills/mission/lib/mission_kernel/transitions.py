@@ -49,6 +49,7 @@ from .commands import (
     RecordVerificationReceipt,
     ImportAcceptanceContract,
     PrepareFreshReview,
+    ImportRepairOrigins,
     BeginFreshReviewDispatch,
     WithdrawFreshReviewRequest,
     RecordFreshReviewLaunch,
@@ -494,6 +495,7 @@ def _active_control(state: MissionState) -> MissionControl:
 _COMPATIBILITY_FORBIDDEN_FIELDS = frozenset(
     {
         "fresh_review",
+        "repair_lineage",
         "budget_ledger",
         "phase",
         "passes",
@@ -815,6 +817,8 @@ def _apply_compatibility(
     ):
         raise _Rejected("compatibility-payload-invalid")
     requested = set(keys) | set(removals)
+    if any(key.startswith(('repair_lineage.', 'extensions.repair_lineage')) for key in requested):
+        raise _Rejected('compatibility-field-forbidden')
     if set(keys) & set(removals):
         raise _Rejected("compatibility-field-overlap")
     if requested & (_COMPATIBILITY_FORBIDDEN_FIELDS - _METADATA_FIELDS):
@@ -873,9 +877,13 @@ def _merge_extension_fields(
     ):
         raise _Rejected("invalid-set-fields")
     requested = set(keys)
+    if any(key.startswith(('repair_lineage.', 'extensions.repair_lineage')) for key in requested):
+        raise _Rejected('repair-lineage-dedicated-field')
     if any(key.startswith("budget_ledger.") for key in requested):
         raise _Rejected("budget-policy-frozen")
     nested = fields.thaw().get("extensions")
+    if isinstance(nested, dict) and 'repair_lineage' in nested:
+        raise _Rejected('repair-lineage-dedicated-field')
     if isinstance(nested, dict) and "budget_ledger" in nested:
         raise _Rejected("budget-policy-frozen")
     if state.budget.policy is not None and "budget_minutes" in requested:
@@ -1245,7 +1253,7 @@ def _acceptance_completion_ready(state: MissionState, command: MarkPass) -> None
     Within fresh-review conditions the section 4 table has priority:
     missing > stale > pending > non-independent > coverage-open; this also
     applies across criterion decisions, never criterion iteration order.
-    Missing contract keys keep the legacy gates; an explicit null is invalid.
+    Missing contract keys keep legacy gates only without origin obligations.
     """
     document = (
         state.legacy_passthrough.thaw()
@@ -1253,6 +1261,12 @@ def _acceptance_completion_ready(state: MissionState, command: MarkPass) -> None
         else state.extensions.thaw()
     )
     if "acceptance_contract" not in document:
+        from .repair_lineage import require_completion_contract
+        from .fresh_review import FreshReviewError
+        try:
+            require_completion_contract(document, reviews=state.fresh_review, repair=state.repair)
+        except FreshReviewError as exc:
+            raise _Rejected(exc.code) from exc
         return
     contract = document["acceptance_contract"]
     if not isinstance(contract, dict):
@@ -1314,9 +1328,11 @@ def _acceptance_completion_ready(state: MissionState, command: MarkPass) -> None
     from .fresh_review_completion import judge_completion
     from .fresh_review import FreshReviewError
     try:
+        from .repair_lineage import validate_projection_backing as validate_repair_backing
+        validate_repair_backing(document, state.repair)
         judge_completion(state.fresh_review, command.fresh_review_evidence,
                          command.fresh_review_bindings, contract, contract_digest,
-                         tuple(item["id"] for item in required), candidates)
+                         tuple(item["id"] for item in required), candidates, state.repair)
     except FreshReviewError as exc:
         raise _Rejected(exc.code) from exc
 
@@ -1785,6 +1801,20 @@ def _prepare_fresh_review(state: MissionState, command: object) -> Transition:
     return Transition(next_state, (KernelEvent("fresh-review-prepared"),))
 
 
+def _import_repair_origins(state: MissionState, command: ImportRepairOrigins) -> Transition:
+    from .repair_lineage import import_origins
+    from .fresh_review import FreshReviewError, _integer
+    from .model import FencedLease
+    try:
+        _integer(command.fencing_epoch, 'repair-lineage-fence-invalid')
+        if not isinstance(state.lease, FencedLease) or command.fencing_epoch != state.lease.fencing_epoch:
+            raise FreshReviewError('repair-lineage-stale-fence')
+        next_state = import_origins(state, command.evidence)
+    except FreshReviewError as rejected:
+        raise _Rejected(rejected.code)
+    return Transition(next_state, (KernelEvent("repair-origins-imported"),))
+
+
 def _fresh_review_dispatch(state: MissionState, command: object) -> Transition:
     from .fresh_review_dispatch import dispatch_state
     from .fresh_review import FreshReviewError
@@ -2161,6 +2191,7 @@ _SPECIALIST_AUTHORITY_FIELDS = frozenset(
         "review_findings",
         "provider_output",
         "final_report",
+        "repair_lineage",
     }
 )
 
@@ -2171,6 +2202,8 @@ def _specialist_record(
     if not isinstance(value, FrozenJsonObject):
         raise _Rejected("specialist-recommendation-invalid")
     record = value.thaw()
+    if any(key.startswith(('repair_lineage.', 'extensions.repair_lineage')) for key in record):
+        raise _Rejected('specialist-recommendation-authority-invalid')
     if set(record) & (_SPECIALIST_AUTHORITY_FIELDS - allowed_authority):
         raise _Rejected("specialist-recommendation-authority-invalid")
     return record
@@ -2405,6 +2438,9 @@ TRANSITION_TABLE = build_transition_table(
             PrepareFreshReview,
             _command_type_guard(PrepareFreshReview),
             _prepare_fresh_review,
+        ),
+        TransitionRule(
+            "repair-origins-import", ImportRepairOrigins, _command_type_guard(ImportRepairOrigins), _import_repair_origins,
         ),
         TransitionRule(
             "fresh-review-run", BeginFreshReviewDispatch, _command_type_guard(BeginFreshReviewDispatch), _fresh_review_dispatch,
@@ -2648,7 +2684,7 @@ def bind_transition_effects(
     elif isinstance(command, (UpdateProgress, GenerateContextManifest, GenerateClaimsLedger)):
         claims = (command.effect,)
     elif isinstance(command, (ClearProgress, RecordVerification, RecordVerificationReceipt, ImportAcceptanceContract,
-                              BeginFreshReviewDispatch, RecordFreshReviewLaunch, CommitFreshReviewResult, WithdrawFreshReviewRequest)):
+                              BeginFreshReviewDispatch, RecordFreshReviewLaunch, CommitFreshReviewResult, WithdrawFreshReviewRequest, ImportRepairOrigins)):
         claims = ()
     if claims is not None and (
         len(effects) != len(claims)

@@ -627,4 +627,5 @@ def prepare_request_state(state, command):
     frozen = freeze_json_value(document)
     changes = {'fresh_review': projection, 'snapshot_provenance': None}
     changes['legacy_passthrough' if state.legacy_passthrough is not None else 'extensions'] = frozen
-    return replace(state, **changes)
+    from .repair_lineage import import_origins
+    return import_origins(replace(state, **changes), command.repair_evidence)

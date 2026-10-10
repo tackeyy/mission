@@ -308,6 +308,7 @@ def test_decide_and_guidance_share_one_named_transition_table():
         "executor-handoff-reject-canonical-drift",
         "executor-handoff-verify-step",
         "fresh-review-prepare",
+        "repair-origins-import",
         "fresh-review-run",
         "fresh-review-launch",
         "fresh-review-output-import",

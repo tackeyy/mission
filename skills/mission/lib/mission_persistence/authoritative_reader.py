@@ -12,6 +12,7 @@ from typing import Any, Optional, Tuple, Union
 
 from mission_kernel import MissionState, decode_mission_state
 from mission_kernel.budget import decode_ledger
+from mission_kernel.repair_lineage import decode_projection as decode_repair_projection
 from mission_kernel.fresh_review import FreshReviewError, decode_projection
 from mission_kernel.codec_v4 import MissionStateDecodeError
 from mission_kernel.json_codec import (
@@ -968,10 +969,10 @@ def _raw_document_carries_budget_ledger(text: str) -> bool:
     # predicate as decode_projection / decode_ledger (``== 5`` also matches 5.0).
     versions = [value for key, value in top if key == "schema_version"]
     if not versions or versions[-1] != 5:
-        return any(key == "budget_ledger" for key, _ in top)
-    return any(key == "budget_ledger" for key, _ in top) or any(
+        return any(key in ("budget_ledger", "repair_lineage") for key, _ in top)
+    return any(key in ("budget_ledger", "repair_lineage") for key, _ in top) or any(
         key == "extensions" and isinstance(value, _JsonPairs)
-        and any(inner == "budget_ledger" for inner, _ in value)
+        and any(inner in ("budget_ledger", "repair_lineage") for inner, _ in value)
         for key, value in top)
 
 
@@ -998,6 +999,7 @@ def read_session_json(session_path: Union[Path, str], *, source: Union[str, byte
         return snapshot.document_copy()
     if isinstance(document, dict):
         decode_projection(document.get("extensions", {}) if document.get("schema_version") == 5 else document)
+        decode_repair_projection(document.get("extensions", {}) if document.get("schema_version") == 5 else document)
         if _raw_document_carries_budget_ledger(source.decode("utf-8")):
             # Legacy tolerance keeps the last duplicate; a budget ledger is bound to
             # budget_minutes, so its document must not hide an earlier duplicate.
@@ -1032,7 +1034,7 @@ def read_authoritative_snapshot(
             # locks, layout creation or recovery, including ordinary live reads.
             repository_snapshot = repository.read_pinned_head(selected_session_id, source)
         except FencedCommitError as error:
-            if error.code.startswith("fresh-review-"):
+            if error.code.startswith(("fresh-review-", "repair-lineage-")):
                 raise FreshReviewError(error.code) from error
             raise
         state_document = decode_json_object(repository_snapshot.state_bytes)
@@ -1059,7 +1061,7 @@ def _decode_authoritative_mission_state(state_bytes):
     try:
         return decode_mission_state(state_bytes)
     except MissionStateDecodeError as error:
-        if error.code.startswith("fresh-review-"):
+        if error.code.startswith(("fresh-review-", "repair-lineage-")):
             raise FreshReviewError(error.code) from error
         raise
 

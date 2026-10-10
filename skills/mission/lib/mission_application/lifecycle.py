@@ -436,7 +436,7 @@ def initialize(
         current = repository.current_mission()
     except (OSError, TypeError, UnicodeError, ValueError) as error:
         code = getattr(error, "code", "")
-        if code.startswith("fresh-review-"):
+        if code.startswith(("fresh-review-", "repair-lineage-")):
             raise LifecycleFailure(code, reason=code) from error
         reason = (
             "canonical-json-invalid"
@@ -452,6 +452,8 @@ def initialize(
     from mission_kernel.budget import decode_ledger
     if decode_ledger(document).policy is not None:
         raise LifecycleFailure("budget-reinitialization-forbidden", reason="budget-reinitialization-forbidden")
+    if "repair_lineage" in document:
+        raise LifecycleFailure("repair-lineage-reinitialization-forbidden", reason="repair-lineage-reinitialization-forbidden")
     if "fresh_review" in document:
         raise LifecycleFailure(
             "fresh-review-reinitialization-forbidden",

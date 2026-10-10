@@ -243,7 +243,7 @@ def validated_coverage_inputs(projection, evidence, bindings, contract, contract
     return attempts, facts
 
 
-def judge_completion(projection, evidence, bindings, contract, contract_digest, required, candidates):
+def judge_completion(projection, evidence, bindings, contract, contract_digest, required, candidates, repair=None):
     """Require carriers, authenticate bytes/inner facts, then conditions 3, 4, 5.
 
     Condition 3 uses missing > stale > pending > non-independent > coverage-open
@@ -284,5 +284,7 @@ def judge_completion(projection, evidence, bindings, contract, contract_digest, 
             or any(result['status'] != 'searched' for item in evidence if item.request_id in selected_ids
                    for result in item.coverage.thaw()['criterion_results'])):
         raise FreshReviewError('acceptance-coverage-open')
-    if any(item.open_finding_ids for item in facts):
+    from .repair_lineage import RepairProjection, effective_unresolved_findings
+    unresolved = effective_unresolved_findings(RepairProjection() if repair is None else repair, projection, evidence, contract)
+    if unresolved or any(item.open_finding_ids for item in facts):
         raise FreshReviewError('acceptance-unresolved-finding')

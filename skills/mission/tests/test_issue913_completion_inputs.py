@@ -448,7 +448,7 @@ def test_bindings_require_exact_request_and_command_keys(gate_state, published, 
 
 
 @pytest.mark.parametrize('closed', [False, True])
-def test_contract_requires_carriers_and_current_bindings_but_legacy_does_not(gate_state, evidence_carrier, published, closed):
+def test_contract_or_retained_origins_require_completion_inputs(gate_state, evidence_carrier, published, closed):
     from mission_kernel.commands import MarkPass
     from mission_kernel.fresh_review_coverage import FreshReviewBindings
     from mission_kernel.transitions import acceptance_completion_rejection
@@ -465,6 +465,10 @@ def test_contract_requires_carriers_and_current_bindings_but_legacy_does_not(gat
     legacy.pop('acceptance_contract')
     key = 'legacy_passthrough' if not closed else 'extensions'
     assert acceptance_completion_rejection(replace(state, **{key: freeze_json_value(legacy)}),
+        _completion_command(fresh_review_evidence=None, fresh_review_bindings=True)) == 'acceptance-contract-missing'
+    from mission_kernel.fresh_review import FreshReviewProjection
+    legacy.pop('fresh_review', None)
+    assert acceptance_completion_rejection(replace(state, fresh_review=FreshReviewProjection(), **{key: freeze_json_value(legacy)}),
         _completion_command(fresh_review_evidence=None, fresh_review_bindings=True)) is None
     legacy['acceptance_contract'] = None
     assert acceptance_completion_rejection(replace(state, **{key: freeze_json_value(legacy)}), _completion_command()) == (
