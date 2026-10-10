@@ -245,7 +245,7 @@ from mission_application.evidence import (  # noqa: E402
 from mission_application.budget import run_budget_status_cli, run_budget_next, run_budget_reconcile_cli
 from mission_persistence.spawn_jobs import cleanup_jobs
 from mission_kernel.budget import BudgetError
-from mission_application.fresh_review import run_fresh_review_prepare_cli, run_fresh_review_status_cli
+from mission_application.fresh_review import run_fresh_review_prepare_cli, run_fresh_review_status_cli, run_repair_origins_cli
 from mission_application.fresh_review_withdraw import run_fresh_review_withdraw_cli
 from mission_application.fresh_review_publish import run_fresh_review_import_cli
 from mission_application.fresh_review_dispatch import run_fresh_review_dispatch_cli
@@ -13824,6 +13824,10 @@ def cmd_fresh_review_import(args):
     print(run_fresh_review_import_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES, fresh_review_host))
 
 
+def cmd_repair_origins(args):
+    print(run_repair_origins_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES))
+
+
 def cmd_fresh_review_status(args):
     print(run_fresh_review_status_cli(args, _ACCEPTANCE_CONTRACT_CLI_SERVICES))
 
@@ -16359,6 +16363,7 @@ def _add_review_parsers(subparsers) -> None:
     p_prepare.add_argument("--max-output-bytes", type=int, default=262144)
     p_prepare.add_argument("--max-packet-bytes", type=int, default=1048576)
     p_prepare.set_defaults(func=cmd_fresh_review_prepare, command_outcome_tracking=True)
+    p_fresh_sub.add_parser("import-lineage", help="保存済み反例の来歴だけを初回取込み（解決は付与しない）").set_defaults(func=cmd_repair_origins, command_outcome_tracking=True)
     p_fresh_sub.add_parser("status", help="保存済み request と消費状態を表示").set_defaults(func=cmd_fresh_review_status)
 
     p_run = p_fresh_sub.add_parser("run", help="dispatch intent を保存して登録 adapter を起動")

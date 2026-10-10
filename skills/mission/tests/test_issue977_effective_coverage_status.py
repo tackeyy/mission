@@ -475,8 +475,10 @@ def test_fresh_review_status_reads_capacity_from_the_same_snapshot(tmp_path, mon
     monkeypatch.setattr(module, 'decode_projection', lambda data: SimpleNamespace(requests=()))
     def fail(code, status):
         raise AssertionError(code)
+    def read_evidence(*_args, **_kwargs):
+        raise AssertionError('no evidence is referenced by an empty state')
     services = SimpleNamespace(resolve_state_file=lambda root: state_file, load_snapshot=load_snapshot,
-                               capacity_status=capacity_status, fail=fail)
+                               capacity_status=capacity_status, fail=fail, read_evidence=read_evidence)
     output = json.loads(module.run_fresh_review_status_cli(SimpleNamespace(), services))
     assert output['capacity'] == {'from': 'snapshot-A'}
     assert len(reads) == 1

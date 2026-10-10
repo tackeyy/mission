@@ -71,7 +71,7 @@ def build_input_packet(contract, perspective, snapshots):
     return packet
 
 
-def prepare_fresh_review(state, *, root, options, operation_id, intent_digest, payload_digest, now, load_policy):
+def prepare_fresh_review(state, *, root, options, operation_id, intent_digest, payload_digest, now, load_policy, read_evidence=None):
     historical = _historical(state, operation_id, intent_digest, payload_digest)
     if historical is not None:
         return PreparedEvidenceOperation(PrepareFreshReview(historical, operation_id, intent_digest, payload_digest, None, None),
@@ -136,8 +136,10 @@ def prepare_fresh_review(state, *, root, options, operation_id, intent_digest, p
     if {key: value.digest for key, value in _capture(root, commands).items()} != {key: value.digest for key, value in snapshots.items()}:
         raise FreshReviewError('fresh-review-stale')
     effect = make_evidence_effect('fresh-review-input', target, content)
+    from .fresh_review_completion import observe_lineage_evidence
+    evidence = observe_lineage_evidence(state, root=root, read_evidence=read_evidence)
     command = PrepareFreshReview(request, operation_id, intent_digest, payload_digest, freeze_json_value(packet),
-                                 FreshReviewInputEffectClaim(effect.kind, effect.target, effect.digest, effect.size))
+                                 FreshReviewInputEffectClaim(effect.kind, effect.target, effect.digest, effect.size), evidence)
     return PreparedEvidenceOperation(command, (effect,), {'request': request_document(request)})
 
 
@@ -167,7 +169,7 @@ def run_fresh_review_prepare_cli(args, services):
                                 operation_command_type=identity.command_type),
             lambda state: prepare_fresh_review(state, root=root, options=options, operation_id=operation_id,
                                                intent_digest=intent, payload_digest=payload, now=services.now(),
-                                               load_policy=services.load_verifier_policy),
+                                               load_policy=services.load_verifier_policy, read_evidence=services.read_evidence),
         )
         return json.dumps({'ok': True, **result}, ensure_ascii=False, indent=2)
     except OSError:
@@ -214,6 +216,41 @@ def run_fresh_review_status_cli(args, services):
                                  'launch': item.launch.thaw() if item.launch is not None else None,
                                  'independent': item.independent,
                                  'result': item.result.thaw() if item.result is not None else None})
-        return json.dumps({'requests': requests, 'capacity': capacity}, ensure_ascii=False, indent=2)
+        from mission_kernel.repair_lineage import decode_projection as decode_repair, projection_document as repair_document, effective_unresolved_findings
+        from .fresh_review_completion import observe_lineage_evidence
+        repair = decode_repair(loaded[1])
+        evidence = observe_lineage_evidence(loaded[1], root=root, read_evidence=services.read_evidence)
+        unresolved = ()
+        if 'acceptance_contract' in loaded[1] or projection.requests or repair.lineages:
+            unresolved = effective_unresolved_findings(repair, projection, evidence, loaded[1].get('acceptance_contract'))
+        return json.dumps({'requests': requests, 'capacity': capacity, 'repair': dict(
+            repair_document(repair), unresolved_lineage_ids=list(unresolved))}, ensure_ascii=False, indent=2)
     except FreshReviewError as exc:
         services.fail(exc.code, 2)
+
+
+def prepare_repair_origins(state, *, root, read_evidence):
+    from mission_kernel.commands import ImportRepairOrigins
+    from .fresh_review_completion import observe_lineage_evidence
+    evidence = observe_lineage_evidence(state, root=root, read_evidence=read_evidence)
+    return PreparedEvidenceOperation(ImportRepairOrigins(evidence, state.get('fencing_epoch', 0)), (), {})
+
+
+def run_repair_origins_cli(args, services):
+    root = Path.cwd()
+    state_file = services.resolve_state_file(root)
+    if not state_file.exists():
+        services.fail('fresh-review-state-missing', 2)
+    try:
+        identity = prepare_cli_operation('repair-origins-import', {}, session_id=state_file.stem,
+            compatibility_arguments=services.compatibility_arguments, canonical_operation=services.canonical_operation)
+        result = execute_evidence_operation(services.repository(root, state_file, stamp=True,
+            strict_read=True, pre_admit_lease=True, session_id=state_file.stem,
+            operation_id=identity.operation_id, operation_command=identity.operation_command,
+            operation_command_type=identity.command_type),
+            partial(prepare_repair_origins, root=root, read_evidence=services.read_evidence))
+        return json.dumps({'ok': True, **result})
+    except OSError:
+        services.fail('fresh-review-io-unavailable', 2)
+    except (FreshReviewError, EvidenceFailure, CliOperationRejected) as exc:
+        services.fail(getattr(exc, 'code', str(exc)), 2)

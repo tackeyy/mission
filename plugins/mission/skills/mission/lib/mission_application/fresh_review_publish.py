@@ -92,10 +92,12 @@ def prepare_failed_output(state, *, request_id, operation, epoch, observation, r
             findings=[reference(item) for item in finding_claims])
     elif decision.reason != 'output-over-import-limit':
         replays = ()
+    from .fresh_review_completion import observe_lineage_evidence
+    evidence = observe_lineage_evidence(state, root=root, read_evidence=getattr(services, 'read_evidence', None))
     command = ImportFreshReviewOutput(request_id, operation, epoch,
         freeze_json_value(receipt_document(decode_terminal_receipt(receipt))),
         freeze_json_value(observation), freeze_json_value(used), candidate,
-        None if raw is None else base64.b64encode(raw).decode('ascii'), claim, coverage_claim, finding_claims, replays)
+        None if raw is None else base64.b64encode(raw).decode('ascii'), claim, coverage_claim, finding_claims, replays, evidence)
     return PreparedEvidenceOperation(command, effects, {})
 
 
