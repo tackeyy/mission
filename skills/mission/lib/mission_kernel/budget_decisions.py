@@ -372,8 +372,10 @@ def settle(ledger, at, *, reservation_id, outcome, elapsed_sec, candidate_digest
     prior = next((p for p in ledger.progress if (p.entry, p.target) == (row.entry, row.target)), None)
     count = prior.consecutive_count + 1 if prior and prior.candidate_digest == candidate_digest and prior.result_digest == result_digest else 1
     progress.append(ProgressSignature(row.entry, row.target, candidate_digest, result_digest, count))
-    if refusal_reason is not None:
-        progress = ledger.progress  # a refused verifier did not produce new evidence
+    if refusal_reason is not None or (row.entry in ('verify-approval', 'force-approval') and not completed):
+        # Design 881 §3.4 compares evidence results, not failed approval attempts.
+        # An incomplete approval must remain retryable after infrastructure repair.
+        progress = ledger.progress
     slots = ledger.stop_slots
     if row.budget_class == 'final' and outcome == 'settled' and completed and slots.final_latch is not None and at >= row.reserved_at:
         slots = replace(slots, final_run=FinalRun(row.reservation_id, at))

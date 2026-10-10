@@ -20,7 +20,7 @@ def now():
 class ApprovalBudget:
     permit: ProviderBudget
     result: dict | None = None
-    failure: Exception | None = None
+    failure: BaseException | None = None
     unstarted: bool = True
 
 
@@ -63,7 +63,8 @@ def approval_settlement(budget, at, *, completed=False):
     failure = budget.failure
     confirmed = str(failure) != 'kill-unconfirmed'
     reason = None
-    if budget.unstarted:
+    # Caller gates and user interruptions are not deadline-enforcement refusals.
+    if budget.unstarted and isinstance(failure, Exception):
         reason = getattr(failure, 'reason_code', None) or (
             'budget-deadline' if isinstance(failure, TimeoutError) else 'budget-deadline-unenforceable')
     result = budget.result if budget.result is not None else {'failure': type(failure).__name__}

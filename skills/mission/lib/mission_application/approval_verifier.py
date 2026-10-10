@@ -153,8 +153,10 @@ def run_approval(verifier, request, directory=None, *, timeout=5, grace=.2, cwd=
         permit = budget.permit
         directory = directory or (cwd or Path.cwd()) / '.mission-state' / 'exec-jobs'
         term_grace = min(grace, permit.policy.term_grace_sec)
+        # Both approval entries start the call limit at this execution boundary;
+        # preparation may differ, but the committed reservation remains the cap.
         deadline = min(permit.deadline - term_grace,
-                       permit.started + min(timeout, permit.policy.adapter_call_sec))
+                       time.monotonic() + min(timeout, permit.policy.adapter_call_sec))
         try:
             budget.result = run_job('approval-verifier', {'verifier': verifier, 'request': request}, directory,
                 deadline=deadline, term_grace=term_grace, kill_wait=permit.policy.kill_wait_sec,
@@ -162,9 +164,11 @@ def run_approval(verifier, request, directory=None, *, timeout=5, grace=.2, cwd=
                 cwd=cwd, session_id=request['session_id'])
             budget.unstarted = False
             return budget.result
-        except Exception as exc:
+        except BaseException as exc:
             budget.failure = exc
             budget.unstarted = getattr(exc, 'exec_unstarted', False)
+            if not isinstance(exc, Exception):
+                raise
             raise ValueError('approval verifier rejected the evidence') from exc
     if isinstance(verifier, dict):
         directory = directory or (cwd or Path.cwd()) / '.mission-state' / 'exec-jobs'

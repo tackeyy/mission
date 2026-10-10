@@ -260,7 +260,7 @@ def run_job(kind, payload, directory, *, timeout=5, term_grace=.2, kill_wait=.2,
         if child.returncode != 0 or set(result) != {'ok', 'result'} or result['ok'] is not True or not isinstance(result['result'], dict):
             raise ValueError('approval verifier rejected the evidence')
         return result['result']
-    except Exception as exc:
+    except BaseException as exc:
         if child is None:
             exc.exec_unstarted = True
         raise

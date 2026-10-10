@@ -322,3 +322,171 @@ def test_force_settlement_is_bound_to_pass_envelope_and_dispatch(
         altered = replace(command, compatibility=replace(command.compatibility, upserts=freeze_json_value(payload)))
         result = decide(state, altered)
         assert not result.accepted and result.rejection.code == 'approval-settlement-binding-invalid'
+
+
+@pytest.mark.parametrize('fault', ['verifier-error', 'timeout'])
+def test_approval_infrastructure_failures_allow_retry_after_verifier_repair(
+        approval_entry, tmp_path, invoke_here, monkeypatch, fault):
+    import budgeted_exec
+    entry, args, env, source = approval_entry
+    original = source.read_text()
+    read = budgeted_exec.read_frame
+    if fault == 'verifier-error':
+        _replace_callback(source, env, 'def verify(request):\n raise RuntimeError("unavailable")\n')
+    else:
+        def timeout(*a, **kw):
+            raise TimeoutError('budget-child-timeout')
+        monkeypatch.setattr(budgeted_exec, 'read_frame', timeout)
+    for _ in range(2):
+        with pytest.raises(SystemExit) as rejected:
+            invoke_here(args, env)
+        assert rejected.value.code == 2
+    ledger = json.loads(_state_path(tmp_path).read_text())['budget_ledger']
+    assert not ledger['progress']
+    assert len(ledger['settlements']) == 2
+    _replace_callback(source, env, original)
+    monkeypatch.setattr(budgeted_exec, 'read_frame', read)
+    invoke_here(args, env)
+    state = json.loads(_state_path(tmp_path).read_text())
+    assert len(state['budget_ledger']['settlements']) == 3
+    assert state['budget_ledger']['progress'][0]['consecutive_count'] == 1
+    assert state['passes'] if entry == 'force-approval' else state['provider_preflights'][args[3]]['status'] == 'approved'
+
+
+@pytest.mark.parametrize('interruption', [KeyboardInterrupt, SystemExit])
+def test_approval_interruption_after_spawn_is_charged_and_propagated_after_cleanup(
+        approval_entry, tmp_path, invoke_here, monkeypatch, interruption):
+    import budgeted_exec
+    from mission_application import approval_budget
+    from types import SimpleNamespace
+    entry, args, env, _ = approval_entry
+    error = interruption(78)
+    children = []
+    spawn = budgeted_exec.spawn_deadline_exec
+    def watched(*a, **kw):
+        child, control = spawn(*a, **kw)
+        children.append(child.pid)
+        return child, control
+    def interrupt(*a, **kw):
+        # Deterministically observe two seconds of elapsed budget time without a sleep.
+        observed = time.monotonic() + 2
+        monkeypatch.setattr(approval_budget, 'time', SimpleNamespace(monotonic=lambda: observed))
+        raise error
+    monkeypatch.setattr(budgeted_exec, 'spawn_deadline_exec', watched)
+    monkeypatch.setattr(budgeted_exec, 'read_frame', interrupt)
+    with pytest.raises(interruption) as raised:
+        invoke_here(args, env)
+    assert raised.value is error
+    assert len(children) == 1
+    for pid in children:
+        with pytest.raises(ProcessLookupError):
+            os.killpg(pid, 0)
+    ledger = json.loads(_state_path(tmp_path).read_text())['budget_ledger']
+    assert not ledger['reservations']
+    assert ledger['settlements'][-1]['observed']['elapsed_sec'] == 2
+    assert ledger['settlements'][-1]['charged_sec'] == 2
+    assert ledger['stop_slots']['refusal_count'] == 0
+    assert ledger['stop_slots']['last_refusal'] is None
+    assert not list((tmp_path / '.mission-state/exec-jobs').glob('*.json'))
+
+
+@pytest.mark.parametrize('failure', ['untrusted', 'gate', 'interrupt-before-spawn'])
+def test_approval_preexecution_rejection_does_not_record_deadline_refusal(
+        approval_entry, tmp_path, invoke_here, monkeypatch, failure):
+    import budgeted_exec
+    from pathlib import Path
+    entry, args, env, _ = approval_entry
+    path = _state_path(tmp_path)
+    if failure == 'untrusted':
+        config = Path(env['XDG_CONFIG_HOME']) / 'mission/approval-verifiers.json'
+        registry = json.loads(config.read_text())
+        registry['verifiers'] = []
+        config.write_text(json.dumps(registry))
+    elif failure == 'gate':
+        state = json.loads(path.read_text())
+        if entry == 'verify-approval':
+            state['provider_preflights'][args[3]]['outbound_packet_digest'] = 'sha256:' + '0' * 64
+        else:
+            args[args.index('--approval-evidence-ref') + 1] = 'invalid'
+        path.write_text(json.dumps(state))
+    else:
+        def interrupt(*a, **kw):
+            from mission_application import approval_budget
+            from types import SimpleNamespace
+            observed = time.monotonic() + 2
+            monkeypatch.setattr(approval_budget, 'time', SimpleNamespace(monotonic=lambda: observed))
+            raise KeyboardInterrupt()
+        monkeypatch.setattr(budgeted_exec, 'create_job', interrupt)
+    monkeypatch.setattr(budgeted_exec, 'spawn_deadline_exec', lambda *a, **kw: pytest.fail('unexpected approval spawn'))
+    with pytest.raises(KeyboardInterrupt if failure == 'interrupt-before-spawn' else SystemExit):
+        invoke_here(args, env)
+    ledger = json.loads(path.read_text())['budget_ledger']
+    assert not ledger['reservations']
+    assert len(ledger['settlements']) == 1
+    assert ledger['settlements'][0]['charged_sec'] == 0
+    assert ledger['stop_slots']['refusal_count'] == 0
+    assert ledger['stop_slots']['last_refusal'] is None
+
+
+@pytest.mark.parametrize('approval_entry', ['verify-approval'], indirect=True)
+@pytest.mark.parametrize('policy_present', [True, False])
+@pytest.mark.parametrize('fault,reason', [
+    ('missing-id', 'preflight-not-awaiting-approval'),
+    ('wrong-status', 'preflight-not-awaiting-approval'),
+    ('missing-digest', 'approval-evidence-invalid'),
+])
+def test_verify_approval_entry_errors_keep_gate_shape_with_or_without_policy(
+        approval_entry, tmp_path, invoke_here, monkeypatch, capsys, policy_present, fault, reason):
+    import budgeted_exec
+    _, args, env, _ = approval_entry
+    path = _state_path(tmp_path)
+    state = json.loads(path.read_text())
+    pointer = state['provider_preflights'][args[3]]
+    if fault == 'missing-id':
+        args[3] = 'missing'
+    elif fault == 'wrong-status':
+        pointer['status'] = 'approved'
+    else:
+        del pointer['outbound_packet_digest']
+    if not policy_present:
+        del state['budget_ledger']
+    path.write_text(json.dumps(state))
+    monkeypatch.setattr(budgeted_exec, 'spawn_deadline_exec', lambda *a, **kw: pytest.fail('unexpected approval spawn'))
+    with pytest.raises(SystemExit) as rejected:
+        invoke_here(args, env)
+    assert rejected.value.code == 2
+    assert f'provider-ineligible: {reason}' in capsys.readouterr().err
+    assert not json.loads(path.read_text()).get('budget_ledger', {}).get('reservations')
+
+
+@pytest.mark.parametrize('adapter_limit', [1, 30])
+def test_approval_deadline_starts_at_execution_and_retains_reservation_cap(
+        approval_entry, tmp_path, invoke_here, monkeypatch, adapter_limit):
+    from mission_application import approval_verifier
+    from mission_kernel.budget import decode_policy, ledger_document, new_ledger
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    entry, args, env, _ = approval_entry
+    path = _state_path(tmp_path)
+    state = json.loads(path.read_text())
+    state['budget_ledger']['policy']['adapter_call_sec'] = adapter_limit
+    state['budget_ledger'] = ledger_document(new_ledger(decode_policy(state['budget_ledger']['policy']),
+        datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')))
+    path.write_text(json.dumps(state))
+    execute = invoke_here.module._run_approval_verifier
+    job = approval_verifier.run_job
+    expected = []
+    def preparation(*a, **kw):
+        permit = kw['budget'].permit
+        # Preparation consumes time before the common execution boundary.
+        execution_at = permit.started + 2
+        monkeypatch.setattr(approval_verifier, 'time', SimpleNamespace(monotonic=lambda: execution_at))
+        expected.append(min(permit.deadline - .2, execution_at + min(5, adapter_limit)))
+        return execute(*a, **kw)
+    def checked(*a, **kw):
+        assert kw['deadline'] == expected[-1]
+        return job(*a, **kw)
+    monkeypatch.setattr(invoke_here.module, '_run_approval_verifier', preparation)
+    monkeypatch.setattr(approval_verifier, 'run_job', checked)
+    invoke_here(args, env)
+    assert len(expected) == 1
