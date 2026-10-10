@@ -68,6 +68,13 @@ class BundleReplay:
 
 
 def verify_cohort(history, materials, used_number, beacon, records, proofs, replay):
+    """Return evidence or invalid_cohort; unexpected replay errors are distinguished.
+
+    Known adapter ValueError codes remain evidence failures. Other Exception
+    values return det_replay_exception and only their type, so callers can
+    investigate evaluator/provider bugs without publishing private diagnostics.
+    Process-control BaseException subclasses propagate to the caller.
+    """
     result = {'status': 'invalid_cohort', 'canonical_attempt': None, 'checks': {'1': False, '2': False, '3': False}}
     try:
         if type(used_number) is not int: raise ValueError('attempt_number_invalid')
@@ -117,12 +124,28 @@ def verify_cohort(history, materials, used_number, beacon, records, proofs, repl
                           if all(v for _, v, _ in selection_core.criteria(t, a, materials[used_number]['scope'], None)[:3])])
         tasks = {t['task_id']: t for t in materials[used_number]['snapshot']}
         rows = {r['task_id']: r for r in manifest['tasks']}
+        # Record shape is cheap to verify for the whole Det pool, even in audit mode.
+        for row in manifest['tasks']:
+            if not all(row['criteria'].get(c, {}).get('accepted') is True for c in ('Lic', 'Con', 'Cx')): continue
+            for variant in ('starter', 'reference'):
+                runs = row['det'][variant]
+                if type(runs) is not list or len(runs) != 3:
+                    raise ValueError('det_observation_count_invalid')
         if isinstance(replay, BundleReplay):
             replay.bind_snapshot(used_number, materials[used_number]['snapshot'], a['snapshot_digest'])
         for task_id in selected:
             for variant in ('starter', 'reference'):
-                observed = selection_core.case_values(replay(used_number, task_id, variant), tasks[task_id]['checks'])
-                if any(observed != selection_core.case_values(r, tasks[task_id]['checks']) for r in rows[task_id]['det'][variant]):
+                runs = rows[task_id]['det'][variant]
+                try:
+                    evaluation = replay(used_number, task_id, variant)
+                except Exception as exc:
+                    if isinstance(exc, ValueError) and str(exc) in (
+                            'det_job_task_mismatch', 'det_binding_invalid', 'det_bundle_mismatch',
+                            'det_task_mismatch', 'det_candidate_mismatch'):
+                        raise
+                    return result | {'reason': 'det_replay_exception', 'replay_error_type': type(exc).__name__}
+                observed = selection_core.case_values(evaluation, tasks[task_id]['checks'])
+                if any(observed != selection_core.case_values(r, tasks[task_id]['checks']) for r in runs):
                     raise ValueError('det_replay_mismatch')
         return result | {'status': 'valid', 'checks': {'1': True, '2': True, '3': True},
                          'reason': None, 'det_replayed': selected,

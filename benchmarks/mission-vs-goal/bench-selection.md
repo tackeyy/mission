@@ -63,8 +63,22 @@ statistics belong to I1. K planning, approval and acquisition remain caller duti
 `replay(number, task_id, variant)` three times per starter/reference for every task passing Lic, Con and Cx.
 Commit these per-case observations in B before the beacon is released. During verification, `all` replays
 each such task once per variant, including Det rejections; early-filter rejections are skipped.
+Every such task must have exactly three committed observations in a list for each variant.
+Verification checks this throughout the Det pool, including tasks outside the audit sample;
+any other count returns `invalid_cohort` with `det_observation_count_invalid`.
 Only the named case booleans are compared, but case names/count, boolean types, status and reason must
 form a valid I2c result. Unavailable evaluation and differing case outcomes invalidate the cohort.
+
+Unexpected `Exception` subclasses raised by the replay callable return `invalid_cohort` with
+`det_replay_exception` and `replay_error_type`, without exception text. This includes programming
+errors such as `RuntimeError`, `AssertionError` and `TypeError`; callers must investigate the
+evaluator/provider failure before retrying verification, and must not count the cohort as valid or
+promote a later attempt. Only the adapter's known `ValueError` codes (`det_job_task_mismatch`,
+`det_binding_invalid`, `det_bundle_mismatch`, `det_task_mismatch`, `det_candidate_mismatch`) retain
+their existing reason codes; unknown `ValueError` diagnostics also become `det_replay_exception`.
+Malformed returned I2c results remain schema failures. Process-control exceptions such as
+`KeyboardInterrupt` and `SystemExit` propagate. During pre-seed `collect_det`, replay exceptions
+also propagate so the caller aborts collection rather than committing partial B observations.
 
 `audit_tasks(seed, manifest, selected)` takes the union of all selected pilot/confirmation primary tasks
 (controls reuse those primary tasks) and the first 59 tasks from each accepted/rejected Det stratum.

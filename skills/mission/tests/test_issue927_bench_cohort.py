@@ -502,3 +502,56 @@ def test_confirmation_k_must_be_integer_and_within_the_remaining_ranking(m, k):
     else: raw = m.canonical(d)
     update_file(m, f[0], 'D', raw)
     assert check(m, f)['status'] == 'invalid_cohort'
+
+
+@pytest.mark.parametrize('mode', ['all', 'audit'])
+@pytest.mark.parametrize('variant', ['starter', 'reference'])
+@pytest.mark.parametrize('count', [0, 1, 2, 4])
+def test_det_replay_requires_three_committed_observations_even_for_rejected_tasks(m, mode, variant, count):
+    f = fixture(m, 18)
+    material = f[1][1]; task_id = material['snapshot'][-1]['task_id']
+    material['observations'][task_id][variant] = [observed(variant == 'reference') for _ in range(count)]
+    a = json.loads(next(iter(f[0]['prs'][0]['files'].values()))); a['det_mode'] = mode
+    update_file(m, f[0], 'A', a); regenerate_committed(m, f)
+    manifest = json.loads(next(iter(f[0]['prs'][1]['files'].values())))
+    assert next(row for row in manifest['tasks'] if row['task_id'] == task_id)['reason'] == 'Det'
+    result = check(m, f, rerun=lambda number, task_id, current: observed(current == 'reference'))
+    assert result['status'] == 'invalid_cohort' and result['canonical_attempt'] == 1
+    assert result['reason'] == 'det_observation_count_invalid'
+    assert result['checks']['3'] is False
+
+
+def test_audit_rejects_wrong_observation_count_even_outside_the_replay_sample(m):
+    f = fixture(m, 130); material = f[1][1]
+    for snapshot in material['snapshot'][70:]:
+        material['observations'][snapshot['task_id']]['starter'] = [observed(True) for _ in range(3)]
+    a = json.loads(next(iter(f[0]['prs'][0]['files'].values()))); a['det_mode'] = 'audit'
+    update_file(m, f[0], 'A', a); regenerate_committed(m, f)
+    manifest = json.loads(next(iter(f[0]['prs'][1]['files'].values())))
+    sample = cohort.audit_tasks(bytes.fromhex(f[2]['randomness']), manifest, [])
+    omitted = next(row['task_id'] for row in manifest['tasks'] if not row['accepted'] and row['task_id'] not in sample)
+    material['observations'][omitted]['starter'] = []
+    regenerate_committed(m, f)
+    calls = []
+    def replay(number, task_id, variant):
+        calls.append(task_id); return material['observations'][task_id][variant][0]
+    result = check(m, f, rerun=replay)
+    assert result['status'] == 'invalid_cohort' and result['reason'] == 'det_observation_count_invalid'
+    assert omitted not in calls
+
+
+@pytest.mark.parametrize('error', [RuntimeError, AssertionError, TypeError, OSError, ValueError])
+def test_replay_exceptions_return_a_distinct_failure_without_publishing_exception_text(m, error):
+    f = fixture(m); second(m, f)
+    def replay(*args): raise error('private evaluator diagnostic')
+    result = check(m, f, rerun=replay)
+    assert result['status'] == 'invalid_cohort' and result['canonical_attempt'] == 1
+    assert result['reason'] == 'det_replay_exception' and result['replay_error_type'] == error.__name__
+    assert result['checks']['3'] is False
+    assert 'private evaluator diagnostic' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('error', [KeyboardInterrupt, SystemExit])
+def test_replay_process_control_exceptions_propagate(m, error):
+    def replay(*args): raise error()
+    with pytest.raises(error): check(m, fixture(m), rerun=replay)
