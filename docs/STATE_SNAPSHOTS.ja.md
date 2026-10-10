@@ -97,6 +97,36 @@ mode `0600`、content digest、semantic self-consistency、live metadata freshne
 digest を再計算する攻撃までは防げません。信頼できない利用者や transport から受け取った
 snapshot は使用しないでください。
 
+## 受入契約のcoverage表示
+
+`acceptance-contract status`は既存のkeyを維持し、次のkeyを追加します。
+`coverage`と`imported_coverage`は契約import時の不変値です。
+
+```json
+{
+  "coverage": {"status": "pending"},
+  "imported_coverage": {"status": "pending"},
+  "effective_coverage": "valid",
+  "effective_coverage_reason_code": null,
+  "effective_coverage_request_id": "request-1"
+}
+```
+
+実効coverageは完了判定と同じkernelの最新全体attempt規則から導出し、
+`pending`・`valid`・`open`を表示します。pending/openでは
+[設計§4の判定表](design/689-fresh-review-receipt.md)の理由コードと、
+選択したrequest IDを返します（全体attemptがなければnull）。最新がwithdrawnの場合も
+古い成功へ戻りません。完了判定と同じ観測処理で現在のbindingを再取得し、
+候補・policy・evidenceを観測できなければ、コマンド自体は成功させたまま
+`effective_coverage: "unavailable"`と理由コードを返します。
+保存済みbindingだけでvalidにはせず、契約と状態bytesは変更しません。
+契約がないsessionの出力は従来どおり`{"present": false}`です。
+実効coverageのvalidだけでは、他の完了条件の成立を意味しません。
+
+`fresh-review status`はrequest一覧と容量の診断という既存の形を維持します。
+全体coverageは`acceptance-contract status`で確認してください。request一覧にも
+同じ観測を加えると、容量だけを調べる場合にも候補とevidenceの読取りが必要になるためです。
+
 ## state 容量と手動での回復
 
 state は 4 MiB の上限内に、未終端 item・halt 1 回・残りの lease takeover 分を予約します。

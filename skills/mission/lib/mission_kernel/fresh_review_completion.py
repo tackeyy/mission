@@ -208,6 +208,18 @@ def _completion_facts(item, request, contract):
     return facts
 
 
+def coverage_attempts(projection):
+    """Adapt persisted records for both completion and status, without mutation."""
+    from .fresh_review import WithdrawnFreshReviewRecord
+    from .fresh_review_coverage import FreshReviewAttempt
+    from .fresh_review_receipts import decode_terminal_receipt
+    legacy_statuses = ('reserved', 'consumed')
+    return tuple(FreshReviewAttempt(item if isinstance(item, WithdrawnFreshReviewRecord) else item.request,
+        'pending' if item.status in legacy_statuses else item.status,
+        None if isinstance(item, WithdrawnFreshReviewRecord) or item.status in legacy_statuses or item.result is None
+        else decode_terminal_receipt(item.result.thaw())) for item in projection.requests)
+
+
 def judge_completion(projection, evidence, bindings, contract, contract_digest, required, candidates):
     """Require carriers, authenticate bytes/inner facts, then conditions 3, 4, 5.
 
@@ -222,20 +234,15 @@ def judge_completion(projection, evidence, bindings, contract, contract_digest, 
     Withdrawn tombstones retain prepare order and criterion scope; when selected,
     they are missing before freshness and never contribute evidence or findings.
     """
-    from .fresh_review import FreshReviewRecord, WithdrawnFreshReviewRecord
-    from .fresh_review_coverage import FreshReviewAttempt, judge_fresh_review, judge_criterion, FreshReviewReason, REASON_ORDER
-    from .fresh_review_receipts import decode_terminal_receipt
+    from .fresh_review import FreshReviewRecord
+    from .fresh_review_coverage import judge_fresh_review, judge_criterion, FreshReviewReason, REASON_ORDER
     if bindings is None:
         raise FreshReviewError(INCOMPLETE)
     validate_completion_carriers(projection, evidence, bindings, contract_digest)
     records = tuple(item for item in projection.requests if isinstance(item, FreshReviewRecord))
     # D1 nonce checkpoints have no authenticated terminal receipt; even a
     # consumed result claiming success remains pending in the decision table.
-    legacy_statuses = ('reserved', 'consumed')
-    attempts = tuple(FreshReviewAttempt(item if isinstance(item, WithdrawnFreshReviewRecord) else item.request,
-        'pending' if item.status in legacy_statuses else item.status,
-        None if isinstance(item, WithdrawnFreshReviewRecord) or item.status in legacy_statuses or item.result is None
-        else decode_terminal_receipt(item.result.thaw())) for item in projection.requests)
+    attempts = coverage_attempts(projection)
     try:
         facts = tuple(_completion_facts(item, next(r.request for r in records if r.request.request_id == item.request_id),
                                         contract) for item in evidence)

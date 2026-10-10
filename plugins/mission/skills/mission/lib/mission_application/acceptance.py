@@ -13,7 +13,11 @@ from mission_application.cli_operation import CliOperationRejected, prepare_cli_
 from mission_application.artifact import EvidenceFailure
 from mission_kernel.commands import ImportAcceptanceContract
 from mission_kernel.json_codec import freeze_json_value
+from mission_kernel.fresh_review import decode_projection, FreshReviewError
+from mission_kernel.fresh_review_completion import coverage_attempts
+from mission_kernel.fresh_review_coverage import derive_effective_coverage, FreshReviewBindings, FreshReviewReason
 from mission_application.verifier_policy import VerifierPolicyError, freeze as freeze_verifier_policy
+from mission_application.fresh_review_completion import FreshReviewCompletionServices
 
 
 @dataclass(frozen=True)
@@ -35,6 +39,7 @@ class AcceptanceContractCliServices:
     capacity_status: object = None
     commit_errors: tuple = ()
     load_snapshot: object = None
+    read_evidence: object = None
 
 
 def prepare_acceptance_contract_import(state: object, *, now: object, raw: object, verifier_policy=None) -> PreparedEvidenceOperation:
@@ -78,7 +83,7 @@ def prepare_acceptance_contract_import_operation(raw, *, session_id, compatibili
     )
 
 
-def acceptance_contract_status(state: object) -> dict:
+def acceptance_contract_status(state: object, *, observe_fresh_review=None) -> dict:
     if not isinstance(state, dict):
         raise EvidenceFailure("state-invalid")
     if "acceptance_contract" not in state:
@@ -92,7 +97,32 @@ def acceptance_contract_status(state: object) -> dict:
         raise EvidenceFailure(str(exc)) from exc
     result["imported_at"] = contract.get("imported_at")
     result["verifier_policy"] = contract.get("verifier_policy")
+    result["imported_coverage"] = result["coverage"]
+    result.update(_effective_coverage_status(state, contract, observe_fresh_review))
     return result
+
+
+def _effective_coverage_status(state, contract, observe_fresh_review):
+    decision = None
+    try:
+        attempts = coverage_attempts(decode_projection(state))
+        required = tuple(item['id'] for item in contract['criteria'] if item['required'])
+        # Missing/withdrawn selection needs no current bindings. Let the kernel
+        # select it so an unavailable old receipt cannot mask that diagnostic.
+        decision = derive_effective_coverage(attempts, required,
+            FreshReviewBindings(canonical_contract_digest(contract), (), ()))
+        if decision.reason_code != FreshReviewReason.MISSING:
+            observed = observe_fresh_review(state)
+            decision = derive_effective_coverage(attempts, required, observed.bindings)
+        return dict(effective_coverage=decision.effective_coverage.value,
+                    effective_coverage_reason_code=decision.reason_code.value if decision.reason_code else None,
+                    effective_coverage_request_id=decision.request_id)
+    except FreshReviewError as exc:
+        reason = exc.code
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError):
+        reason = 'acceptance-fresh-review-bindings-unavailable'
+    return dict(effective_coverage='unavailable', effective_coverage_reason_code=reason,
+                effective_coverage_request_id=decision.request_id if decision else None)
 
 
 def _state_file(cwd, services):
@@ -139,7 +169,8 @@ def run_acceptance_contract_status_cli(args, services) -> str:
     try:
         with repository.transaction():
             data = repository.load()
-        return json.dumps(acceptance_contract_status(data), ensure_ascii=False, indent=2)
+        observation = FreshReviewCompletionServices(cwd, services.load_verifier_policy, services.read_evidence)
+        return json.dumps(acceptance_contract_status(data, observe_fresh_review=observation), ensure_ascii=False, indent=2)
     except EvidenceFailure as exc:
         services.fail(exc.code, 2)
     except AcceptanceContractError as exc:
