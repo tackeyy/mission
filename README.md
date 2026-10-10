@@ -357,6 +357,23 @@ audit/stats state snapshots are documented in
 routing, and `--force-mission` keeps the mission loop active even when a Simple
 task would normally route to goal.
 
+Sessions with an acceptance contract also require passed verification receipts
+for every required criterion on the current candidate, independent fresh review
+receipts, valid effective coverage, and no unresolved mandatory-violation findings.
+Register a runtime adapter in `$XDG_CONFIG_HOME/mission/fresh-review-adapters.json`;
+there is no default adapter. The public flow is `init` → registered policy and
+`acceptance-contract import` → `verification run --criterion <ID>` for each required
+criterion → `fresh-review prepare` → `fresh-review run` → `fresh-review import` →
+the ordinary review/aggregate/`push-score --scoring-json` flow → `mark-passes`/`closeout`.
+Inline review in the parent context is recorded as `independent=false` and cannot
+satisfy completion. Preparing a newer whole attempt supersedes earlier clean
+coverage; a later clean review does not erase unresolved findings. Contract-key-absent
+legacy sessions keep their existing completion rules. See the
+[reviewer protocol](skills/mission-reviewer/SKILL.md#契約付きsessionのfresh-review) and
+[receipt design](docs/design/689-fresh-review-receipt.md) for registration and bindings.
+The fixture adapter tests cover flat v4 and fenced v5 containers retaining v4
+payloads; they do not prove context separation in a real agent host.
+
 ## Requirements
 
 - macOS or Linux
