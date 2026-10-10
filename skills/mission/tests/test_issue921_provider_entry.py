@@ -663,3 +663,73 @@ def test_budgeted_provider_watchdog_loss_after_start_is_not_unstarted(
     assert entry.get('child_pid')
     assert entry['reason_code'] == 'budget-provider-exchange-failed'
     assert marker.exists()
+
+
+@pytest.mark.parametrize('error_type', [OSError, KeyboardInterrupt, SystemExit])
+@pytest.mark.parametrize('boundary', ['cleanup', 'spawn-handoff'])
+def test_provider_cleanup_exception_cannot_release_unconfirmed_reservation(
+        run_cli, tmp_path, prepare_approved_invocation, invoke_here, monkeypatch, error_type, boundary):
+    import budgeted_exec
+    _, env = _prepare_command_provider(run_cli, tmp_path)
+    args, env, _ = prepare_approved_invocation(cwd=tmp_path, provider='guarded-command-provider',
+        iteration=1, phase='planning', env_extra=env)
+    _budget(tmp_path)
+    cleanup, children = budgeted_exec.cleanup_group, []
+    def failed_observation(child, **kw):
+        children.append(child)
+        raise error_type('cleanup observation failed')
+    if boundary == 'cleanup':
+        monkeypatch.setattr(budgeted_exec, 'cleanup_group', failed_observation)
+    else:
+        spawn = budgeted_exec.spawn_deadline_exec
+        def lost_handle(*a, **kw):
+            child, control = spawn(*a, **kw)
+            children.append(child)
+            os.close(control)
+            raise error_type('spawn handoff failed')
+        monkeypatch.setattr(budgeted_exec, 'spawn_deadline_exec', lost_handle)
+    try:
+        if error_type is OSError and boundary == 'cleanup':
+            invoke_here(args, env)
+        else:
+            with pytest.raises(SystemExit if error_type is OSError else error_type):
+                invoke_here(args, env)
+        state = json.loads(_state_path(tmp_path).read_text())
+        ledger = state['budget_ledger']
+        assert len(ledger['reservations']) == 1
+        assert ledger['settlements'][-1]['outcome'] == 'kill-unconfirmed'
+        entry = state['specialist_invocations'][-1]
+        if boundary == 'cleanup':
+            assert entry['reason_code'] == 'kill-unconfirmed'
+        else:
+            assert entry['status'] == 'dispatch-unknown'
+            assert entry.get('proven_no_dispatch') is not True
+    finally:
+        for child in children:
+            assert cleanup(child, term_grace=.2, kill_wait=2)
+
+
+@pytest.mark.parametrize('error_type', [KeyboardInterrupt, SystemExit])
+def test_unstarted_provider_interruption_is_persisted_then_propagated(
+        run_cli, tmp_path, prepare_approved_invocation, invoke_here, monkeypatch, error_type):
+    import budgeted_exec
+    _, env = _prepare_command_provider(run_cli, tmp_path)
+    args, env, _ = prepare_approved_invocation(cwd=tmp_path, provider='guarded-command-provider',
+        iteration=1, phase='planning', env_extra=env)
+    _budget(tmp_path)
+    error = error_type('interrupted before spawn')
+    error.exec_unstarted = error.exec_cleanup_confirmed = True
+    def interrupted(*a, **kw):
+        raise error
+    monkeypatch.setattr(budgeted_exec, 'spawn_deadline_exec', interrupted)
+    with pytest.raises(error_type) as observed:
+        invoke_here(args, env)
+    assert observed.value is error
+    document = json.loads(_state_path(tmp_path).read_text())
+    entry = document['specialist_invocations'][-1]
+    assert entry['status'] == 'failed-before-start' and entry['proven_no_dispatch'] is True
+    assert 'child_pid' not in entry
+    ledger = document['budget_ledger']
+    assert not ledger['reservations']
+    assert ledger['settlements'][-1]['outcome'] == 'settled'
+    assert ledger['settlements'][-1]['charged_sec'] == 0

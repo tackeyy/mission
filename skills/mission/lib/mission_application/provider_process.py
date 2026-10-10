@@ -142,11 +142,14 @@ def exchange_provider(child, packet, deadline, *, term_grace=.2, kill_wait=.2,
         return ProviderExchange(bytes(outputs['stdout']), bytes(outputs['stderr']),
                                 None if b'E' in control else child.returncode, timed_out or b'T' in control,
                                 confirmed, observed, truncated, complete, b'E' in control, b'W' in control)
-    except BaseException:
+    except BaseException as error:
         # Only exceptions raised by this exchange count, including collection.
         # An enclosing caller's except block is not an exchange failure.
+        error.exec_cleanup_confirmed = confirmed is True
         if confirmed is False:
-            raise ValueError('kill-unconfirmed')
+            failure = ValueError('kill-unconfirmed')
+            failure.exec_cleanup_confirmed = False
+            raise failure from error
         raise
     finally:
         for stream in (child.stdin, child.stdout, child.stderr):

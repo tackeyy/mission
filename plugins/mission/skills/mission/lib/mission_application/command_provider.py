@@ -519,6 +519,7 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
     spawn_failed_reason = None
     exchange = None
     budget_failure = None
+    exchange_interruption = None
     kill_confirmed = True
     if strict_result is not None:
         # A strict backend is still external work.  Its return value becomes
@@ -568,20 +569,39 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
             else:
                 from budgeted_exec import spawn_deadline_exec
                 if time.monotonic() >= budget.deadline:
-                    raise OSError("budget-child-deadline-expired")
+                    error = OSError("budget-child-deadline-expired")
+                    error.exec_unstarted = error.exec_cleanup_confirmed = True
+                    raise error
                 process, control_receiver = spawn_deadline_exec(
                     argv, min(budget.deadline + budget.policy.term_grace_sec + budget.policy.kill_wait_sec + 1,
                               time.monotonic() + 86400),
                     stdin=execution.PIPE, stdout=execution.PIPE, stderr=execution.PIPE, env=command_env)
-        except (OSError, ValueError) as exc:
+        except BaseException as exc:
             if budget is None and not isinstance(exc, OSError):
                 raise
-            spawn_failed_reason = "budget-deadline-unenforceable" if budget is not None else "spawn-failed"
             exit_code = None; stdout = ""; stderr = execution.redact(str(exc))
             completed_at = execution.clock()
-            entry.update({"status": "failed-before-start", "lifecycle_state": "terminal", "transitioned_at": completed_at,
-                          "completed_at": completed_at, "reason_code": spawn_failed_reason,
-                          "proven_no_dispatch": True})
+            if budget is not None and not (getattr(exc, 'exec_unstarted', False)
+                                          and getattr(exc, 'exec_cleanup_confirmed', False)):
+                kill_confirmed, budget_failure = False, 'kill-unconfirmed'
+                # No handle means no process receipt: preserve dispatch-unknown,
+                # charge the held reservation, and let reconciliation recover it.
+                unknown_repository = _make_repo_invoke(':spawn-unknown')
+                with unknown_repository.transaction():
+                    unknown = unknown_repository.load()
+                    if not getattr(unknown_repository, 'operation_replayed', False):
+                        settle_provider(unknown, budget, completed_at, execution.value_digest(entry), confirmed=False)
+                        unknown_repository.save(unknown)
+                if not isinstance(exc, Exception):
+                    raise
+                raise CommandProviderFailure('kill-unconfirmed', 'provider-ineligible: kill-unconfirmed', 2) from exc
+            else:
+                spawn_failed_reason = "budget-deadline-unenforceable" if budget is not None else "spawn-failed"
+                entry.update({"status": "failed-before-start", "lifecycle_state": "terminal", "transitioned_at": completed_at,
+                              "completed_at": completed_at, "reason_code": spawn_failed_reason,
+                              "proven_no_dispatch": True})
+                if not isinstance(exc, Exception):
+                    exchange_interruption = exc
         else:
             if budget is not None:
                 # No repository lock/commit may delay the child's deadline.
@@ -612,10 +632,12 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
                         budget_failure = "budget-child-timeout"
                     elif not exchange.output_complete or exchange.output_truncated:
                         budget_failure = "budget-output-incomplete"
-                except (OSError, ValueError) as exc:
-                    kill_confirmed = str(exc) != "kill-unconfirmed"
+                except BaseException as exc:
+                    kill_confirmed = getattr(exc, 'exec_cleanup_confirmed', False)
                     budget_failure = "budget-provider-exchange-failed" if kill_confirmed else "kill-unconfirmed"
                     exit_code, stdout, stderr = process.returncode, "", execution.redact(str(exc))
+                    if not isinstance(exc, Exception):
+                        exchange_interruption = exc
 
             # An exec refusal is terminal before the provider process starts.
             # It has no process receipt to persist or reconcile.
@@ -779,6 +801,8 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
                 cwd, data, entry, request.iteration, evidence,
                 save_state=_repo_invoke_result.save,
             )
+    if exchange_interruption is not None:
+        raise exchange_interruption
     result = {"ok": status == "completed", "outcome_kind": outcome["outcome_kind"], "outcome": outcome, "entry": entry}
     if selected_entry:
         result["selected_entry"] = selected_entry
