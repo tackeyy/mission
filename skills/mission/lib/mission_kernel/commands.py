@@ -355,6 +355,25 @@ class ImportRepairOrigins:
 
 
 @dataclass(frozen=True)
+class BeginFindingRepair:
+    lineage_id: str
+    operation_id: str
+    history: Optional[FrozenJsonObject]
+    plan: str
+    history_effect: Optional[FreshReviewInputEffectClaim]
+    plan_effect: Optional[FreshReviewInputEffectClaim]
+    repro_effect: Optional[FreshReviewInputEffectClaim]
+    evidence: tuple[FreshReviewCompletionEvidence, ...] = ()
+
+
+@dataclass(frozen=True)
+class ReconcileFindingRepair:
+    attempt_id: str
+    operation_id: str
+    reason: str = 'publication-result-lost'
+
+
+@dataclass(frozen=True)
 class WithdrawFreshReviewRequest:
     request_id: str
     operation_id: str
@@ -603,6 +622,8 @@ Command = Union[
     ImportAcceptanceContract,
     PrepareFreshReview,
     ImportRepairOrigins,
+    BeginFindingRepair,
+    ReconcileFindingRepair,
     BeginFreshReviewDispatch,
     WithdrawFreshReviewRequest,
     RecordFreshReviewLaunch,
@@ -646,6 +667,8 @@ _COMMAND_TYPES = {
     ImportAcceptanceContract: "acceptance-contract-import",
     PrepareFreshReview: "fresh-review-prepare",
     ImportRepairOrigins: "repair-origins-import",
+    BeginFindingRepair: "repair-begin",
+    ReconcileFindingRepair: "repair-reconcile",
     BeginFreshReviewDispatch: "fresh-review-run",
     WithdrawFreshReviewRequest: "fresh-review-withdraw",
     RecordFreshReviewLaunch: "fresh-review-launch",

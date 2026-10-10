@@ -50,6 +50,8 @@ from .commands import (
     ImportAcceptanceContract,
     PrepareFreshReview,
     ImportRepairOrigins,
+    BeginFindingRepair,
+    ReconcileFindingRepair,
     BeginFreshReviewDispatch,
     WithdrawFreshReviewRequest,
     RecordFreshReviewLaunch,
@@ -1801,6 +1803,15 @@ def _prepare_fresh_review(state: MissionState, command: object) -> Transition:
     return Transition(next_state, (KernelEvent("fresh-review-prepared"),))
 
 
+def _repair_attempt(state, command):
+    from .repair_attempts import mutate_attempt
+    from .fresh_review import FreshReviewError
+    try:
+        return Transition(mutate_attempt(state, command), (KernelEvent("repair-attempt-recorded"),))
+    except (FreshReviewError, ValueError, TypeError, KeyError, AttributeError, StopIteration, RecursionError) as exc:
+        raise _Rejected(getattr(exc, 'code', 'repair-attempt-invalid')) from exc
+
+
 def _import_repair_origins(state: MissionState, command: ImportRepairOrigins) -> Transition:
     from .repair_lineage import import_origins
     from .fresh_review import FreshReviewError, _integer
@@ -2439,6 +2450,8 @@ TRANSITION_TABLE = build_transition_table(
             _command_type_guard(PrepareFreshReview),
             _prepare_fresh_review,
         ),
+        TransitionRule("repair-begin", BeginFindingRepair, _command_type_guard(BeginFindingRepair), _repair_attempt),
+        TransitionRule("repair-reconcile", ReconcileFindingRepair, _command_type_guard(ReconcileFindingRepair), _repair_attempt),
         TransitionRule(
             "repair-origins-import", ImportRepairOrigins, _command_type_guard(ImportRepairOrigins), _import_repair_origins,
         ),
@@ -2675,6 +2688,10 @@ def bind_transition_effects(
         claims = () if command.effect is None else (command.effect,)
         if isinstance(command, ImportFreshReviewOutput):
             claims += (() if command.coverage_effect is None else (command.coverage_effect,)) + command.findings_effect
+    elif isinstance(command, BeginFindingRepair):
+        claims = () if command.history_effect is None else (command.history_effect, command.plan_effect, command.repro_effect)
+    elif isinstance(command, ReconcileFindingRepair):
+        claims = ()
     elif isinstance(command, (InitializeArtifact, RenderArtifact, RecordArtifactPublication)):
         claims = (command.effect,)
     elif isinstance(command, AppendArtifactBlock):

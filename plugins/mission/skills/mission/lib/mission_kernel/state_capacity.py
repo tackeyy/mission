@@ -466,9 +466,15 @@ def lineage_stage_delta(document: Mapping, request) -> int:
     )
 
 
-def repair_attempt_reserve(_document: Mapping) -> int:
-    """E2 (#?) stub. Always zero until the repair-attempt writer exists."""
-    return 0
+def repair_attempt_reserve(document: Mapping) -> int:
+    from .repair_lineage import decode_projection
+    from .repair_attempts import REPAIR_TERMINAL_DELTA
+    surface = document.get('extensions', {}) if document.get('schema_version') == 5 else document
+    try:
+        return sum(REPAIR_TERMINAL_DELTA for row in decode_projection(surface).lineages
+                   for item in row.document.thaw().get('attempts', ()) if item['status'] == 'pending')
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return STATE_LIMIT
 
 
 def disposition_reserve(_document: Mapping) -> int:
@@ -650,7 +656,8 @@ def residual_reservation(
     recovery = ledger.stop_slots.system_recovery.reservation
     if recovery is not None:
         held.append(recovery)
-    total = sum(row.reserved_bytes + BUDGET_SETTLEMENT_ROW_DELTA for row in held)
+    total = repair_attempt_reserve(document)
+    total += sum(row.reserved_bytes + BUDGET_SETTLEMENT_ROW_DELTA for row in held)
     if encoding is StateEncoding.LEGACY_PRETTY:
         return total
     projection = fresh_review_projection(document)
@@ -668,7 +675,7 @@ def residual_reservation(
         )
         total += fixed
         total += lineage_residual(document, record)
-    total += repair_attempt_reserve(document) + disposition_reserve(document)
+    total += disposition_reserve(document)
     return total
 
 

@@ -41,6 +41,7 @@ class AcceptanceContractCliServices:
     commit_errors: tuple = ()
     load_snapshot: object = None
     read_evidence: object = None
+    run_with_base_retry: object = None
 
 
 def prepare_acceptance_contract_import(state: object, *, now: object, raw: object, verifier_policy=None) -> PreparedEvidenceOperation:

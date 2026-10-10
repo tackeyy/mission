@@ -195,6 +195,8 @@
       "lib/mission_application/planning.py:run_transition_effects:execute_transition_effects": 1,
       "lib/mission_application/ports.py:__init__:execution": 2,
       "lib/mission_application/provider_process.py:exchange_provider:exec_cleanup_confirmed": 2,
+      "lib/mission_application/repair.py:advance:execute_evidence_operation": 1,
+      "lib/mission_application/repair.py:run_repair_cli:execute_evidence_operation": 2,
       "lib/mission_application/review.py:mark_pass:execute": 1,
       "lib/mission_application/review.py:mark_pass:execution": 2,
       "lib/mission_application/runtime_guard.py:__post_init__:execute": 1,
