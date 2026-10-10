@@ -87,6 +87,8 @@ def _callable_child(verifier, request, control, sender, receiver):
 
 
 def run_callable(verifier, request, *, timeout=5, grace=.2):
+    # Callable verifiers have no enforceable budget admission, so this legacy
+    # fork path intentionally remains outside the deadline-watchdog boundary.
     context = multiprocessing.get_context('fork')
     parent, child_control = context.Pipe()
     receiver, sender = os.pipe()

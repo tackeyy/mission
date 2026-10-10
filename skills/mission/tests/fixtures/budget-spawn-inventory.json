@@ -120,6 +120,7 @@
       "bin/mission-state.py:v5_janitor_factory:recover": 1,
       "lib/budgeted_exec.py:run_job:exec_unstarted": 3,
       "lib/budgeted_exec.py:run_job:executable": 1,
+      "lib/budgeted_exec.py:run_job:spawn_exec": 1,
       "lib/fresh_review_host.py:_call:executable": 1,
       "lib/integration_gate.py:integrate_and_test:executed": 1,
       "lib/integration_gate.py:require_suite_report:executed": 3,

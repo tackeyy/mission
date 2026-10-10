@@ -295,7 +295,7 @@
   },
   "lib/mission_application/verification_exec.py": {
     "_stop:write": 1,
-    "main:write": 3
+    "main:write": 4
   },
   "lib/mission_application/verification_runner.py": {
     "_read:open-write": 1,

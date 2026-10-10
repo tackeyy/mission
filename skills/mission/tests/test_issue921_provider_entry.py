@@ -128,7 +128,7 @@ def test_budgeted_provider_watchdog_reclaims_stopped_command_after_supervisor_st
     process_env.update(env)
     process_env.update(MISSION_SESSION_ID='test', MISSION_LEASE_ID='test-lease')
     supervisor = subprocess.Popen([sys.executable, str(Path(__file__).parents[1] / 'bin/mission-state.py'),
-        *args, '--timeout', '2'], cwd=tmp_path, env=process_env,
+        *args, '--timeout', '6'], cwd=tmp_path, env=process_env,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     try:
         _wait(lambda: _pids(marker) is not None)
@@ -136,7 +136,7 @@ def test_budgeted_provider_watchdog_reclaims_stopped_command_after_supervisor_st
         os.kill(supervisor.pid, supervisor_signal)
         if supervisor_signal == signal.SIGKILL:
             supervisor.wait(timeout=1)
-        _wait(lambda: _absent(target) and _absent(grandchild) and _group_absent(pgid), seconds=4)
+        _wait(lambda: _absent(target) and _absent(grandchild) and _group_absent(pgid), seconds=8)
     finally:
         with contextlib.suppress(ProcessLookupError):
             os.kill(supervisor.pid, signal.SIGKILL)

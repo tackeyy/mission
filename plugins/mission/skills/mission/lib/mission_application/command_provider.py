@@ -593,14 +593,16 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
                     stdout = execution.redact(exchange.stdout.decode("utf-8", errors="replace"))
                     stderr = execution.redact(exchange.stderr.decode("utf-8", errors="replace"))
                     kill_confirmed = exchange.kill_confirmed
-                    if exchange.exec_failed:
+                    if not kill_confirmed:
+                        budget_failure = "kill-unconfirmed"
+                    elif exchange.exec_failed:
                         spawn_failed_reason = "budget-deadline-unenforceable"
                         completed_at = execution.clock()
                         entry.update({"status": "failed-before-start", "lifecycle_state": "terminal",
                                       "transitioned_at": completed_at, "completed_at": completed_at,
                                       "reason_code": spawn_failed_reason, "proven_no_dispatch": True})
-                    elif not kill_confirmed:
-                        budget_failure = "kill-unconfirmed"
+                    elif exchange.watchdog_failed:
+                        budget_failure = "budget-provider-exchange-failed"
                     elif exchange.timed_out:
                         budget_failure = "budget-child-timeout"
                     elif not exchange.output_complete or exchange.output_truncated:

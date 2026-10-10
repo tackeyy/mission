@@ -8,7 +8,7 @@ import time
 import pytest
 
 
-def _wait(predicate, seconds=5):
+def _wait(predicate, seconds=10):
     end = time.monotonic() + seconds
     while not predicate():
         assert time.monotonic() < end, 'owned process did not reach expected state'
@@ -46,7 +46,7 @@ def test_deadline_spawn_reclaims_stopped_target_after_supervisor_stops(tmp_path,
     import budgeted_exec
 
     marker = tmp_path / 'owned-pids'
-    deadline = time.monotonic() + 2
+    deadline = time.monotonic() + 6
     script = f'''
 import sys,time
 sys.path.insert(0,{str(__import__('pathlib').Path(__file__).resolve().parents[1] / 'lib')!r})

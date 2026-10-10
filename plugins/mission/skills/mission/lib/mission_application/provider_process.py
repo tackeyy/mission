@@ -27,6 +27,7 @@ class ProviderExchange:
     output_truncated: bool
     output_complete: bool
     exec_failed: bool
+    watchdog_failed: bool
 
 
 def exchange_provider(child, packet, deadline, *, term_grace=.2, kill_wait=.2,
@@ -140,7 +141,7 @@ def exchange_provider(child, packet, deadline, *, term_grace=.2, kill_wait=.2,
         control = b'' if control_receiver is None else budgeted_exec.read_deadline_control(control_receiver)
         return ProviderExchange(bytes(outputs['stdout']), bytes(outputs['stderr']),
                                 None if b'E' in control else child.returncode, timed_out or b'T' in control,
-                                confirmed, observed, truncated, complete, b'E' in control)
+                                confirmed, observed, truncated, complete, b'E' in control, b'W' in control)
     except BaseException:
         # Only exceptions raised by this exchange count, including collection.
         # An enclosing caller's except block is not an exchange failure.

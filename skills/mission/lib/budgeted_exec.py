@@ -226,13 +226,19 @@ def run_job(kind, payload, directory, *, timeout=5, term_grace=.2, kill_wait=.2,
         try:
             if absolute_deadline and time.monotonic() >= deadline:
                 raise TimeoutError('budget-child-timeout')
-            # The descriptor may itself start an inner deadline watchdog. Give
-            # its result frame one bounded second to reach this outer boundary;
-            # an unresponsive descriptor is still reclaimed independently.
-            watchdog_deadline = min(deadline + 1, time.monotonic() + 86400)
-            child, control_receiver = spawn_deadline_exec(
-                [sys.executable, '-I', str(Path(__file__).parent / 'mission_application' / 'spawn_trampoline.py'),
-                 str(path), digest], watchdog_deadline, pass_fds=(sender,), cwd=cwd)
+            argv = [sys.executable, '-I', str(Path(__file__).parent / 'mission_application' / 'spawn_trampoline.py'),
+                    str(path), digest]
+            if absolute_deadline:
+                # Verification may collect a bounded frame after target deadline.
+                # Keep the independent guard through that collection window.
+                watchdog_deadline = min((collect_deadline if collect_deadline is not None else deadline) + 1,
+                                        time.monotonic() + 86400)
+                child, control_receiver = spawn_deadline_exec(argv, watchdog_deadline,
+                    pass_fds=(sender,), cwd=cwd)
+            else:
+                # Inert approval descriptors have no budget deadline; preserve
+                # the legacy direct spawn contract.
+                child = spawn_exec(argv, pass_fds=(sender,), cwd=cwd)
             os.close(sender)
             sender = None
             result = read_frame(child, receiver, deadline if collect_deadline is None else collect_deadline,

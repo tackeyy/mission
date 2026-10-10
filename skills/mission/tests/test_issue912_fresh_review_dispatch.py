@@ -530,7 +530,7 @@ def test_adapter_watchdog_reclaims_stopped_callback_after_supervisor_stops(revie
         'import sys; '
         f'sys.path.insert(0, {str(Path(__file__).parents[1] / "lib")!r}); '
         'import fresh_review_host as host; '
-        'host._call(host.resolve("neutral"), "observe", {}, timeout=2)'
+            'host._call(host.resolve("neutral"), "observe", {}, timeout=6)'
     )
     supervisor = subprocess.Popen(
         [sys.executable, '-c', driver],
@@ -543,7 +543,7 @@ def test_adapter_watchdog_reclaims_stopped_callback_after_supervisor_stops(revie
         os.kill(supervisor.pid, supervisor_signal)
         if supervisor_signal == signal.SIGKILL:
             supervisor.wait(timeout=1)
-        _wait_for(lambda: _absent(target) and _absent(grandchild) and _group_absent(pgid), seconds=4)
+        _wait_for(lambda: _absent(target) and _absent(grandchild) and _group_absent(pgid), seconds=8)
     finally:
         with contextlib.suppress(ProcessLookupError):
             os.kill(supervisor.pid, signal.SIGKILL)

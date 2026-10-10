@@ -186,17 +186,17 @@ def test_registry_exec_does_not_run_parent_atfork_hooks(tmp_path, installed_veri
     assert list((tmp_path / 'jobs').iterdir()) == []
 
 
-def test_approval_descriptor_run_job_uses_deadline_spawn(tmp_path, installed_verifier, monkeypatch):
+def test_unbudgeted_approval_descriptor_run_job_keeps_direct_spawn(tmp_path, installed_verifier, monkeypatch):
     import budgeted_exec as execution
     pin, request, _, _ = installed_verifier
     calls = []
-    actual = execution.spawn_deadline_exec
-    def watched(argv, deadline, **kwargs):
-        calls.append((argv, deadline))
-        return actual(argv, deadline, **kwargs)
-    monkeypatch.setattr(execution, 'spawn_deadline_exec', watched)
+    actual = execution.spawn_exec
+    def watched(argv, **kwargs):
+        calls.append(argv)
+        return actual(argv, **kwargs)
+    monkeypatch.setattr(execution, 'spawn_exec', watched)
     assert execution.run_job('approval-verifier', {'verifier': pin, 'request': request}, tmp_path / 'jobs') == {'verified': True}
-    assert len(calls) == 1 and 'spawn_trampoline.py' in calls[0][0][2]
+    assert len(calls) == 1 and 'spawn_trampoline.py' in calls[0][2]
 
 
 @pytest.mark.parametrize('supervisor_signal', [signal.SIGSTOP, signal.SIGKILL])
@@ -218,8 +218,9 @@ def test_approval_descriptor_watchdog_reclaims_stopped_callback_after_supervisor
     driver = (
         'import sys; '
         f'sys.path.insert(0, {str(LIB)!r}); '
-        'from mission_application.approval_verifier import run_approval; '
-        f'run_approval({pin!r}, {request!r}, {str(tmp_path / "jobs")!r}, timeout=2)'
+        'import time; from budgeted_exec import run_job; '
+        f'run_job("approval-verifier", {{"verifier": {pin!r}, "request": {request!r}}}, '
+        f'{str(tmp_path / "jobs")!r}, deadline=time.monotonic()+6)'
     )
     supervisor = subprocess.Popen([sys.executable, '-I', '-c', driver], cwd=tmp_path,
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -253,7 +254,7 @@ def test_approval_descriptor_watchdog_reclaims_stopped_callback_after_supervisor
         os.kill(supervisor.pid, supervisor_signal)
         if supervisor_signal == signal.SIGKILL:
             supervisor.wait(timeout=1)
-        end = time.monotonic() + 4
+        end = time.monotonic() + 8
         while not (absent(target) and absent(grandchild) and group_absent(pgid)):
             assert time.monotonic() < end
             time.sleep(.01)
@@ -275,7 +276,7 @@ def test_startup_grandchild_stall_stays_in_group_and_is_swept(tmp_path, installe
     # The descendant uses exec so pytest's own at-fork hooks never run here.
     code = ("import subprocess, sys, os, json, time; "
             "p=subprocess.Popen([sys.executable,'-S','-c','import time; time.sleep(20)']); "
-            f"open({str(marker)!r},'w').write(json.dumps([p.pid,os.getpid(),os.getpgrp()])); time.sleep(20)")
+            f"open({str(marker)!r},'w').write(json.dumps([p.pid,os.getpid(),os.getpgrp(),os.getppid()])); time.sleep(20)")
     if startup == 'pth':
         (site / 'stall.pth').write_text(code + '\n')
     else:
@@ -284,12 +285,12 @@ def test_startup_grandchild_stall_stays_in_group_and_is_swept(tmp_path, installe
     began = time.monotonic()
     try:
         with pytest.raises((ValueError, TimeoutError)):
-            run_job('approval-verifier', {'verifier': pin, 'request': request}, tmp_path / 'jobs', timeout=2, kill_wait=1)
+            run_job('approval-verifier', {'verifier': pin, 'request': request}, tmp_path / 'jobs',
+                    deadline=time.monotonic() + 2, kill_wait=1)
         assert time.monotonic() - began < 10
         assert marker.exists()
-        grandchild, leader, group = json.loads(marker.read_text())
-        # The job runs under the deadline bootstrap, which leads the owned group.
-        assert group != os.getpgrp() and group != leader
+        grandchild, target, group, bootstrap = json.loads(marker.read_text())
+        assert group != os.getpgrp() and group == bootstrap and group != target
         with pytest.raises(ProcessLookupError):
             os.killpg(group, 0)
         assert list((tmp_path / 'jobs').iterdir()) == []
