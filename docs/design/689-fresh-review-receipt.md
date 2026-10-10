@@ -190,7 +190,8 @@ ledger の omission を valid と呼ぶ自己申告だけでは足りず、kerne
 
 | 判定順 | 最新の全体 attempt | `effective_coverage` | 完了 gate の理由コード |
 |---|---|---|---|
-| 1 | 全体 attempt が存在しない | `pending` | `acceptance-fresh-review-missing` |
+| 1a | 全体 attempt が存在しない | `pending` | `acceptance-fresh-review-missing` |
+| 1b | 最新の全体 attempt が `withdrawn` | `pending` | `acceptance-fresh-review-missing` |
 | 2 | 状態を問わず、request が束縛した contract・input・candidate が現在と一致しない | `open` | `acceptance-fresh-review-stale` |
 | 3 | `pending`・`dispatch-unknown`・`running` | `pending` | `acceptance-fresh-review-pending` |
 | 4 | `completed` だが `independent=false` | `open` | `acceptance-fresh-review-non-independent` |
@@ -198,6 +199,8 @@ ledger の omission を valid と呼ぶ自己申告だけでは足りず、kerne
 | 6 | `completed` かつ `independent=true` で coverage receipt が valid | `valid` | （§5 の他の条件へ進む） |
 
 行は上から順に評価し、最初に当てはまった行を採る（実行途中でも古い候補に束縛された attempt は stale を返す）。
+
+withdrawnのtombstoneも`criterion_ids`の包含により全体・各required criterionの最新attemptの選択に参加する。取下げはprojectionの同じ位置で置き換えるため、prepareの追加順を保つ。選ばれたwithdrawnはbindingを持たず、行1bのmissingでstaleより先に止まり、古い成功へ戻らない。後続のclean attemptがあれば、その最新attemptを判定する。withdrawnはinputの再観測・evidence carrierの対象外で、Dのorigin・lineage・findingを持たない（[設計880](880-repair-lineage.md)§2「pending requestの取下げ」の決定）。
 
 保存互換のD1 nonce checkpoint（`mission-fresh-review/1`の`reserved`／`consumed`）は、[nonce reducer](../../skills/mission/lib/mission_kernel/fresh_review.py)が保存するdispatch前の予約／未解釈JSON結果で、検証可能なterminal receiptを持たない。保存recordを変えず、判定時だけ両方をreceiptなしの`pending`相当へ写す。最新なら行2のfreshnessを先に検査し、一致しても行3の`acceptance-fresh-review-pending`で拒否する。最新の全体attempt・各required criterionの最新attemptでない古いcheckpointは、その状態で後続reviewを妨げない。
 

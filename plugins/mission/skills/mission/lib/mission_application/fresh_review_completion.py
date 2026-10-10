@@ -42,7 +42,8 @@ def observe_completion_inputs(state, *, root, load_policy, read_evidence):
     """Observe all non-withdrawn requests, including partial and older attempts.
 
     Filtering for FreshReviewRecord excludes withdrawn tombstones represented
-    by WithdrawnFreshReviewRecord.
+    by WithdrawnFreshReviewRecord: they have no bindings/evidence to observe,
+    but still participate in the kernel's latest-attempt selection.
     Capture the union of bound commands once, then compute each request's input
     from its command subset and perspective using the same packet as prepare.
     Never substitute a saved request digest for a new observation.
