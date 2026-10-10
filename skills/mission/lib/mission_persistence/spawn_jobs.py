@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ctypes
+import contextlib
 import errno
 import hashlib
 import json
@@ -79,12 +80,18 @@ def write_private_file(path: Path, content: bytes, *, fsync=None) -> None:
                     raise OSError(errno.EIO, 'write made no progress')
                 view = view[written:]
             (fsync or os.fsync)(fd)
-        finally:
+        except BaseException:
+            # Preserve the write interruption even if descriptor cleanup fails.
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            raise
+        else:
             os.close(fd)
         # Caller ensures the private directory before creation.
         read_job(path, hashlib.sha256(content).hexdigest(), limit=max(len(content), 1))
     except BaseException:
-        path.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
         raise
 
 

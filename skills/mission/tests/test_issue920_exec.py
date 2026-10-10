@@ -122,6 +122,56 @@ def test_exclusive_write_does_not_remove_existing_file(tmp_path):
         write_private_file(path, b'replace')
     assert path.read_bytes() == b'keep'
 
+@pytest.mark.parametrize('error_type', [OSError, KeyboardInterrupt])
+def test_deadline_sender_close_cannot_replace_spawn_failure(monkeypatch, error_type):
+    import budgeted_exec
+    receiver, sender = os.pipe()
+    close = os.close
+    error = error_type('original spawn failure')
+    error.exec_unstarted = error.exec_cleanup_confirmed = True
+    monkeypatch.setattr(budgeted_exec.os, 'pipe', lambda: (receiver, sender))
+    def refuse(*args, **kwargs):
+        raise error
+    def fail_close(fd):
+        close(fd)
+        if fd == sender:
+            raise OSError(13, 'sender close denied')
+    monkeypatch.setattr(budgeted_exec, 'spawn_exec', refuse)
+    monkeypatch.setattr(budgeted_exec.os, 'close', fail_close)
+    with pytest.raises(error_type) as observed:
+        budgeted_exec.spawn_deadline_exec(['neutral'], time.monotonic() + 5)
+    assert observed.value is error
+    assert error.exec_unstarted is True and error.exec_cleanup_confirmed is True
+    for fd in (receiver, sender):
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
+@pytest.mark.parametrize('cleanup_fault', ['unlink', 'close'])
+@pytest.mark.parametrize('error_type', [OSError, KeyboardInterrupt])
+def test_private_write_housekeeping_preserves_original_interruption(tmp_path, monkeypatch, cleanup_fault, error_type):
+    from mission_persistence import spawn_jobs as jobs
+    path = tmp_path / 'partial'
+    error = error_type('original write interrupted')
+    close, unlink = os.close, Path.unlink
+    def interrupt(fd, content):
+        raise error
+    def deny_unlink(target, **kwargs):
+        if target == path:
+            raise OSError(13, 'delete denied')
+        return unlink(target, **kwargs)
+    def deny_close(fd):
+        close(fd)
+        raise OSError(13, 'close denied')
+    monkeypatch.setattr(jobs.os, 'write', interrupt)
+    if cleanup_fault == 'unlink':
+        monkeypatch.setattr(Path, 'unlink', deny_unlink)
+    else:
+        monkeypatch.setattr(jobs.os, 'close', deny_close)
+    with pytest.raises(error_type) as observed:
+        jobs.write_private_file(path, b'partial')
+    assert observed.value is error
+    assert path.exists() == (cleanup_fault == 'unlink')
+
 def test_residual_jobs_preserve_live_unknown_and_open_reservations(tmp_path, monkeypatch):
     from mission_persistence import spawn_jobs as jobs
     directory = tmp_path / 'jobs'

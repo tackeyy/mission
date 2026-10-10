@@ -73,7 +73,9 @@ def spawn_deadline_exec(argv, deadline, *, pass_fds=(), stdin=subprocess.DEVNULL
         raise
     finally:
         if sender is not None:
-            os.close(sender)
+            # Descriptor housekeeping is not evidence about child lifetime.
+            with contextlib.suppress(OSError):
+                os.close(sender)
     return child, receiver
 
 
@@ -296,7 +298,10 @@ def run_job(kind, payload, directory, *, timeout=5, term_grace=.2, kill_wait=.2,
             with contextlib.suppress(OSError):
                 os.close(control_receiver)
         if path is not None:
-            path.unlink(missing_ok=True)
+            # A residual job file cannot invalidate collected evidence or hide
+            # the original interruption and its cleanup confirmation.
+            with contextlib.suppress(OSError):
+                path.unlink(missing_ok=True)
 
 
 def write_frame(fd, result, *, frame_limit=FRAME_LIMIT):

@@ -155,7 +155,9 @@ def exchange_provider(child, packet, deadline, *, term_grace=.2, kill_wait=.2,
         for stream in (child.stdin, child.stdout, child.stderr):
             close_stream(stream)
         if selector is not None:
-            selector.close()
+            # Closing the selector cannot change the confirmed group outcome.
+            with contextlib.suppress(OSError):
+                selector.close()
         if control_receiver is not None:
             with contextlib.suppress(OSError):
                 os.close(control_receiver)

@@ -54,6 +54,33 @@ def test_provider_closing_stdin_keeps_output_and_exit_code(provider):
     assert result.stdout == b'accepted-prefix\n' and result.stderr == b'refused\n'
     assert result.exit_code == 23 and result.kill_confirmed and not result.timed_out
 
+@pytest.mark.parametrize('interrupted', [False, True])
+def test_selector_close_preserves_confirmed_exchange_and_interruption(provider, monkeypatch, interrupted):
+    from mission_application import provider_process
+    child = provider('import time; time.sleep(60)')
+    error = KeyboardInterrupt('original exchange interrupted')
+    selector = provider_process.selectors.DefaultSelector()
+    close = selector.close
+    def fail_close():
+        close()
+        raise OSError(errno.EACCES, 'selector close denied')
+    def observed_exit(pid):
+        if interrupted:
+            raise error
+        return True
+    monkeypatch.setattr(selector, 'close', fail_close)
+    monkeypatch.setattr(provider_process.selectors, 'DefaultSelector', lambda: selector)
+    monkeypatch.setattr(budgeted_exec, 'observe_exit', observed_exit)
+    if interrupted:
+        with pytest.raises(KeyboardInterrupt) as observed:
+            provider_process.exchange_provider(child, b'', time.monotonic() + 5, kill_wait=2)
+        assert observed.value is error and error.exec_cleanup_confirmed is True
+    else:
+        result = provider_process.exchange_provider(child, b'', time.monotonic() + 5, kill_wait=2)
+        assert result.kill_confirmed is True
+    assert child.returncode is not None
+    assert all(stream.closed for stream in (child.stdin, child.stdout, child.stderr))
+
 
 def test_nonreading_provider_is_recovered_at_absolute_deadline(provider):
     from mission_application.provider_process import exchange_provider
