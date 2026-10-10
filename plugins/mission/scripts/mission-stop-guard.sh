@@ -11,7 +11,26 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 0
 fi
 
-INPUT=$(cat)
+# Shell variables cannot retain NUL. Detect it rather than granting reentry
+# from a prefix or from text with the byte silently removed by substitution.
+if IFS= read -r -d '' INPUT; then
+  INPUT='invalid-hook-input-with-nul'
+fi
+
+# Match only one complete object with the host's boolean reentry flag. A parse
+# failure or any other value still goes through the bounded verdict below.
+# Token validation rejects nonstandard numbers accepted by some JSON parsers;
+# complete string tokens are masked before validating the remaining tokens.
+# Reentry has the same silent skip reply as runtime_guard's stop-hook-reentry.
+if ! printf '%s' "$INPUT" | jq --raw-input --slurp --exit-status 'def standard_tokens:
+  gsub("\"(?:[^\"\\\\]|\\\\.)*\""; "null")
+  | [splits("[ \t\r\n{}\\[\\],:]+")]
+  | all(. == "" or test("\\A(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)\\z"));
+standard_tokens and (try (fromjson | type == "object" and .stop_hook_active == true) catch false)' >/dev/null 2>&1; then
+  :
+else
+  exit 0
+fi
 
 # 上限は二重に掛ける。どちらか一方では穴が残る。
 #
