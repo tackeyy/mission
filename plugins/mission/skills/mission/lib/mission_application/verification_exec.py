@@ -62,6 +62,12 @@ def main():
         except ProcessLookupError:
             pass  # reporting supervisor already reclaimed the group
         return 0
+    if os.getpgrp() != os.getpid():
+        try:
+            os.write(control, b'E')
+        except OSError:
+            pass
+        return 2
     try:
         watchdog = subprocess.Popen([sys.executable, '-I', '-S', __file__, sys.argv[1], sys.argv[2], '--watchdog', str(os.getpgrp())],
             pass_fds=(control,), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, close_fds=True)

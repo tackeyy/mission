@@ -191,6 +191,7 @@ def test_deadline_rechecked_after_watchdog_ready_before_target_exec(monkeypatch)
         if fd == ready_receiver:
             now.append(deadline)
         return data
+    monkeypatch.setattr(bootstrap.os, 'getpgrp', os.getpid)
     monkeypatch.setattr(bootstrap.sys, 'argv', ['bootstrap', str(deadline), str(sender), 'neutral-target'])
     monkeypatch.setattr(bootstrap, 'time', SimpleNamespace(monotonic=lambda: now[-1] if now else deadline-1))
     monkeypatch.setattr(bootstrap.subprocess, 'Popen', spawn)
@@ -470,6 +471,7 @@ def test_deadline_watchdog_start_failure_cannot_report_a_completed_verifier(monk
     import os, time
     from mission_application import verification_exec as bootstrap
     receiver, sender = os.pipe()
+    monkeypatch.setattr(bootstrap.os, 'getpgrp', os.getpid)
     monkeypatch.setattr(bootstrap.sys, 'argv', ['bootstrap', str(time.monotonic()+10), str(sender), 'neutral-verifier'])
     def unavailable(*a, **kw):
         raise OSError('watchdog unavailable')
@@ -504,3 +506,56 @@ def test_completed_failed_verifier_does_not_wait_for_grandchild_stdout(tmp_path)
     assert result['output_digest'] == 'sha256:' + hashlib.sha256(b'prefix\n').hexdigest()
     with pytest.raises(ProcessLookupError):
         os.kill(int(marker.read_text()), 0)
+
+
+def test_bootstrap_rejects_nonleader_before_watchdog_or_target(monkeypatch):
+    from mission_application import verification_exec as bootstrap
+    receiver, sender = os.pipe()
+    monkeypatch.setattr(bootstrap.sys, 'argv', ['bootstrap', str(time.monotonic()+5), str(sender), 'neutral-target'])
+    monkeypatch.setattr(bootstrap.os, 'getpgrp', lambda: os.getpid()+1)
+    monkeypatch.setattr(bootstrap.subprocess, 'Popen', lambda *a, **kw: pytest.fail('nonleader admitted target/watchdog'))
+    monkeypatch.setattr(bootstrap.os, 'killpg', lambda *a: pytest.fail('foreign group signalled'))
+    try:
+        assert bootstrap.main() == 2 and os.read(receiver, 1) == b'E'
+    finally:
+        os.close(receiver); os.close(sender)
+
+
+@pytest.mark.parametrize('confirmed', [True, False])
+def test_budget_timeout_requires_final_group_cleanup(tmp_path, monkeypatch, confirmed):
+    import budgeted_exec
+    original, attempts = budgeted_exec.cleanup_group, []
+    def cleanup(child, **kwargs):
+        reclaimed = original(child, **kwargs)
+        attempts.append(reclaimed)
+        return reclaimed and confirmed
+    monkeypatch.setattr(budgeted_exec, 'cleanup_group', cleanup)
+    command = validate(_policy())['project-test']
+    command.update(timeout_sec=1, argv=[command['argv'][0], '-c', 'import time; time.sleep(60)'])
+    candidate = runner.CandidateSnapshot((), runner._digest(()))
+    if confirmed:
+        result = runner.execute_candidate(candidate, command, relative_cwd='.', budget_deadline=time.monotonic()+10)
+        assert result['status'] == 'blocked' and result['block_reason'] == 'timeout'
+    else:
+        with pytest.raises(runner.VerificationRunnerError, match='kill-unconfirmed'):
+            runner.execute_candidate(candidate, command, relative_cwd='.', budget_deadline=time.monotonic()+10)
+    assert attempts == [True]
+
+
+@pytest.mark.parametrize('budgeted', [False, True])
+def test_escaped_grandchild_stdout_cannot_make_verifier_pass(tmp_path, budgeted):
+    marker = tmp_path / 'escaped-owned-pid'
+    program = ('import subprocess,sys; from pathlib import Path; '
+        'p=subprocess.Popen([sys.executable,"-c","import time; time.sleep(60)"],start_new_session=True); '
+        f'Path({str(marker)!r}).write_text(str(p.pid)); print("prefix",flush=True)')
+    command = validate(_policy())['project-test']
+    command.update(timeout_sec=1, argv=[command['argv'][0], '-c', program])
+    try:
+        result = runner.execute_candidate(runner.CandidateSnapshot((), runner._digest(())),
+            command, relative_cwd='.', **({'budget_deadline': time.monotonic()+10} if budgeted else {}))
+        assert marker.exists()
+        assert result['status'] == 'blocked' and result['timed_out'] and result['block_reason'] == 'timeout'
+    finally:
+        if marker.exists():
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(int(marker.read_text()), signal.SIGKILL)

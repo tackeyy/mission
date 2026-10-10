@@ -22,6 +22,8 @@
   },
   "rows-1-2": {
     "candidates": {
+      "lib/mission_application/spawn_trampoline.py:main:run_contract_verifier": 1,
+      "lib/mission_application/verification_budget.py:execute_verification:run_job": 1,
       "lib/mission_application/verification_exec.py:main:Popen": 2,
       "lib/mission_application/verification_execution.py:run_contract_verifier:execute_candidate": 1,
       "lib/mission_application/verification_execution.py:run_verification_receipt_cli:run_contract_verifier": 1,
@@ -29,7 +31,7 @@
       "lib/mission_application/verification_runner.py:execute_candidate:Popen": 1,
       "lib/mission_application/verification_runner.py:execute_candidate:spawn_exec": 1
     },
-    "reason": "APIs and references for these design entries, including the private deadline executor. CLI budget admission, reservation and settlement remain pending in F2a (#921; section 7). No reservation coverage is claimed.",
+    "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
     "rows": [
       1,
       2
@@ -114,6 +116,7 @@
       "bin/mission-state.py:legacy_janitor_factory:recover": 1,
       "bin/mission-state.py:v5_factory:recover": 1,
       "bin/mission-state.py:v5_janitor_factory:recover": 1,
+      "lib/budgeted_exec.py:run_job:exec_unstarted": 2,
       "lib/budgeted_exec.py:run_job:executable": 1,
       "lib/fresh_review_host.py:_call:executable": 1,
       "lib/integration_gate.py:integrate_and_test:executed": 1,
@@ -130,10 +133,11 @@
       "lib/mission_application/artifact.py:run_artifact_publish:execute_artifact_operation": 1,
       "lib/mission_application/artifact.py:run_artifact_render:execute_artifact_operation": 1,
       "lib/mission_application/budget.py:run_budget_next:spawn_actions": 1,
+      "lib/mission_application/budget.py:run_budget_reconcile_cli:execute": 1,
       "lib/mission_application/command_provider.py:_invoke_command_provider:execution": 42,
       "lib/mission_application/command_provider.py:_invoke_command_provider:execution_context": 3,
       "lib/mission_application/command_provider.py:_invoke_command_provider:execution_isolator": 2,
-      "lib/mission_application/command_provider.py:_invoke_command_provider:spawn_failed_reason": 2,
+      "lib/mission_application/command_provider.py:_invoke_command_provider:spawn_failed_reason": 5,
       "lib/mission_application/command_provider.py:invoke_command_provider:execution": 1,
       "lib/mission_application/command_provider.py:pre_spawn_guard:execution": 1,
       "lib/mission_application/evidence.py:__init__:execute_retry_safe_evidence_plan": 1,
@@ -184,8 +188,10 @@
       "lib/mission_application/specialist_selection.py:decline_specialist_selection:execution": 2,
       "lib/mission_application/stale_cleanup.py:run_cleanup_stale:execute": 6,
       "lib/mission_application/supersede_reviews.py:_publish_review_group:execute": 1,
+      "lib/mission_application/verification_budget.py:execute_verification:exec_unstarted": 1,
       "lib/mission_application/verification_exec.py:main:executable": 1,
       "lib/mission_application/verification_execution.py:run_contract_verifier:executed_count": 1,
+      "lib/mission_application/verification_execution.py:run_verification_receipt_cli:execute_verification": 1,
       "lib/mission_application/verification_runner.py:execute_candidate:exec_failed": 4,
       "lib/mission_application/verification_runner.py:execute_candidate:executable": 1,
       "lib/mission_application/verifier_policy.py:inline_python_source:executable": 1,

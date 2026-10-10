@@ -397,6 +397,7 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None, bud
             remaining = deadline + (1 if group_cleaned else 0) - time.monotonic()
             if remaining <= 0:
                 if group_cleaned:
+                    timed_out = True  # an escaped descendant still owns stdout
                     output_truncated = True
                     selector.close(); stdout.close()
                     break
