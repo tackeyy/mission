@@ -1754,6 +1754,7 @@ def test_c2_repository_and_direct_write_inventories_are_closed_and_disjoint():
             "executor-handoff verify-step",
             "planning reselect",
             "supersede-reviews",
+            "budget reconcile",
             # Batch 2
             "specialists decline",
             "specialists recommend",

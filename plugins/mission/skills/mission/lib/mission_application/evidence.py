@@ -98,6 +98,7 @@ class VerificationRecordRequest:
 class VerificationReceiptRequest:
     now: object
     receipt: object
+    budget: object = None
 
 
 @dataclass(frozen=True)
@@ -587,10 +588,12 @@ def run_verification_record(
     )
 
 
-def prepare_verification_receipt(state: object, *, now: object, receipt: object) -> PreparedEvidenceOperation:
+def prepare_verification_receipt(state: object, *, now: object, receipt: object, budget=None) -> PreparedEvidenceOperation:
     if not isinstance(state, dict) or not isinstance(receipt, dict):
         raise EvidenceFailure("verification-receipt-invalid")
-    command = RecordVerificationReceipt(now, freeze_json_value(receipt))
+    from .verification_budget import verification_settlement
+    command = RecordVerificationReceipt(now, freeze_json_value(receipt),
+        verification_settlement(budget, now, receipt) if budget is not None else None)
     from mission_kernel.evidence import project_verification_receipt
     entry = _translate(lambda: project_verification_receipt(command))
     return PreparedEvidenceOperation(command, (), {"receipt": copy.deepcopy(entry)}, volatile_fields=("recorded_at",))
@@ -599,7 +602,7 @@ def prepare_verification_receipt(state: object, *, now: object, receipt: object)
 def run_verification_receipt(request: VerificationReceiptRequest, repository: object) -> dict:
     return execute_evidence_operation(
         repository,
-        lambda state: prepare_verification_receipt(state, now=request.now, receipt=request.receipt),
+        lambda state: prepare_verification_receipt(state, now=request.now, receipt=request.receipt, budget=request.budget),
     )
 
 

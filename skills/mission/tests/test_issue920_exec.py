@@ -129,12 +129,18 @@ def test_residual_jobs_preserve_live_unknown_and_open_reservations(tmp_path, mon
     monkeypatch.setattr(jobs, 'process_start', lambda pid: None)
     assert jobs.cleanup_jobs(directory) == []
     monkeypatch.setattr(jobs, 'process_start', lambda pid: str(int(start) + 1))
-    assert jobs.cleanup_jobs(directory) == [path]  # reused PID is a dead owner
-    reserved, _ = jobs.create_job(directory, b'{}', reservation_id='reservation_1')
+    assert jobs.cleanup_jobs(directory) == []  # dead parent, unknown reader deadline
+    import time
+    expired, _ = jobs.create_job(directory, json.dumps({'expires_at': time.time() - 1}).encode())
+    monkeypatch.setattr(jobs, 'process_start', lambda pid: str(int(start) + 2))
+    assert jobs.cleanup_jobs(directory) == [expired]
+    path.unlink()
+    reserved, _ = jobs.create_job(directory, b'{}', reservation_id='reservation_1', session_id='test-session')
     monkeypatch.setattr(jobs, 'process_start', lambda pid: 'absent')
     assert jobs.cleanup_jobs(directory) == []  # reservation state unknown
     assert jobs.cleanup_jobs(directory, open_reservations={'reservation_1'}) == []
-    assert jobs.cleanup_jobs(directory, open_reservations=set()) == [reserved]
+    assert jobs.cleanup_jobs(directory, open_reservations=set()) == []  # another session is unknown
+    assert jobs.cleanup_jobs(directory, open_reservations=set(), closed_reservations={'reservation_1'}, session_id='test-session') == [reserved]
 
 def test_callable_setsid_failure_cannot_invoke_callback(tmp_path, monkeypatch):
     from mission_application import approval_verifier as approval

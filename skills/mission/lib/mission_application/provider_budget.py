@@ -20,7 +20,7 @@ PROVIDER_TERMINAL_BYTES = 64 * 1024
 class ProviderBudget:
     reservation: DispatchReservation
     policy: BudgetPolicy
-    candidate_digest: str
+    candidate_digest: str | None
     deadline: float
     started: float
 
@@ -59,12 +59,13 @@ def reserve_provider(document, entry, timeout, at, *, prepared, enforceable=True
     return ProviderBudget(row, held.policy, command.candidate_digest, start + remaining, start), None
 
 
-def settle_provider(document, budget, at, result_digest, *, confirmed=True, output_bytes=None, completed=False, unstarted=False):
+def settle_provider(document, budget, at, result_digest, *, confirmed=True, output_bytes=None, completed=False, unstarted=False, refusal_reason=None):
     if budget is None:
         return
     result = _apply(document, SettleDispatchBudget(at, budget.reservation.reservation_id,
         'settled' if confirmed else 'kill-unconfirmed',
         (0 if unstarted else max(0, int(time.monotonic() - budget.started))) if confirmed else None,
-        budget.candidate_digest, result_digest, output_bytes=output_bytes, completed=completed))
+        budget.candidate_digest or 'sha256:' + '0' * 64, result_digest,
+        output_bytes=output_bytes, completed=completed, refusal_reason=refusal_reason))
     if not result.accepted:
         raise ValueError(result.rejection.code)
