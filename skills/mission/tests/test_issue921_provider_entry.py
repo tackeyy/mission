@@ -1,12 +1,59 @@
 """Provider admission contracts at the existing public CLI boundary."""
+import contextlib
 import json
 import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from mission_kernel.budget import decode_policy, default_policy_document, ledger_document, new_ledger
 from .test_provider_application_guard import _prepare_command_provider, _state_path
+
+
+def _wait(predicate, seconds=5):
+    end = time.monotonic() + seconds
+    while not predicate():
+        assert time.monotonic() < end, 'owned process did not reach expected state'
+        time.sleep(.01)
+
+
+def _absent(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
+def _group_absent(pgid):
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        # Darwin can retain an unowned zombie group leader after both owned
+        # members have gone. The PID checks below still prove no owned member.
+        return True
+    # Linux keeps a killed leader as a zombie while its stopped parent cannot
+    # reap it; a group holding only zombies has no live member.
+    rows = [row.split() for row in subprocess.run(['ps', '-A', '-o', 'pgid=,stat='], capture_output=True,
+            text=True, check=True).stdout.splitlines() if row.strip()]
+    # An empty or unparsable listing cannot prove absence.
+    assert rows and all(len(parts) >= 2 and parts[0].isdigit() for parts in rows), rows[:3]
+    return not any(parts[0] == str(pgid) and not parts[1].startswith('Z') for parts in rows)
+
+
+def _pids(marker):
+    try:
+        value = json.loads(marker.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, list) and len(value) == 3 else None
 
 
 @pytest.fixture
@@ -66,6 +113,63 @@ def test_provider_sees_durable_reservation_and_timeout_is_settled_after_cleanup(
     assert entry['reason_code'] == 'budget-child-timeout'
     with pytest.raises(ProcessLookupError):
         os.killpg(entry['child_pid'], 0)
+
+
+def test_budgeted_provider_preserves_graceful_sigterm_output(run_cli, tmp_path, prepare_approved_invocation):
+    marker, env = _prepare_command_provider(run_cli, tmp_path)
+    command = tmp_path / 'commands' / 'provider-command'
+    command.write_text(f'#!{sys.executable}\n'
+        'import signal,time\n'
+        'def done(*_): print("graceful", flush=True); raise SystemExit(0)\n'
+        'signal.signal(signal.SIGTERM, done)\nwhile True: time.sleep(.1)\n')
+    command.chmod(0o700)
+    args, env, _ = prepare_approved_invocation(cwd=tmp_path, provider='guarded-command-provider',
+        iteration=1, phase='planning', env_extra=env)
+    _budget(tmp_path)
+    result = run_cli(*args, '--timeout', '3', cwd=tmp_path, env_extra=env)
+    assert result.returncode == 0
+    entry = json.loads(_state_path(tmp_path).read_text())['specialist_invocations'][-1]
+    assert entry['exit_code'] == 0 and entry['reason'] == 'budget-child-timeout'
+
+
+@pytest.mark.parametrize('supervisor_signal', [signal.SIGSTOP, signal.SIGKILL])
+def test_budgeted_provider_watchdog_reclaims_stopped_command_after_supervisor_stops(
+        run_cli, tmp_path, prepare_approved_invocation, supervisor_signal):
+    """The command-provider path retains deadline enforcement after CLI loss."""
+    marker, env = _prepare_command_provider(run_cli, tmp_path)
+    command = tmp_path / 'commands' / 'provider-command'
+    command.write_text(f'#!{sys.executable}\n'
+        'import json,os,signal,subprocess,sys,time\nfrom pathlib import Path\n'
+        'child=subprocess.Popen([sys.executable,"-c","import time; time.sleep(60)"])\n'
+        f'Path({str(marker)!r}).write_text(json.dumps([os.getpgrp(),os.getpid(),child.pid]))\n'
+        'os.killpg(os.getpgrp(),signal.SIGSTOP)\ntime.sleep(60)\n')
+    command.chmod(0o700)
+    args, env, _ = prepare_approved_invocation(cwd=tmp_path, provider='guarded-command-provider',
+        iteration=1, phase='planning', env_extra=env)
+    _budget(tmp_path)
+    process_env = {key: value for key, value in os.environ.items() if not key.startswith('MISSION_')}
+    process_env.update(env)
+    process_env.update(MISSION_SESSION_ID='test', MISSION_LEASE_ID='test-lease')
+    supervisor = subprocess.Popen([sys.executable, str(Path(__file__).parents[1] / 'bin/mission-state.py'),
+        *args, '--timeout', '6'], cwd=tmp_path, env=process_env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        _wait(lambda: _pids(marker) is not None)
+        pgid, target, grandchild = _pids(marker)
+        os.kill(supervisor.pid, supervisor_signal)
+        if supervisor_signal == signal.SIGKILL:
+            supervisor.wait(timeout=1)
+        # The watchdog keeps the policy's SIGTERM grace and kill wait (2 + 1 s) plus 1 s.
+        _wait(lambda: _absent(target) and _absent(grandchild) and _group_absent(pgid), seconds=14)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(supervisor.pid, signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            supervisor.wait(timeout=1)
+        pids = _pids(marker)
+        if pids is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(pids[0], signal.SIGKILL)
 
 
 def test_deadline_does_not_restore_the_fractional_second_already_consumed(monkeypatch):
@@ -360,7 +464,7 @@ def test_provider_terminal_probes_release_budget_and_deadline_prevents_late_spaw
     else:
         spawn = budgeted_exec.spawn_exec
         def inherited(*a, **kw):
-            assert 'cwd' not in kw  # Both provider routes inherit the invocation cwd.
+            assert kw.get('cwd') is None  # Both provider routes inherit the invocation cwd.
             return spawn(*a, **kw)
         monkeypatch.setattr(budgeted_exec, 'spawn_exec', inherited)
     settled = command_provider.settle_provider
@@ -438,20 +542,124 @@ def test_process_receipt_commit_failure_retains_unknown_reservation_for_reconcil
     assert len(state['budget_ledger']['reservations']) == 1 and not state['budget_ledger']['settlements']
 
 
+@pytest.mark.parametrize('failure', ['exec', 'watchdog-ready'])
 def test_budget_provider_exec_failure_is_refused_and_settled_zero(
-        run_cli, tmp_path, prepare_approved_invocation, invoke_here, monkeypatch):
+        run_cli, tmp_path, prepare_approved_invocation, invoke_here, monkeypatch, failure):
     import budgeted_exec
     marker, env = _prepare_command_provider(run_cli, tmp_path)
     args, env, _ = prepare_approved_invocation(cwd=tmp_path, provider='guarded-command-provider',
                                              iteration=1, phase='planning', env_extra=env)
     _budget(tmp_path)
-    def fail(*a, **kw):
-        raise OSError('exec failed')
-    monkeypatch.setattr(budgeted_exec, 'spawn_exec', fail)
+    actual = budgeted_exec.spawn_deadline_exec
+    missing = str(tmp_path / 'missing-provider-executable')
+    def fail(_argv, deadline, **kw):
+        if failure == 'watchdog-ready':
+            from .test_issue921_verifier_deadline_exec import _faulty_watchdog
+            return _faulty_watchdog(marker, 'import os; os.write(1,b"X")', deadline,
+                                   target=_argv, **kw)
+        return actual([missing], deadline, **kw)
+    monkeypatch.setattr(budgeted_exec, 'spawn_deadline_exec', fail)
     invoke_here(args, env)
     state = json.loads(_state_path(tmp_path).read_text())
     assert not marker.exists()
     assert state['specialist_invocations'][-1]['reason_code'] == 'budget-deadline-unenforceable'
+    assert state['specialist_invocations'][-1]['reason'] == 'exec failed before start'
     ledger = state['budget_ledger']
     assert not ledger['reservations'] and ledger['settlements'][-1]['charged_sec'] == 0
     assert ledger['stop_slots']['last_refusal'] == 'budget-deadline-unenforceable'
+
+
+@pytest.mark.parametrize('remaining', [86400, 86399.9])
+def test_provider_watchdog_deadline_is_capped_at_bootstrap_limit(
+        run_cli, tmp_path, prepare_approved_invocation, invoke_here, monkeypatch, remaining):
+    from dataclasses import replace
+    import budgeted_exec
+    from mission_application import command_provider
+    marker, env = _prepare_command_provider(run_cli, tmp_path)
+    args, env, _ = prepare_approved_invocation(cwd=tmp_path, provider='guarded-command-provider',
+        iteration=1, phase='planning', env_extra=env)
+    _budget(tmp_path)
+    from types import SimpleNamespace
+    now = time.monotonic()
+    monkeypatch.setattr(command_provider, 'time', SimpleNamespace(monotonic=lambda: now))
+    reserve = command_provider.reserve_provider
+    def upper_budget(*a, **kw):
+        budget, refusal = reserve(*a, **kw)
+        return replace(budget, deadline=now+remaining), refusal
+    monkeypatch.setattr(command_provider, 'reserve_provider', upper_budget)
+    spawn = budgeted_exec.spawn_deadline_exec
+    deadlines = []
+    def bounded(argv, deadline, **kw):
+        deadlines.append(deadline)
+        assert deadline == now+86400
+        return spawn(argv, deadline, **kw)
+    monkeypatch.setattr(budgeted_exec, 'spawn_deadline_exec', bounded)
+    invoke_here([*args, '--timeout', '86400'], env)
+    entry = json.loads(_state_path(tmp_path).read_text())['specialist_invocations'][-1]
+    assert len(deadlines) == 1 and marker.exists()
+    assert entry['status'] != 'failed-before-start'
+    assert entry.get('proven_no_dispatch') is not True
+
+
+def test_bootstrap_exec_failure_cannot_override_unconfirmed_cleanup(
+        run_cli, tmp_path, prepare_approved_invocation, invoke_here, monkeypatch):
+    import budgeted_exec
+    from mission_application import provider_process
+    marker, env = _prepare_command_provider(run_cli, tmp_path)
+    args, env, _ = prepare_approved_invocation(cwd=tmp_path, provider='guarded-command-provider',
+        iteration=1, phase='planning', env_extra=env)
+    _budget(tmp_path)
+    spawn = budgeted_exec.spawn_deadline_exec
+    def refused(_argv, deadline, **kw):
+        return spawn([str(tmp_path / 'missing-provider-executable')], deadline, **kw)
+    monkeypatch.setattr(budgeted_exec, 'spawn_deadline_exec', refused)
+    cleanup = budgeted_exec.cleanup_group
+    cleaned = []
+    def unconfirmed(child, **kw):
+        cleaned.append(cleanup(child, **kw))  # reclaim real children before injecting uncertainty
+        return False
+    monkeypatch.setattr(budgeted_exec, 'cleanup_group', unconfirmed)
+    exchange = provider_process.exchange_provider
+    controls = []
+    def observed(*a, **kw):
+        result = exchange(*a, **kw)
+        controls.append(result.exec_failed)
+        return result
+    monkeypatch.setattr(provider_process, 'exchange_provider', observed)
+    invoke_here(args, env)
+    state = json.loads(_state_path(tmp_path).read_text())
+    entry = state['specialist_invocations'][-1]
+    assert controls == [True] and cleaned == [True] and not marker.exists()
+    assert entry['reason_code'] == 'kill-unconfirmed'
+    assert 'proven_no_dispatch' not in entry
+    assert len(state['budget_ledger']['reservations']) == 1
+
+
+def test_budgeted_provider_watchdog_loss_after_start_is_not_unstarted(
+        run_cli, tmp_path, prepare_approved_invocation, invoke_here, monkeypatch):
+    """A started command that kills its watchdog must not be settled as never dispatched."""
+    marker, env = _prepare_command_provider(run_cli, tmp_path)
+    command = tmp_path / 'commands' / 'provider-command'
+    command.write_text(f'#!{sys.executable}\n'
+        'import os,time\nfrom pathlib import Path\n'
+        'Path(os.environ["PROVIDER_MARKER"]).write_text("started")\n'
+        'time.sleep(60)\n')
+    command.chmod(0o700)
+    args, env, _ = prepare_approved_invocation(cwd=tmp_path, provider='guarded-command-provider',
+        iteration=1, phase='planning', env_extra=env)
+    _budget(tmp_path)
+    import budgeted_exec
+    from .test_issue921_verifier_deadline_exec import _faulty_watchdog
+    def spawn(argv, deadline, **kw):
+        fault = ('import os,time; from pathlib import Path; os.write(1,b"R"); '
+                 f'm=Path({str(marker)!r}); '
+                 '\nwhile not m.exists(): time.sleep(.01)')
+        return _faulty_watchdog(marker, fault, deadline, target=argv, **kw)
+    monkeypatch.setattr(budgeted_exec, 'spawn_deadline_exec', spawn)
+    invoke_here([*args, '--timeout', '30'], env)
+    entry = json.loads(_state_path(tmp_path).read_text())['specialist_invocations'][-1]
+    assert entry.get('status') != 'failed-before-start'
+    assert entry.get('proven_no_dispatch') is not True
+    assert entry.get('child_pid')
+    assert entry['reason_code'] == 'budget-provider-exchange-failed'
+    assert marker.exists()

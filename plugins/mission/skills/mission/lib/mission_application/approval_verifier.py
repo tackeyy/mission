@@ -87,6 +87,8 @@ def _callable_child(verifier, request, control, sender, receiver):
 
 
 def run_callable(verifier, request, *, timeout=5, grace=.2):
+    # Callable verifiers have no enforceable budget admission, so this legacy
+    # fork path intentionally remains outside the deadline-watchdog boundary.
     context = multiprocessing.get_context('fork')
     parent, child_control = context.Pipe()
     receiver, sender = os.pipe()
@@ -149,7 +151,8 @@ def run_approval(verifier, request, directory=None, *, timeout=5, grace=.2, cwd=
         directory = directory or (cwd or Path.cwd()) / '.mission-state' / 'exec-jobs'
         try:
             return run_job('approval-verifier', {'verifier': verifier, 'request': request}, directory,
-                           timeout=timeout, term_grace=grace, kill_wait=grace, cwd=cwd, session_id=request['session_id'])
+                           timeout=timeout, deadline=time.monotonic() + timeout,
+                           term_grace=grace, kill_wait=grace, cwd=cwd, session_id=request['session_id'])
         except Exception as exc:
             raise ValueError('approval verifier rejected the evidence') from exc
     return run_callable(verifier, request, timeout=timeout, grace=grace)

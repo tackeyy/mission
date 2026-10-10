@@ -340,18 +340,12 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None, bud
                 child = subprocess.Popen(argv, cwd=cwd, shell=False, stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True, env=env)
             else:
-                from budgeted_exec import spawn_exec
+                from budgeted_exec import spawn_deadline_exec
                 # A separate owned group lets us kill the verifier's descendants
                 # while retaining the supervisor that reports output and exit.
-                control_receiver, control_sender = os.pipe()
+                child, control_receiver = spawn_deadline_exec(argv, budget_deadline, cwd=cwd,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
                 descriptors.callback(os.close, control_receiver)
-                os.set_blocking(control_receiver, False)
-                try:
-                    child = spawn_exec([sys.executable, '-I', '-S', str(Path(__file__).with_name('verification_exec.py')),
-                        str(budget_deadline), str(control_sender), *argv], pass_fds=(control_sender,),
-                        cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
-                finally:
-                    os.close(control_sender)
         except OSError:
             return {
                 "started_at": started,
@@ -436,15 +430,13 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None, bud
             exit_code = child.poll()
         else:
             exit_code = child.returncode
-        exec_failed = False
+        process_unavailable = False
         if control_receiver is not None:
-            try:
-                control = os.read(control_receiver, 2)
-            except BlockingIOError:
-                control = b''
+            from budgeted_exec import read_deadline_control
+            control = read_deadline_control(control_receiver)
             timed_out = timed_out or b'T' in control
-            exec_failed = b'E' in control
-            if exec_failed:
+            process_unavailable = b'E' in control or b'W' in control
+            if b'E' in control:
                 exit_code = None
         selector.close()
         stdout.close()
@@ -461,7 +453,7 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None, bud
     if before != after:
         raise VerificationRunnerError("candidate-mutated")
     toolchain_stale = not _toolchain_matches(command)
-    passed = not timed_out and not exec_failed and not candidate_stale and not toolchain_stale and exit_code == 0 and (command.get("kind") != "test" or (count is not None and count > 0 and report_successful))
+    passed = not timed_out and not process_unavailable and not candidate_stale and not toolchain_stale and exit_code == 0 and (command.get("kind") != "test" or (count is not None and count > 0 and report_successful))
     return {
         "started_at": started,
         "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
@@ -471,7 +463,7 @@ def execute_candidate(candidate, command, *, relative_cwd, repro_input=None, bud
         "output_digest": "sha256:" + output_hash.hexdigest(),
         "observed_output_bytes": observed_output_bytes,
         "output_truncated": output_truncated,
-        "status": "passed" if passed else "blocked" if timed_out or exec_failed or candidate_stale or toolchain_stale else "failed",
-        "block_reason": "process-unavailable" if exec_failed else ("budget-deadline" if budget_limited else "timeout") if timed_out else observation_reason if candidate_stale else "toolchain-stale" if toolchain_stale else None,
+        "status": "passed" if passed else "blocked" if timed_out or process_unavailable or candidate_stale or toolchain_stale else "failed",
+        "block_reason": "process-unavailable" if process_unavailable else ("budget-deadline" if budget_limited else "timeout") if timed_out else observation_reason if candidate_stale else "toolchain-stale" if toolchain_stale else None,
         "repro_input_digest": repro_digest,
     }
