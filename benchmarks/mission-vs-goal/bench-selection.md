@@ -55,7 +55,8 @@ revision; a matching SHA string alone does not establish provenance. Records sup
 package SHA/digest and integer start time. Every A package must contain a 40-character lowercase
 hex `sha` and `sha256:<64 lowercase hex>` `digest`; null, empty or malformed values return
 `package_invalid` before record equality can establish a match. Both declared arm sets must have packages.
-Check 2 compares B's `lineage_digest` with authenticated document declarations or independent materials.
+Check 2 compares B's `lineage_digest` with independent materials whenever observations are supplied,
+and requires every authenticated document declaration to agree as well.
 Only status=valid with checks 1–3 true establishes selection evidence.
 Checks 4–5 (actual run separation and record execution order), complete assignment accounting and
 statistics belong to I1. K planning, approval and acquisition remain caller duties.
@@ -143,14 +144,19 @@ time and digest-bound verified timestamp must precede `t_R - margin`. Acquisitio
 the reported merge time. Invalid binding/proofs return `preregistration_evidence_invalid`.
 All document lineage declarations must agree; a supplemental document cannot hide a conflicting P.
 
-If neither document declares a lineage digest, the verifier recalculates eligible tasks from
+Whenever `materials` contains `observations`, even with a document declaration, the verifier
+recalculates eligible tasks from
 `materials.snapshot`, `scope` and per-task `observations`, then runs G1–G3 on their repository URLs,
 reachable roots and base file fingerprints using A's `g3_percent`. The resulting canonical pair-record
 digest must match B. These materials must be acquired independently from A's frozen inputs and retained
 I2c observations, not copied from B's lineage/acceptance rows. When `materials.lineage_digest` is present,
 it must also match the expected digest. Any disagreement returns `lineage_digest_mismatch`; B's
-self-consistency alone cannot pass check 2. A valid document declaration takes precedence over the
-fallback calculation; the optional materials digest must still agree.
+self-consistency alone cannot pass check 2. With a declaration and observations, the declaration,
+B and the recalculation must all agree. Without a declaration, recalculation remains required.
+With a declaration but no observations, check 2 retains the authenticated declaration-to-B comparison
+required by design §3.2.1; it does not establish independent recalculation. The optional materials
+digest must still agree in either route. This preserves the frozen document-match requirement
+without claiming that unavailable observations were independently checked.
 
 ## 解釈（owner確認待ち）
 
@@ -163,6 +169,12 @@ B未作成は空のpoolとして扱うが、Aのsnapshot再利用は検査する
 必要なmaterialsの欠落はUNKNOWN（`attempt_materials_unknown`）で後続へ繰り上げない。
 Pは独立した宣言行`attempt_digest: sha256:<AのbytesのSHA-256、64桁小文字hex>`を1行持つ。部分一致・重複を認めない。
 検査2は、時刻証明付きの事前登録文書に系譜digestがあれば必ずそれとBを照合する。
+materialsにobservationsがある場合は文書の宣言にかかわらず独立に再計算し、Bとの一致を要求する。
+宣言があれば宣言・B・再計算の3つすべての一致を要求する。Bのmerge後・cutoff前の補助文書も再計算を省略できない。
+宣言がありobservationsが無い場合は、宣言とBの照合だけを行う。
+理由: [設計§3.2.1の検査2](https://github.com/tackeyy/mission/blob/a19c9778/docs/design/884-evaluation-aggregation.md#L194-L202)は文書との一致を要求し、
+observationsの欠落自体を拒否条件とはしていないため、この凍結した要件を維持する。
+この経路は独立再計算を確立したものではなく、宣言の認証・Aへのbinding・cutoff前の時刻は従来どおり必要である。
 文書に宣言が無い場合はmaterialsのsnapshot・scope・観測から系譜を独立に再計算し、
 Bの`lineage_digest`と照合する。materialsにもdigestがあれば一致を要求し、Bの自己整合を根拠にしない。
 §3.2.1の文言は事前登録文書との一致を求めるが、Aと同じcommitのPには、
