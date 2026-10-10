@@ -87,15 +87,24 @@ def run_repair_cli(args, services):
                 session_id=sf.stem, compatibility_arguments=services.compatibility_arguments, canonical_operation=services.canonical_operation)
             operation = identity.operation_id or 'repair-begin:' + secrets.token_hex(16)
             identifier = attempt_id(args.finding, operation)
+            started_here = False
+            def prepare(state):
+                nonlocal started_here
+                started_here = not any(a['attempt_id'] == identifier for line in decode_projection(state).lineages
+                    for a in line.document.thaw()['attempts'])
+                return prepare_begin(state, root=root, lineage_id=args.finding, operation=operation, plan=plan, services=services)
+            # Observation failures on retries must not terminate an existing
+            # obligation. Only a new attempt admitted below can need recovery.
+            existing = prepare(read())
+            if existing.command.history is None:
+                _, item = find_attempt(read(), identifier)
+                return json.dumps(dict(ok=True, attempt=item), ensure_ascii=False, indent=2)
             try:
-                existing = prepare_begin(read(), root=root, lineage_id=args.finding, operation=operation, plan=plan, services=services)
-                if existing.command.history is None:
-                    _, item = find_attempt(read(), identifier)
-                    return json.dumps(dict(ok=True, attempt=item), ensure_ascii=False, indent=2)
-                execute_evidence_operation(repo(operation, identity.operation_command, command_type='repair-begin'), partial(prepare_begin,
-                    root=root, lineage_id=args.finding, operation=operation, plan=plan, services=services))
+                execute_evidence_operation(repo(operation, identity.operation_command, command_type='repair-begin'), prepare)
             except (OSError, StateBoundaryError) as exc:
                 if isinstance(exc, StateBoundaryError) and not isinstance(exc.__cause__, OSError):
+                    raise
+                if not started_here:
                     raise
                 # A failed begin which published nothing creates no obligation.
                 # If publication reached the head, recovery must close that exact

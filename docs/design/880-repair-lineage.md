@@ -181,6 +181,10 @@ E はこの保証を残し、E に link のない legacy findings の migration/
 | open/repairing/deferred → rejected | 独立 disposition receipt 必須。false-positive、重複先、非義務との関係を具体的に束縛。正当な義務違反の受容を意味しない |
 | verified/rejected/deferred → 実効open | §4 の stale、判定 binding 不一致、または同じ反例の新しい失敗。履歴と元の ID を保持し、再修復可能 |
 
+**E2aのbefore_candidateの保証主体**: 現在のfilesystem候補はapplicationの[`prepare_begin`](../../skills/mission/lib/mission_application/repair.py)が凍結commandごとの`_capture`で観測し、再観測との一致を確認する。公開CLIからsnapshot値を指定する入口は設けない。kernelのstateには過去の候補bindingしかないため、`before_candidate.snapshots`はapplicationが観測した値としてキー集合とdigestの形式だけを検査する（contract・requirement・policy・iterationはstateと照合する）。この境界は[`test_public_begin_uses_application_capture_and_refuses_drift`](../../skills/mission/tests/test_issue906_repair_attempts.py)で固定する。
+
+E2bのreverifyは`before_candidate`を信頼の根拠にしない。下記のfailed/passed replay receiptと対象候補の新しい観測を束縛して判定する。`before_candidate`を権威として使用する設計へ変える場合は、その段で現在候補との照合を必須とする。
+
 verified の必須条件:
 
 1. 元反例の実行が同じ criterion/command/typed repro で `failed` と観測されている。blocked、自己申告 actual、未実行を失敗と数えない。D の original replay が未確認なら、まず保存された introduced snapshot で baseline replay を観測する（B の現 primitive は project_root から capture するため、未merge の D の候補保存に依存する）。snapshot が保存されていなければ UNKNOWN/open のまま。

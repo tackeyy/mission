@@ -414,3 +414,171 @@ def test_reconcile_retries_only_before_publication(replay_reviewer, run_cli, mon
     else:
         assert json.loads(app.run_repair_cli(args, services))['attempt']['status'] == 'blocked'
         assert len(calls) == 2
+
+
+@pytest.mark.parametrize('forged', ['reason', 'operation_id'])
+def test_terminal_reconcile_rejects_invalid_intent_before_noop(repair_state, forged):
+    from mission_kernel.commands import ReconcileFindingRepair
+    from mission_kernel.repair_attempts import terminal_operation
+    from mission_kernel.transitions import decide
+    state, _ = begun_state(repair_state)
+    identifier = state.repair.lineages[0].document.thaw()['attempts'][0]['attempt_id']
+    command = ReconcileFindingRepair(identifier, terminal_operation(identifier, 'blocked', 'publication-result-lost'))
+    ended = decide(state, command).transition.new_state
+    valid = decide(ended, command)
+    assert valid.accepted and valid.transition.new_state == ended
+    result = decide(ended, replace(command, **{forged: 'forged'}))
+    assert not result.accepted
+    assert result.rejection.code == ('repair-attempt-invalid' if forged == 'reason' else 'repair-operation-conflict')
+    assert result.transition is None and result.effects == ()
+
+
+@pytest.mark.parametrize('already_terminal', [False, True])
+def test_reconcile_rejects_fence_older_than_begin(repair_state, already_terminal):
+    from mission_kernel.commands import ReconcileFindingRepair
+    from mission_kernel.repair_attempts import terminal_operation
+    from mission_kernel.transitions import decide
+    state, _ = begun_state(repair_state)
+    item = state.repair.lineages[0].document.thaw()['attempts'][0]
+    command = ReconcileFindingRepair(item['attempt_id'], terminal_operation(item['attempt_id'], 'blocked', 'publication-result-lost'))
+    if already_terminal:
+        state = decide(state, command).transition.new_state
+    state = replace(state, lease=replace(state.lease, fencing_epoch=item['fencing_epoch'] - 1))
+    result = decide(state, command)
+    assert not result.accepted and result.rejection.code == 'repair-lineage-stale-fence'
+    assert result.transition is None and result.effects == ()
+
+
+@pytest.mark.parametrize('status,reason', [('blocked', 'publication-result-lost'), ('failed', 'replay-failed')])
+def test_saved_terminal_cannot_precede_begin_fence(repair_state, status, reason):
+    from mission_kernel.repair_attempts import terminal
+    from mission_kernel.repair_lineage import decode_projection
+    state, _ = begun_state(repair_state)
+    document = state.legacy_passthrough.thaw()
+    row = document['repair_lineage']['lineages'][0]
+    item = row['attempts'][0]
+    row['lifecycle'] = 'open'
+    item.update(status=status, terminal=terminal(item['attempt_id'], status, reason, item['fencing_epoch']))
+    decode_projection(document)  # Same epoch is a valid terminal.
+    item['terminal']['fencing_epoch'] -= 1
+    with pytest.raises(FreshReviewError, match='repair-lineage-shape-invalid'):
+        decode_projection(document)
+
+
+@pytest.mark.parametrize('schema', [4, 5])
+def test_retry_history_read_failure_keeps_healthy_pending(replay_reviewer, run_cli, monkeypatch, schema):
+    from .test_command_inventory import _load_mission_state_module
+    from .test_issue879_completion_cli import _public_bytes
+    from mission_application import repair as app
+    root = replay_reviewer[0]
+    invoke(run_cli, replay_reviewer, FIXTURE_REVIEW_MODE='counterexample')
+    assert import_output(run_cli, replay_reviewer).returncode == 0
+    state = json.loads(run_cli('get', cwd=root).stdout)
+    if schema == 4:
+        _persist_fixture(root, state, schema)
+    lineage = state['repair_lineage']['lineages'][0]['lineage_id']
+    (root / 'repair-plan.json').write_text('repair plan')
+    arguments = ('repair', 'begin', '--finding', lineage, '--plan-ref', 'repair-plan.json')
+    env = {'MISSION_OPERATION_ID': 'retry-read'}
+    item = json.loads(run_cli(*arguments, cwd=root, env_extra=env, check=True).stdout)['attempt']
+    before = _public_bytes(root)
+    monkeypatch.chdir(root)
+    for key, value in dict(env, MISSION_SESSION_ID='test', MISSION_LEASE_ID='test-lease').items():
+        monkeypatch.setenv(key, value)
+    services = _load_mission_state_module()._ACCEPTANCE_CONTRACT_CLI_SERVICES
+    original = app._read
+    def unavailable(root, reference, **kwargs):
+        if reference.relative_path == item['history_ref']['relative_path']:
+            raise OSError('temporary history read failure')
+        return original(root, reference, **kwargs)
+    monkeypatch.setattr(app, '_read', unavailable)
+    args = SimpleNamespace(repair_command='begin', finding=lineage, plan_ref='repair-plan.json')
+    with pytest.raises(SystemExit):
+        app.run_repair_cli(args, services)
+    assert _public_bytes(root) == before
+    assert (root / item['history_ref']['relative_path']).is_file()
+    retry = run_cli(*arguments, cwd=root, env_extra=env, check=True)
+    assert json.loads(retry.stdout)['attempt'] == item
+    ended = run_cli('repair', 'reconcile', '--attempt', item['attempt_id'], cwd=root, check=True)
+    assert json.loads(ended.stdout)['attempt']['status'] == 'blocked'
+
+
+@pytest.mark.parametrize('drift', [False, True])
+def test_public_begin_uses_application_capture_and_refuses_drift(replay_reviewer, run_cli, monkeypatch, drift):
+    from .test_command_inventory import _load_mission_state_module
+    from .test_issue879_completion_cli import _public_bytes
+    from mission_application import repair as app
+    from acceptance_contract import frozen_verifier_commands
+    root = replay_reviewer[0]
+    invoke(run_cli, replay_reviewer, FIXTURE_REVIEW_MODE='counterexample')
+    assert import_output(run_cli, replay_reviewer).returncode == 0
+    state = json.loads(run_cli('get', cwd=root).stdout)
+    row = state['repair_lineage']['lineages'][0]
+    (root / 'app.txt').write_text('new repair candidate')
+    (root / 'repair-plan.json').write_text('repair plan')
+    before = _public_bytes(root)
+    rejected = run_cli('repair', 'begin', '--finding', row['lineage_id'], '--plan-ref', 'repair-plan.json',
+        '--before-candidate', json.dumps(row['introduced_candidate']), cwd=root)
+    assert rejected.returncode != 0 and _public_bytes(root) == before
+    monkeypatch.chdir(root)
+    monkeypatch.setenv('MISSION_SESSION_ID', 'test')
+    monkeypatch.setenv('MISSION_LEASE_ID', 'test-lease')
+    services = _load_mission_state_module()._ACCEPTANCE_CONTRACT_CLI_SERVICES
+    commands = frozen_verifier_commands(state['acceptance_contract'])
+    selected = {key: commands[key] for key in row['introduced_candidate']['snapshots']}
+    observations = []
+    original = app._capture
+    def capture(root, commands):
+        assert commands == selected
+        snapshots = original(root, commands)
+        if drift and observations:
+            snapshots = {key: SimpleNamespace(digest='sha256:' + 'f' * 64) for key in snapshots}
+        observations.append({key: snapshot.digest for key, snapshot in snapshots.items()})
+        return snapshots
+    monkeypatch.setattr(app, '_capture', capture)
+    args = SimpleNamespace(repair_command='begin', finding=row['lineage_id'], plan_ref='repair-plan.json')
+    if drift:
+        with pytest.raises(SystemExit):
+            app.run_repair_cli(args, services)
+        assert observations and _public_bytes(root) == before
+        assert not list((root / 'evidence/repair-attempt').glob('*.json'))
+    else:
+        item = json.loads(app.run_repair_cli(args, services))['attempt']
+        body = json.loads((root / item['history_ref']['relative_path']).read_text())
+        assert observations and body['before_candidate']['snapshots'] == observations[-1]
+        assert body['before_candidate']['snapshots'] != row['introduced_candidate']['snapshots']
+
+
+
+def test_peer_begin_before_admission_is_not_blocked_by_retry_read_failure(replay_reviewer, run_cli, monkeypatch):
+    from .test_command_inventory import _load_mission_state_module
+    from .test_issue879_completion_cli import _public_bytes
+    from mission_application import repair as app
+    root = replay_reviewer[0]
+    invoke(run_cli, replay_reviewer, FIXTURE_REVIEW_MODE='counterexample')
+    assert import_output(run_cli, replay_reviewer).returncode == 0
+    row = json.loads(run_cli('get', cwd=root).stdout)['repair_lineage']['lineages'][0]
+    (root / 'repair-plan.json').write_text('repair plan')
+    arguments = ('repair', 'begin', '--finding', row['lineage_id'], '--plan-ref', 'repair-plan.json')
+    env = {'MISSION_OPERATION_ID': 'peer-begin'}
+    monkeypatch.chdir(root)
+    for key, value in dict(env, MISSION_SESSION_ID='test', MISSION_LEASE_ID='test-lease').items():
+        monkeypatch.setenv(key, value)
+    services = _load_mission_state_module()._ACCEPTANCE_CONTRACT_CLI_SERVICES
+    peer = {}
+    def repository(*args, **kwargs):
+        if kwargs.get('operation_command_type') == 'repair-begin' and not peer:
+            peer['attempt'] = json.loads(run_cli(*arguments, cwd=root, env_extra=env, check=True).stdout)['attempt']
+            peer['bytes'] = _public_bytes(root)
+        return services.repository(*args, **kwargs)
+    original = app._read
+    def unavailable(root, reference, **kwargs):
+        if reference.kind == 'repair-attempt':
+            raise OSError('temporary history read failure')
+        return original(root, reference, **kwargs)
+    monkeypatch.setattr(app, '_read', unavailable)
+    args = SimpleNamespace(repair_command='begin', finding=row['lineage_id'], plan_ref='repair-plan.json')
+    with pytest.raises(SystemExit):
+        app.run_repair_cli(args, replace(services, repository=repository))
+    assert peer and _public_bytes(root) == peer['bytes']
+    assert json.loads(run_cli(*arguments, cwd=root, env_extra=env, check=True).stdout)['attempt'] == peer['attempt']

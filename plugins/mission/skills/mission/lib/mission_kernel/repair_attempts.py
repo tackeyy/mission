@@ -60,6 +60,8 @@ def validate_attempts(row):
         elif item['status'] in ('failed', 'blocked'):
             end = _closed(item['terminal'], ('outcome', 'reason', 'operation_id', 'fencing_epoch', 'event_ref', 'comparison_ref'), INVALID)
             _integer(end['fencing_epoch'], INVALID)
+            if end['fencing_epoch'] < item['fencing_epoch']:
+                raise FreshReviewError(INVALID)
             if end['reason'] not in TERMINAL_REASONS or (item['status'] == 'failed') != (end['reason'] == 'replay-failed'):
                 raise FreshReviewError(INVALID)
             if end != terminal(item['attempt_id'], item['status'], end['reason'], end['fencing_epoch']):
@@ -163,6 +165,10 @@ def mutate_attempt(state, command):
                 or candidate['iteration'] != state.control.iteration):
             raise FreshReviewError('repair-contract-stale')
         _integer(candidate['iteration'], INVALID)
+        # Snapshot values are application observations of the filesystem.
+        # Kernel state has historical bindings, not a current capture; only
+        # snapshot keys/format are checked here. E2b reverify must not use
+        # before_candidate as authority for a failed/passed replay.
         if type(candidate['snapshots']) is not dict or set(candidate['snapshots']) != set(row['introduced_candidate']['snapshots']):
             raise FreshReviewError(INVALID)
         for value in candidate['snapshots'].values():
@@ -184,13 +190,15 @@ def mutate_attempt(state, command):
     else:
         document = _document(state)
         row, item = find_attempt(document, command.attempt_id)
-        if item['status'] != 'pending':
-            return state
         if command.reason not in ('publication-result-lost', 'effects-unavailable'):
             raise FreshReviewError(INVALID)
         expected = terminal_operation(command.attempt_id, 'blocked', command.reason)
         if command.operation_id != expected:
             raise FreshReviewError('repair-operation-conflict')
+        if epoch < item['fencing_epoch']:
+            raise FreshReviewError('repair-lineage-stale-fence')
+        if item['status'] != 'pending':
+            return state
         item.update(status='blocked', terminal=terminal(command.attempt_id, 'blocked', command.reason, epoch))
         row['lifecycle'] = 'open'
     surface = document['repair_lineage']['lineages']
