@@ -49,7 +49,11 @@ def _group_absent(pgid):
         return True
     except PermissionError:
         return True  # Darwin can retain an unowned zombie group leader.
-    return False
+    # Linux keeps a killed leader as a zombie while its stopped parent cannot
+    # reap it; a group holding only zombies has no live member.
+    rows = subprocess.run(['ps', '-A', '-o', 'pgid=,stat='], capture_output=True, text=True).stdout
+    return not any(parts[0] == str(pgid) and not parts[1].startswith('Z')
+                   for parts in (row.split() for row in rows.splitlines()) if len(parts) >= 2)
 
 
 @pytest.mark.parametrize("completion_session", [4, 5], indirect=True, ids=["v4-flat", "v5-container"])
