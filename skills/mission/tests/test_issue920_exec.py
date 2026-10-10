@@ -635,3 +635,20 @@ def test_older_metadata_without_dist_rechecks_distribution_ownership(tmp_path, i
             with pytest.raises(ValueError, match='distribution'):
                 action()
         assert loaded == []
+
+
+@pytest.mark.parametrize('reason, unstarted', [(b'W', False), (b'T', False), (b'E', True)])
+def test_run_job_marks_only_pre_start_failure_as_unstarted(tmp_path, installed_verifier, monkeypatch, reason, unstarted):
+    import budgeted_exec
+    pin, request, _, _ = installed_verifier
+    def fake(argv, deadline, **kwargs):
+        receiver, sender = os.pipe()
+        os.write(sender, reason)
+        os.close(sender)
+        return budgeted_exec.spawn_exec([sys.executable, '-c', 'raise SystemExit(3)']), receiver
+    monkeypatch.setattr(budgeted_exec, 'spawn_deadline_exec', fake)
+    with pytest.raises(Exception) as caught:
+        budgeted_exec.run_job('approval-verifier', {'verifier': pin, 'request': request}, tmp_path / 'jobs',
+                              timeout=2, kill_wait=.2, deadline=time.monotonic() + 2)
+    assert getattr(caught.value, 'exec_unstarted', False) is unstarted
+

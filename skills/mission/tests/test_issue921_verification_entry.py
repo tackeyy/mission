@@ -670,3 +670,23 @@ def test_blocked_verifier_receipts_record_current_observation_time(monkeypatch, 
     assert receipt['exit_code'] is None and not receipt['timed_out']
     if fault in ('path-conflict', 'no-progress'):
         assert receipt['candidate_digest'] == candidate.digest
+
+
+def test_run_job_watchdog_outlives_the_collection_deadline(tmp_path, monkeypatch):
+    import budgeted_exec
+    import time
+    from mission_application.verifier_policy import validate
+    from .test_issue878_verification_runner import _contract, _policy
+    contract = _contract('mission-neutral')
+    contract['verifier_policy'] = {'digest': 'sha256:' + 'a' * 64, 'commands': validate(_policy())}
+    seen = []
+    def fake(argv, deadline, **kwargs):
+        seen.append(deadline)
+        raise OSError('stop before spawn')
+    monkeypatch.setattr(budgeted_exec, 'spawn_deadline_exec', fake)
+    now = time.monotonic()
+    with pytest.raises(OSError):
+        budgeted_exec.run_job('verification', dict(contract=contract, criterion='AC1', repro_input=None, deadline=now + 2),
+            tmp_path / 'jobs', deadline=now + 2, collect_deadline=now + 13)
+    # The watchdog must not reclaim the supervisor during post-run collection.
+    assert seen and seen[0] >= now + 14

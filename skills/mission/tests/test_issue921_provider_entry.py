@@ -555,3 +555,26 @@ def test_budget_provider_exec_failure_is_refused_and_settled_zero(
     ledger = state['budget_ledger']
     assert not ledger['reservations'] and ledger['settlements'][-1]['charged_sec'] == 0
     assert ledger['stop_slots']['last_refusal'] == 'budget-deadline-unenforceable'
+
+
+def test_budgeted_provider_watchdog_loss_after_start_is_not_unstarted(run_cli, tmp_path, prepare_approved_invocation):
+    """A started command that kills its watchdog must not be settled as never dispatched."""
+    marker, env = _prepare_command_provider(run_cli, tmp_path)
+    command = tmp_path / 'commands' / 'provider-command'
+    command.write_text(f'#!{sys.executable}\n'
+        'import os,signal,subprocess,time\n'
+        'rows=subprocess.run(["ps","-A","-o","pid=,ppid="],capture_output=True,text=True).stdout.split("\\n")\n'
+        'for row in rows:\n'
+        '    parts=row.split()\n'
+        '    if len(parts)==2 and int(parts[1])==os.getppid() and int(parts[0])!=os.getpid():\n'
+        '        os.kill(int(parts[0]),signal.SIGKILL)\n'
+        'time.sleep(2)\n')
+    command.chmod(0o700)
+    args, env, _ = prepare_approved_invocation(cwd=tmp_path, provider='guarded-command-provider',
+        iteration=1, phase='planning', env_extra=env)
+    _budget(tmp_path)
+    run_cli(*args, '--timeout', '6', cwd=tmp_path, env_extra=env)
+    entry = json.loads(_state_path(tmp_path).read_text())['specialist_invocations'][-1]
+    assert entry.get('status') != 'failed-before-start'
+    assert entry.get('proven_no_dispatch') is not True
+    assert entry.get('child_pid')
