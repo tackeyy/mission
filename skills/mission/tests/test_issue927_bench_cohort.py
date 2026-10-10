@@ -579,16 +579,20 @@ def test_matching_invalid_package_evidence_is_rejected(m, package):
     assert result['status'] == 'invalid_cohort' and result['reason'] == 'package_invalid'
 
 
-@pytest.mark.parametrize('matches', [True, False])
-def test_lineage_digest_in_preregistration_must_match_b(m, matches):
+@pytest.mark.parametrize('matches,observations_match', [(True, True), (False, True), (True, False)])
+def test_lineage_digest_in_preregistration_must_match_b(m, matches, observations_match):
     f = fixture(m); h = f[0]
     p = next(raw for path, raw in h['current_files'].items() if path.endswith('preregistration.md'))
     expected = f[1][1]['lineage_digest'] if matches else 'sha256:' + '0' * 64
     update_file(m, h, 'P', p + b'lineage_digest: ' + expected.encode() + b'\n')
+    if not observations_match:
+        task_id = f[1][1]['snapshot'][0]['task_id']
+        f[1][1]['observations'][task_id]['starter'] = [observed(True)] * 3
     result = check(m, f)
-    assert result['status'] == ('valid' if matches else 'invalid_cohort')
-    assert result['checks']['2'] is matches
-    if not matches: assert result['reason'] == 'lineage_digest_mismatch'
+    agrees = matches and observations_match
+    assert result['status'] == ('valid' if agrees else 'invalid_cohort')
+    assert result['checks']['2'] is agrees
+    if not agrees: assert result['reason'] == 'lineage_digest_mismatch'
 
 
 @pytest.mark.parametrize('defect', [None, 'digest', 'proof', 'merge-time', 'proof-time', 'attempt-binding', 'conflicting-P'])
@@ -604,11 +608,30 @@ def test_materials_preregistration_is_timestamp_bound_and_controls_lineage(m, de
     materials[1]['preregistration'] = {'raw': raw, 'proof': proof, 'merged_at': 900 if defect == 'merge-time' else 249}
     if defect == 'conflicting-P': update_file(m, h, 'P', p + b'lineage_digest: sha256:' + b'0' * 64 + b'\n')
     materials[1].pop('lineage_digest')
-    if defect is None: materials[1].pop('observations')  # a document declaration takes precedence over fallback
+    if defect is None: materials[1].pop('observations')  # declaration-only evidence under design 3.2.1
     result = check(m, f, rerun=lambda *args: observed(args[-1] == 'reference'))
     assert result['status'] == ('valid' if defect is None else 'invalid_cohort')
     if defect in ('digest', 'conflicting-P'): assert result['reason'] == 'lineage_digest_mismatch'
     if defect in ('proof', 'merge-time', 'proof-time', 'attempt-binding'): assert result['reason'] == 'preregistration_evidence_invalid'
+
+
+@pytest.mark.parametrize('observations_match', [False, True])
+def test_materials_preregistration_does_not_skip_independent_lineage(m, observations_match):
+    f = fixture(m); h, materials = f[:2]; material = materials[1]
+    attempt = m.enumerate_attempts(h, Proofs())[0]
+    raw = attempt['stages']['P']['raw'] + b'lineage_digest: ' + material['lineage_digest'].encode() + b'\n'
+    when = attempt['stages']['B']['merged_at'] + 50
+    assert attempt['stages']['B']['merged_at'] < when < m.cutoff(attempt)
+    material['preregistration'] = {'raw': raw, 'merged_at': when,
+        'proof': {'time': when, 'signature': sign((m.digest(raw) + ':' + str(when)).encode())}}
+    if not observations_match:
+        task_id = material['snapshot'][0]['task_id']
+        material['observations'][task_id]['starter'] = [observed(True)] * 3
+    result = check(m, f, rerun=lambda *args: observed(args[-1] == 'reference'))
+    assert result['status'] == ('valid' if observations_match else 'invalid_cohort')
+    assert result['canonical_attempt'] == 1
+    assert result['checks'] == {'1': True, '2': observations_match, '3': observations_match}
+    assert result['reason'] == (None if observations_match else 'lineage_digest_mismatch')
 
 
 @pytest.mark.parametrize('det', [{}, {'starter': [observed()] * 3},
