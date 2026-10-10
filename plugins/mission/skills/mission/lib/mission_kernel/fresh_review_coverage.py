@@ -12,6 +12,7 @@ from enum import Enum
 from .fresh_review import (
     FreshReviewError, FreshReviewRequest, _digest, _identifier, candidate_identity,
     canonical_digest, decode_request, request_document,
+    WithdrawnFreshReviewRecord, FreshReviewProjection, decode_projection, projection_document,
 )
 from .fresh_review_receipts import (
     CompletedFreshReview, ContextMode, CoverageStatus, FreshReviewTerminal,
@@ -36,7 +37,8 @@ _TERMINAL = ('completed', 'failed', 'blocked', 'abandoned-unknown')
 
 @dataclass(frozen=True)
 class FreshReviewAttempt:
-    request: FreshReviewRequest
+    # Withdrawn attempts retain selection identity/scope, but no request bindings.
+    request: FreshReviewRequest | WithdrawnFreshReviewRecord
     status: str
     terminal_receipt: FreshReviewTerminal | None = None
 
@@ -77,12 +79,22 @@ def _validated(attempts, current):
     inputs, snapshots = _pairs(current.input_digests), _pairs(current.candidate_snapshots)
     ids, nonces = set(), set()
     for item in attempts:
-        if not isinstance(item, FreshReviewAttempt) or not isinstance(item.status, str) or item.status not in _ACTIVE + _TERMINAL:
+        if not isinstance(item, FreshReviewAttempt) or not isinstance(item.status, str):
             raise FreshReviewError('fresh-review-attempt-invalid')
-        request = decode_request(request_document(item.request))
+        if isinstance(item.request, WithdrawnFreshReviewRecord):
+            if item.status != 'withdrawn' or item.terminal_receipt is not None:
+                raise FreshReviewError('fresh-review-attempt-invalid')
+            request = decode_projection({'fresh_review': projection_document(
+                FreshReviewProjection((item.request,)))}).requests[0]
+        else:
+            if item.status not in _ACTIVE + _TERMINAL:
+                raise FreshReviewError('fresh-review-attempt-invalid')
+            request = decode_request(request_document(item.request))
         if request.request_id in ids or request.nonce in nonces:
             raise FreshReviewError('fresh-review-identity-reused')
         ids.add(request.request_id); nonces.add(request.nonce)
+        if item.status == 'withdrawn':
+            continue
         if item.status in _ACTIVE:
             if item.terminal_receipt is not None:
                 raise FreshReviewError('fresh-review-attempt-invalid')
@@ -124,6 +136,9 @@ def _judge(attempts, criteria, current, inputs, snapshots):
     if latest is None:
         return FreshReviewDecision(CoverageStatus.PENDING, FreshReviewReason.MISSING, None)
     request = latest.request
+    # Withdrawal has no bindings: missing must precede every freshness check.
+    if latest.status == 'withdrawn':
+        return FreshReviewDecision(CoverageStatus.PENDING, FreshReviewReason.MISSING, request.request_id)
     command_ids = {binding.command_id for binding in request.candidate_bindings}
     if (request.contract_digest != current.contract_digest or inputs.get(request.request_id) != request.input_digest
             or not command_ids.issubset(snapshots)
