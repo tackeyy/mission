@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+from functools import partial
 import json
 from pathlib import Path
 import secrets
@@ -175,16 +176,32 @@ def run_fresh_review_prepare_cli(args, services):
         services.fail(getattr(exc, 'code', str(exc)), 2)
 
 
+def snapshot_failure_message(exc):
+    """Keep the boundary's sanitized detail with its code, as the transactional reader did."""
+    code = getattr(exc, 'code', None) or 'repository-format-invalid'
+    detail = getattr(exc, 'detail', None)
+    if not isinstance(detail, str) or not detail:
+        return code
+    return detail if detail.startswith(code) else f'{code}: {detail}'
+
+
+def _same_snapshot(loaded, *_args, **_kwargs):
+    return loaded
+
+
 def run_fresh_review_status_cli(args, services):
     root = Path.cwd()
     state_file = services.resolve_state_file(root)
     if not state_file.exists():
         services.fail('fresh-review-state-missing', 2)
-    repository = services.repository(root, state_file, stamp=False, strict_read=True)
     try:
-        with repository.transaction():
-            projection = decode_projection(repository.load())
-            capacity = services.capacity_status(state_file)
+        loaded = services.load_snapshot(state_file)
+    except Exception as exc:
+        services.fail(snapshot_failure_message(exc), 2)
+    try:
+        projection = decode_projection(loaded[1])
+        # capacity は同じ snapshot から計算し、要求一覧と別の状態を混ぜない。
+        capacity = services.capacity_status(state_file, load_snapshot=partial(_same_snapshot, loaded))
         requests = []
         for item in projection.requests:
             if isinstance(item, WithdrawnFreshReviewRecord):

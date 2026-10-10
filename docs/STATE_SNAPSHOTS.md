@@ -108,6 +108,43 @@ an authentication key they cannot protect against a malicious owner who rewrites
 every related field and recomputes the digest. Do not accept snapshots from an
 untrusted user or transport.
 
+## Acceptance coverage status
+
+`acceptance-contract status` keeps every existing key, including `coverage`
+(the immutable imported value), and adds:
+
+```json
+{
+  "coverage": {"status": "pending"},
+  "imported_coverage": {"status": "pending"},
+  "effective_coverage": "valid",
+  "effective_coverage_reason_code": null,
+  "effective_coverage_request_id": "request-1"
+}
+```
+
+Effective coverage uses the completion kernel's latest whole-attempt rule:
+`pending`, `valid`, or `open`. Pending/open include the reason code from
+[the coverage decision table](design/689-fresh-review-receipt.md)
+and the selected request ID (null when no whole attempt exists). Withdrawn
+attempts remain in selection order and never fall back to an older success.
+Bindings are recaptured with the same observation as completion. If current
+bindings or immutable evidence cannot be observed, the command still succeeds
+with `effective_coverage: "unavailable"` and a reason code; it never reports
+valid from saved bindings alone. Before deriving coverage, status shares the
+completion kernel's carrier authentication and semantic evidence checks, including
+requirement mapping, criterion results and finding/replay facts. Rejected evidence
+returns `unavailable` with the completion rejection code.
+Both status commands read a captured head and verified immutable lineage without
+creating locks or writer layout, or running recovery. Files and mtimes remain
+unchanged. Sessions without a contract still return `{"present": false}`.
+Valid coverage alone does not imply that every completion gate passes.
+
+`fresh-review status` retains its request/capacity diagnostic shape. Use
+`acceptance-contract status` for whole-contract coverage; repeating that
+observation in the request listing would also require candidate and evidence
+reads when inspecting capacity alone.
+
 ## State capacity and manual recovery
 
 State writes reserve space for unfinished review items, one halt slot, and the
