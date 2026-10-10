@@ -1,12 +1,41 @@
 """Provider admission contracts at the existing public CLI boundary."""
+import contextlib
 import json
 import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from mission_kernel.budget import decode_policy, default_policy_document, ledger_document, new_ledger
 from .test_provider_application_guard import _prepare_command_provider, _state_path
+
+
+def _wait(predicate, seconds=5):
+    end = time.monotonic() + seconds
+    while not predicate():
+        assert time.monotonic() < end, 'owned process did not reach expected state'
+        time.sleep(.01)
+
+
+def _absent(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
+def _pids(marker):
+    try:
+        value = json.loads(marker.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, list) and len(value) == 3 else None
 
 
 @pytest.fixture
@@ -66,6 +95,45 @@ def test_provider_sees_durable_reservation_and_timeout_is_settled_after_cleanup(
     assert entry['reason_code'] == 'budget-child-timeout'
     with pytest.raises(ProcessLookupError):
         os.killpg(entry['child_pid'], 0)
+
+
+@pytest.mark.parametrize('supervisor_signal', [signal.SIGSTOP, signal.SIGKILL])
+def test_budgeted_provider_watchdog_reclaims_stopped_command_after_supervisor_stops(
+        run_cli, tmp_path, prepare_approved_invocation, supervisor_signal):
+    """The command-provider path retains deadline enforcement after CLI loss."""
+    marker, env = _prepare_command_provider(run_cli, tmp_path)
+    command = tmp_path / 'commands' / 'provider-command'
+    command.write_text(f'#!{sys.executable}\n'
+        'import json,os,signal,subprocess,sys,time\nfrom pathlib import Path\n'
+        'child=subprocess.Popen([sys.executable,"-c","import time; time.sleep(60)"])\n'
+        f'Path({str(marker)!r}).write_text(json.dumps([os.getpgrp(),os.getpid(),child.pid]))\n'
+        'os.killpg(os.getpgrp(),signal.SIGSTOP)\ntime.sleep(60)\n')
+    command.chmod(0o700)
+    args, env, _ = prepare_approved_invocation(cwd=tmp_path, provider='guarded-command-provider',
+        iteration=1, phase='planning', env_extra=env)
+    _budget(tmp_path)
+    process_env = {key: value for key, value in os.environ.items() if not key.startswith('MISSION_')}
+    process_env.update(env)
+    process_env.update(MISSION_SESSION_ID='test', MISSION_LEASE_ID='test-lease')
+    supervisor = subprocess.Popen([sys.executable, str(Path(__file__).parents[1] / 'bin/mission-state.py'),
+        *args, '--timeout', '2'], cwd=tmp_path, env=process_env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        _wait(lambda: _pids(marker) is not None)
+        pgid, target, grandchild = _pids(marker)
+        os.kill(supervisor.pid, supervisor_signal)
+        if supervisor_signal == signal.SIGKILL:
+            supervisor.wait(timeout=1)
+        _wait(lambda: _absent(target) and _absent(grandchild), seconds=4)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(supervisor.pid, signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            supervisor.wait(timeout=1)
+        pids = _pids(marker)
+        if pids is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(pids[0], signal.SIGKILL)
 
 
 def test_deadline_does_not_restore_the_fractional_second_already_consumed(monkeypatch):
