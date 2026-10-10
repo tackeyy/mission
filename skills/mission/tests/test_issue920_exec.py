@@ -249,9 +249,11 @@ def test_approval_descriptor_watchdog_reclaims_stopped_callback_after_supervisor
             return True  # Darwin can retain an unowned zombie group leader.
         # Linux keeps a killed leader as a zombie while its stopped parent cannot
         # reap it; a group holding only zombies has no live member.
-        rows = subprocess.run(['ps', '-A', '-o', 'pgid=,stat='], capture_output=True, text=True).stdout
-        return not any(parts[0] == str(pgid) and not parts[1].startswith('Z')
-                       for parts in (row.split() for row in rows.splitlines()) if len(parts) >= 2)
+        rows = [row.split() for row in subprocess.run(['ps', '-A', '-o', 'pgid=,stat='], capture_output=True,
+                text=True, check=True).stdout.splitlines() if row.strip()]
+        # An empty or unparsable listing cannot prove absence.
+        assert rows and all(len(parts) >= 2 and parts[0].isdigit() for parts in rows), rows[:3]
+        return not any(parts[0] == str(pgid) and not parts[1].startswith('Z') for parts in rows)
     try:
         end = time.monotonic() + 10
         while marker_pids() is None:
