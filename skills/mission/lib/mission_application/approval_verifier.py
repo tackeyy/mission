@@ -151,7 +151,8 @@ def run_approval(verifier, request, directory=None, *, timeout=5, grace=.2, cwd=
         directory = directory or (cwd or Path.cwd()) / '.mission-state' / 'exec-jobs'
         try:
             return run_job('approval-verifier', {'verifier': verifier, 'request': request}, directory,
-                           timeout=timeout, term_grace=grace, kill_wait=grace, cwd=cwd, session_id=request['session_id'])
+                           timeout=timeout, deadline=time.monotonic() + timeout,
+                           term_grace=grace, kill_wait=grace, cwd=cwd, session_id=request['session_id'])
         except Exception as exc:
             raise ValueError('approval verifier rejected the evidence') from exc
     return run_callable(verifier, request, timeout=timeout, grace=grace)

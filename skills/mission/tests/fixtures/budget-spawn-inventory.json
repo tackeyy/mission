@@ -196,7 +196,6 @@
       "lib/mission_application/verification_exec.py:main:executable": 1,
       "lib/mission_application/verification_execution.py:run_contract_verifier:executed_count": 1,
       "lib/mission_application/verification_execution.py:run_verification_receipt_cli:execute_verification": 1,
-      "lib/mission_application/verification_runner.py:execute_candidate:exec_failed": 4,
       "lib/mission_application/verifier_policy.py:inline_python_source:executable": 1,
       "lib/mission_kernel/budget.py:_reservation:system": 1,
       "lib/mission_kernel/budget_decisions.py:settle:system": 3,

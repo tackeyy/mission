@@ -67,7 +67,7 @@ def _marked_group(marker):
                     os.killpg(pids[0], signal.SIGKILL)
 
 
-def _faulty_watchdog(marker, fault, deadline, *, target=None, watchdog_marker=None):
+def _faulty_watchdog(marker, fault, deadline, *, target=None, watchdog_marker=None, **kwargs):
     """Inject a real watchdog process, leaving bootstrap/target unmocked."""
     import budgeted_exec
     helper = Path(runner.__file__).with_name('verification_exec.py')
@@ -90,7 +90,7 @@ raise SystemExit(namespace['main']())
 '''
     try:
         child = budgeted_exec.spawn_exec([sys.executable, '-I', '-S', '-c', script],
-            pass_fds=(sender,))
+            pass_fds=(sender,), **kwargs)
     finally:
         os.close(sender)
     return child, receiver
@@ -207,18 +207,33 @@ def test_deadline_rechecked_after_watchdog_ready_before_target_exec(monkeypatch)
         ready.close(); os.close(receiver); os.close(sender)
 
 
-def test_watchdog_exit_kills_verifier_group(tmp_path):
+def test_watchdog_exit_kills_verifier_group(tmp_path, monkeypatch):
+    import budgeted_exec
     marker = tmp_path / 'owned-pids'
+    observed = []
+    read = budgeted_exec.read_deadline_control
+    def control(fd):
+        value = read(fd)
+        observed.append(value)
+        return value
+    def spawn(argv, deadline, **kwargs):
+        # Exit only after the real target has started, independent of host load.
+        fault = ('import os,time; from pathlib import Path; os.write(1,b"R"); '
+                 f'm=Path({str(marker)!r}); '
+                 '\nwhile not m.exists(): time.sleep(.01)')
+        return _faulty_watchdog(marker, fault, deadline, target=argv, **kwargs)
+    monkeypatch.setattr(budgeted_exec, 'spawn_deadline_exec', spawn)
+    monkeypatch.setattr(budgeted_exec, 'read_deadline_control', control)
+    command = validate(_policy())['project-test']
+    command.update(argv=[command['argv'][0], '-c', _program(marker)], timeout_sec=30)
     with _marked_group(marker):
-        child, receiver = _faulty_watchdog(marker,
-            'import os,time; os.write(1,b"R"); time.sleep(.5)', time.monotonic()+10)
-        try:
-            _wait(marker.exists)
-            pids = json.loads(marker.read_text())
-            _wait(lambda: all(_absent(pid) for pid in pids[1:]))
-            assert os.read(receiver, 1) == b'E'
-        finally:
-            os.close(receiver)
+        result = runner.execute_candidate(runner.CandidateSnapshot((), runner._digest(())),
+            command, relative_cwd='.', budget_deadline=time.monotonic()+30)
+        assert observed == [b'W']
+        assert result['status'] == 'blocked' and result['block_reason'] == 'process-unavailable'
+        assert not result['timed_out']
+        assert marker.exists()
+        _wait(lambda: all(_absent(pid) for pid in json.loads(marker.read_text())[1:]), 10)
 
 
 @pytest.mark.parametrize('terminal', ['passed', 'failed', 'unstarted'])
@@ -485,6 +500,34 @@ def test_deadline_watchdog_start_failure_cannot_report_a_completed_verifier(monk
         assert os.read(receiver, 1) == b'E'
     finally:
         os.close(receiver); os.close(sender)
+
+
+def test_post_start_oserror_reports_watchdog_failure_not_exec_refusal(monkeypatch):
+    from types import SimpleNamespace
+    from mission_application import verification_exec as bootstrap
+    receiver, sender = os.pipe()
+    ready_receiver, ready_sender = os.pipe()
+    os.write(ready_sender, b'R'); os.close(ready_sender)
+    ready = os.fdopen(ready_receiver, 'rb')
+    launches, signals = [], []
+    def unavailable():
+        raise OSError('post-start observation unavailable')
+    def spawn(argv, **kw):
+        launches.append(argv)
+        return (SimpleNamespace(stdout=ready, poll=lambda: None) if '--watchdog' in argv
+                else SimpleNamespace(poll=unavailable))
+    monkeypatch.setattr(bootstrap.sys, 'argv',
+        ['bootstrap', str(time.monotonic()+30), str(sender), 'neutral-target'])
+    monkeypatch.setattr(bootstrap.os, 'getpgrp', os.getpid)
+    monkeypatch.setattr(bootstrap.subprocess, 'Popen', spawn)
+    monkeypatch.setattr(bootstrap.signal, 'signal', lambda *a: None)
+    monkeypatch.setattr(bootstrap.os, 'killpg', lambda *a: signals.append(a))
+    try:
+        assert bootstrap.main() == 2
+        assert len(launches) == 2 and os.read(receiver, 1) == b'W'
+        assert signals == [(os.getpid(), signal.SIGKILL)]
+    finally:
+        ready.close(); os.close(receiver); os.close(sender)
 
 
 

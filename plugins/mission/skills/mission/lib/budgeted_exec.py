@@ -45,7 +45,7 @@ def spawn_deadline_exec(argv, deadline, *, pass_fds=(), stdin=subprocess.DEVNULL
     """Start an exec boundary with a detached watchdog and return its control reader.
 
     The bootstrap is shared with verifier execution.  The caller owns and must
-    close the returned read descriptor after it has interpreted ``E`` or ``T``.
+    close the returned read descriptor after interpreting ``E``, ``W`` or ``T``.
     """
     receiver, sender = os.pipe()
     try:
@@ -236,8 +236,7 @@ def run_job(kind, payload, directory, *, timeout=5, term_grace=.2, kill_wait=.2,
                 child, control_receiver = spawn_deadline_exec(argv, watchdog_deadline,
                     pass_fds=(sender,), cwd=cwd)
             else:
-                # Inert approval descriptors have no budget deadline; preserve
-                # the legacy direct spawn contract.
+                # Calls without an absolute deadline retain direct spawn.
                 child = spawn_exec(argv, pass_fds=(sender,), cwd=cwd)
             os.close(sender)
             sender = None

@@ -216,14 +216,17 @@ def test_approval_descriptor_watchdog_reclaims_stopped_callback_after_supervisor
     )
     pin['source_digest'] = 'sha256:' + hashlib.sha256(source.read_bytes()).hexdigest()
     driver = (
-        'import sys; '
+        'import sys; from pathlib import Path; '
         f'sys.path.insert(0, {str(LIB)!r}); '
-        'import time; from budgeted_exec import run_job; '
-        f'run_job("approval-verifier", {{"verifier": {pin!r}, "request": {request!r}}}, '
-        f'{str(tmp_path / "jobs")!r}, deadline=time.monotonic()+6)'
+        'from mission_application.approval_verifier import run_approval,verify_approval_request; '
+        'from functools import partial; '
+        f'verify_approval_request({request!r}, "neutral", verifiers={{}}, '
+        f'resolve=lambda cwd,name: {pin!r}, execute=partial(run_approval, timeout=12, '
+        f'directory=Path({str(tmp_path / "jobs")!r})), '
+        f'cwd=Path({str(tmp_path)!r}))'
     )
     supervisor = subprocess.Popen([sys.executable, '-I', '-c', driver], cwd=tmp_path,
-                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                   start_new_session=True)
     def marker_pids():
         try:
@@ -246,15 +249,16 @@ def test_approval_descriptor_watchdog_reclaims_stopped_callback_after_supervisor
             return True  # Darwin can retain an unowned zombie group leader.
         return False
     try:
-        end = time.monotonic() + 5
+        end = time.monotonic() + 10
         while marker_pids() is None:
+            assert supervisor.poll() is None, supervisor.stderr.read().decode()
             assert time.monotonic() < end
             time.sleep(.01)
         pgid, target, grandchild = marker_pids()
         os.kill(supervisor.pid, supervisor_signal)
         if supervisor_signal == signal.SIGKILL:
             supervisor.wait(timeout=1)
-        end = time.monotonic() + 8
+        end = time.monotonic() + 18
         while not (absent(target) and absent(grandchild) and group_absent(pgid)):
             assert time.monotonic() < end
             time.sleep(.01)
@@ -263,6 +267,7 @@ def test_approval_descriptor_watchdog_reclaims_stopped_callback_after_supervisor
             os.kill(supervisor.pid, signal.SIGKILL)
         with contextlib.suppress(Exception):
             supervisor.wait(timeout=1)
+        supervisor.stderr.close()
         if marker_pids() is not None:
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(marker_pids()[0], signal.SIGKILL)
@@ -653,4 +658,3 @@ def test_run_job_marks_only_pre_start_failure_as_unstarted(tmp_path, installed_v
         budgeted_exec.run_job('approval-verifier', {'verifier': pin, 'request': request}, tmp_path / 'jobs',
                               timeout=2, kill_wait=.2, deadline=time.monotonic() + 2)
     assert getattr(caught.value, 'exec_unstarted', False) is unstarted
-
