@@ -345,6 +345,13 @@ class PrepareFreshReview:
     payload_digest: str
     packet: Optional[FrozenJsonObject]
     effect: Optional[FreshReviewInputEffectClaim]
+    repair_evidence: tuple[FreshReviewCompletionEvidence, ...] = ()
+
+
+@dataclass(frozen=True)
+class ImportRepairOrigins:
+    evidence: tuple[FreshReviewCompletionEvidence, ...]
+    fencing_epoch: int
 
 
 @dataclass(frozen=True)
@@ -396,6 +403,7 @@ class ImportFreshReviewOutput:
     coverage_effect: Optional[FreshReviewInputEffectClaim] = None
     findings_effect: tuple[FreshReviewInputEffectClaim, ...] = ()
     replay_results: tuple[FrozenJsonObject, ...] = ()
+    repair_evidence: tuple[FreshReviewCompletionEvidence, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -562,6 +570,7 @@ GENERIC_SET_DEDICATED_FIELDS = frozenset(
         "verification_receipts",
         "acceptance_contract",
         "fresh_review",
+        "repair_lineage",
         "budget_ledger",
     }
 )
@@ -593,6 +602,7 @@ Command = Union[
     RecordVerificationReceipt,
     ImportAcceptanceContract,
     PrepareFreshReview,
+    ImportRepairOrigins,
     BeginFreshReviewDispatch,
     WithdrawFreshReviewRequest,
     RecordFreshReviewLaunch,
@@ -635,6 +645,7 @@ _COMMAND_TYPES = {
     RecordVerificationReceipt: "record-verification-receipt",
     ImportAcceptanceContract: "acceptance-contract-import",
     PrepareFreshReview: "fresh-review-prepare",
+    ImportRepairOrigins: "repair-origins-import",
     BeginFreshReviewDispatch: "fresh-review-run",
     WithdrawFreshReviewRequest: "fresh-review-withdraw",
     RecordFreshReviewLaunch: "fresh-review-launch",

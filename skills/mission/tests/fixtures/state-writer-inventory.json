@@ -387,6 +387,9 @@
     "_timestamp:replace": 1,
     "decode_terminal_receipt:dynamic": 2
   },
+  "lib/mission_kernel/repair_lineage.py": {
+    "import_origins:replace": 1
+  },
   "lib/mission_kernel/snapshot.py": {
     "decode_snapshot:replace": 1
   },

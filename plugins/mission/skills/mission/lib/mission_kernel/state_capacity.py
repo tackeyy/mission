@@ -448,7 +448,8 @@ def lineage_variable_part(document: Mapping, request) -> int:
         prohibited = criterion.get("prohibited_side_effects")
         payload = {
             "requirement_ids": requirement_ids if isinstance(requirement_ids, list) else [],
-            "prohibited_side_effects": prohibited if isinstance(prohibited, list) else [],
+            "prohibited_side_effects": max(prohibited, [f"{criterion['id']}:{i}" for i in range(len(prohibited))],
+                key=_encode_len_safe) if isinstance(prohibited, list) and isinstance(criterion.get("id"), str) else [],
         }
         size = _encode_len_safe(payload) + command_map_bytes
         best = max(best, size)
@@ -666,10 +667,33 @@ def residual_reservation(
             record.status, _FRESH_REVIEW_FIXED_RESERVE_BY_STATUS["pending"]
         )
         total += fixed
-        if record.status not in ('blocked', 'abandoned-unknown'):
-            total += lineage_stage_delta(document, record.request)
+        total += lineage_residual(document, record)
     total += repair_attempt_reserve(document) + disposition_reserve(document)
     return total
+
+
+def lineage_residual(document, record):
+    """Release only the origins durably introduced by E1, never a later review."""
+    from .repair_lineage import decode_projection, origin_request_id
+    from .fresh_review_receipts import CompletedFreshReview, FailedFreshReview, decode_terminal_receipt
+    surface = document.get('extensions', {}) if document.get('schema_version') == 5 else document
+    try:
+        rows = [item.document.thaw() for item in decode_projection(surface).lineages
+                if origin_request_id(item.document.thaw()) == record.request.request_id]
+    except (ValueError, TypeError):
+        return STATE_LIMIT
+    if record.status in ('blocked', 'abandoned-unknown'):
+        return 0
+    if record.status not in ('completed', 'failed'):
+        return lineage_stage_delta(document, record.request)
+    terminal = decode_terminal_receipt(record.result.thaw())
+    if isinstance(terminal, FailedFreshReview):
+        return FRESH_REVIEW_UNIMPORTED_LINEAGE_MAX_BYTES if terminal.reason == 'output-over-import-limit' and not rows else 0
+    if isinstance(terminal, CompletedFreshReview):
+        imported = {row['finding_ref']['digest'] for row in rows if row['kind'] == 'finding'}
+        missing = sum(ref.digest not in imported for ref in terminal.findings)
+        return missing * (FRESH_REVIEW_FINDING_LINEAGE_FIXED_MAX_BYTES + lineage_variable_part(document, record.request))
+    return 0
 
 
 def pending_withdraw_candidates(document: Mapping) -> tuple[str, ...]:

@@ -28,7 +28,7 @@ class FreshReviewCompletionInputs:
 def _read(root, reference, *, read_evidence):
     try:
         raw = read_evidence(root, reference.relative_path, FRESH_REVIEW_EVIDENCE_MAX_BYTES)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, TypeError) as exc:
         raise FreshReviewError('acceptance-fresh-review-evidence-unavailable') from exc
     if len(raw) != reference.size or 'sha256:' + hashlib.sha256(raw).hexdigest() != reference.digest:
         raise FreshReviewError(MISMATCH)
@@ -36,6 +36,18 @@ def _read(root, reference, *, read_evidence):
         return decode_json_object(raw, limit=FRESH_REVIEW_EVIDENCE_MAX_BYTES).thaw()
     except (ValueError, RecursionError) as exc:
         raise FreshReviewError(INVALID) from exc
+
+
+def observe_lineage_evidence(state, *, root, read_evidence):
+    records = tuple(item for item in decode_projection(state).requests if isinstance(item, FreshReviewRecord))
+    evidence = []
+    for record in records:
+        if record.status == 'completed':
+            terminal = decode_terminal_receipt(record.result.thaw())
+            evidence.append(decode_completion_evidence(record.request, terminal,
+                _read(root, terminal.coverage_receipt.evidence_ref, read_evidence=read_evidence),
+                tuple(_read(root, ref, read_evidence=read_evidence) for ref in terminal.findings)))
+    return tuple(evidence)
 
 
 def observe_completion_inputs(state, *, root, load_policy, read_evidence):
@@ -53,13 +65,7 @@ def observe_completion_inputs(state, *, root, load_policy, read_evidence):
     contract = state['acceptance_contract']
     commands = frozen_verifier_commands(contract)
     records = tuple(item for item in decode_projection(state).requests if isinstance(item, FreshReviewRecord))
-    evidence = []
-    for record in records:
-        if record.status == 'completed':
-            terminal = decode_terminal_receipt(record.result.thaw())
-            evidence.append(decode_completion_evidence(record.request, terminal,
-                _read(root, terminal.coverage_receipt.evidence_ref, read_evidence=read_evidence),
-                tuple(_read(root, ref, read_evidence=read_evidence) for ref in terminal.findings)))
+    evidence = observe_lineage_evidence(state, root=root, read_evidence=read_evidence)
     code = 'acceptance-fresh-review-bindings-unavailable'
     ids = {binding.command_id for item in records for binding in item.request.candidate_bindings}
     if not ids.issubset(commands):

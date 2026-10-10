@@ -153,6 +153,7 @@
       "lib/mission_application/evidence.py:run_verification_receipt:execute_evidence_operation": 1,
       "lib/mission_application/evidence.py:run_verification_record:execute_evidence_operation": 1,
       "lib/mission_application/fresh_review.py:run_fresh_review_prepare_cli:execute_evidence_operation": 1,
+      "lib/mission_application/fresh_review.py:run_repair_origins_cli:execute_evidence_operation": 1,
       "lib/mission_application/fresh_review_dispatch.py:_execute:execute": 1,
       "lib/mission_application/fresh_review_dispatch.py:_terminal:cancel": 1,
       "lib/mission_application/fresh_review_publish.py:_replay_hypotheses:launch": 1,
