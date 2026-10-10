@@ -40,6 +40,36 @@ def spawn_exec(argv, *, pass_fds=(), stdin=subprocess.DEVNULL,
                             pass_fds=pass_fds, stdin=stdin, stdout=stdout, stderr=stderr, cwd=cwd, env=env)
 
 
+def spawn_deadline_exec(argv, deadline, *, pass_fds=(), stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=None, env=None):
+    """Start an exec boundary with a detached watchdog and return its control reader.
+
+    The bootstrap is shared with verifier execution.  The caller owns and must
+    close the returned read descriptor after interpreting ``E``, ``W`` or ``T``.
+    """
+    receiver, sender = os.pipe()
+    try:
+        os.set_blocking(receiver, False)
+        bootstrap = Path(__file__).parent / 'mission_application' / 'verification_exec.py'
+        child = spawn_exec([sys.executable, '-I', '-S', str(bootstrap), str(deadline), str(sender), *argv],
+                           pass_fds=(*pass_fds, sender), stdin=stdin, stdout=stdout, stderr=stderr,
+                           cwd=cwd, env=env)
+    except BaseException:
+        os.close(receiver)
+        raise
+    finally:
+        os.close(sender)
+    return child, receiver
+
+
+def read_deadline_control(receiver):
+    """Return bootstrap/watchdog reason bytes without blocking the deadline path."""
+    try:
+        return os.read(receiver, 2)
+    except BlockingIOError:
+        return b''
+
+
 def observe_exit(pid):
     if _has_waitid():
         info = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT | os.WNOHANG)
@@ -184,7 +214,7 @@ def run_job(kind, payload, directory, *, timeout=5, term_grace=.2, kill_wait=.2,
         error.exec_unstarted = True
         raise error
     receiver, sender = os.pipe()
-    child, path, timed_out = None, None, False
+    child, control_receiver, path, timed_out = None, None, None, False
     try:
         job = {'schema': 'mission-exec-job/1', 'kind': kind, 'result_fd': sender, **payload,
                'expires_at': time.time() + max(0, deadline - time.monotonic())}
@@ -196,8 +226,18 @@ def run_job(kind, payload, directory, *, timeout=5, term_grace=.2, kill_wait=.2,
         try:
             if absolute_deadline and time.monotonic() >= deadline:
                 raise TimeoutError('budget-child-timeout')
-            child = spawn_exec([sys.executable, '-I', str(Path(__file__).parent / 'mission_application' / 'spawn_trampoline.py'),
-                                str(path), digest], pass_fds=(sender,), cwd=cwd)
+            argv = [sys.executable, '-I', str(Path(__file__).parent / 'mission_application' / 'spawn_trampoline.py'),
+                    str(path), digest]
+            if absolute_deadline:
+                # Verification may collect a bounded frame after target deadline.
+                # Keep the independent guard through that collection window.
+                watchdog_deadline = min((collect_deadline if collect_deadline is not None else deadline) + 1,
+                                        time.monotonic() + 86400)
+                child, control_receiver = spawn_deadline_exec(argv, watchdog_deadline,
+                    pass_fds=(sender,), cwd=cwd)
+            else:
+                # Calls without an absolute deadline retain direct spawn.
+                child = spawn_exec(argv, pass_fds=(sender,), cwd=cwd)
             os.close(sender)
             sender = None
             result = read_frame(child, receiver, deadline if collect_deadline is None else collect_deadline,
@@ -209,6 +249,14 @@ def run_job(kind, payload, directory, *, timeout=5, term_grace=.2, kill_wait=.2,
             if child is not None and not cleanup_group(child, term_grace=term_grace,
                                                        kill_wait=kill_wait, timed_out=timed_out):
                 raise ValueError('kill-unconfirmed')
+            if control_receiver is not None:
+                control = read_deadline_control(control_receiver)
+                os.close(control_receiver)
+                control_receiver = None
+                if b'E' in control:
+                    error = OSError('deadline exec failed')
+                    error.exec_unstarted = True
+                    raise error
         if child.returncode != 0 or set(result) != {'ok', 'result'} or result['ok'] is not True or not isinstance(result['result'], dict):
             raise ValueError('approval verifier rejected the evidence')
         return result['result']
@@ -222,6 +270,9 @@ def run_job(kind, payload, directory, *, timeout=5, term_grace=.2, kill_wait=.2,
         if sender is not None:
             with contextlib.suppress(OSError):
                 os.close(sender)
+        if control_receiver is not None:
+            with contextlib.suppress(OSError):
+                os.close(control_receiver)
         if path is not None:
             path.unlink(missing_ok=True)
 

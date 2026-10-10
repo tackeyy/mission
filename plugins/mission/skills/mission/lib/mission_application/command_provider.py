@@ -566,11 +566,13 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
             if budget is None:
                 process = execution.Popen(argv, stdin=execution.PIPE, stdout=execution.PIPE, stderr=execution.PIPE, env=command_env)
             else:
-                from budgeted_exec import spawn_exec
+                from budgeted_exec import spawn_deadline_exec
                 if time.monotonic() >= budget.deadline:
                     raise OSError("budget-child-deadline-expired")
-                process = spawn_exec(argv, stdin=execution.PIPE, stdout=execution.PIPE,
-                                     stderr=execution.PIPE, env=command_env)
+                process, control_receiver = spawn_deadline_exec(
+                    argv, min(budget.deadline + budget.policy.term_grace_sec + budget.policy.kill_wait_sec + 1,
+                              time.monotonic() + 86400),
+                    stdin=execution.PIPE, stdout=execution.PIPE, stderr=execution.PIPE, env=command_env)
         except (OSError, ValueError) as exc:
             if budget is None and not isinstance(exc, OSError):
                 raise
@@ -588,13 +590,24 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
                 try:
                     exchange = exchange_provider(process, packet, budget.deadline,
                         term_grace=budget.policy.term_grace_sec, kill_wait=budget.policy.kill_wait_sec,
-                        collect_sec=budget.policy.collect_sec)
+                        collect_sec=budget.policy.collect_sec, control_receiver=control_receiver)
                     exit_code = exchange.exit_code
                     stdout = execution.redact(exchange.stdout.decode("utf-8", errors="replace"))
                     stderr = execution.redact(exchange.stderr.decode("utf-8", errors="replace"))
                     kill_confirmed = exchange.kill_confirmed
                     if not kill_confirmed:
                         budget_failure = "kill-unconfirmed"
+                    elif exchange.exec_failed:
+                        spawn_failed_reason = "budget-deadline-unenforceable"
+                        # Bootstrap stderr may contain an absolute executable path;
+                        # retain the actionable class without publishing it.
+                        stderr = "exec failed before start"
+                        completed_at = execution.clock()
+                        entry.update({"status": "failed-before-start", "lifecycle_state": "terminal",
+                                      "transitioned_at": completed_at, "completed_at": completed_at,
+                                      "reason_code": spawn_failed_reason, "proven_no_dispatch": True})
+                    elif exchange.watchdog_failed:
+                        budget_failure = "budget-provider-exchange-failed"
                     elif exchange.timed_out:
                         budget_failure = "budget-child-timeout"
                     elif not exchange.output_complete or exchange.output_truncated:
@@ -604,50 +617,53 @@ def _invoke_command_provider(request, workspace, provider_policy, state_effects,
                     budget_failure = "budget-provider-exchange-failed" if kill_confirmed else "kill-unconfirmed"
                     exit_code, stdout, stderr = process.returncode, "", execution.redact(str(exc))
 
-            entry["child_pid"] = process.pid
-            entry["process_identity_digest"] = execution.value_digest({"invocation_id": entry["invocation_id"], "pid": process.pid, "running_at": running_at})
+            # An exec refusal is terminal before the provider process starts.
+            # It has no process receipt to persist or reconcile.
+            if spawn_failed_reason is None:
+                entry["child_pid"] = process.pid
+                entry["process_identity_digest"] = execution.value_digest({"invocation_id": entry["invocation_id"], "pid": process.pid, "running_at": running_at})
             # A failed :proc commit retains dispatch-unknown and its reservation.
             # The subsequent budget reconcile slice must settle this crash window.
-            _repo_invoke_proc = _make_repo_invoke(":proc")
-            with _repo_invoke_proc.transaction():
-                dispatch_state = _repo_invoke_proc.load()
-                if not getattr(_repo_invoke_proc, "operation_replayed", False):
-                    current_entry = dict(provider_policy.invocation_by_id(dispatch_state, entry["invocation_id"]))
-                    if current_entry.get("status") != "dispatch-unknown":
-                        if budget is None:
-                            process.terminate(); process.wait(timeout=5)
-                        raise CommandProviderFailure("provider-ineligible", "provider-ineligible: invocation-not-dispatch-unknown", 2)
-                    try:
-                        receipt_state = record_provider_receipt(
-                            [current_entry],
-                            {
-                                "invocation_id": entry["invocation_id"],
-                                "operation_id": entry["operation_id"],
-                                "outbound_packet_digest": entry["outbound_packet_digest"],
-                                "iteration": entry["iteration"],
-                                "fencing_epoch": entry["fencing_epoch"],
-                            },
-                            {"kind": "process", "identity": entry["process_identity_digest"]},
-                        )
-                    except PlanningFailure as exc:
-                        if budget is None:
-                            process.terminate(); process.wait(timeout=5)
-                        provider_policy.provider_gate(exc.code)
-                    current_entry.update({
-                        "child_pid": entry["child_pid"],
-                        "process_identity_digest": entry["process_identity_digest"],
-                        "provider_receipt": receipt_state["provider_receipt"],
-                        "status": receipt_state["status"],
-                        "lifecycle_state": receipt_state["lifecycle_state"],
-                        "running_at": execution.clock(), "started_at": running_at,
-                        "heartbeat_at": execution.clock(), "transitioned_at": execution.clock(),
-                    })
-                    provider_policy.validate_invocation_transition(entry, current_entry)
-                    state_effects.replace_provider_invocation(dispatch_state, current_entry)
-                    dispatch_state["updated_at"] = execution.clock()
-                    _repo_invoke_proc.save(dispatch_state)
-                    entry = current_entry
-            if budget is None:
+                _repo_invoke_proc = _make_repo_invoke(":proc")
+                with _repo_invoke_proc.transaction():
+                    dispatch_state = _repo_invoke_proc.load()
+                    if not getattr(_repo_invoke_proc, "operation_replayed", False):
+                        current_entry = dict(provider_policy.invocation_by_id(dispatch_state, entry["invocation_id"]))
+                        if current_entry.get("status") != "dispatch-unknown":
+                            if budget is None:
+                                process.terminate(); process.wait(timeout=5)
+                            raise CommandProviderFailure("provider-ineligible", "provider-ineligible: invocation-not-dispatch-unknown", 2)
+                        try:
+                            receipt_state = record_provider_receipt(
+                                [current_entry],
+                                {
+                                    "invocation_id": entry["invocation_id"],
+                                    "operation_id": entry["operation_id"],
+                                    "outbound_packet_digest": entry["outbound_packet_digest"],
+                                    "iteration": entry["iteration"],
+                                    "fencing_epoch": entry["fencing_epoch"],
+                                },
+                                {"kind": "process", "identity": entry["process_identity_digest"]},
+                            )
+                        except PlanningFailure as exc:
+                            if budget is None:
+                                process.terminate(); process.wait(timeout=5)
+                            provider_policy.provider_gate(exc.code)
+                        current_entry.update({
+                            "child_pid": entry["child_pid"],
+                            "process_identity_digest": entry["process_identity_digest"],
+                            "provider_receipt": receipt_state["provider_receipt"],
+                            "status": receipt_state["status"],
+                            "lifecycle_state": receipt_state["lifecycle_state"],
+                            "running_at": execution.clock(), "started_at": running_at,
+                            "heartbeat_at": execution.clock(), "transitioned_at": execution.clock(),
+                        })
+                        provider_policy.validate_invocation_transition(entry, current_entry)
+                        state_effects.replace_provider_invocation(dispatch_state, current_entry)
+                        dispatch_state["updated_at"] = execution.clock()
+                        _repo_invoke_proc.save(dispatch_state)
+                        entry = current_entry
+            if budget is None and spawn_failed_reason is None:
                 try:
                     raw_stdout, raw_stderr = process.communicate(input=packet, timeout=timeout)
                 except execution.TimeoutExpired:

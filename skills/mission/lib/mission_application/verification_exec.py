@@ -8,6 +8,7 @@ Use -I -S for this bootstrap so site hooks cannot precede watchdog admission.
 from __future__ import annotations
 
 import math
+import contextlib
 import os
 import select
 import signal
@@ -40,6 +41,11 @@ def main():
     if control < 3:
         return 2
     os.set_blocking(control, False)
+    target_started = False
+    term_received = False
+    def defer_term(_signum, _frame):
+        nonlocal term_received
+        term_received = True
     try:
         deadline = float(sys.argv[1])
     except (ValueError, OverflowError):
@@ -83,14 +89,21 @@ def main():
         if time.monotonic() >= deadline:
             _stop(control, b'T')
             return 2
-        target = subprocess.Popen(sys.argv[3:], close_fds=True)
+        # The outer spawn boundary has already closed every descriptor except
+        # its declared pass_fds.  Preserve those payload descriptors (for
+        # example run_job's result pipe) across this exec-only trampoline.
+        target = subprocess.Popen(sys.argv[3:], close_fds=False)
+        target_started = True
+        # SIGTERM is delivered to the whole group.  Keep the bootstrap alive
+        # through the grace period so a cooperative target can report exit 0.
+        signal.signal(signal.SIGTERM, defer_term)
         # Keep the group leader alive: watchdog death must fail closed even if
         # the reporting supervisor has crashed. The detached guard also reclaims it on bootstrap exit.
         while True:
             if watchdog.poll() is not None:
-                _stop(control, b'E')
+                _stop(control, b'W')
                 return 2
-            if time.monotonic() >= deadline:
+            if time.monotonic() >= deadline and not term_received:
                 _stop(control, b'T')
                 return 2
             code = target.poll()
@@ -101,8 +114,11 @@ def main():
                     os.kill(os.getpid(), -code)
                 return code
             time.sleep(.01)
-    except OSError:
-        _stop(control, b'E')
+    except OSError as exc:
+        if not target_started:
+            with contextlib.suppress(OSError):
+                os.write(2, str(exc).encode('utf-8', errors='replace')[:1024] + b'\n')
+        _stop(control, b'W' if target_started else b'E')
     return 2
 
 

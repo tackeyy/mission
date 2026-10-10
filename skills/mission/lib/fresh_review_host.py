@@ -11,7 +11,7 @@ import sys
 import tempfile
 import os
 import time
-from budgeted_exec import spawn_exec, observe_exit, cleanup_group, strict_json
+from budgeted_exec import spawn_deadline_exec, observe_exit, cleanup_group, strict_json
 
 from fresh_review_runtime import AdapterPin, AdapterRegistration, validate_registry, REGISTRY_SCHEMA
 from mission_kernel.fresh_review import FreshReviewError, canonical_bytes, canonical_digest, request_document
@@ -28,14 +28,14 @@ def _call(pin, action, payload, *, cwd=None, timeout=10):
     F can replace admission around this seam without changing adapter calls.
     """
     envelope = {'pin': asdict(pin) if pin is not None else None, 'action': action, **payload}
-    child, timed_out, confirmed = None, False, True
+    child, control_receiver, timed_out, confirmed = None, None, False, True
     try:
         with tempfile.TemporaryFile() as incoming, tempfile.TemporaryFile() as outgoing:
             incoming.write(canonical_bytes(envelope))
             incoming.seek(0)
             deadline = time.monotonic() + timeout
             try:
-                child = spawn_exec([sys.executable, str(Path(__file__).resolve())],
+                child, control_receiver = spawn_deadline_exec([sys.executable, str(Path(__file__).resolve())], deadline,
                     stdin=incoming, stdout=outgoing, stderr=subprocess.DEVNULL, cwd=cwd)
                 while not observe_exit(child.pid):
                     if time.monotonic() >= deadline or os.fstat(outgoing.fileno()).st_size > 512 * 1024:
@@ -45,6 +45,9 @@ def _call(pin, action, payload, *, cwd=None, timeout=10):
             finally:
                 if child is not None:
                     confirmed = cleanup_group(child, timed_out=timed_out)
+                if control_receiver is not None:
+                    os.close(control_receiver)
+                    control_receiver = None
             if not confirmed or timed_out or child.returncode != 0:
                 return {'unknown': True}
             outgoing.seek(0)
