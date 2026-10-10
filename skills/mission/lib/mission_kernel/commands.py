@@ -319,6 +319,7 @@ class RecordVerificationReceipt:
     at: str
     receipt: FrozenJsonObject
     settlement: SettleDispatchBudget | None = None
+    candidate: FrozenJsonObject | None = None
 
 
 @dataclass(frozen=True)
@@ -371,6 +372,28 @@ class ReconcileFindingRepair:
     attempt_id: str
     operation_id: str
     reason: str = 'publication-result-lost'
+
+
+@dataclass(frozen=True)
+class BeginFindingReverification:
+    attempt_id: str
+    operation_id: str
+    candidate: FrozenJsonObject
+    reservation_id: str
+    budget_class: str
+    reservation: ReserveDispatchBudget | None = None
+
+
+@dataclass(frozen=True)
+class CommitFindingReverification:
+    attempt_id: str
+    operation_id: str
+    result: FrozenJsonObject
+    effect: FreshReviewInputEffectClaim
+    receipt_effect: FreshReviewInputEffectClaim
+    evidence: tuple[FreshReviewCompletionEvidence, ...]
+    previous_results: tuple[FrozenJsonObject, ...] = ()
+    settlement: SettleDispatchBudget | None = None
 
 
 @dataclass(frozen=True)
@@ -624,6 +647,8 @@ Command = Union[
     ImportRepairOrigins,
     BeginFindingRepair,
     ReconcileFindingRepair,
+    BeginFindingReverification,
+    CommitFindingReverification,
     BeginFreshReviewDispatch,
     WithdrawFreshReviewRequest,
     RecordFreshReviewLaunch,
@@ -669,6 +694,8 @@ _COMMAND_TYPES = {
     ImportRepairOrigins: "repair-origins-import",
     BeginFindingRepair: "repair-begin",
     ReconcileFindingRepair: "repair-reconcile",
+    BeginFindingReverification: "repair-reverify-begin",
+    CommitFindingReverification: "repair-reverify-commit",
     BeginFreshReviewDispatch: "fresh-review-run",
     WithdrawFreshReviewRequest: "fresh-review-withdraw",
     RecordFreshReviewLaunch: "fresh-review-launch",

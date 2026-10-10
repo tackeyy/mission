@@ -51,6 +51,15 @@ def observe_lineage_evidence(state, *, root, read_evidence):
     return tuple(evidence)
 
 
+def observe_repair_results(state, *, root, read_evidence):
+    from mission_kernel.repair_lineage import decode_projection as decode_repair
+    from mission_kernel.fresh_review import ContentAddressedRef
+    from mission_kernel.json_codec import freeze_json_value
+    return tuple(freeze_json_value(_read(root, ContentAddressedRef(**item['terminal']['comparison_ref']),
+        read_evidence=read_evidence)) for row in decode_repair(state).lineages
+        for item in row.document.thaw().get('attempts', ()) if 'generation' in item['terminal'])
+
+
 def observe_completion_inputs(state, *, root, load_policy, read_evidence):
     """Observe all non-withdrawn requests, including partial and older attempts.
 
@@ -89,7 +98,8 @@ def observe_completion_inputs(state, *, root, load_policy, read_evidence):
     if dict(candidates) != {key: value.digest for key, value in prepare._capture(root, selected).items()}:
         raise FreshReviewError(code)
     return FreshReviewCompletionInputs(tuple(evidence), FreshReviewBindings(
-        canonical_contract_digest(contract), inputs, candidates))
+        canonical_contract_digest(contract), inputs, candidates,
+        observe_repair_results(state, root=root, read_evidence=read_evidence)))
 
 
 @dataclass(frozen=True)

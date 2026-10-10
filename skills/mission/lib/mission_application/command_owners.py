@@ -36,6 +36,7 @@ COMMAND_OWNER_REGISTRY = {
         "fresh-review import-lineage",
         "repair begin",
         "repair reconcile",
+        "repair reverify",
         "fresh-review run",
         "fresh-review import",
         "fresh-review reconcile",

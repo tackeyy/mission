@@ -32,6 +32,7 @@ from mission_kernel.commands import (
     ProgressEffectClaim,
     RecordVerification,
     RecordVerificationReceipt,
+    BeginFindingReverification,
     UpdateProgress,
     VerificationCheck,
 )
@@ -99,6 +100,7 @@ class VerificationReceiptRequest:
     now: object
     receipt: object
     budget: object = None
+    project_root: object = None
 
 
 @dataclass(frozen=True)
@@ -241,6 +243,8 @@ def execute_evidence_operation(repository: object, prepare) -> dict:
             raise EvidenceFailure("progress-projection-mismatch")
         if replayed:
             payload["progress"] = copy.deepcopy(source.get("progress"))
+    elif isinstance(command, BeginFindingReverification):
+        payload["dispatch_replayed"] = replayed
     elif isinstance(command, ClearProgress):
         if "progress" in source:
             raise EvidenceFailure("progress-projection-mismatch")
@@ -303,7 +307,7 @@ def execute_evidence_operation(repository: object, prepare) -> dict:
         receipts = source.get("verification_receipts")
         if not isinstance(receipts, list) or not receipts or not isinstance(receipts[-1], dict):
             raise EvidenceFailure("verification-receipt-projection-mismatch")
-        observed = dict(receipts[-1]); observed.pop("recorded_at", None)
+        observed = dict(receipts[-1]); observed.pop("recorded_at", None); observed.pop("repair_generation", None)
         if observed != command.receipt.thaw():
             raise EvidenceFailure("verification-receipt-projection-mismatch")
         if replayed:
@@ -588,12 +592,18 @@ def run_verification_record(
     )
 
 
-def prepare_verification_receipt(state: object, *, now: object, receipt: object, budget=None) -> PreparedEvidenceOperation:
+def prepare_verification_receipt(state: object, *, now: object, receipt: object, budget=None, project_root=None) -> PreparedEvidenceOperation:
     if not isinstance(state, dict) or not isinstance(receipt, dict):
         raise EvidenceFailure("verification-receipt-invalid")
     from .verification_budget import verification_settlement
+    candidate = None
+    if project_root is not None and state.get('repair_lineage'):
+        from .fresh_review import _capture
+        from acceptance_contract import frozen_verifier_commands
+        candidate = freeze_json_value({key: value.digest for key, value in
+            _capture(project_root, frozen_verifier_commands(state['acceptance_contract'])).items()})
     command = RecordVerificationReceipt(now, freeze_json_value(receipt),
-        verification_settlement(budget, now, receipt) if budget is not None else None)
+        verification_settlement(budget, now, receipt) if budget is not None else None, candidate)
     from mission_kernel.evidence import project_verification_receipt
     entry = _translate(lambda: project_verification_receipt(command))
     return PreparedEvidenceOperation(command, (), {"receipt": copy.deepcopy(entry)}, volatile_fields=("recorded_at",))
@@ -602,7 +612,7 @@ def prepare_verification_receipt(state: object, *, now: object, receipt: object,
 def run_verification_receipt(request: VerificationReceiptRequest, repository: object) -> dict:
     return execute_evidence_operation(
         repository,
-        lambda state: prepare_verification_receipt(state, now=request.now, receipt=request.receipt, budget=request.budget),
+        lambda state: prepare_verification_receipt(state, now=request.now, receipt=request.receipt, budget=request.budget, project_root=request.project_root),
     )
 
 

@@ -48,6 +48,7 @@ class FreshReviewBindings:
     contract_digest: str
     input_digests: tuple[tuple[str, str], ...]
     candidate_snapshots: tuple[tuple[str, str], ...]
+    repair_results: tuple = ()
 
 
 @dataclass(frozen=True)

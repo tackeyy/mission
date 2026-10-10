@@ -98,7 +98,7 @@ def decode_projection(document):
             seen.add(row['lineage_id'])
             # E2/E3 will add authenticated resolution variants. Authored status
             # cannot grant a successful replay or independent disposition in E1.
-            if row['lifecycle'] not in ('open', 'repairing'):
+            if row['lifecycle'] not in ('open', 'repairing', 'verified'):
                 raise FreshReviewError('repair-lineage-lifecycle-invalid')
             marker = row['last_candidate_change']
             if marker != _absent('no-resolution-binding'):
@@ -305,7 +305,7 @@ def _obligation_indices(contract):
             {c['id']: c for c in validated['criteria']})
 
 
-def effective_unresolved_findings(projection, reviews, evidence, contract):
+def effective_unresolved_findings(projection, reviews, evidence, contract, bindings=None):
     requirements, criteria = _obligation_indices(contract)
     rows = origin_documents(reviews, evidence, contract)
     if type(projection) is not RepairProjection or any(type(r) is not FindingLineage or type(r.document) is not FrozenJsonObject for r in projection.lineages):
@@ -316,6 +316,16 @@ def effective_unresolved_findings(projection, reviews, evidence, contract):
     expected = {r['lineage_id']: r for r in rows}
     if any(key not in expected or origin_identity(value) != origin_identity(expected[key]) for key, value in existing.items()):
         raise FreshReviewError(MISMATCH)
-    return tuple(row['lineage_id'] for row in rows if row['kind'] == 'unimported-findings'
+    from .repair_reverification import resolution_valid, validate_result
+    resolved = set()
+    if bindings is not None:
+        for row in existing.values():
+            if row['kind'] == 'finding' and resolution_valid(row, bindings.repair_results, dict(bindings.candidate_snapshots), contract):
+                item = row['attempts'][-1]
+                body = next(r.thaw() for r in bindings.repair_results if canonical_digest(r.thaw()) == item['terminal']['comparison_ref']['digest'])
+                finding = next(f.thaw() for e in evidence for f in e.findings if canonical_digest(f.thaw()) == row['finding_ref']['digest'])
+                if validate_result({'acceptance_contract': contract}, row, item, body, finding, previous_results=bindings.repair_results) == 'verified':
+                    resolved.add(row['lineage_id'])
+    return tuple(row['lineage_id'] for row in rows if row['lineage_id'] not in resolved and (row['kind'] == 'unimported-findings'
         or row['prohibited_side_effect_ids'] or row['criterion_id'] not in criteria
-        or any(requirements.get(key, 'unknown') != 'context' for key in criteria[row['criterion_id']]['requirement_ids']))
+        or any(requirements.get(key, 'unknown') != 'context' for key in criteria[row['criterion_id']]['requirement_ids'])))

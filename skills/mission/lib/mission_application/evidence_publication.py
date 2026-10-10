@@ -442,6 +442,7 @@ def publication_blob_shapes_by_command_type():
         }
     from mission_kernel.fresh_review import FRESH_REVIEW_FINDINGS_LIMIT
     shapes["fresh-review-output-import"].update(blob_count=None, blob_max=FRESH_REVIEW_FINDINGS_LIMIT + 2)
+    shapes["repair-reverify-commit"].update(blob_count=None, blob_max=2)
     return shapes
 
 # Which attribute of a command's effect claim holds the path it publishes to.
@@ -456,6 +457,7 @@ def publication_blob_shapes_by_command_type():
 PUBLICATION_PATH_FIELD_BY_COMMAND_TYPE = {
     "fresh-review-prepare": "target",
     "repair-begin": "target",
+    "repair-reverify-commit": "target",
     "fresh-review-output-import": "target",
     "generate-claims-ledger": "publication_path",
     "generate-context-manifest": "publication_path",
@@ -468,6 +470,7 @@ PUBLICATION_PATH_FIELD_BY_COMMAND_TYPE = {
 EFFECT_FIELDS_BY_COMMAND_TYPE = {
     "fresh-review-prepare": ("effect",),
     "repair-begin": ("history_effect", "plan_effect", "repro_effect"),
+    "repair-reverify-commit": ("effect", "receipt_effect"),
     "fresh-review-output-import": ("effect", "coverage_effect", "findings_effect"),
     "export-artifact": ("artifact_effect", "export_effect"),
     "generate-claims-ledger": ("effect",),

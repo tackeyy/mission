@@ -409,6 +409,7 @@
     "_prepare_budget_admission:replace": 2,
     "_reactivate:replace": 1,
     "_record_specialist_recommendation:replace": 1,
+    "_repair_attempt:replace": 1,
     "_resume_stale:replace": 1,
     "_unbound_state:replace": 1,
     "bind_transition_effects:dynamic": 2

@@ -115,6 +115,10 @@ def run_repair_cli(args, services):
                     raise EvidenceFailure('repair-effects-unavailable')
                 execute_evidence_operation(repo(terminal_operation(identifier, 'blocked', 'effects-unavailable')),
                     partial(prepare_reconcile, identifier=identifier, reason='effects-unavailable'))
+        elif args.repair_command == 'reverify':
+            from .repair_reverification import reverify
+            identifier = args.attempt
+            reverify(identifier, read=read, repo=repo, root=root, services=services)
         else:
             identifier = args.attempt
             _, item = find_attempt(read(), identifier)  # begin/load recovers durable prepare first

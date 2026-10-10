@@ -113,7 +113,7 @@ def _publish_receipt(request, services, cwd, state_file, receipt, budget):
         raise
     from mission_application.evidence import VerificationReceiptRequest, run_verification_receipt
     result = run_verification_receipt(
-        VerificationReceiptRequest(services.now(), receipt, budget),
+        VerificationReceiptRequest(services.now(), receipt, budget, cwd),
         services.repository(
             cwd, state_file, stamp=True, pre_admit_lease=True,
             session_id=state_file.stem, operation_id=operation_id,

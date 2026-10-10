@@ -20,6 +20,18 @@
       14
     ]
   },
+  "repair-reverification": {
+    "candidates": {
+      "lib/mission_application/repair_reverification.py:reverify:execute_evidence_operation": 4,
+      "lib/mission_application/repair_reverification.py:reverify:execute_verification": 1,
+      "lib/mission_application/repair_reverification.py:reverify:run_contract_verifier": 1,
+      "lib/mission_kernel/repair_reverification.py:validate_result:executed_count": 2
+    },
+    "reason": "Repair replay (design 881 section 3.2 row 8): a durable fenced intent precedes the child; active policy reserves repair budget in that same commit, supervises collection and settles with the terminal. Inert policy uses the frozen verifier timeout. Evidence-operation names are conservative syntactic candidates, not additional child dispatches.",
+    "rows": [
+      8
+    ]
+  },
   "rows-1-2": {
     "candidates": {
       "lib/mission_application/spawn_trampoline.py:main:run_contract_verifier": 1,

@@ -78,6 +78,8 @@ def budget_class(entry, state, ledger, at):
                      'system-recover', 'repair-begin'):
         raise BudgetError('budget-entry-invalid')
     latched = ledger.stop_slots.final_latch is not None or at >= deadlines(ledger, at).repair
+    if entry == 'repair-reverify' and any(a['status'] == 'pending' for r in state.repair.lineages for a in r.document.thaw()['attempts']):
+        return _reject('final-latched') if latched else 'repair'
     if entry in ('repair-reverify', 'repair-disposition-run', 'repair-begin'):
         return _reject('final-latched') if latched else _reject('repair-attempt-missing')
     if entry in ('invoke-command', 'invoke-prepared', 'verify-approval'):
@@ -166,6 +168,14 @@ def admit(ledger, state, at, *, entry, target, operation_id, fencing_epoch,
         _int(reserved_bytes)
         if candidate_digest is not None or entry != 'verification-run':
             _text(candidate_digest, re.compile(r'sha256:[0-9a-f]{64}\Z'))
+        if entry == 'repair-reverify':
+            from .repair_attempts import find_attempt, _document
+            try:
+                _, attempt = find_attempt(_document(state), target)
+                if attempt['status'] != 'pending' or 'intent' in attempt:
+                    return _reject('repair-attempt-missing')
+            except (ValueError, KeyError):
+                return _reject('repair-attempt-missing')
         if entry == 'system-recover':
             recovery = ledger.stop_slots.system_recovery
             if recovery.reservation is not None:

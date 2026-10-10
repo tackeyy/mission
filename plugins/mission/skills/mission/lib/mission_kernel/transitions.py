@@ -52,6 +52,8 @@ from .commands import (
     ImportRepairOrigins,
     BeginFindingRepair,
     ReconcileFindingRepair,
+    BeginFindingReverification,
+    CommitFindingReverification,
     BeginFreshReviewDispatch,
     WithdrawFreshReviewRequest,
     RecordFreshReviewLaunch,
@@ -1321,6 +1323,9 @@ def _acceptance_completion_ready(state: MissionState, command: MarkPass) -> None
         latest = next((item for item in reversed(history) if item["criterion_id"] == criterion_id), None)
         if latest is None:
             raise _Rejected("acceptance-receipt-missing")
+        invalidated = max((r.document.thaw()["last_candidate_change"].get("generation", 0) for r in state.repair.lineages), default=0)
+        if invalidated and latest.get("repair_generation", 0) <= invalidated:
+            raise _Rejected("acceptance-receipt-stale")
         if latest.get("status") != "passed":
             raise _Rejected("acceptance-receipt-not-passed")
         if (latest.get("contract_digest") != contract_digest or latest.get("verifier_policy_digest") != policy_digest or latest.get("verifier_definition_digest") != verifier_definition_digest(verifier_command)):
@@ -1759,6 +1764,17 @@ def _record_verification_receipt(state: MissionState, raw_command: object) -> Tr
     from .budget_decisions import verification_result_digest, stalled_candidate, verification_refusal_reason
     command = raw_command
     assert isinstance(command, RecordVerificationReceipt)
+    if command.candidate is not None:
+        from acceptance_contract import frozen_verifier_commands
+        from .fresh_review import _digest
+        try:
+            candidates = command.candidate.thaw()
+            if set(candidates) != set(frozen_verifier_commands(_evidence_document(state)['acceptance_contract'])):
+                raise ValueError('partial candidate map')
+            for digest in candidates.values():
+                _digest(digest)
+        except (ValueError, AttributeError, TypeError, KeyError):
+            raise _Rejected('verification-candidate-invalid')
     if state.budget.policy is not None and command.settlement is None:
         raise _Rejected('verification-settlement-binding-invalid')
     if command.settlement is not None:
@@ -1807,7 +1823,36 @@ def _repair_attempt(state, command):
     from .repair_attempts import mutate_attempt
     from .fresh_review import FreshReviewError
     try:
-        return Transition(mutate_attempt(state, command), (KernelEvent("repair-attempt-recorded"),))
+        from .repair_reverification import mutate_reverification
+        if isinstance(command, BeginFindingReverification) and command.reservation is not None:
+            request = command.reservation
+            if (request.entry != 'repair-reverify' or request.target != command.attempt_id
+                    or request.operation_id != command.operation_id or request.fencing_epoch != state.lease.fencing_epoch):
+                raise FreshReviewError('repair-reservation-invalid')
+            from .guidance import decode_legacy_guidance
+            state = _reserve_budget(state, replace(request, guidance=decode_legacy_guidance(_evidence_document(state), state.snapshot_provenance))).new_state
+            held = next(r for r in state.budget.reservations if r.operation_id == command.operation_id)
+            if (held.reservation_id, held.budget_class) != (command.reservation_id, command.budget_class):
+                raise FreshReviewError('repair-reservation-invalid')
+        elif isinstance(command, BeginFindingReverification) and state.budget.policy is not None:
+            raise FreshReviewError('repair-reservation-required')
+        if isinstance(command, CommitFindingReverification) and state.budget.policy is not None:
+            from .repair_attempts import find_attempt, _document
+            _, attempt = find_attempt(_document(state), command.attempt_id)
+            from .budget_decisions import verification_result_digest, verification_refusal_reason
+            receipt = command.result.thaw()['receipt']
+            if (command.settlement is None or command.settlement.reservation_id != attempt['intent']['reservation_id']
+                    or command.settlement.result_digest != verification_result_digest(receipt)
+                    or command.settlement.candidate_digest != receipt['candidate_digest']
+                    or command.settlement.output_bytes != receipt['observed_output_bytes']
+                    or command.settlement.completed != (receipt['status'] in ('passed', 'failed'))
+                    or command.settlement.refusal_reason != verification_refusal_reason(receipt)
+                    or (command.settlement.outcome == 'kill-unconfirmed') != (receipt['block_reason'] == 'kill-unconfirmed')):
+                raise FreshReviewError('repair-settlement-invalid')
+            state = _settle_budget(state, command.settlement).new_state
+        updated = (mutate_reverification(state, command) if isinstance(command, (BeginFindingReverification, CommitFindingReverification))
+                   else mutate_attempt(state, command))
+        return Transition(updated, (KernelEvent("repair-attempt-recorded"),))
     except (FreshReviewError, ValueError, TypeError, KeyError, AttributeError, StopIteration, RecursionError) as exc:
         raise _Rejected(getattr(exc, 'code', 'repair-attempt-invalid')) from exc
 
@@ -2451,6 +2496,8 @@ TRANSITION_TABLE = build_transition_table(
             _prepare_fresh_review,
         ),
         TransitionRule("repair-begin", BeginFindingRepair, _command_type_guard(BeginFindingRepair), _repair_attempt),
+        TransitionRule("repair-reverify-begin", BeginFindingReverification, _command_type_guard(BeginFindingReverification), _repair_attempt),
+        TransitionRule("repair-reverify-commit", CommitFindingReverification, _command_type_guard(CommitFindingReverification), _repair_attempt),
         TransitionRule("repair-reconcile", ReconcileFindingRepair, _command_type_guard(ReconcileFindingRepair), _repair_attempt),
         TransitionRule(
             "repair-origins-import", ImportRepairOrigins, _command_type_guard(ImportRepairOrigins), _import_repair_origins,
@@ -2626,6 +2673,8 @@ def decide(state: MissionState, command: Command) -> Decision:
         reducer = rule.reducer
         assert reducer is not None
         transition = reducer(state, command)
+        from .repair_reverification import invalidate_observed
+        transition = Transition(invalidate_observed(state, command, transition.new_state), transition.events, transition.effects)
     except _Rejected as rejected:
         return Decision(False, None, Rejection(rejected.code), rule.rule_id)
     _register_transition(transition, state, command)
@@ -2690,7 +2739,9 @@ def bind_transition_effects(
             claims += (() if command.coverage_effect is None else (command.coverage_effect,)) + command.findings_effect
     elif isinstance(command, BeginFindingRepair):
         claims = () if command.history_effect is None else (command.history_effect, command.plan_effect, command.repro_effect)
-    elif isinstance(command, ReconcileFindingRepair):
+    elif isinstance(command, CommitFindingReverification):
+        claims = (command.effect, command.receipt_effect)
+    elif isinstance(command, (ReconcileFindingRepair, BeginFindingReverification)):
         claims = ()
     elif isinstance(command, (InitializeArtifact, RenderArtifact, RecordArtifactPublication)):
         claims = (command.effect,)
