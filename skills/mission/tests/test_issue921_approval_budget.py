@@ -166,7 +166,7 @@ def test_approval_refusal_failure_and_inert_paths(approval_entry, tmp_path, invo
     elif fault == 'spawn-error':
         def unavailable(*a, **kw):
             raise OSError('exec unavailable')
-        monkeypatch.setattr(budgeted_exec, 'spawn_exec', unavailable)
+        monkeypatch.setattr(budgeted_exec.subprocess, 'Popen', unavailable)
     elif fault == 'kill-unconfirmed':
         cleanup = budgeted_exec.cleanup_group
         def unconfirmed(*a, **kw):
@@ -298,7 +298,7 @@ def test_force_settlement_is_bound_to_pass_envelope_and_dispatch(
         {'outcome': 'charged-full-unknown'}, {'refusal_reason': 'budget-deadline'},
         {'tool_calls': 0}, {'replays': 0}, {'output_bytes': 0},
     ]
-    changes += [{field: value} for field in ('reservation_id', 'candidate_digest', 'result_digest', 'at')
+    changes += [{field: value} for field in ('reservation_id', 'candidate_digest', 'result_digest', 'progress_digest', 'at')
                 for value in (None, {}, [], 1, False, '', 'invalid', 'sha256:' + '0' * 63, 'sha256:' + 'z' * 64)]
     failures = 0
     for change in changes:
@@ -314,12 +314,20 @@ def test_force_settlement_is_bound_to_pass_envelope_and_dispatch(
     foreign = replace(state.budget.reservations[0], entry='verification-run', target='AC1')
     result = decide(replace(state, budget=replace(state.budget, reservations=(foreign,))), command)
     assert not result.accepted and result.rejection.code == 'approval-settlement-binding-invalid'
-    assert failures == 54  # 48 field mutations + 6 missing/malformed settlements
+    assert failures == 63  # 57 field mutations + 6 missing/malformed settlements
     from mission_kernel.json_codec import freeze_json_value
     for value in (['invalid'], 'invalid', 1, False, None):
         payload = command.compatibility.upserts.thaw()
         payload['force_approval']['request'] = value
         altered = replace(command, compatibility=replace(command.compatibility, upserts=freeze_json_value(payload)))
+        result = decide(state, altered)
+        assert not result.accepted and result.rejection.code == 'approval-settlement-binding-invalid'
+    from mission_kernel.budget_decisions import approval_result_digest
+    for value in (None, [], False, 1, 'invalid'):
+        payload = command.compatibility.upserts.thaw()
+        payload['force_approval']['response'] = value
+        altered = replace(command, compatibility=replace(command.compatibility, upserts=freeze_json_value(payload)),
+            approval_settlement=replace(settlement, result_digest=approval_result_digest(value)))
         result = decide(state, altered)
         assert not result.accepted and result.rejection.code == 'approval-settlement-binding-invalid'
 
@@ -490,3 +498,171 @@ def test_approval_deadline_starts_at_execution_and_retains_reservation_cap(
     monkeypatch.setattr(approval_verifier, 'run_job', checked)
     invoke_here(args, env)
     assert len(expected) == 1
+
+
+@pytest.mark.parametrize('fault', ['cleanup-interrupt', 'cleanup-error', 'spawn-handoff-interrupt'])
+def test_approval_unknown_recovery_keeps_full_charge_and_reservation(
+        approval_entry, tmp_path, invoke_here, monkeypatch, fault):
+    import budgeted_exec
+    _, args, env, source = approval_entry
+    _replace_callback(source, env, 'import time\ndef verify(request):\n time.sleep(60)\n return {}\n')
+    cleanup, spawn = budgeted_exec.cleanup_group, budgeted_exec.spawn_exec
+    children = []
+    def owned(*a, **kw):
+        child = spawn(*a, **kw)
+        children.append(child)
+        if fault == 'spawn-handoff-interrupt':
+            raise KeyboardInterrupt()
+        return child
+    def interrupted_cleanup(*a, **kw):
+        if fault == 'cleanup-error':
+            raise OSError('cleanup observation failed')
+        raise KeyboardInterrupt()
+    monkeypatch.setattr(budgeted_exec, 'spawn_exec', owned)
+    if fault != 'spawn-handoff-interrupt':
+        monkeypatch.setattr(budgeted_exec, 'cleanup_group', interrupted_cleanup)
+        monkeypatch.setattr(budgeted_exec, 'read_frame', lambda *a, **kw: (_ for _ in ()).throw(TimeoutError()))
+    try:
+        with pytest.raises(SystemExit if fault == 'cleanup-error' else KeyboardInterrupt) as rejected:
+            invoke_here(args, env)
+        if fault != 'cleanup-error':
+            assert rejected.value.exec_unstarted is False
+            assert rejected.value.exec_cleanup_confirmed is False
+        ledger = json.loads(_state_path(tmp_path).read_text())['budget_ledger']
+        assert len(children) == 1 and len(ledger['reservations']) == 1
+        assert ledger['settlements'][-1]['outcome'] == 'kill-unconfirmed'
+        assert ledger['settlements'][-1]['charged_sec'] == ledger['reservations'][0]['reserved_sec']
+    finally:
+        for child in children:
+            assert cleanup(child, term_grace=.2, kill_wait=2)
+
+
+def test_identical_invalid_approval_results_stop_repetition_despite_fresh_nonce(
+        approval_entry, tmp_path, invoke_here, monkeypatch, capsys):
+    from mission_application import approval_verifier
+    entry, args, env, source = approval_entry
+    text = source.read_text()
+    if entry == 'verify-approval':
+        text = text.replace("'single_use_nonce':nonce", "'single_use_nonce':'bad'")
+    else:
+        text = text.replace("'decision':'approved'", "'decision':'rejected'")
+    _replace_callback(source, env, text)
+    job, results = approval_verifier.run_job, []
+    def observed(*a, **kw):
+        result = job(*a, **kw)
+        results.append(result)
+        return result
+    monkeypatch.setattr(approval_verifier, 'run_job', observed)
+    for _ in range(2):
+        with pytest.raises(SystemExit) as rejected:
+            invoke_here(args, env)
+        assert rejected.value.code == 2
+    ledger = json.loads(_state_path(tmp_path).read_text())['budget_ledger']
+    assert ledger['progress'][0]['consecutive_count'] == 2
+    if entry == 'force-approval':
+        assert results[0]['request_digest'] != results[1]['request_digest']
+    monkeypatch.setattr(approval_verifier, 'run_job', lambda *a, **kw: pytest.fail('stalled approval spawned'))
+    with pytest.raises(SystemExit) as rejected:
+        invoke_here(args, env)
+    assert rejected.value.code == 2
+    assert 'budget-no-new-evidence' in capsys.readouterr().err
+    assert len(json.loads(_state_path(tmp_path).read_text())['budget_ledger']['settlements']) == 2
+
+
+def test_approval_pipe_failure_is_unstarted_zero_charge_and_refusal(
+        approval_entry, tmp_path, invoke_here, monkeypatch):
+    import budgeted_exec
+    import errno
+    from mission_application import approval_budget
+    from types import SimpleNamespace
+    _, args, env, _ = approval_entry
+    def unavailable():
+        observed = time.monotonic() + 2
+        monkeypatch.setattr(approval_budget, 'time', SimpleNamespace(monotonic=lambda: observed))
+        raise OSError(errno.EMFILE, 'pipe unavailable')
+    monkeypatch.setattr(budgeted_exec.os, 'pipe', unavailable)
+    with pytest.raises(SystemExit) as rejected:
+        invoke_here(args, env)
+    assert rejected.value.code == 2
+    ledger = json.loads(_state_path(tmp_path).read_text())['budget_ledger']
+    assert not ledger['reservations']
+    assert ledger['settlements'][-1]['charged_sec'] == 0
+    assert ledger['stop_slots']['last_refusal'] == 'budget-deadline-unenforceable'
+
+
+def test_policy_force_pass_requires_settlement_even_without_open_dispatch():
+    from mission_kernel.commands import MarkPass
+    from mission_kernel.transitions import decide
+    from .test_issue919_budget_decisions import _state
+    state = _state()
+    result = decide(state, MarkPass(force=True, force_approval_verified=True,
+                                   at='2026-01-01T00:00:01Z'))
+    assert not result.accepted
+    assert result.rejection.code == 'approval-settlement-binding-invalid'
+
+
+@pytest.mark.parametrize('approval_entry', ['force-approval'], indirect=True)
+def test_force_admission_with_an_open_dispatch_refuses_before_spawn(
+        approval_entry, tmp_path, invoke_here, monkeypatch, capsys):
+    from mission_application.approval_budget import now
+    from mission_application.provider_budget import _apply
+    from mission_kernel.commands import ReserveDispatchBudget
+    import budgeted_exec
+    _, args, env, _ = approval_entry
+    path = _state_path(tmp_path)
+    document = json.loads(path.read_text())
+    decision = _apply(document, ReserveDispatchBudget(now(), 'verification-run', 'AC1',
+        'op:unsettled', 1, 5, 65536, 'sha256:' + 'c' * 64))
+    assert decision.accepted
+    path.write_text(json.dumps(document))
+    monkeypatch.setattr(budgeted_exec, 'spawn_exec', lambda *a, **kw: pytest.fail('force spawned with unsettled work'))
+    with pytest.raises(SystemExit) as rejected:
+        invoke_here(args, env)
+    assert rejected.value.code == 2
+    assert 'budget-dispatch-unsettled' in capsys.readouterr().err
+    assert json.loads(path.read_text())['budget_ledger'] == document['budget_ledger']
+
+
+def test_budget_callable_refusal_is_recorded_without_spawning(
+        approval_entry, tmp_path, invoke_here, monkeypatch):
+    from mission_application import approval_verifier
+    _, args, env, _ = approval_entry
+    def callable_verifier(request):
+        pytest.fail('budgeted callable executed')
+    execute = invoke_here.module._run_approval_verifier
+    monkeypatch.setattr(invoke_here.module, '_run_approval_verifier',
+        lambda descriptor, request, **kw: execute(callable_verifier, request, **kw))
+    monkeypatch.setattr(approval_verifier, 'run_callable', lambda *a, **kw: pytest.fail('budgeted callable spawned'))
+    with pytest.raises(SystemExit) as rejected:
+        invoke_here(args, env)
+    assert rejected.value.code == 2
+    ledger = json.loads(_state_path(tmp_path).read_text())['budget_ledger']
+    assert not ledger['reservations'] and ledger['settlements'][-1]['charged_sec'] == 0
+    assert ledger['stop_slots']['last_refusal'] == 'budget-deadline-unenforceable'
+
+
+@pytest.mark.parametrize('approval_entry', ['force-approval'], indirect=True)
+def test_registered_budget_callable_refusal_is_recorded_before_execution(
+        approval_entry, tmp_path, invoke_here, monkeypatch):
+    _, args, env, _ = approval_entry
+    verifier_id = args[args.index('--approval-verifier') + 1]
+    monkeypatch.setitem(invoke_here.module._APPROVAL_VERIFIERS, verifier_id,
+        lambda request: pytest.fail('registered budget callable executed'))
+    with pytest.raises(SystemExit) as rejected:
+        invoke_here(args, env)
+    assert rejected.value.code == 2
+    ledger = json.loads(_state_path(tmp_path).read_text())['budget_ledger']
+    assert not ledger['reservations'] and ledger['settlements'][-1]['charged_sec'] == 0
+    assert ledger['stop_slots']['last_refusal'] == 'budget-deadline-unenforceable'
+
+
+def test_approval_progress_ignores_freshness_but_preserves_result_content():
+    from mission_kernel.budget_decisions import approval_progress_digest, approval_result_digest
+    base = {'decision': 'rejected', 'verifier_id': 'neutral', 'finding': 'invalid-proof'}
+    signature = approval_progress_digest(base)
+    for index in range(50):
+        response = {**base, **{key: str(index) for key in ('event_nonce', 'single_use_nonce',
+            'request_digest', 'receipt_ref', 'verified_at', 'expires_at')}}
+        assert approval_progress_digest(response) == signature
+        assert approval_result_digest(response) != approval_result_digest(base)
+        assert approval_progress_digest({**response, 'finding': str(index)}) != signature

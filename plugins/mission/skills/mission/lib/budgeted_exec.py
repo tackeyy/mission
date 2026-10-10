@@ -35,9 +35,16 @@ def spawn_exec(argv, *, pass_fds=(), stdin=subprocess.DEVNULL,
                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=None, env=None):
     """No Python pre-exec callbacks or caller-supplied session options."""
     if not (_has_waitid() or _has_kqueue()):
-        raise ValueError('budget-deadline-unenforceable')
-    return subprocess.Popen(argv, start_new_session=True, close_fds=True,
-                            pass_fds=pass_fds, stdin=stdin, stdout=stdout, stderr=stderr, cwd=cwd, env=env)
+        error = ValueError('budget-deadline-unenforceable')
+        error.exec_unstarted = error.exec_cleanup_confirmed = True
+        raise error
+    try:
+        return subprocess.Popen(argv, start_new_session=True, close_fds=True,
+                                pass_fds=pass_fds, stdin=stdin, stdout=stdout, stderr=stderr, cwd=cwd, env=env)
+    except OSError as error:
+        # Popen reports exec refusal only after reaping its failed child.
+        error.exec_unstarted = error.exec_cleanup_confirmed = True
+        raise
 
 
 def spawn_deadline_exec(argv, deadline, *, pass_fds=(), stdin=subprocess.DEVNULL,
@@ -47,18 +54,26 @@ def spawn_deadline_exec(argv, deadline, *, pass_fds=(), stdin=subprocess.DEVNULL
     The bootstrap is shared with verifier execution.  The caller owns and must
     close the returned read descriptor after interpreting ``E``, ``W`` or ``T``.
     """
-    receiver, sender = os.pipe()
+    receiver = sender = None
+    spawn_attempted = False
     try:
+        receiver, sender = os.pipe()
         os.set_blocking(receiver, False)
         bootstrap = Path(__file__).parent / 'mission_application' / 'verification_exec.py'
+        spawn_attempted = True
         child = spawn_exec([sys.executable, '-I', '-S', str(bootstrap), str(deadline), str(sender), *argv],
                            pass_fds=(*pass_fds, sender), stdin=stdin, stdout=stdout, stderr=stderr,
                            cwd=cwd, env=env)
-    except BaseException:
-        os.close(receiver)
+    except BaseException as error:
+        error.exec_unstarted = getattr(error, 'exec_unstarted', not spawn_attempted)
+        error.exec_cleanup_confirmed = getattr(error, 'exec_cleanup_confirmed', not spawn_attempted)
+        if receiver is not None:
+            with contextlib.suppress(OSError):
+                os.close(receiver)
         raise
     finally:
-        os.close(sender)
+        if sender is not None:
+            os.close(sender)
     return child, receiver
 
 
@@ -205,17 +220,17 @@ def read_frame(child, fd, deadline, *, exit_probe=observe_exit, frame_limit=FRAM
 
 
 def run_job(kind, payload, directory, *, timeout=5, term_grace=.2, kill_wait=.2, cwd=None, deadline=None, reservation_id=None, collect_deadline=None, session_id=None):
-    absolute_deadline = deadline is not None
-    deadline = time.monotonic() + timeout if deadline is None else deadline
-    if collect_deadline is not None and (kind != 'verification' or not math.isfinite(collect_deadline) or collect_deadline < deadline):
-        raise ValueError('invalid verification collection deadline')
-    if time.monotonic() >= deadline:
-        error = TimeoutError('budget-child-timeout')
-        error.exec_unstarted = True
-        raise error
-    receiver, sender = os.pipe()
+    receiver = sender = None
     child, control_receiver, path, timed_out = None, None, None, False
+    spawn_attempted, cleanup_confirmed = False, True
     try:
+        absolute_deadline = deadline is not None
+        deadline = time.monotonic() + timeout if deadline is None else deadline
+        if collect_deadline is not None and (kind != 'verification' or not math.isfinite(collect_deadline) or collect_deadline < deadline):
+            raise ValueError('invalid verification collection deadline')
+        if time.monotonic() >= deadline:
+            raise TimeoutError('budget-child-timeout')
+        receiver, sender = os.pipe()
         job = {'schema': 'mission-exec-job/1', 'kind': kind, 'result_fd': sender, **payload,
                'expires_at': time.time() + max(0, deadline - time.monotonic())}
         raw = json.dumps(job, allow_nan=False, separators=(',', ':')).encode()
@@ -228,6 +243,9 @@ def run_job(kind, payload, directory, *, timeout=5, term_grace=.2, kill_wait=.2,
                 raise TimeoutError('budget-child-timeout')
             argv = [sys.executable, '-I', str(Path(__file__).parent / 'mission_application' / 'spawn_trampoline.py'),
                     str(path), digest]
+            # A signal can arrive after spawn returns but before assignment.
+            # Once attempted, absence of a handle is not proof of no child.
+            spawn_attempted, cleanup_confirmed = True, False
             if absolute_deadline:
                 # Verification may collect a bounded frame after target deadline.
                 # Keep the independent guard through that collection window.
@@ -246,9 +264,11 @@ def run_job(kind, payload, directory, *, timeout=5, term_grace=.2, kill_wait=.2,
             timed_out = True
             raise
         finally:
-            if child is not None and not cleanup_group(child, term_grace=term_grace,
-                                                       kill_wait=kill_wait, timed_out=timed_out):
-                raise ValueError('kill-unconfirmed')
+            if child is not None:
+                cleanup_confirmed = cleanup_group(child, term_grace=term_grace,
+                                                   kill_wait=kill_wait, timed_out=timed_out)
+                if not cleanup_confirmed:
+                    raise ValueError('kill-unconfirmed')
             if control_receiver is not None:
                 control = read_deadline_control(control_receiver)
                 os.close(control_receiver)
@@ -261,12 +281,14 @@ def run_job(kind, payload, directory, *, timeout=5, term_grace=.2, kill_wait=.2,
             raise ValueError('approval verifier rejected the evidence')
         return result['result']
     except BaseException as exc:
-        if child is None:
-            exc.exec_unstarted = True
+        exc.exec_unstarted = getattr(exc, 'exec_unstarted', not spawn_attempted)
+        exc.exec_cleanup_confirmed = (cleanup_confirmed if child is not None or not spawn_attempted
+                                      else getattr(exc, 'exec_cleanup_confirmed', False))
         raise
     finally:
-        with contextlib.suppress(OSError):
-            os.close(receiver)
+        if receiver is not None:
+            with contextlib.suppress(OSError):
+                os.close(receiver)
         if sender is not None:
             with contextlib.suppress(OSError):
                 os.close(sender)

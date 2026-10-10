@@ -7,7 +7,7 @@ import secrets
 import time
 
 from mission_kernel.budget import decode_ledger
-from mission_kernel.budget_decisions import completion_rejection, approval_result_digest
+from mission_kernel.budget_decisions import completion_rejection, approval_result_digest, approval_progress_digest
 from mission_kernel.commands import ReserveDispatchBudget, RecordBudgetRefusal, SettleDispatchBudget
 from .provider_budget import ProviderBudget, _apply
 
@@ -22,6 +22,7 @@ class ApprovalBudget:
     result: dict | None = None
     failure: BaseException | None = None
     unstarted: bool = True
+    cleanup_confirmed: bool = True  # No child exists until execution is attempted.
 
 
 def admit_approval(repository, entry, target):
@@ -61,7 +62,7 @@ def admit_approval(repository, entry, target):
 
 def approval_settlement(budget, at, *, completed=False):
     failure = budget.failure
-    confirmed = str(failure) != 'kill-unconfirmed'
+    confirmed = budget.cleanup_confirmed
     reason = None
     # Caller gates and user interruptions are not deadline-enforcement refusals.
     if budget.unstarted and isinstance(failure, Exception):
@@ -72,7 +73,8 @@ def approval_settlement(budget, at, *, completed=False):
     return SettleDispatchBudget(at, permit.reservation.reservation_id,
         'settled' if confirmed else 'kill-unconfirmed',
         (0 if budget.unstarted else max(0, int(time.monotonic() - permit.started))) if confirmed else None,
-        permit.candidate_digest, approval_result_digest(result), completed=completed, refusal_reason=reason)
+        permit.candidate_digest, approval_result_digest(result), completed=completed, refusal_reason=reason,
+        progress_digest=approval_progress_digest(budget.result) if budget.result is not None else None)
 
 
 def settle_approval(document, budget, *, completed=False):

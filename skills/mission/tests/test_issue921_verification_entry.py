@@ -163,7 +163,7 @@ def test_verification_refusal_legacy_and_supervisor_failures(
     elif fault == 'spawn-error':
         def fail(*a, **kw):
             raise OSError('spawn unavailable')
-        monkeypatch.setattr(budgeted_exec, 'spawn_exec', fail)
+        monkeypatch.setattr(budgeted_exec.subprocess, 'Popen', fail)
     else:
         cleanup = budgeted_exec.cleanup_group
         def unconfirmed(*a, **kw):
@@ -464,7 +464,7 @@ def test_deadline_preserves_large_candidate_result_and_kills_grandchildren(run_c
     assert receipt['observed_output_bytes'] == 7
 
 
-@pytest.mark.parametrize('fault,reason', [('job', 'budget-job-write-failed'), ('exec', 'budget-deadline-unenforceable'), ('deadline', 'budget-deadline')])
+@pytest.mark.parametrize('fault,reason', [('job', 'budget-job-write-failed'), ('exec', 'budget-deadline-unenforceable'), ('deadline', 'budget-deadline'), ('pipe', 'budget-deadline-unenforceable')])
 def test_unstarted_verification_records_refusal_reason_and_zero_charge(run_cli, tmp_path, invoke_here, monkeypatch, fault, reason):
     import budgeted_exec
     from mission_persistence.spawn_jobs import JobWriteError
@@ -474,7 +474,12 @@ def test_unstarted_verification_records_refusal_reason_and_zero_charge(run_cli, 
     def fail(*a, **kw):
         monkeypatch.setattr(budgeted_exec.time, 'monotonic', lambda: observed_monotonic()+2)
         raise JobWriteError(None) if fault == 'job' else TimeoutError('budget-child-timeout') if fault == 'deadline' else OSError('exec failed')
-    monkeypatch.setattr(budgeted_exec, 'create_job' if fault == 'job' else 'spawn_exec', fail)
+    if fault == 'pipe':
+        monkeypatch.setattr(budgeted_exec.os, 'pipe', fail)
+    elif fault == 'exec':
+        monkeypatch.setattr(budgeted_exec.subprocess, 'Popen', fail)
+    else:
+        monkeypatch.setattr(budgeted_exec, 'create_job', fail)
     invoke_here(['verification', 'run', '--criterion', 'AC1'], {})
     state = json.loads(_state_path(tmp_path).read_text())
     assert state['verification_receipts'][-1]['block_reason'] == reason

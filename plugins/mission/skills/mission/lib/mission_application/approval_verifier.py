@@ -146,10 +146,19 @@ def run_callable(verifier, request, *, timeout=5, grace=.2):
             child.close()
 
 
+def _refuse_budget_callable(budget):
+    error = ValueError('budget-deadline-unenforceable')
+    error.reason_code = 'budget-deadline-unenforceable'
+    if budget is not None:
+        budget.failure = error
+        budget.unstarted = budget.cleanup_confirmed = True
+    raise error
+
+
 def run_approval(verifier, request, directory=None, *, timeout=5, grace=.2, cwd=None, budget=None):
     if budget is not None:
         if not isinstance(verifier, dict):
-            raise ValueError('budget-deadline-unenforceable')
+            _refuse_budget_callable(budget)
         permit = budget.permit
         directory = directory or (cwd or Path.cwd()) / '.mission-state' / 'exec-jobs'
         term_grace = min(grace, permit.policy.term_grace_sec)
@@ -158,15 +167,18 @@ def run_approval(verifier, request, directory=None, *, timeout=5, grace=.2, cwd=
         deadline = min(permit.deadline - term_grace,
                        time.monotonic() + min(timeout, permit.policy.adapter_call_sec))
         try:
+            budget.cleanup_confirmed = False
             budget.result = run_job('approval-verifier', {'verifier': verifier, 'request': request}, directory,
                 deadline=deadline, term_grace=term_grace, kill_wait=permit.policy.kill_wait_sec,
                 reservation_id=permit.reservation.reservation_id.replace(':', '_'),
                 cwd=cwd, session_id=request['session_id'])
             budget.unstarted = False
+            budget.cleanup_confirmed = True
             return budget.result
         except BaseException as exc:
             budget.failure = exc
             budget.unstarted = getattr(exc, 'exec_unstarted', False)
+            budget.cleanup_confirmed = getattr(exc, 'exec_cleanup_confirmed', False)
             if not isinstance(exc, Exception):
                 raise
             raise ValueError('approval verifier rejected the evidence') from exc
@@ -190,7 +202,7 @@ def verify_approval_request(request, verifier_name, *, verifiers, resolve, execu
     verifier = verifiers.get(verifier_name)
     policy_present = state is not None and ('budget_ledger' in state or 'budget_ledger' in (state.get('extensions') or {}))
     if verifier is not None and (budgeted or policy_present):
-        raise ValueError('budget-deadline-unenforceable')
+        _refuse_budget_callable(budget)
     descriptor = resolve(cwd, verifier_name) if verifier is None and cwd is not None else None
     if verifier is None and descriptor is None:
         raise ValueError('approval verifier is not configured')

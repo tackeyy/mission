@@ -103,6 +103,13 @@ def approval_result_digest(response):
     return _digest(response)
 
 
+def approval_progress_digest(response):
+    # Design 881 §3.4: request freshness is not new verifier evidence.
+    volatile = {'event_nonce', 'single_use_nonce', 'request_digest', 'receipt_ref',
+                'verified_at', 'expires_at'}
+    return _digest({key: value for key, value in response.items() if key not in volatile})
+
+
 def verification_result_digest(receipt):
     return _digest({key: receipt.get(key) for key in ('status', 'exit_code', 'executed_count', 'output_digest')})
 
@@ -285,7 +292,8 @@ def _retain_settlement(ledger, record):
 
 
 def settle(ledger, at, *, reservation_id, outcome, elapsed_sec, candidate_digest, result_digest,
-           tool_calls=None, replays=None, output_bytes=None, completed=False, refusal_reason=None):
+           tool_calls=None, replays=None, output_bytes=None, completed=False, refusal_reason=None,
+           progress_digest=None):
     if refusal_reason is not None:
         if (refusal_reason not in ('budget-job-write-failed', 'budget-deadline-unenforceable', 'budget-deadline', 'budget-no-new-evidence')
                 or outcome != 'settled' or completed
@@ -294,6 +302,8 @@ def settle(ledger, at, *, reservation_id, outcome, elapsed_sec, candidate_digest
     _text(reservation_id)
     _text(candidate_digest, re.compile(r'sha256:[0-9a-f]{64}\Z'))
     _text(result_digest, re.compile(r'sha256:[0-9a-f]{64}\Z'))
+    if progress_digest is not None:
+        _text(progress_digest, re.compile(r'sha256:[0-9a-f]{64}\Z'))
     if elapsed_sec is not None:
         _int(elapsed_sec)
     for value in (tool_calls, replays, output_bytes):
@@ -369,12 +379,15 @@ def settle(ledger, at, *, reservation_id, outcome, elapsed_sec, candidate_digest
     charges[index] = replace(charge, charged_sec=charge.charged_sec + (0 if prior_settlement is not None else charged),
                              open_count=charge.open_count - 1)
     progress = [p for p in ledger.progress if (p.entry, p.target) != (row.entry, row.target)]
+    approval = row.entry in ('verify-approval', 'force-approval')
+    signature = progress_digest if approval else result_digest
     prior = next((p for p in ledger.progress if (p.entry, p.target) == (row.entry, row.target)), None)
-    count = prior.consecutive_count + 1 if prior and prior.candidate_digest == candidate_digest and prior.result_digest == result_digest else 1
-    progress.append(ProgressSignature(row.entry, row.target, candidate_digest, result_digest, count))
-    if refusal_reason is not None or (row.entry in ('verify-approval', 'force-approval') and not completed):
-        # Design 881 §3.4 compares evidence results, not failed approval attempts.
-        # An incomplete approval must remain retryable after infrastructure repair.
+    count = prior.consecutive_count + 1 if prior and prior.candidate_digest == candidate_digest and prior.result_digest == signature else 1
+    if signature is not None:
+        progress.append(ProgressSignature(row.entry, row.target, candidate_digest, signature, count))
+    if refusal_reason is not None or (approval and progress_digest is None):
+        # No result was obtained; infrastructure repair can retry this candidate.
+        # An observed invalid result still counts, regardless of completed.
         progress = ledger.progress
     slots = ledger.stop_slots
     if row.budget_class == 'final' and outcome == 'settled' and completed and slots.final_latch is not None and at >= row.reserved_at:
