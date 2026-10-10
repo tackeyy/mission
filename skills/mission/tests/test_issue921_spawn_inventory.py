@@ -196,11 +196,18 @@ def test_fresh_review_replay_is_classified_as_pending_d_dispatch():
 
 def test_covered_provider_entries_leave_other_dispatch_entries_pending():
     from mission_kernel.budget import BUDGET_SPAWN_ENTRIES
-    assert {key for key, status in BUDGET_SPAWN_ENTRIES.items() if status == 'covered'} == {'invoke-command', 'invoke-prepared', 'verification-run'}
+    assert {key for key, status in BUDGET_SPAWN_ENTRIES.items() if status == 'covered'} == {'invoke-command', 'invoke-prepared', 'verification-run', 'verify-approval', 'force-approval'}
     assert set(BUDGET_SPAWN_ENTRIES.values()) == {'covered', 'pending'}
     source = (MISSION / 'lib/mission_application/command_provider.py').read_text()
     calls = {node.func.id for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
     assert {'reserve_provider', 'settle_provider', 'spawn_deadline_exec', 'exchange_provider'} <= calls
+    for module, required in (
+        ('provider_approval', {'admit_approval', 'settle_approval', 'settle_rejected_approval'}),
+        ('review', {'admit_approval', 'approval_settlement', 'settle_rejected_approval'}),
+    ):
+        tree = ast.parse((MISSION / 'lib/mission_application' / (module + '.py')).read_text())
+        wired = {n.func.id for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+        assert required <= wired
     helper = ast.parse((MISSION / 'lib/budgeted_exec.py').read_text())
     for node in ast.walk(helper):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == 'Popen':

@@ -146,7 +146,26 @@ def run_callable(verifier, request, *, timeout=5, grace=.2):
             child.close()
 
 
-def run_approval(verifier, request, directory=None, *, timeout=5, grace=.2, cwd=None):
+def run_approval(verifier, request, directory=None, *, timeout=5, grace=.2, cwd=None, budget=None):
+    if budget is not None:
+        if not isinstance(verifier, dict):
+            raise ValueError('budget-deadline-unenforceable')
+        permit = budget.permit
+        directory = directory or (cwd or Path.cwd()) / '.mission-state' / 'exec-jobs'
+        term_grace = min(grace, permit.policy.term_grace_sec)
+        deadline = min(permit.deadline - term_grace,
+                       permit.started + min(timeout, permit.policy.adapter_call_sec))
+        try:
+            budget.result = run_job('approval-verifier', {'verifier': verifier, 'request': request}, directory,
+                deadline=deadline, term_grace=term_grace, kill_wait=permit.policy.kill_wait_sec,
+                reservation_id=permit.reservation.reservation_id.replace(':', '_'),
+                cwd=cwd, session_id=request['session_id'])
+            budget.unstarted = False
+            return budget.result
+        except Exception as exc:
+            budget.failure = exc
+            budget.unstarted = getattr(exc, 'exec_unstarted', False)
+            raise ValueError('approval verifier rejected the evidence') from exc
     if isinstance(verifier, dict):
         directory = directory or (cwd or Path.cwd()) / '.mission-state' / 'exec-jobs'
         try:
@@ -159,7 +178,7 @@ def run_approval(verifier, request, directory=None, *, timeout=5, grace=.2, cwd=
 
 
 def verify_approval_request(request, verifier_name, *, verifiers, resolve, execute, cwd=None,
-                            budgeted=False, state=None):
+                            budgeted=False, state=None, budget=None):
     if not isinstance(verifier_name, str) or not re.fullmatch(r'[a-z][a-z0-9-]{0,63}', verifier_name):
         raise ValueError('approval verifier is invalid or not configured')
     if state is not None and (not isinstance(state, dict) or not isinstance(state.get('extensions', {}), dict)):
@@ -172,7 +191,8 @@ def verify_approval_request(request, verifier_name, *, verifiers, resolve, execu
     if verifier is None and descriptor is None:
         raise ValueError('approval verifier is not configured')
     try:
-        result = execute(verifier if verifier is not None else descriptor, request, cwd=cwd)
+        options = {'budget': budget} if budget is not None else {}
+        result = execute(verifier if verifier is not None else descriptor, request, cwd=cwd, **options)
     except Exception as exc:
         raise ValueError('approval verifier rejected the evidence') from exc
     try:

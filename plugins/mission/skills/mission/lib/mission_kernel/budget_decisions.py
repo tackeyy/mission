@@ -99,6 +99,10 @@ def stalled_candidate(ledger, entry, target):
     return matching.candidate_digest if matching and matching.consecutive_count >= ledger.policy.no_progress_limit else None
 
 
+def approval_result_digest(response):
+    return _digest(response)
+
+
 def verification_result_digest(receipt):
     return _digest({key: receipt.get(key) for key in ('status', 'exit_code', 'executed_count', 'output_digest')})
 

@@ -100,6 +100,7 @@ class MarkPass:
     compatibility: CompatibilityPayload = EMPTY_COMPATIBILITY_PAYLOAD
     fresh_review_evidence: tuple[FreshReviewCompletionEvidence, ...] = ()
     fresh_review_bindings: FreshReviewBindings | None = None
+    approval_settlement: SettleDispatchBudget | None = None
 
 
 @dataclass(frozen=True)
