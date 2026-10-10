@@ -131,7 +131,12 @@ attempts remain in selection order and never fall back to an older success.
 Bindings are recaptured with the same observation as completion. If current
 bindings or immutable evidence cannot be observed, the command still succeeds
 with `effective_coverage: "unavailable"` and a reason code; it never reports
-valid from saved bindings alone. The imported contract and state bytes remain
+valid from saved bindings alone. Before deriving coverage, status shares the
+completion kernel's carrier authentication and semantic evidence checks, including
+requirement mapping, criterion results and finding/replay facts. Rejected evidence
+returns `unavailable` with the completion rejection code.
+Both status commands read a captured head and verified immutable lineage without
+creating locks or writer layout, or running recovery. Files and mtimes remain
 unchanged. Sessions without a contract still return `{"present": false}`.
 Valid coverage alone does not imply that every completion gate passes.
 

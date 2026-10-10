@@ -119,7 +119,11 @@ snapshot は使用しないでください。
 古い成功へ戻りません。完了判定と同じ観測処理で現在のbindingを再取得し、
 候補・policy・evidenceを観測できなければ、コマンド自体は成功させたまま
 `effective_coverage: "unavailable"`と理由コードを返します。
-保存済みbindingだけでvalidにはせず、契約と状態bytesは変更しません。
+保存済みbindingだけでvalidにはしません。導出前に完了判定と同じkernelのcarrier認証と
+evidence整合性検査を通し、requirement mapping・criterion result・finding/replay factsの
+不整合には`unavailable`と完了判定と同じ理由コードを返します。
+両statusコマンドは捕捉したheadと検証済みの不変lineageを読み、lock・writerレイアウトの
+作成や回復を行いません。ファイルのbytesとmtimeは変更しません。
 契約がないsessionの出力は従来どおり`{"present": false}`です。
 実効coverageのvalidだけでは、他の完了条件の成立を意味しません。
 

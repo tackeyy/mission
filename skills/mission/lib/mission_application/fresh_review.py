@@ -180,11 +180,13 @@ def run_fresh_review_status_cli(args, services):
     state_file = services.resolve_state_file(root)
     if not state_file.exists():
         services.fail('fresh-review-state-missing', 2)
-    repository = services.repository(root, state_file, stamp=False, strict_read=True)
     try:
-        with repository.transaction():
-            projection = decode_projection(repository.load())
-            capacity = services.capacity_status(state_file)
+        _, data = services.load_snapshot(state_file)
+    except Exception as exc:
+        services.fail(getattr(exc, 'code', None) or 'repository-format-invalid', 2)
+    try:
+        projection = decode_projection(data)
+        capacity = services.capacity_status(state_file)
         requests = []
         for item in projection.requests:
             if isinstance(item, WithdrawnFreshReviewRecord):

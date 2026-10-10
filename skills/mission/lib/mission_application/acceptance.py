@@ -14,7 +14,7 @@ from mission_application.artifact import EvidenceFailure
 from mission_kernel.commands import ImportAcceptanceContract
 from mission_kernel.json_codec import freeze_json_value
 from mission_kernel.fresh_review import decode_projection, FreshReviewError
-from mission_kernel.fresh_review_completion import coverage_attempts
+from mission_kernel.fresh_review_completion import coverage_attempts, validated_coverage_inputs
 from mission_kernel.fresh_review_coverage import derive_effective_coverage, FreshReviewBindings, FreshReviewReason
 from mission_application.verifier_policy import VerifierPolicyError, freeze as freeze_verifier_policy
 from mission_application.fresh_review_completion import FreshReviewCompletionServices
@@ -105,7 +105,8 @@ def acceptance_contract_status(state: object, *, observe_fresh_review=None) -> d
 def _effective_coverage_status(state, contract, observe_fresh_review):
     decision = None
     try:
-        attempts = coverage_attempts(decode_projection(state))
+        projection = decode_projection(state)
+        attempts = coverage_attempts(projection)
         required = tuple(item['id'] for item in contract['criteria'] if item['required'])
         # Missing/withdrawn selection needs no current bindings. Let the kernel
         # select it so an unavailable old receipt cannot mask that diagnostic.
@@ -113,6 +114,8 @@ def _effective_coverage_status(state, contract, observe_fresh_review):
             FreshReviewBindings(canonical_contract_digest(contract), (), ()))
         if decision.reason_code != FreshReviewReason.MISSING:
             observed = observe_fresh_review(state)
+            attempts, _ = validated_coverage_inputs(projection, observed.evidence, observed.bindings,
+                                                   contract, canonical_contract_digest(contract))
             decision = derive_effective_coverage(attempts, required, observed.bindings)
         return dict(effective_coverage=decision.effective_coverage.value,
                     effective_coverage_reason_code=decision.reason_code.value if decision.reason_code else None,
@@ -165,10 +168,11 @@ def run_acceptance_contract_import_cli(args, services) -> str:
 def run_acceptance_contract_status_cli(args, services) -> str:
     cwd = Path.cwd()
     state_file = _state_file(cwd, services)
-    repository = services.repository(cwd, state_file, stamp=False, strict_read=True)
     try:
-        with repository.transaction():
-            data = repository.load()
+        _, data = services.load_snapshot(state_file)
+    except Exception as exc:
+        services.fail(getattr(exc, 'code', None) or 'repository-format-invalid', 2)
+    try:
         observation = FreshReviewCompletionServices(cwd, services.load_verifier_policy, services.read_evidence)
         return json.dumps(acceptance_contract_status(data, observe_fresh_review=observation), ensure_ascii=False, indent=2)
     except EvidenceFailure as exc:

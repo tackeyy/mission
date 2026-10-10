@@ -88,16 +88,18 @@ def test_latest_whole_attempt_is_displayed_without_falling_back(clean, case, exp
     from .test_issue974_withdrawn_completion import tombstone
     from .test_issue909_fresh_review_receipts import terminal_document
     state, command = clean
+    if case == 'partial':
+        from .test_issue913_completion_judgement import with_contract
+        state, command = with_contract(clean, lambda c: c['criteria'].append(dict(c['criteria'][0], id='AC2')))
     old = state.fresh_review.requests[0]
-    latest, _ = bound_record(old, command.fresh_review_evidence[0].coverage.thaw(),
+    latest, latest_evidence = bound_record(old, command.fresh_review_evidence[0].coverage.thaw(),
                              request_id='latest', nonce='latest-nonce')
     if case in ('absent', 'partial'):
         rows = ()
         if case == 'partial':
-            latest = FreshReviewRecord(replace(latest.request, criterion_ids=('optional',), candidate_bindings=tuple(replace(b, criterion_id='optional') for b in latest.request.candidate_bindings)),
+            latest = FreshReviewRecord(latest.request,
                 latest.prepare_operation_id, latest.prepare_intent_digest, latest.prepare_payload_digest)
-            # No whole attempt: the only request covers an optional criterion.
-            latest = replace(latest, request=replace(latest.request, criterion_ids=('optional',)))
+            # The request covers AC1, but the contract now requires AC1 and AC2.
             rows = (latest,)
     elif case == 'withdrawn':
         rows = (old, tombstone(old.request, old.request.criterion_ids))
@@ -108,7 +110,12 @@ def test_latest_whole_attempt_is_displayed_without_falling_back(clean, case, exp
             raw['launch_receipt']['context_mode'] = 'inline'
             raw['launch_digest'] = canonical_digest(raw['launch_receipt'])
         elif case == 'open':
-            raw['coverage_receipt']['status'] = 'open'
+            coverage = latest_evidence.coverage.thaw()
+            coverage['status'] = 'open'
+            coverage['open_requirement_ids'] = ['R1']
+            coverage['requirements'][0].update(status='open', reason_code='unconfirmed')
+            latest, latest_evidence = bound_record(latest, coverage)
+            raw = latest.result.thaw()
         elif case in ('failed', 'blocked', 'abandoned-unknown'):
             terminal = terminal_document(case)
             for key in ('request_id', 'request_digest', 'candidate_digest', 'nonce'):
@@ -131,7 +138,8 @@ def test_latest_whole_attempt_is_displayed_without_falling_back(clean, case, exp
     def observe(_):
         if case in ('absent', 'partial', 'withdrawn'):
             pytest.fail('missing coverage must not require bindings or old evidence')
-        return FreshReviewCompletionInputs(bindings=bindings)
+        evidence = (*command.fresh_review_evidence, latest_evidence) if rows[-1].status == 'completed' else command.fresh_review_evidence
+        return FreshReviewCompletionInputs(evidence, bindings)
     data = document(state)
     before = canonical_bytes(data)
     result = acceptance_contract_status(data, observe_fresh_review=observe)
@@ -165,7 +173,7 @@ def test_public_status_reobserves_bindings_and_preserves_all_published_bytes(tmp
     from mission_application import verification_runner
     from mission_kernel.fresh_review import canonical_digest, candidate_identity
     from .mission_state_fixture_corpus import issue483_corpus
-    from .test_issue879_completion_cli import _public_bytes, _persist_fixture
+    from .test_issue879_completion_cli import _persist_fixture
     state, command = clean
     old = state.fresh_review.requests[0]
     contract = state.legacy_passthrough.thaw()['acceptance_contract']
@@ -228,42 +236,43 @@ runpy.run_path(sys.argv[0],run_name='__main__')
     def status_cli():
         return subprocess.run([sys.executable, '-c', script, str(cli.parent.parent / 'lib'), str(cli)],
                               cwd=tmp_path, capture_output=True, text=True)
-    before = _public_bytes(tmp_path)
+    before = state_tree_fingerprint(tmp_path)
     result = status_cli()
     assert result.returncode == 0, result.stderr
     output = json.loads(result.stdout)
     assert output['effective_coverage'] == 'valid', output['effective_coverage_reason_code']
     assert output['coverage'] == output['imported_coverage'] == {'status': 'pending'}
-    assert _public_bytes(tmp_path) == before
+    assert state_tree_fingerprint(tmp_path) == before
     (tmp_path / 'input.txt').write_bytes(b'changed candidate')
-    before = _public_bytes(tmp_path)
+    before = state_tree_fingerprint(tmp_path)
     result = status_cli()
     assert result.returncode == 0, result.stderr
     output = json.loads(result.stdout)
     assert (output['effective_coverage'], output['effective_coverage_reason_code']) == (
         'open', 'acceptance-fresh-review-stale')
-    assert _public_bytes(tmp_path) == before
+    assert state_tree_fingerprint(tmp_path) == before
     (tmp_path / 'input.txt').unlink()
     (tmp_path / 'input.txt').symlink_to(coverage_path)
-    before = _public_bytes(tmp_path)
+    before = state_tree_fingerprint(tmp_path)
     result = status_cli()
     assert result.returncode == 0, result.stderr
     output = json.loads(result.stdout)
     assert (output['effective_coverage'], output['effective_coverage_reason_code']) == (
         'unavailable', 'acceptance-fresh-review-bindings-unavailable')
-    assert _public_bytes(tmp_path) == before
+    assert state_tree_fingerprint(tmp_path) == before
     coverage_path.unlink()
-    before = _public_bytes(tmp_path)
+    before = state_tree_fingerprint(tmp_path)
     result = status_cli()
     assert result.returncode == 0, result.stderr
     output = json.loads(result.stdout)
     assert (output['effective_coverage'], output['effective_coverage_reason_code']) == (
         'unavailable', 'acceptance-fresh-review-evidence-unavailable')
-    assert _public_bytes(tmp_path) == before
+    assert state_tree_fingerprint(tmp_path) == before
 
 
 def test_status_and_completion_execute_the_shared_kernel_coverage_rule(clean, monkeypatch):
     from mission_kernel import fresh_review_coverage as kernel
+    from mission_kernel import fresh_review_completion as completion
     from mission_kernel.transitions import acceptance_completion_rejection
     state, command = clean
     calls = []
@@ -272,13 +281,22 @@ def test_status_and_completion_execute_the_shared_kernel_coverage_rule(clean, mo
         calls.append((attempts, criteria, current))
         return original(attempts, criteria, current, inputs, snapshots)
     monkeypatch.setattr(kernel, '_judge', judge)
+    facts_calls = []
+    original_facts = completion._completion_facts
+    def facts(*args):
+        facts_calls.append(args)
+        return original_facts(*args)
+    monkeypatch.setattr(completion, '_completion_facts', facts)
     observed = FreshReviewCompletionInputs(command.fresh_review_evidence, command.fresh_review_bindings)
     output = acceptance_contract_status(document(state), observe_fresh_review=lambda _: observed)
     assert output['effective_coverage'] == 'valid'
     status_calls = list(calls)
+    status_facts = list(facts_calls)
     calls.clear()
+    facts_calls.clear()
     assert acceptance_completion_rejection(state, command) is None
     assert any(call in calls for call in status_calls if call[2] == command.fresh_review_bindings)
+    assert status_facts and status_facts == facts_calls
 
 
 def test_contractless_status_remains_readable_without_observation():
@@ -314,3 +332,128 @@ def test_imported_coverage_preserves_existing_v2_diagnostic_shapes(clean, covera
     assert output['coverage'] == output['imported_coverage'] == coverage
     assert output['effective_coverage'] == 'unavailable'
     assert canonical_bytes(data) == before
+
+
+@pytest.mark.parametrize('fault', ['open-list', 'criterion-result', 'requirement-map',
+                                   'finding-requirement', 'replay-binding', 'replay-actual'])
+def test_rebound_semantic_faults_share_the_completion_rejection(clean, published, fault):
+    from .test_issue913_completion_judgement import command_for
+    from mission_kernel.transitions import acceptance_completion_rejection
+    state, command = clean
+    coverage = command.fresh_review_evidence[0].coverage.thaw()
+    findings = []
+    if fault == 'open-list':
+        coverage['open_requirement_ids'] = ['R1']
+    elif fault == 'criterion-result':
+        coverage['criterion_results'][0]['criterion_id'] = 'ghost'
+    elif fault == 'requirement-map':
+        coverage['requirements'][0]['criterion_ids'] = ['ghost']
+    else:
+        findings = [json.loads(published[4][0])]
+        coverage['open_finding_ids'] = ['finding-1']
+        if fault == 'finding-requirement':
+            findings[0]['requirement_ids'] = ['ghost']
+        elif fault == 'replay-binding':
+            findings[0]['replay']['candidate_digest'] = 'sha256:' + 'b' * 64
+        else:
+            findings[0]['actual']['exit_code'] = 0
+    record, evidence = bound_record(state.fresh_review.requests[0], coverage, tuple(findings))
+    state = replace(state, fresh_review=FreshReviewProjection((record,)))
+    command = command_for(state, (evidence,))
+    reason = acceptance_completion_rejection(state, command)
+    assert reason == 'acceptance-fresh-review-evidence-invalid'
+    observed = FreshReviewCompletionInputs(command.fresh_review_evidence, command.fresh_review_bindings)
+    result = acceptance_contract_status(document(state), observe_fresh_review=lambda _: observed)
+    assert result['effective_coverage'] in ('open', 'unavailable')
+    assert result['effective_coverage_reason_code'] == reason
+
+
+@pytest.mark.parametrize('optional', [False, True], ids=['required-subset', 'optional-excluded'])
+def test_status_and_completion_use_the_same_required_criterion_set(clean, optional):
+    from .test_issue913_completion_judgement import with_contract, command_for
+    from mission_kernel.fresh_review import FreshReviewRecord
+    from mission_kernel.transitions import acceptance_completion_rejection
+    state, command = with_contract(clean, lambda c: c['criteria'].append(
+        dict(c['criteria'][0], id='AC2', required=not optional)))
+    record = state.fresh_review.requests[0]
+    record = published_record(record) if optional else FreshReviewRecord(record.request,
+        record.prepare_operation_id, record.prepare_intent_digest, record.prepare_payload_digest)
+    state = replace(state, fresh_review=FreshReviewProjection((record,)))
+    command = command_for(state, command.fresh_review_evidence if optional else ())
+    # This request names the real AC1 only. AC2 belongs to the contract, but
+    # makes this request partial only when AC2 is required.
+    observed = FreshReviewCompletionInputs(command.fresh_review_evidence, command.fresh_review_bindings)
+    result = acceptance_contract_status(document(state), observe_fresh_review=lambda _: observed)
+    reason = None if optional else 'acceptance-fresh-review-missing'
+    assert acceptance_completion_rejection(state, command) == reason
+    assert result['effective_coverage'] == ('valid' if optional else 'pending')
+    assert result['effective_coverage_reason_code'] == reason
+
+
+@pytest.mark.parametrize('fault,reason', [
+    ('missing-carrier', 'acceptance-fresh-review-evidence-invalid'),
+    ('digest', 'acceptance-fresh-review-evidence-mismatch'),
+    ('bindings', 'acceptance-fresh-review-bindings-invalid'),
+])
+def test_status_authenticates_carriers_and_bindings_like_completion(clean, fault, reason):
+    from mission_kernel.json_codec import freeze_json_value
+    from mission_kernel.transitions import acceptance_completion_rejection
+    state, command = clean
+    if fault == 'missing-carrier':
+        command = replace(command, fresh_review_evidence=())
+    elif fault == 'digest':
+        evidence = command.fresh_review_evidence[0]
+        coverage = evidence.coverage.thaw()
+        coverage['open_requirement_ids'] = ['R1']
+        command = replace(command, fresh_review_evidence=(replace(evidence, coverage=freeze_json_value(coverage)),))
+    else:
+        command = replace(command, fresh_review_bindings=replace(command.fresh_review_bindings,
+                          contract_digest='sha256:' + 'b' * 64))
+    assert acceptance_completion_rejection(state, command) == reason
+    observed = FreshReviewCompletionInputs(command.fresh_review_evidence, command.fresh_review_bindings)
+    result = acceptance_contract_status(document(state), observe_fresh_review=lambda _: observed)
+    assert (result['effective_coverage'], result['effective_coverage_reason_code']) == ('unavailable', reason)
+
+
+def state_tree_fingerprint(root):
+    """Include coordination files, directory creation and mtimes, not just public bytes."""
+    root = root / '.mission-state'
+    return {str(path.relative_to(root)): (path.stat().st_mtime_ns,
+            path.read_bytes() if path.is_file() else None)
+            for path in (root, *sorted(root.rglob('*')))}
+
+
+@pytest.mark.parametrize('storage', [4, 5], ids=['flat-v4', 'container-v4'])
+@pytest.mark.parametrize('route', ['acceptance-contract', 'fresh-review'])
+def test_status_never_creates_locks_layout_or_recovers_transactions(tmp_path, storage, route, monkeypatch):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from .mission_state_fixture_corpus import issue483_corpus
+    from .test_issue879_completion_cli import _persist_fixture
+    state_dir = tmp_path / '.mission-state'
+    (state_dir / 'sessions').mkdir(parents=True)
+    data = issue483_corpus()['v4']
+    (state_dir / 'sessions/test.json').write_bytes(canonical_bytes(data))
+    _persist_fixture(tmp_path, data, storage)
+    lock = state_dir / '.state.lock'
+    if lock.exists():
+        lock.unlink()
+    # Keep the referenced immutable lineage, but remove all empty writer layout.
+    for path in sorted(state_dir.rglob('*'), key=lambda p: len(p.parts), reverse=True):
+        if path.is_dir() and not any(path.iterdir()):
+            path.rmdir()
+    if storage == 5:
+        # A writer's begin/recovery would reject this prepare. Diagnostics read
+        # only the published head and leave transaction residue untouched.
+        pending = state_dir / 'transactions/prepared'
+        pending.mkdir(parents=True)
+        (pending / 'unfinished.json').write_bytes(b'{unfinished-transaction')
+    monkeypatch.setenv('MISSION_SESSION_ID', 'test')
+    monkeypatch.setenv('MISSION_LEASE_ID', 'test-lease')
+    cli = Path(__file__).parents[1] / 'bin/mission-state.py'
+    before = state_tree_fingerprint(tmp_path)
+    result = subprocess.run([sys.executable, str(cli), route, 'status'], cwd=tmp_path,
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert state_tree_fingerprint(tmp_path) == before
