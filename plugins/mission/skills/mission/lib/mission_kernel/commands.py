@@ -100,6 +100,7 @@ class MarkPass:
     compatibility: CompatibilityPayload = EMPTY_COMPATIBILITY_PAYLOAD
     fresh_review_evidence: tuple[FreshReviewCompletionEvidence, ...] = ()
     fresh_review_bindings: FreshReviewBindings | None = None
+    approval_settlement: SettleDispatchBudget | None = None
 
 
 @dataclass(frozen=True)
@@ -135,6 +136,8 @@ class SettleDispatchBudget:
     output_bytes: int | None = None
     completed: bool = False
     refusal_reason: str | None = None
+    progress_digest: str | None = None
+    approval_terminal_digest: str | None = None
 
 
 @dataclass(frozen=True)

@@ -221,7 +221,6 @@ ALLOWED_DIRECT_ATOMIC_WRITERS = {
     "_publish_state_archive_compaction",
     "backup_state",
     "cmd_specialists_consent",
-    "cmd_verify_provider_approval",
 }
 
 
