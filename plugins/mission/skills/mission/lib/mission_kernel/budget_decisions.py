@@ -169,12 +169,13 @@ def admit(ledger, state, at, *, entry, target, operation_id, fencing_epoch,
         if candidate_digest is not None or entry != 'verification-run':
             _text(candidate_digest, re.compile(r'sha256:[0-9a-f]{64}\Z'))
         if entry == 'repair-reverify':
-            from .repair_attempts import find_attempt, _document
             try:
-                _, attempt = find_attempt(_document(state), target)
-                if attempt['status'] != 'pending' or 'intent' in attempt:
+                row = next(r.document.thaw() for r in state.repair.lineages if r.document.thaw()['lineage_id'] == target)
+                attempt = row['attempts'][-1]
+                if (attempt['status'] != 'pending' or 'intent' in attempt
+                        or operation_id != 'repair-dispatch:' + attempt['attempt_id'][7:]):
                     return _reject('repair-attempt-missing')
-            except (ValueError, KeyError):
+            except (ValueError, KeyError, IndexError, StopIteration):
                 return _reject('repair-attempt-missing')
         if entry == 'system-recover':
             recovery = ledger.stop_slots.system_recovery
@@ -376,7 +377,8 @@ def settle(ledger, at, *, reservation_id, outcome, elapsed_sec, candidate_digest
                              open_count=charge.open_count - 1)
     progress = [p for p in ledger.progress if (p.entry, p.target) != (row.entry, row.target)]
     prior = next((p for p in ledger.progress if (p.entry, p.target) == (row.entry, row.target)), None)
-    count = prior.consecutive_count + 1 if prior and prior.candidate_digest == candidate_digest and prior.result_digest == result_digest else 1
+    count = prior.consecutive_count + 1 if prior and prior.candidate_digest == candidate_digest and (
+        row.entry == 'repair-reverify' or prior.result_digest == result_digest) else 1
     progress.append(ProgressSignature(row.entry, row.target, candidate_digest, result_digest, count))
     if refusal_reason is not None:
         progress = ledger.progress  # a refused verifier did not produce new evidence

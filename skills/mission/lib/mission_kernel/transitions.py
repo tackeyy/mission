@@ -1826,13 +1826,17 @@ def _repair_attempt(state, command):
         from .repair_reverification import mutate_reverification
         if isinstance(command, BeginFindingReverification) and command.reservation is not None:
             request = command.reservation
-            if (request.entry != 'repair-reverify' or request.target != command.attempt_id
+            from .repair_attempts import find_attempt, _document
+            row, _ = find_attempt(_document(state), command.attempt_id)
+            if (request.entry != 'repair-reverify' or request.target != row['lineage_id'] or request.at != command.started_at
                     or request.operation_id != command.operation_id or request.fencing_epoch != state.lease.fencing_epoch):
                 raise FreshReviewError('repair-reservation-invalid')
             from .guidance import decode_legacy_guidance
             state = _reserve_budget(state, replace(request, guidance=decode_legacy_guidance(_evidence_document(state), state.snapshot_provenance))).new_state
             held = next(r for r in state.budget.reservations if r.operation_id == command.operation_id)
             if (held.reservation_id, held.budget_class) != (command.reservation_id, command.budget_class):
+                raise FreshReviewError('repair-reservation-invalid')
+            if held.child_deadline_at != command.deadline_at:
                 raise FreshReviewError('repair-reservation-invalid')
         elif isinstance(command, BeginFindingReverification) and state.budget.policy is not None:
             raise FreshReviewError('repair-reservation-required')

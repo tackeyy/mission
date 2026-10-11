@@ -382,6 +382,8 @@ class BeginFindingReverification:
     reservation_id: str
     budget_class: str
     reservation: ReserveDispatchBudget | None = None
+    started_at: str = ''
+    deadline_at: str = ''
 
 
 @dataclass(frozen=True)

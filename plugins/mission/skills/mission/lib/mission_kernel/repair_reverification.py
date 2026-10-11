@@ -1,5 +1,5 @@
 """Authenticate same-counterexample replay pairs and preserve invalidation."""
-from dataclasses import replace
+from __future__ import annotations
 from acceptance_contract import canonical_contract_digest, frozen_verifier_commands
 from .fresh_review import FreshReviewError, canonical_bytes, canonical_digest, _closed, _identifier, _integer, _digest
 from .json_codec import freeze_json_value
@@ -9,9 +9,10 @@ INVALID = 'repair-reverification-invalid'
 
 
 def next_generation(document):
-    return 1 + max((max(row['last_candidate_change'].get('generation', 0),
+    lineage = max((max(row['last_candidate_change'].get('generation', 0),
         *(a['terminal'].get('generation', 0) for a in row.get('attempts', ())), 0)
         for row in document.get('repair_lineage', {}).get('lineages', ())), default=0)
+    return 1 + max((lineage, *(r.get('repair_generation', 0) for r in document.get('verification_receipts', ()))))
 
 
 def replay_binding(document, row):
@@ -54,7 +55,11 @@ def validate_result(document, row, item, result, finding, *, current=None, previ
     receipt = body['receipt']
     project_verification_receipt(RecordVerificationReceipt(receipt['finished_at'], freeze_json_value(receipt)))
     from .budget import _at
-    if (_at(receipt['finished_at']) < _at(receipt['started_at'])
+    intent = item['intent']
+    if 'started_at' not in intent or 'deadline_at' not in intent:
+        raise FreshReviewError(INVALID)
+    if (not _at(intent['started_at']) <= _at(receipt['started_at']) <= _at(receipt['finished_at']) <= _at(intent['deadline_at'])
+            or receipt['status'] == 'passed' and receipt['output_truncated']
             or receipt['status'] == 'passed' and command['kind'] == 'test'
             and (receipt['executed_count'] is None or receipt['executed_count'] < 1)):
         raise FreshReviewError(INVALID)
@@ -74,7 +79,7 @@ def validate_result(document, row, item, result, finding, *, current=None, previ
         raise FreshReviewError('repair-repro-mismatch')
     if receipt['status'] == 'failed':
         return 'failed'
-    baseline = finding.get('replay')
+    baselines = [finding.get('replay')]
     for previous in row['attempts']:
         if previous['attempt_id'] == item['attempt_id']:
             break
@@ -83,15 +88,16 @@ def validate_result(document, row, item, result, finding, *, current=None, previ
             prior = next((r.thaw() for r in previous_results if canonical_digest(r.thaw()) == ref['digest']), None)
             if prior is None or reference('repair-reverification', canonical_bytes(prior)) != ref:
                 raise FreshReviewError('repair-baseline-unavailable')
-            baseline = prior['receipt']
+            baselines.append(prior['receipt'])
     # Never use the application-authored before_candidate as replay evidence.
-    if (not isinstance(baseline, dict) or baseline.get('status') != 'failed'
+    for baseline in baselines:
+        if (not isinstance(baseline, dict) or baseline.get('status') != 'failed'
             or baseline.get('repro_input_digest') != row['repro']['runner_repro_digest']
             or baseline.get('criterion_id') != row['criterion_id']
             or baseline.get('verifier_definition_digest') != receipt['verifier_definition_digest']):
-        raise FreshReviewError('repair-baseline-unavailable')
-    if baseline['candidate_digest'] == receipt['candidate_digest']:
-        raise FreshReviewError('repair-candidate-not-new')
+            raise FreshReviewError('repair-baseline-unavailable')
+        if baseline['candidate_digest'] == receipt['candidate_digest']:
+            raise FreshReviewError('repair-candidate-not-new')
     return 'verified'
 
 
@@ -119,10 +125,13 @@ def mutate_reverification(state, command):
             raise FreshReviewError(INVALID)
         for value in candidate.values():
             _digest(value)
+        from .budget import _at
+        if _at(command.started_at) >= _at(command.deadline_at):
+            raise FreshReviewError(INVALID)
         # Variable candidate maps belong in effects, not capacity summaries.
         item['intent'] = dict(operation_id=command.operation_id, fencing_epoch=state.lease.fencing_epoch,
             reservation_id=command.reservation_id, budget_class=command.budget_class, candidate_map_digest=canonical_digest(candidate),
-            snapshot_digest=candidate[row['repro']['command_id']])
+            snapshot_digest=candidate[row['repro']['command_id']], started_at=command.started_at, deadline_at=command.deadline_at)
     else:
         if 'intent' not in item or item['intent']['fencing_epoch'] != state.lease.fencing_epoch:
             raise FreshReviewError('repair-lineage-stale-fence')
@@ -196,9 +205,10 @@ def invalidate_observed(state, command, proposed):
     generation = next_generation(_document(state))
     changed = False
     for row in document['repair_lineage']['lineages']:
-        if row['lifecycle'] != 'verified':
+        if row['kind'] != 'finding':
             continue
-        intent = row['attempts'][-1]['intent']
+        baseline = (row['attempts'][-1]['intent']['candidate_map_digest'] if row['lifecycle'] == 'verified'
+            else canonical_digest(row['introduced_candidate']['snapshots']))
         # Unknown dependencies: any observed changed command invalidates all.
         selected = {key: candidates[key] for key in row['introduced_candidate']['snapshots'] if key in candidates}
         unknown_changed = False
@@ -209,12 +219,15 @@ def invalidate_observed(state, command, proposed):
                 previous = next((r for r in reversed(prior) if r['verifier_definition_digest'] == canonical_digest(commands[key])), None)
                 if previous is None or previous['candidate_digest'] != candidates[key]:
                     unknown_changed = True
-        if (row['repro']['command_id'] in selected and selected[row['repro']['command_id']] != intent['snapshot_digest']
-                or set(selected) == set(row['introduced_candidate']['snapshots'])
-                and canonical_digest(selected) != intent['candidate_map_digest']
-                or unknown_changed
-                or receipt is not None and captured is None and row['repro']['command_id'] not in candidates):
+        marker = row['last_candidate_change']
+        observation = canonical_digest(candidates)
+        complete = set(selected) == set(row['introduced_candidate']['snapshots'])
+        if (unknown_changed or not complete
+                or complete and (canonical_digest(selected) != baseline or 'generation' in marker)
+                and marker.get('candidate_map_digest') != observation):
             row['last_candidate_change'] = dict(generation=generation,
-                candidate_map_digest=canonical_digest(candidates), operation_id=getattr(command, 'operation_id', 'candidate-observation'))
+                candidate_map_digest=observation, operation_id=getattr(command, 'operation_id', 'candidate-observation'))
             changed = True
+    if changed and receipt is not None:
+        document['verification_receipts'][-1]['repair_generation'] = next_generation(document)
     return _store(proposed, document) if changed else proposed

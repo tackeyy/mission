@@ -1,4 +1,6 @@
 """Dispatch a saved counterexample once, then publish an observed terminal."""
+from __future__ import annotations
+from datetime import timedelta
 from functools import partial
 from acceptance_contract import frozen_verifier_commands
 from mission_kernel.commands import BeginFindingReverification, CommitFindingReverification, FreshReviewInputEffectClaim
@@ -34,8 +36,18 @@ def reverify(identifier, *, read, repo, root, services):
         raise FreshReviewError('repair-attempt-already-terminal')
     if 'intent' in item:
         # A durable dispatch from another invocation is never automatically run.
+        def expired(document):
+            from mission_kernel.budget import _at
+            _, pending = find_attempt(document, identifier)
+            saved = pending['intent']
+            held = next((r for r in document.get('budget_ledger', {}).get('reservations', ())
+                if r['reservation_id'] == saved['reservation_id']), None)
+            deadline = saved.get('deadline_at') if held is None else held['settle_by']
+            if deadline is None or _at(services.now()) <= _at(deadline):
+                raise FreshReviewError('repair-attempt-busy')
+            return prepare_reconcile(document, identifier=identifier, reason='publication-result-lost')
         execute_evidence_operation(repo(terminal_operation(identifier, 'blocked', 'publication-result-lost')),
-            partial(prepare_reconcile, identifier=identifier, reason='publication-result-lost'))
+            expired)
         return
     history = _read(root, ContentAddressedRef(**item['history_ref']), read_evidence=services.read_evidence)
     repro = _read(root, ContentAddressedRef(**history['repro_input_ref']), read_evidence=services.read_evidence)
@@ -52,15 +64,18 @@ def reverify(identifier, *, read, repo, root, services):
             raise FreshReviewError('repair-reverification-stale')
         definition = replay_binding(document, current_row)
         at = services.now(); size = verification_terminal_bytes(definition)
-        budget, refusal = reserve_verification(document, identifier, definition['timeout_sec'], at,
+        budget, refusal = reserve_verification(document, current_row['lineage_id'], definition['timeout_sec'], at,
             candidates[current_row['repro']['command_id']], size, entry='repair-reverify', operation=operation)
         if refusal is not None:
             raise FreshReviewError(refusal)
-        request = None if budget is None else ReserveDispatchBudget(at, 'repair-reverify', identifier, operation,
+        request = None if budget is None else ReserveDispatchBudget(at, 'repair-reverify', current_row['lineage_id'], operation,
             budget.reservation.fencing_epoch, definition['timeout_sec'], size, budget.candidate_digest)
+        from mission_kernel.budget import _at
+        deadline = ((_at(at) + timedelta(seconds=definition['timeout_sec'])).strftime('%Y-%m-%dT%H:%M:%SZ')
+            if budget is None else budget.reservation.child_deadline_at)
         return PreparedEvidenceOperation(BeginFindingReverification(identifier, operation,
             freeze_json_value(candidates), 'repair:' + identifier[7:] if budget is None else budget.reservation.reservation_id,
-            'repair', request), (), {})
+            'repair', request, at, deadline), (), {})
     dispatch = execute_evidence_operation(repo(operation, command_type='repair-reverify-begin'), intent)
     if dispatch.get("dispatch_replayed"):
         return

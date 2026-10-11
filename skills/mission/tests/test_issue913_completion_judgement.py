@@ -552,13 +552,21 @@ def test_two_application_observations_must_describe_the_same_current_candidate(c
     rejected(state, command, 'acceptance-fresh-review-stale')
 
 
-def test_context_only_finding_does_not_create_a_required_obligation(clean, published):
+@pytest.mark.parametrize('side_effect', [False, True])
+def test_context_only_finding_does_not_create_a_required_obligation(clean, published, side_effect):
     state, command = with_contract(clean, lambda c: c['requirements'][0].update(classification='context'))
     finding = json.loads(published[4][0])
-    finding['prohibited_side_effect_ids'] = []
+    if not side_effect:
+        finding['prohibited_side_effect_ids'] = []
     finding['replay']['contract_digest'] = command.fresh_review_bindings.contract_digest
-    record, evidence = bound_record(state.fresh_review.requests[0], command.fresh_review_evidence[0].coverage.thaw(), (finding,))
-    state = replace(state, fresh_review=FreshReviewProjection((record,)))
-    command = command_for(state, (evidence,))
-    assert acceptance_completion_rejection(state, command) is None
-    assert decide(state, command).accepted
+    coverage = command.fresh_review_evidence[0].coverage.thaw()
+    coverage['open_finding_ids'] = [finding['finding_id']] if side_effect else []
+    record, evidence = bound_record(state.fresh_review.requests[0], coverage, (finding,), request_id='older', nonce='older-nonce')
+    state = replace(state, fresh_review=FreshReviewProjection((record, *state.fresh_review.requests)))
+    command = command_for(state, (evidence, *command.fresh_review_evidence))
+    assert evidence.findings[0].thaw()['resolution'] == 'open'
+    if side_effect:
+        rejected(state, command, 'acceptance-unresolved-finding')
+    else:
+        assert acceptance_completion_rejection(state, command) is None
+        assert decide(state, command).accepted

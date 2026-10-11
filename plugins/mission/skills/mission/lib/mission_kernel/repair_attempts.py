@@ -1,4 +1,5 @@
 """Bounded repair obligations. E2a never issues a resolution receipt."""
+from __future__ import annotations
 from dataclasses import replace
 import hashlib
 import json
@@ -52,7 +53,12 @@ def validate_attempts(row):
             *(('intent',) if 'intent' in item else ())), INVALID)
         if 'intent' in item:
             intent = _closed(item['intent'], ('operation_id', 'fencing_epoch', 'reservation_id', 'budget_class',
-                'candidate_map_digest', 'snapshot_digest'), INVALID)
+                'candidate_map_digest', 'snapshot_digest',
+                *(('started_at', 'deadline_at') if 'started_at' in item['intent'] or 'deadline_at' in item['intent'] else ())), INVALID)
+            if 'started_at' in intent:
+                from .budget import _at
+                if _at(intent['started_at']) >= _at(intent['deadline_at']):
+                    raise FreshReviewError(INVALID)
             for key in ('operation_id', 'reservation_id', 'budget_class'):
                 _identifier(intent[key])
             _integer(intent['fencing_epoch'], INVALID)
@@ -191,6 +197,15 @@ def mutate_attempt(state, command):
             raise FreshReviewError(INVALID)
         for value in candidate['snapshots'].values():
             _digest(value)
+        if row['lifecycle'] == 'verified':
+            latest = row['attempts'][-1]
+            changed = canonical_digest(candidate['snapshots']) != latest['intent']['candidate_map_digest']
+            if not changed and row['last_candidate_change'].get('generation', 0) < latest['terminal']['generation']:
+                raise FreshReviewError('repair-lineage-already-verified')
+            if changed:
+                from .repair_reverification import next_generation
+                row['last_candidate_change'] = dict(generation=next_generation(document),
+                    candidate_map_digest=canonical_digest(candidate['snapshots']), operation_id=command.operation_id)
         if type(body['baseline_receipts']) is not list or body['baseline_receipts'] != baseline_receipts(document, row):
             raise FreshReviewError(INVALID)
         _reference(body['plan_ref'], 'repair-plan'); _reference(body['repro_input_ref'], 'repair-repro')

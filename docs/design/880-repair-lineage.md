@@ -181,6 +181,8 @@ E はこの保証を残し、E に link のない legacy findings の migration/
 | open/repairing/deferred → rejected | 独立 disposition receipt 必須。false-positive、重複先、非義務との関係を具体的に束縛。正当な義務違反の受容を意味しない |
 | verified/rejected/deferred → 実効open | §4 の stale、判定 binding 不一致、または同じ反例の新しい失敗。履歴と元の ID を保持し、再修復可能 |
 
+E2bでは候補が変わらずstaleでもないverifiedへの`repair begin`を拒否し、beginで候補変更を観測した場合は同じcommitでmarkerを保持して実効openから開始する。
+
 **E2aのbefore_candidateの保証主体**: 現在のfilesystem候補はapplicationの[`prepare_begin`](../../skills/mission/lib/mission_application/repair.py)が凍結commandごとの`_capture`で観測し、再観測との一致を確認する。公開CLIからsnapshot値を指定する入口は設けない。kernelのstateには過去の候補bindingしかないため、`before_candidate.snapshots`はapplicationが観測した値としてキー集合とdigestの形式だけを検査する（contract・requirement・policy・iterationはstateと照合する）。この境界は[`test_public_begin_uses_application_capture_and_refuses_drift`](../../skills/mission/tests/test_issue906_repair_attempts.py)で固定する。
 
 E2bのreverifyは`before_candidate`を信頼の根拠にしない。下記のfailed/passed replay receiptと対象候補の新しい観測を束縛して判定する。`before_candidate`を権威として使用する設計へ変える場合は、その段で現在候補との照合を必須とする。
@@ -192,6 +194,9 @@ verified の必須条件:
 3. 新候補で、同じ criterion、元 `repro_digest`、登録 replay.command_id、definition/policy/contract、B runner digest が一致する **新規の passed replay receipt** がある。通常 verifier の成功で代替しない。caller の `resolved=true` / `status=verified` を受け付けない。
 4. prepare、実行直前、実行後、公開直前の候補観測が一致し、公開時の現 operation/lease/fence を通る。receipt は immutable artifact ref と同じ state commit に束縛される。過去 operation の receipt を新 attempt として流用しない。
 5. 当該 attempt に後続 failed/blocked/unknown replay がない。最新実行の失敗から古い passed に戻らない。repair candidate の変更後は §4 に従う。
+
+E2bの「新しい候補」は同じ反例でfailedしたことのないreplay snapshotを意味し、introducedのfailed候補と全ての過去のfailed attemptの候補への復帰はverifiedにしない。
+E2bのpassedは非切詰めの出力を必須とし、receiptを当該attemptの保存済みdispatch operationに束縛し、時刻は秒精度で`dispatch.started_at ≤ receipt.started_at ≤ receipt.finished_at ≤ dispatch.deadline_at`を満たす。
 
 B の runner が passed を導出する処理を再利用する。test command では fresh report と正の executed_count を含む成功条件があり、timeout/toolchain/candidate drift は blocked となる。[skills/mission/lib/mission_application/verification_runner.py:147-420][S03] kernel は receipt の閉じた shape・binding と producer 専用 carrier を検査する。既存 B receipt の shape validator だけで実行出所が証明されたとは扱わない。[skills/mission/lib/mission_application/verification_execution.py:85-167][S02]
 
@@ -211,6 +216,9 @@ receipt は origin/lineage/repro/contract/candidate、判断対象の evidence r
 
 決定: E 初版は依存関係を **unknown** とし、候補 map の変更後は全 required criteria の通常検証と、全ての既存 verified finding の replay を再実行する。依存 graph の新 schema や caller の `unaffected` 指定を導入しない。精密な影響解析による再利用は後続設計とする。
 
+E2bではintroduced snapshotの一部しか観測できない場合も依存unknownとしてmarkerを更新し、markerと同じcommitで新しく観測した通常receiptはmarkerより新しいgenerationとする（観測済みの条件の再実行は不要、残るrequired条件は再検証する）。
+初回repairのopen/repairingでも候補変化をmarkerへ保持して既存の通常receiptを全required再検証へ追い出し、既に観測した同じfull candidate mapではmarkerを再更新しない。
+
 現 B snapshot は全 tracked bytes、declared_untracked、declared local input を含み、通常 command ごとに capture する。[skills/mission/lib/mission_application/verification_runner.py:147-420][S03][skills/mission/lib/mission_application/review.py:30-101][S10] E は D の通常/replay command ごとの候補 map を使う（未merge依存）。HEAD 不変・dirty bytes 変更も候補変更になる。[docs/design/689-fresh-review-receipt.md:11-128][D01]
 
 | 変化 | 必ず無効化する現在の主張 |
@@ -225,9 +233,12 @@ stale は status/completion の **読取時にも現候補との差から導出*
 既存 resume/reactivate は control を更新する reducer である。[skills/mission/lib/mission_kernel/transitions.py:869-947][S11] E はそれを第二の lifecycle に置き換えず、repair projection と保留・未実行 attempt・履歴をそのまま codec から復元する。resume 時に候補を再観測し、unrepaired/unverified と stale を返す。iteration 増加で collection を空にしない。
 
 reverification 実行は短い fenced intent 保存→lock を放して B 実行→候補再取得→fenced terminal publication。execution intent は D と同じ `dispatch-unknown/running/terminal` の共有規律で、finding lifecycle とは別の実行観測とする。中断後の unknown を自動実行し直さない。head または operation record に記録済みの結果があれば current fence で reconcile してそれを返し、無ければ `blocked(reason="publication-result-lost")` で終端化し、新しい attempt で再実行する（§2「公開の回復」の決定。staged generation の再利用はしない）。旧 writer の遅着は拒否。公開後・応答前の停止は同一 operation の保存結果を返す。
+E2bの別呼出しによる自動回復は保存済み期限（F予約が残る場合はsettle_by）まで`repair-attempt-busy`で拒否し、期限後だけ結果喪失として終端化する；旧intentに期限の証拠が無ければ自動終端化せず明示的reconcileを要する。
 既存 operation replay が歴史的 state を返す仕組み、fenced lease の旧 token 拒否、transition/effects の公開を再利用する。[skills/mission/lib/mission_application/evidence.py:199-250][S12][skills/mission/lib/mission_persistence/legacy_v4.py:714-773][S13][skills/mission/lib/mission_persistence/fenced_commit.py:1465-1500][S36] v4 flat は既存 lock/lease/effect publication を維持し、v5 と同じ世代CASを持つと主張しない。公開経路は v4 flat と v5 container/v4 payload、closed v5 は typed codec/pure reducer に限定し、公開bridgeを新設しない。[skills/mission/lib/mission_persistence/legacy_v4.py:714-773][S13][skills/mission/lib/mission_persistence/fenced_commit.py:1465-1500][S36][docs/design/689-fresh-review-receipt.md:239-273][D03]
 
 ## 5. Completion gate
+
+E2bの条件5は保存済みcoverageのopen_finding_idsを重ねて判定せず、全originを照合するeffective_unresolved_findingsでverifiedと禁止副作用のないcontext-onlyを除外する；supplemental open obligationはDのcoverage判定に残す。
 
 決定: D3 の条件5を pure `effective_unresolved_findings` に接続する。D が導入した全 finding origins と E lineage を照合し、対応 lineage 欠落、open、repairing、deferred、stale verified（§2「stale の保持」の (1)(2) を満たさないものを含む）、無効 disposition は未解決。completed terminal の findings は D 側で F_MAX 件以下に閉じて全て lineage を持ち、取込み上限超過の failed 終端は `unimported-findings` lineage を持つ（§2「D 終端の findings 上限」）。`unimported-findings` lineage は、§3「取込み上限超過の終端の disposition」の有効な receipt が無い限り、義務との関係が不明な未解決 finding として常に `acceptance-unresolved-finding` で止める。後の D attempt の成功・最新 attempt の coverage valid では解消しない。lineage が未導入の期間（D3 から E1 まで）も、D3 の条件 5 がこの終端を同じ理由で止める（§9 の義務）。required obligation または禁止副作用に関連すれば **High/Medium/Low 全て** `acceptance-unresolved-finding`。severity は優先順位と報告にだけ使う。[docs/design/689-fresh-review-receipt.md:239-273][D03]
 
@@ -329,6 +340,7 @@ CIはPython shards→`make test-shard`→tracked testsの選択で配線され�
 増分の内訳（推定）: E0 +20〜30（4 variant と lineage・disposition の最大形 test）、round 4 で E0 +110〜170（D の decoder 上限 +70〜110、移行・取下げの判定・lineage 未導入の終端 +40〜60）、round 5 で E0 +40〜70（withdrawn の状態・decoder・reducer・判定と test）、E1 +160〜240（slot・同一 commit の更新・completion 条件・`unimported-findings` lineage。overflow を削除した分を除いた）、E2 +30〜60（operation ID の導出・結果喪失の終端・CAS 敗北の test）、E3 +80〜140（予約と slot、取込み上限超過の終端の disposition）。過去の実測との比 ×1.6 で補正すると E0 は 1,312〜1,792行で上限が 1,400行を超え（分割は §9 の未決 9）、E1・E2 の上限も 1,400行を超える（E1 1,456〜1,984、E2 1,408〜1,856）。E3 は 1,168〜1,584行。着手前に実 diff の見込みを再計測し、超える場合は分割案を出す。
 
 **E2bへの容量予約の引継ぎ**: E2aの`REPAIR_TERMINAL_DELTA`は終端要約の予約だけである。E2bでreverifyの実行intentを導入する際は、intent保存段の最大増分（Fの`reservation_id`・`budget_class`を含む形）もpending全件の予約総量へ追加する。beginと全writerは残る全段の予約を確保し、intentから終端までの各段が容量上限付近でも保存できることを最大形のencodeテストで固定する。E2aの定数だけをそのまま流用しない。
+E2bのintentには秒精度UTCのstarted_at/deadline_atを追加して既存E0bのΔ内で予約し、no-progressはattempt IDではなくlineage IDと候補digestで数え、同じ候補の繰返しは出力digestの違いで回数をリセットしない。
 
 E2以前もattempt/receiptの最小履歴は保存する。E4まで比較が未測定であることを明示し、親880の「改悪を測れる履歴」を未完了として残す。子をRefsで親へ結び自身をCloses、最後のE4を#880本体に残す場合は親本文を最終統合の条件へ更新する。ここでは本文を変更しない。
 

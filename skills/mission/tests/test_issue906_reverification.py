@@ -13,7 +13,7 @@ def repair_reviewer(completion_session, run_cli, tmp_path):
     from .test_issue878_verification_runner import _replay_policy
     root, state, schema = completion_session
     policy = _replay_policy()
-    policy['commands'][1]['argv'][-1] = "from pathlib import Path; assert Path('repro.json').read_text() == '0'; assert Path('app.txt').read_text() == 'repaired'"
+    policy['commands'][1]['argv'][-1] = f"from pathlib import Path; import time; print(time.time_ns()); assert Path('repro.json').read_text() == '0'; assert Path('app.txt').read_text() == 'repaired' or Path({str(root / '.mission/replay-passed')!r}).exists()"
     raw = json.dumps(policy, sort_keys=True, separators=(',', ':')).encode()
     (root / '.mission/verifiers.json').write_bytes(raw)
     digest = 'sha256:' + hashlib.sha256(raw).hexdigest()
@@ -48,6 +48,16 @@ def test_public_same_counterexample_failed_new_candidate_passed(repair_reviewer,
     assert not state.get('verification_receipts')  # Replay never substitutes normal verification.
     again = run_cli('repair', 'reverify', '--attempt', attempt['attempt_id'], cwd=root, check=True)
     assert json.loads(again.stdout)['attempt'] == ended
+    refused = run_cli('repair', 'begin', '--finding', row['lineage_id'], '--plan-ref', 'plan.json', cwd=root,
+        env_extra={'MISSION_OPERATION_ID': 'begin-verified'})
+    assert refused.returncode != 0 and 'repair-lineage-already-verified' in refused.stderr
+    assert json.loads(run_cli('get', cwd=root).stdout)['repair_lineage']['lineages'][0]['lifecycle'] == 'verified'
+    (root / 'app.txt').write_text('changed-again')
+    reopened = run_cli('repair', 'begin', '--finding', row['lineage_id'], '--plan-ref', 'plan.json', cwd=root,
+        env_extra={'MISSION_OPERATION_ID': 'begin-stale'}, check=True)
+    assert json.loads(reopened.stdout)['attempt']['status'] == 'pending'
+    changed = json.loads(run_cli('get', cwd=root).stdout)['repair_lineage']['lineages'][0]
+    assert changed['last_candidate_change']['generation'] > ended['terminal']['generation']
 
 @pytest.fixture
 def reverified(repair_state):
@@ -61,7 +71,8 @@ def reverified(repair_state):
     state, begun = begun_state(repair_state)
     row = state.repair.lineages[0].document.thaw(); item = row['attempts'][0]
     candidates = dict(row['introduced_candidate']['snapshots']); candidates[row['repro']['command_id']] = 'sha256:' + 'b'*64
-    dispatched = decide(state, BeginFindingReverification(item['attempt_id'], 'dispatch', freeze_json_value(candidates), 'reservation', 'repair'))
+    dispatched = decide(state, BeginFindingReverification(item['attempt_id'], 'dispatch', freeze_json_value(candidates), 'reservation', 'repair',
+        started_at='2026-01-01T00:00:00Z', deadline_at='2026-01-01T00:00:05Z'))
     assert dispatched.accepted, dispatched.rejection
     state = dispatched.transition.new_state; row = state.repair.lineages[0].document.thaw(); item = row['attempts'][0]
     finding = begun.evidence[0].findings[0].thaw()
@@ -90,6 +101,14 @@ def test_verified_lineage_leaves_completion_blockers_only_with_current_evidence(
     stale = replace(bindings, candidate_snapshots=tuple((key, 'sha256:'+'c'*64) for key in body['candidate']))
     assert effective_unresolved_findings(verified.repair, verified.fresh_review, command.evidence, contract, stale)
 
+
+def test_first_repair_invalidates_normal_receipts_even_if_only_replay_snapshot_changed(reverified):
+    state, command, _ = reverified
+    row = state.repair.lineages[0].document.thaw(); body = command.result.thaw()
+    assert any(body['candidate'][key] == digest for key, digest in row['introduced_candidate']['snapshots'].items())
+    assert row['last_candidate_change'].get('generation', 0) > 0
+    assert row['last_candidate_change']['generation'] < body['generation']
+
 @pytest.mark.parametrize('schema', [4, 5])
 @pytest.mark.parametrize('claim', ['repro', 'old-candidate', 'self-report'])
 def test_public_reverify_cannot_replace_saved_input_candidate_or_claim(repair_reviewer, run_cli, schema, claim):
@@ -102,6 +121,27 @@ def test_public_reverify_cannot_replace_saved_input_candidate_or_claim(repair_re
     before = _public_bytes(root)
     refused = run_cli('repair', 'reverify', '--attempt', item['attempt_id'], *extra, cwd=root)
     assert refused.returncode != 0 and _public_bytes(root) == before
+
+
+@pytest.mark.parametrize('schema', [4, 5])
+@pytest.mark.parametrize('returned', ['introduced', 'previous-attempt'])
+def test_public_passed_replay_on_any_earlier_failed_candidate_is_not_verified(repair_reviewer, run_cli, schema, returned):
+    root = repair_reviewer[0]; original = (root / 'app.txt').read_text()
+    row, item = begin(run_cli, repair_reviewer, schema)
+    target = original if returned == 'introduced' else 'failed-before'
+    for number, contents in enumerate((['failed-later'] if returned == 'introduced' else ['failed-before', 'failed-later'])):
+        (root / 'app.txt').write_text(contents)
+        failed = run_cli('repair', 'reverify', '--attempt', item['attempt_id'], cwd=root, check=True)
+        assert json.loads(failed.stdout)['attempt']['status'] == 'failed'
+        item = json.loads(run_cli('repair', 'begin', '--finding', row['lineage_id'], '--plan-ref', 'plan.json', cwd=root,
+            env_extra={'MISSION_OPERATION_ID': 'return-failed-' + str(number)}, check=True).stdout)['attempt']
+    (root / 'app.txt').write_text(target)
+    # An opaque fixture verifier changes its answer, without changing its snapshot.
+    (root / '.mission/replay-passed').write_text('passed')
+    result = run_cli('repair', 'reverify', '--attempt', item['attempt_id'], cwd=root)
+    assert result.returncode != 0 and 'repair-candidate-not-new' in result.stderr
+    ended = json.loads(run_cli('get', cwd=root).stdout)['repair_lineage']['lineages'][0]
+    assert ended['lifecycle'] == 'open' and ended['attempts'][-1]['status'] == 'blocked'
 
 
 def test_committed_candidate_change_remains_stale_after_bytes_return(reverified):
@@ -118,6 +158,7 @@ def test_committed_candidate_change_remains_stale_after_bytes_return(reverified)
     current = observed.transition.new_state
     marker = current.repair.lineages[0].document.thaw()['last_candidate_change']
     assert marker['generation'] >= body['generation']
+    assert current.legacy_passthrough.thaw()['verification_receipts'][-1]['repair_generation'] > marker['generation']
     bindings = FreshReviewBindings(body['receipt']['contract_digest'], (), tuple(body['candidate'].items()), (command.result,))
     assert effective_unresolved_findings(current.repair, current.fresh_review, command.evidence, contract, bindings)
 
@@ -134,6 +175,7 @@ def test_reserved_intent_and_terminal_fit_near_limit(reverified, encoding, outco
     state, command, verified = reverified
     doc = state.legacy_passthrough.thaw()
     doc['repair_lineage']['lineages'][0]['attempts'][-1].pop('intent')
+    doc['repair_lineage']['lineages'][0]['last_candidate_change'] = dict(kind='absent', reason='no-resolution-binding')
     mode = sc.StateEncoding.CANONICAL if encoding == 'canonical' else sc.StateEncoding.LEGACY_PRETTY
     def encode(document):
         return json.dumps(document, ensure_ascii=False, sort_keys=True, **({'separators':(',',':')} if encoding == 'canonical' else {'indent':2})).encode()
@@ -144,7 +186,8 @@ def test_reserved_intent_and_terminal_fit_near_limit(reverified, encoding, outco
     before = encode(doc); state = _store(state, doc)
     intent = command.result.thaw()['dispatch']
     staged = decide(state, BeginFindingReverification(command.attempt_id, intent['operation_id'],
-        freeze_json_value(command.result.thaw()['candidate']), intent['reservation_id'], intent['budget_class']))
+        freeze_json_value(command.result.thaw()['candidate']), intent['reservation_id'], intent['budget_class'],
+        started_at=intent['started_at'], deadline_at=intent['deadline_at']))
     assert staged.accepted, staged.rejection
     state = staged.transition.new_state; after_intent = encode(state.legacy_passthrough.thaw())
     assert check_state_capacity(before, after_intent, encoding=mode).accepted
@@ -180,18 +223,48 @@ def test_reverify_intent_binds_an_actual_budget_reservation(repair_reviewer, run
     state = json.loads(run_cli('get', cwd=root).stdout); ledger = decode_ledger(state)
     assert ended['status'] == 'verified'
     assert ended['intent']['budget_class'] == 'repair'
-    assert any(p.entry == 'repair-reverify' and p.target == item['attempt_id'] for p in ledger.progress)
+    assert any(p.entry == 'repair-reverify' and p.target == state['repair_lineage']['lineages'][0]['lineage_id'] for p in ledger.progress)
     assert not ledger.reservations
     assert any(s.reservation_id == ended['intent']['reservation_id'] for s in ledger.settlements)
 
 
-def test_replayed_dispatch_never_spawns_again(repair_reviewer, run_cli, monkeypatch):
+def test_no_progress_counts_the_same_lineage_candidate_across_attempts(repair_reviewer, run_cli):
+    from datetime import datetime, timezone
+    from mission_kernel.budget import decode_policy, default_policy_document, ledger_document, new_ledger, decode_ledger
+    root = repair_reviewer[0]; row, item = begin(run_cli, repair_reviewer)
+    state = json.loads(run_cli('get', cwd=root).stdout)
+    policy = default_policy_document(1800); policy['no_progress_limit'] = 2
+    state['budget_minutes'] = 30
+    state['budget_ledger'] = ledger_document(new_ledger(decode_policy(policy), datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')))
+    _persist_fixture(root, state, 5, operation_id='fixture-budget')
+    for number in range(2):
+        if number:
+            item = json.loads(run_cli('repair', 'begin', '--finding', row['lineage_id'], '--plan-ref', 'plan.json', cwd=root,
+                env_extra={'MISSION_OPERATION_ID': 'failure-2'}, check=True).stdout)['attempt']
+        replay = run_cli('repair', 'reverify', '--attempt', item['attempt_id'], cwd=root, check=True)
+        assert json.loads(replay.stdout)['attempt']['status'] == 'failed'
+    ledger = decode_ledger(json.loads(run_cli('get', cwd=root).stdout))
+    assert any(p.target == row['lineage_id'] and p.consecutive_count == 2 for p in ledger.progress)
+    item = json.loads(run_cli('repair', 'begin', '--finding', row['lineage_id'], '--plan-ref', 'plan.json', cwd=root,
+        env_extra={'MISSION_OPERATION_ID': 'failure-3'}, check=True).stdout)['attempt']
+    refused = run_cli('repair', 'reverify', '--attempt', item['attempt_id'], cwd=root)
+    assert refused.returncode != 0 and 'budget-no-new-evidence' in refused.stderr
+
+
+@pytest.mark.parametrize('recovery', ['live', 'expired', 'legacy', 'cleanup'])
+def test_replayed_dispatch_never_spawns_again(repair_reviewer, run_cli, monkeypatch, recovery):
     from .test_command_inventory import _load_mission_state_module
     from mission_application import repair_reverification as app
     from mission_application.repair import run_repair_cli
     from types import SimpleNamespace
     root = repair_reviewer[0]; _, item = begin(run_cli, repair_reviewer)
     (root / 'app.txt').write_text('repaired')
+    if recovery == 'cleanup':
+        from datetime import datetime, timezone
+        from mission_kernel.budget import decode_policy, default_policy_document, ledger_document, new_ledger
+        state = json.loads(run_cli('get', cwd=root).stdout); state['budget_minutes'] = 30
+        state['budget_ledger'] = ledger_document(new_ledger(decode_policy(default_policy_document(1800)), datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')))
+        _persist_fixture(root, state, 5, operation_id='fixture-budget')
     monkeypatch.chdir(root); monkeypatch.setenv('MISSION_SESSION_ID', 'test'); monkeypatch.setenv('MISSION_LEASE_ID', 'test-lease')
     original = app.execute_evidence_operation
     def peer_dispatch(repository, prepare):
@@ -201,8 +274,36 @@ def test_replayed_dispatch_never_spawns_again(repair_reviewer, run_cli, monkeypa
         pytest.fail('replayed durable dispatch spawned the verifier again')
     monkeypatch.setattr(app, 'execute_evidence_operation', peer_dispatch)
     monkeypatch.setattr(app, 'run_contract_verifier', forbidden)
-    result = json.loads(run_repair_cli(SimpleNamespace(repair_command='reverify', attempt=item['attempt_id']), _load_mission_state_module()._ACCEPTANCE_CONTRACT_CLI_SERVICES))
+    monkeypatch.setattr(app, 'execute_verification', forbidden)
+    args = SimpleNamespace(repair_command='reverify', attempt=item['attempt_id'])
+    services = _load_mission_state_module()._ACCEPTANCE_CONTRACT_CLI_SERVICES
+    result = json.loads(run_repair_cli(args, services))
     assert result['attempt']['status'] == 'pending'
+    monkeypatch.setattr(app, 'execute_evidence_operation', original)
+    if recovery in ('expired', 'cleanup'):
+        from datetime import timedelta
+        from mission_kernel.budget import _at
+        late = (_at(result['attempt']['intent']['deadline_at']) + timedelta(seconds=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        services = replace(services, now=lambda: late)
+        if recovery == 'cleanup':
+            state = json.loads(run_cli('get', cwd=root).stdout)
+            settled_by = state['budget_ledger']['reservations'][0]['settle_by']
+            assert _at(late) < _at(settled_by)
+            with pytest.raises(SystemExit):
+                run_repair_cli(args, services)
+            assert json.loads(run_cli('get', cwd=root).stdout)['repair_lineage']['lineages'][0]['attempts'][-1]['status'] == 'pending'
+            late = (_at(settled_by) + timedelta(seconds=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        ended = json.loads(run_repair_cli(args, services))['attempt']
+        assert ended['status'] == 'blocked' and ended['terminal']['reason'] == 'publication-result-lost'
+    else:
+        if recovery == 'legacy':
+            state = json.loads(run_cli('get', cwd=root).stdout)
+            intent = state['repair_lineage']['lineages'][0]['attempts'][-1]['intent']
+            intent.pop('started_at'); intent.pop('deadline_at')
+            _persist_fixture(root, state, 5, operation_id='legacy-intent')
+        with pytest.raises(SystemExit):
+            run_repair_cli(args, services)
+        assert json.loads(run_cli('get', cwd=root).stdout)['repair_lineage']['lineages'][0]['attempts'][-1]['status'] == 'pending'
 
 
 def test_same_candidate_pass_cannot_verify(reverified):
@@ -264,6 +365,10 @@ def test_changed_non_replay_candidate_remains_stale(reverified):
     assert result.accepted, result.rejection
     row = result.transition.new_state.repair.lineages[0].document.thaw()
     assert row['last_candidate_change']['generation'] >= body['generation']
+    again = decide(result.transition.new_state, RecordVerificationReceipt(receipt['finished_at'],
+        freeze_json_value(receipt), candidate=freeze_json_value(candidates)))
+    assert again.accepted, again.rejection
+    assert again.transition.new_state.repair.lineages[0].document.thaw()['last_candidate_change'] == row['last_candidate_change']
 
 
 def test_maximum_intent_and_verified_terminal_fit_existing_deltas(reverified):
@@ -275,11 +380,12 @@ def test_maximum_intent_and_verified_terminal_fit_existing_deltas(reverified):
     item['terminal'].update(fencing_epoch=2**63-1, generation=2**63-1)
     item['terminal']['comparison_ref']['size'] = 262144
     validate_attempts(row)
-    envelope = lambda a: json.dumps(dict(extensions=dict(repair_lineage=dict(lineages=[dict(attempts=[a])]))), indent=2, sort_keys=True).encode()
+    marker = dict(generation=2**63-1, candidate_map_digest='sha256:'+'f'*64, operation_id='o'*128)
+    envelope = lambda a, m=marker: json.dumps(dict(extensions=dict(repair_lineage=dict(lineages=[dict(attempts=[a], last_candidate_change=m)]))), indent=2, sort_keys=True).encode()
     import copy
     pending = copy.deepcopy(item); pending.update(status='pending', terminal={'kind':'absent','reason':'not-terminal'})
     before_intent = copy.deepcopy(pending); before_intent.pop('intent')
-    assert len(envelope(pending)) - len(envelope(before_intent)) <= FRESH_REVIEW_DISPATCH_STAGE_DELTA
+    assert len(envelope(pending)) - len(envelope(before_intent, dict(kind='absent', reason='no-resolution-binding'))) <= FRESH_REVIEW_DISPATCH_STAGE_DELTA
     assert len(envelope(item)) - len(envelope(pending)) <= REPAIR_TERMINAL_DELTA
 
 
@@ -344,3 +450,78 @@ def test_reverification_requires_both_effects_and_origin(reverified, field):
     bad = () if field == 'evidence' else replace(getattr(command, field), size=getattr(command, field).size+1)
     result = decide(reverified[0], replace(command, **{field:bad}))
     assert not result.accepted and result.transition is None
+
+
+@pytest.mark.parametrize('returned', ['introduced', 'previous-attempt'])
+def test_earlier_failed_candidate_cannot_verify_after_a_different_failure(reverified, returned):
+    import copy
+    from mission_kernel.repair_reverification import validate_result
+    from mission_kernel.fresh_review import canonical_bytes, canonical_digest, FreshReviewError
+    from mission_kernel.repair_attempts import reference
+    from mission_kernel.json_codec import freeze_json_value
+    state, command, _ = reverified
+    row = state.repair.lineages[0].document.thaw(); item = row['attempts'][-1]
+    finding = command.evidence[0].findings[0].thaw(); body = command.result.thaw()
+    prior = copy.deepcopy(body); prior['receipt'].update(status='failed', exit_code=1, candidate_digest='sha256:'+'c'*64)
+    previous = copy.deepcopy(item); previous.update(attempt_id='sha256:'+'d'*64, status='failed',
+        terminal=dict(generation=1, comparison_ref=reference('repair-reverification', canonical_bytes(prior))))
+    row['attempts'].insert(0, previous)
+    earlier = copy.deepcopy(prior); earlier['receipt']['candidate_digest'] = 'sha256:'+'e'*64
+    earlier_attempt = copy.deepcopy(previous); earlier_attempt['attempt_id'] = 'sha256:'+'e'*64
+    earlier_attempt['terminal']['comparison_ref'] = reference('repair-reverification', canonical_bytes(earlier))
+    row['attempts'].insert(0, earlier_attempt)
+    candidate = finding['replay']['candidate_digest'] if returned == 'introduced' else earlier['receipt']['candidate_digest']
+    body['candidate'][body['command_id']] = candidate
+    body['receipt']['candidate_digest'] = candidate
+    item['intent'].update(snapshot_digest=body['receipt']['candidate_digest'], candidate_map_digest=canonical_digest(body['candidate']))
+    body['dispatch'] = item['intent']; body['receipt_ref'] = reference('repair-replay', canonical_bytes(body['receipt']))
+    with pytest.raises(FreshReviewError, match='repair-candidate-not-new'):
+        validate_result(state.legacy_passthrough.thaw(), row, item, body, finding,
+            previous_results=(freeze_json_value(earlier), freeze_json_value(prior)))
+
+
+@pytest.mark.parametrize('change', [dict(output_truncated=True), dict(started_at='2025-12-31T23:59:59Z'),
+    dict(finished_at='2026-01-01T00:01:00Z'), dict(started_at='2026-01-01T00:00:02Z')])
+def test_pass_requires_complete_output_and_dispatch_time_window(reverified, change):
+    from mission_kernel.repair_reverification import validate_result
+    from mission_kernel.fresh_review import canonical_bytes, FreshReviewError
+    from mission_kernel.repair_attempts import reference
+    state, command, _ = reverified
+    row = state.repair.lineages[0].document.thaw(); item = row['attempts'][-1]
+    body = command.result.thaw(); body['receipt'].update(change)
+    body['receipt_ref'] = reference('repair-replay', canonical_bytes(body['receipt']))
+    with pytest.raises(FreshReviewError):
+        validate_result(state.legacy_passthrough.thaw(), row, item, body, command.evidence[0].findings[0].thaw())
+
+
+def test_partial_legacy_observation_invalidates_unknown_dependencies(reverified):
+    from mission_kernel.commands import RecordVerificationReceipt
+    from mission_kernel.transitions import decide
+    from mission_kernel.json_codec import freeze_json_value
+    _, command, verified = reverified
+    result = decide(verified, RecordVerificationReceipt(command.result.thaw()['receipt']['finished_at'],
+        freeze_json_value(command.result.thaw()['receipt'])))
+    assert result.accepted, result.rejection
+    row = result.transition.new_state.repair.lineages[0].document.thaw()
+    assert row['last_candidate_change']['generation'] > command.result.thaw()['generation']
+
+
+def test_concurrent_reverify_does_not_terminate_running_dispatch(repair_reviewer, run_cli, monkeypatch):
+    from .test_command_inventory import _load_mission_state_module
+    from mission_application import repair_reverification as app
+    from mission_application.repair import run_repair_cli
+    from types import SimpleNamespace
+    root = repair_reviewer[0]; _, item = begin(run_cli, repair_reviewer)
+    (root / 'app.txt').write_text('repaired')
+    monkeypatch.chdir(root); monkeypatch.setenv('MISSION_SESSION_ID', 'test'); monkeypatch.setenv('MISSION_LEASE_ID', 'test-lease')
+    args = SimpleNamespace(repair_command='reverify', attempt=item['attempt_id'])
+    services = _load_mission_state_module()._ACCEPTANCE_CONTRACT_CLI_SERVICES
+    original = app.run_contract_verifier
+    def running(*args_, **kwargs):
+        with pytest.raises(SystemExit):
+            run_repair_cli(args, services)
+        state = json.loads(run_cli('get', cwd=root).stdout)
+        assert state['repair_lineage']['lineages'][0]['attempts'][-1]['status'] == 'pending'
+        return original(*args_, **kwargs)
+    monkeypatch.setattr(app, 'run_contract_verifier', running)
+    assert json.loads(run_repair_cli(args, services))['attempt']['status'] == 'verified'
