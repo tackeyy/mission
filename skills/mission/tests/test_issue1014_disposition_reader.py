@@ -373,3 +373,45 @@ def test_alias_cycle_is_rejected_after_both_edges_have_authenticated_proofs(reje
     assert validate_terminal(document, target, target_item, evidence, candidates)[1] == (source['lineage_id'],)
     with pytest.raises(FreshReviewError, match='disposition-alias-invalid'):
         observe_disposition_results(document, root=tmp_path, candidates=candidates)
+
+
+def supporting_proof(rejected, kind):
+    from dataclasses import replace
+    from .test_issue907_disposition import rebind
+    from mission_kernel.finding_disposition import DispositionArtifact
+    from mission_kernel.fresh_review import canonical_digest
+    from mission_kernel.json_codec import freeze_json_value
+    body = {'support':'retained'}
+    ref = dict(kind=kind, relative_path='evidence/fresh-review/'+canonical_digest(body)[7:]+'.json',
+        digest=canonical_digest(body), size=len(canonical_bytes(body)))
+    changed = rebind(rejected, {'finding-disposition-output':lambda b:b.update(evidence=[ref])})
+    evidence = replace(changed[3], artifacts=changed[3].artifacts+(
+        DispositionArtifact(freeze_json_value(ref), freeze_json_value(body)),))
+    return changed[1].legacy_passthrough.thaw(), evidence, changed[2].observed_candidates.thaw()
+
+
+@pytest.mark.parametrize('kind', [None, 0, False, [], {}, '', 'bad kind', 'x'*129,
+    'arbitrary-neutral-support', 'a', 'A0._:-', 'a'*128])
+def test_supporting_evidence_requires_general_identifier_without_a_kind_enum(rejected, kind):
+    from mission_kernel.finding_disposition import validate_disposition_evidence
+    from mission_kernel.fresh_review import FreshReviewError
+    document, evidence, candidates = supporting_proof(rejected, kind)
+    valid = type(kind) is str and kind in ('arbitrary-neutral-support', 'a', 'A0._:-', 'a'*128)
+    if valid:
+        assert validate_disposition_evidence(document, evidence, candidates) is None
+    else:
+        with pytest.raises(FreshReviewError):
+            validate_disposition_evidence(document, evidence, candidates)
+
+
+@pytest.mark.parametrize('kind', [None, 'arbitrary-neutral-support'])
+def test_reader_uses_the_same_supporting_identifier_boundary(rejected, tmp_path, kind):
+    from mission_application.disposition_evidence import observe_disposition_results
+    from mission_kernel.fresh_review import FreshReviewError
+    document, evidence, candidates = supporting_proof(rejected, kind)
+    materialize(tmp_path, evidence)
+    if kind is None:
+        with pytest.raises(FreshReviewError):
+            observe_disposition_results(document, root=tmp_path, candidates=candidates)
+    else:
+        assert observe_disposition_results(document, root=tmp_path, candidates=candidates).artifacts

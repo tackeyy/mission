@@ -5,10 +5,10 @@ import hashlib
 
 from mission_kernel.finding_disposition import (
     DispositionArtifact, DispositionEvidence, decode_request, validate_ref,
-    validate_dispositions, validate_disposition_evidence,
+    validate_dispositions, validate_disposition_evidence, validate_source_ref,
 )
 from mission_kernel.fresh_review import FreshReviewError, canonical_bytes, FRESH_REVIEW_EVIDENCE_MAX_BYTES
-from mission_kernel.fresh_review_receipts import _reference, decode_launch_receipt
+from mission_kernel.fresh_review_receipts import decode_launch_receipt
 from mission_kernel.json_codec import decode_json_object, freeze_json_value
 from mission_kernel.repair_attempts import absent
 from mission_persistence.strict_reader import read_stable_bytes_beneath
@@ -32,7 +32,7 @@ def observe_disposition_results(document, *, root, candidates):
 
     def read(ref, kind, *, limit=LIMIT, source=False):
         if source:
-            _reference(ref, kind)
+            validate_source_ref(ref, kind)
         else:
             validate_ref(ref, kind, limit)
         path = ref['relative_path']

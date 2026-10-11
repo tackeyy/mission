@@ -25,3 +25,11 @@
 - strict readerは読取ごとにFDを閉じるため、全read-setを再読取してdirectory/file identityとbytesを比較する。比較後のfilesystem変更まで防ぐatomic snapshotではない。carrierの消費側で候補・fence・証拠を再検査する契約を維持する。
 
 独立探索・fresh session review・Checker・required CI・mergeは未実施で、依頼元が同headで実施する。旧E2targetの有効receiptによる解決集合や全候補mutation配線は後続保存単位の対象。本段階は有効proofがあっても非空E3履歴を未解決のまま保持する。
+
+## レビュー指摘に対するkind境界の修正
+
+supporting evidenceのkindを期待値へそのまま渡すと自己比較になり、一般identifierでない型・空文字・過長値を受理した。E3共有`validate_source_ref`で既存`_identifier`を適用し、pure outputとreaderのsource参照を同じ境界へ接続した。request sourceの既知2種choiceは保持し、D共通`_reference`全体は変更していない。検索範囲はcanonical/mirrorのproduction lib、検索語は`_reference(`・`source=True`・`['kind']`。
+
+不正kind8件の純粋入口とreader代表1件が未拒否のRed、任意の有効identifier5件はGreenだった。修正後、reader81件と既存pure validator56件が成功（計137件、1.78秒）。全kind表のreader側への複製を避け、共有検証の入力表とfilesystem配線の代表に分けた。追加は同じ証拠参照境界の回帰であり、writerや解決権威を増やしていない。
+
+kind修正後のwriter/spawn inventory・mirror/hygiene・module inventoryテスト・CI shard検査は603件成功（33.97秒）。全moduleのmirror一致と、変更した2moduleのPython3.9構文・canonical/mirror importも成功した。追加のkind独立探索と最終レビューは依頼元の固定snapshot検証を待つ。
