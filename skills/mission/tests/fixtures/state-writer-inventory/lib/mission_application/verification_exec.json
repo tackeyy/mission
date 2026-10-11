@@ -1,0 +1,7 @@
+{
+  "calls": {
+    "_stop:write": 1,
+    "main:write": 4
+  },
+  "module": "lib/mission_application/verification_exec.py"
+}

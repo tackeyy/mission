@@ -1,0 +1,6 @@
+{
+  "calls": {
+    "compatibility_delta:copy-ref": 1
+  },
+  "module": "lib/mission_application/compatibility.py"
+}

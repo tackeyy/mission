@@ -1,0 +1,14 @@
+{
+  "calls": {
+    "_digest_tree:open-write": 1,
+    "create_immutable_package:replace": 1,
+    "create_immutable_package:unlink": 1,
+    "create_worker_export:open-write": 1,
+    "create_worker_export:rmtree": 1,
+    "create_worker_export:unlink": 1,
+    "initialize_worker_export_repository:write_text": 1,
+    "write_record:open-write": 1,
+    "write_record:write": 1
+  },
+  "module": "benchmarks/mission-vs-goal/native_goal_benchmark.py"
+}

@@ -1,0 +1,10 @@
+{
+  "calls": {
+    "_fsync_directory:open-write": 1,
+    "_lock_file:open-write": 1,
+    "publish:link": 1,
+    "publish:unlink": 2,
+    "publish:write": 1
+  },
+  "module": "lib/evidence_handoff.py"
+}

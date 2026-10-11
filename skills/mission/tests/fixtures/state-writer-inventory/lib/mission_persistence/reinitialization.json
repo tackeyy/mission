@@ -1,0 +1,14 @@
+{
+  "calls": {
+    "_cleanup_reserved_assumptions:open-write": 1,
+    "_cleanup_reserved_assumptions:unlink": 1,
+    "_reserve_new_assumptions:open-write": 3,
+    "_reserve_new_assumptions:unlink": 2,
+    "start_new_mission:dynamic": 1,
+    "start_new_mission:write": 1,
+    "write_exclusive:fdopen-write": 1,
+    "write_exclusive:open-write": 1,
+    "write_exclusive:write": 1
+  },
+  "module": "lib/mission_persistence/reinitialization.py"
+}

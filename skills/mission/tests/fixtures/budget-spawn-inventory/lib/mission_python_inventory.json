@@ -1,0 +1,19 @@
+{
+  "candidates": {
+    "_assert_importable_from_root:executable": {
+      "count": 1,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "_assert_importable_from_root:run": {
+      "count": 1,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        14
+      ]
+    }
+  },
+  "module": "lib/mission_python_inventory.py"
+}

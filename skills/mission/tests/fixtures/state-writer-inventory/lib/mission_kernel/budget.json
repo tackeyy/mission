@@ -1,0 +1,8 @@
+{
+  "calls": {
+    "_at:replace": 1,
+    "_iso:replace": 1,
+    "_reservation:dynamic": 1
+  },
+  "module": "lib/mission_kernel/budget.py"
+}

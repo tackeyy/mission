@@ -1,0 +1,40 @@
+{
+  "candidates": {
+    "_local_binary_runner:run": {
+      "count": 1,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        12
+      ]
+    },
+    "_local_runner:run": {
+      "count": 1,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        12
+      ]
+    },
+    "integrate_and_test:executed": {
+      "count": 1,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "require_suite_report:executed": {
+      "count": 3,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "validate_default_branch_name:run": {
+      "count": 1,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        12
+      ]
+    }
+  },
+  "module": "lib/integration_gate.py"
+}

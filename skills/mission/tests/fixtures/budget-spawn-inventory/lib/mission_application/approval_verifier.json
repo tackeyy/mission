@@ -1,0 +1,51 @@
+{
+  "candidates": {
+    "run_approval:exec_cleanup_confirmed": {
+      "count": 1,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "run_approval:exec_unstarted": {
+      "count": 1,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "run_approval:run_job": {
+      "count": 2,
+      "reason": "Approval admission commits before both descriptor spawn entries; policy-only execution uses the shared watchdog helper. Legacy callable fork is rejected under policy.",
+      "rows": [
+        5,
+        6
+      ]
+    },
+    "run_callable:Process": {
+      "count": 1,
+      "reason": "Approval admission commits before both descriptor spawn entries; policy-only execution uses the shared watchdog helper. Legacy callable fork is rejected under policy.",
+      "rows": [
+        5,
+        6
+      ]
+    },
+    "run_callable:get_context": {
+      "count": 1,
+      "reason": "Approval admission commits before both descriptor spawn entries; policy-only execution uses the shared watchdog helper. Legacy callable fork is rejected under policy.",
+      "rows": [
+        5,
+        6
+      ]
+    },
+    "verify_approval_request:execute": {
+      "count": 1,
+      "reason": "Approval admission commits before both descriptor spawn entries; policy-only execution uses the shared watchdog helper. Legacy callable fork is rejected under policy.",
+      "rows": [
+        5,
+        6
+      ]
+    }
+  },
+  "module": "lib/mission_application/approval_verifier.py"
+}

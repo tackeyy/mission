@@ -1,0 +1,19 @@
+{
+  "candidates": {
+    "_git_bytes:run": {
+      "count": 1,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        13
+      ]
+    },
+    "worktree_archive_lineage_references:run": {
+      "count": 1,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        13
+      ]
+    }
+  },
+  "module": "lib/worktree_archive.py"
+}

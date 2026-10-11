@@ -1,0 +1,14 @@
+{
+  "calls": {
+    "apply_acceptance_contract:copy-ref": 1,
+    "apply_claims_ledger:copy-ref": 2,
+    "apply_context_manifest:copy-ref": 2,
+    "apply_progress_clear:copy-ref": 1,
+    "apply_progress_update:copy-ref": 1,
+    "apply_verification_receipt:copy-ref": 2,
+    "apply_verification_record:copy-ref": 2,
+    "project_context_manifest:copy-ref": 1,
+    "project_verification_receipt:copy-ref": 1
+  },
+  "module": "lib/mission_kernel/evidence.py"
+}

@@ -1,0 +1,75 @@
+{
+  "candidates": {
+    "_replayed_artifact_payload:execution": {
+      "count": 2,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "_translate_artifact_rule:call": {
+      "count": 1,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "execute_artifact_operation:execute": {
+      "count": 2,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "execute_artifact_operation:execute_transition_effects": {
+      "count": 5,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "execute_artifact_operation:execution": {
+      "count": 4,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "run_artifact_append:execute_artifact_operation": {
+      "count": 1,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "run_artifact_export:execute_artifact_operation": {
+      "count": 1,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "run_artifact_init:execute_artifact_operation": {
+      "count": 1,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "run_artifact_publish:execute_artifact_operation": {
+      "count": 1,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "run_artifact_render:execute_artifact_operation": {
+      "count": 1,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    }
+  },
+  "module": "lib/mission_application/artifact.py"
+}

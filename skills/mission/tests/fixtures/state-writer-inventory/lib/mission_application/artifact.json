@@ -1,0 +1,16 @@
+{
+  "calls": {
+    "_artifact:copy-ref": 1,
+    "_render_effect:copy-ref": 2,
+    "_replayed_artifact_payload:copy-ref": 3,
+    "_state:copy-ref": 1,
+    "context_manifest:copy-ref": 1,
+    "execute_artifact_operation:copy-ref": 1,
+    "prepare_artifact_append:copy-ref": 1,
+    "prepare_artifact_export:copy-ref": 2,
+    "prepare_artifact_init:copy-ref": 1,
+    "prepare_artifact_publish:copy-ref": 2,
+    "prepare_artifact_render:copy-ref": 1
+  },
+  "module": "lib/mission_application/artifact.py"
+}

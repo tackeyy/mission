@@ -1,0 +1,9 @@
+{
+  "calls": {
+    "_read:open-write": 1,
+    "execute_candidate:replace": 3,
+    "execute_candidate:write_bytes": 1,
+    "materialize_candidate:write_bytes": 1
+  },
+  "module": "lib/mission_application/verification_runner.py"
+}

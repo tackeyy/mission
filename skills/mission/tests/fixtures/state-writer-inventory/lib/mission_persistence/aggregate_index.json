@@ -1,0 +1,15 @@
+{
+  "calls": {
+    "_acquire_inflight:open-write": 1,
+    "_atomic_publish:fdopen-write": 1,
+    "_atomic_publish:replace": 1,
+    "_atomic_publish:unlink": 1,
+    "_atomic_publish:write": 1,
+    "_consume:unlink": 1,
+    "_fsync_directory:open-write": 1,
+    "_locked:open-write": 1,
+    "_publish_membership:remove": 1,
+    "_utc_text:replace": 1
+  },
+  "module": "lib/mission_persistence/aggregate_index.py"
+}

@@ -1,0 +1,7 @@
+{
+  "calls": {
+    "_cleanup_worktree:rmtree": 1,
+    "lease:open-write": 1
+  },
+  "module": "lib/integration_gate.py"
+}

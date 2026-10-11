@@ -1,0 +1,82 @@
+{
+  "candidates": {
+    "_invoke_command_provider:Popen": {
+      "count": 1,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        3
+      ]
+    },
+    "_invoke_command_provider:exec_cleanup_confirmed": {
+      "count": 6,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "_invoke_command_provider:exec_failed": {
+      "count": 1,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "_invoke_command_provider:exec_unstarted": {
+      "count": 2,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "_invoke_command_provider:execution": {
+      "count": 44,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "_invoke_command_provider:execution_context": {
+      "count": 3,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "_invoke_command_provider:execution_isolator": {
+      "count": 2,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "_invoke_command_provider:spawn_deadline_exec": {
+      "count": 1,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        3
+      ]
+    },
+    "_invoke_command_provider:spawn_failed_reason": {
+      "count": 8,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "invoke_command_provider:execution": {
+      "count": 1,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "pre_spawn_guard:execution": {
+      "count": 1,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    }
+  },
+  "module": "lib/mission_application/command_provider.py"
+}

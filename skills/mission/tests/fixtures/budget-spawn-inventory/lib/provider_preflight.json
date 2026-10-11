@@ -1,0 +1,33 @@
+{
+  "candidates": {
+    "_packet_projection:execution": {
+      "count": 7,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "_packet_projection:execution_context": {
+      "count": 4,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "build_preflight:execution_context": {
+      "count": 1,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "dispatch_prepared_packet:execution_context": {
+      "count": 5,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    }
+  },
+  "module": "lib/provider_preflight.py"
+}

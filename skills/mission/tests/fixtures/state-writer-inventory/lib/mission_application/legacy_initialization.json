@@ -1,0 +1,8 @@
+{
+  "calls": {
+    "initialize_legacy_v4:atomic_write_bytes": 1,
+    "initialize_legacy_v4:atomic_write_text": 1,
+    "initialize_legacy_v4:move": 1
+  },
+  "module": "lib/mission_application/legacy_initialization.py"
+}

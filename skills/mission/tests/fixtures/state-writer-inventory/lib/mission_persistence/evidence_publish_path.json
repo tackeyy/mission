@@ -1,0 +1,6 @@
+{
+  "calls": {
+    "open_evidence_publish_directory:open-write": 4
+  },
+  "module": "lib/mission_persistence/evidence_publish_path.py"
+}

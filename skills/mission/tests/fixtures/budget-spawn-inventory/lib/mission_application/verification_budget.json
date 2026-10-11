@@ -1,0 +1,28 @@
+{
+  "candidates": {
+    "execute_verification:exec_cleanup_confirmed": {
+      "count": 1,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        1,
+        2
+      ]
+    },
+    "execute_verification:exec_unstarted": {
+      "count": 1,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "execute_verification:run_job": {
+      "count": 1,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        1,
+        2
+      ]
+    }
+  },
+  "module": "lib/mission_application/verification_budget.py"
+}

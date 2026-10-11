@@ -1,0 +1,12 @@
+{
+  "candidates": {
+    "judge_completion:launch": {
+      "count": 6,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    }
+  },
+  "module": "lib/mission_kernel/fresh_review_completion.py"
+}

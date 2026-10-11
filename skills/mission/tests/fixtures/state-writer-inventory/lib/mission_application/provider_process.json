@@ -1,0 +1,7 @@
+{
+  "calls": {
+    "exchange_provider:dynamic": 1,
+    "pump:write": 1
+  },
+  "module": "lib/mission_application/provider_process.py"
+}

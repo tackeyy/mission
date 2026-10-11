@@ -1,0 +1,12 @@
+{
+  "calls": {
+    "build_snapshot_document:replace": 2,
+    "read_snapshot:replace": 1,
+    "write_snapshot:fdopen-write": 1,
+    "write_snapshot:open-write": 1,
+    "write_snapshot:replace": 1,
+    "write_snapshot:unlink": 1,
+    "write_snapshot:write": 1
+  },
+  "module": "lib/state_snapshot.py"
+}

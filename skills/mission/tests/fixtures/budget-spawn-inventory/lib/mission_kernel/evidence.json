@@ -1,0 +1,12 @@
+{
+  "candidates": {
+    "project_verification_receipt:executed_count": {
+      "count": 2,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    }
+  },
+  "module": "lib/mission_kernel/evidence.py"
+}

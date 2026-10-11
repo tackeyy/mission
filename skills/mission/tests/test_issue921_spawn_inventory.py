@@ -18,7 +18,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
 MISSION = ROOT / 'skills/mission'
-FIXTURE = Path(__file__).parent / 'fixtures/budget-spawn-inventory.json'
+FIXTURE_DIR = Path(__file__).parent / 'fixtures/budget-spawn-inventory'
 
 
 # Only non-spawning references observed in bin/mission-state.py and lib/.
@@ -42,6 +42,15 @@ TAILS = set("""Popen Process Pool ProcessPoolExecutor get_context fork forkpty s
 popen launch collect cancel recover observe_parent run_job dispatch_prepared_packet
 _run_bounded create_worker_export initialize_worker_export_repository run_contract_verifier
 subprocess_exec subprocess_shell""".split())
+
+
+def _json_without_duplicate_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f'duplicate JSON key: {key}')
+        result[key] = value
+    return result
 
 
 def spawn_calls(source):
@@ -168,16 +177,42 @@ def inventory():
 
 
 def manifest_counts():
-    return {key: dict(count=count, rows=group['rows'], reason=group['reason'])
-            for group in json.loads(FIXTURE.read_text()).values()
-            for key, count in group['candidates'].items()}
+    """Read reviewer-maintained module fragments; never classify candidates here."""
+    entries = sorted(path for path in FIXTURE_DIR.rglob('*') if path.is_file())
+    assert all(path.suffix == '.json' for path in entries), (
+        f'Invalid spawn inventory fragment in {FIXTURE_DIR}: every file must be JSON')
+    fragments = entries
+    assert fragments, f'No spawn inventory fragments in {FIXTURE_DIR}'
+    result = {}
+    for path in fragments:
+        try:
+            fragment = json.loads(path.read_text(), object_pairs_hook=_json_without_duplicate_keys)
+            module = fragment['module']
+            candidates = fragment['candidates']
+            expected_path = FIXTURE_DIR / Path(module).with_suffix('.json')
+            assert (isinstance(module, str) and isinstance(candidates, dict)
+                    and candidates and path == expected_path)
+            for candidate, value in candidates.items():
+                assert (isinstance(candidate, str) and isinstance(value, dict)
+                        and type(value.get('count')) is int and value['count'] > 0
+                        and isinstance(value.get('rows'), list) and value['rows']
+                        and all(type(row) is int for row in value['rows'])
+                        and isinstance(value.get('reason'), str) and value['reason'])
+                key = f'{module}:{candidate}'
+                assert key not in result, f'Duplicate spawn inventory candidate: {key}'
+                result[key] = value
+        except (AssertionError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise AssertionError(f'Invalid spawn inventory fragment: {path}: {error}') from error
+    return result
 
 
 def test_spawn_inventory_matches_design_table_and_has_no_unclassified_call():
     actual = inventory()
     manifest = manifest_counts()
     assert not any(key.endswith(':unclassified-spawn') for key in actual)
-    assert actual == {key: value['count'] for key, value in manifest.items()}
+    assert actual == {key: value['count'] for key, value in manifest.items()}, (
+        'Update the affected reviewer-approved module fragment under '
+        'skills/mission/tests/fixtures/budget-spawn-inventory/; do not generate classifications automatically.')
     text = (ROOT / 'docs/design/881-budget-reservation.md').read_text()
     table = text.split('### 3.2 ', 1)[1].split('### 3.3 ', 1)[0]
     rows = {int(n) for n in re.findall(r'^\| (\d+) \|', table, re.M)}
@@ -297,12 +332,48 @@ def test_unclassified_capability_cannot_be_whitelisted(monkeypatch, tmp_path):
     manifest = manifest_counts()
     key = 'lib/example.py:example:unclassified-spawn'
     manifest[key] = dict(count=1, rows=[3], reason='unresolved capability')
-    fixture = tmp_path / 'inventory.json'
-    fixture.write_text(json.dumps({'probe': dict(candidates={k: v['count'] for k, v in manifest.items()}, rows=[3], reason='probe')}))
-    monkeypatch.setitem(globals(), 'FIXTURE', fixture)
+    fixture = tmp_path / 'lib' / 'example.json'
+    fixture.parent.mkdir()
+    fixture.write_text(json.dumps({'module': 'lib/example.py', 'candidates': {
+        'example:unclassified-spawn': manifest[key]}}))
+    monkeypatch.setitem(globals(), 'FIXTURE_DIR', tmp_path)
     monkeypatch.setitem(globals(), 'inventory', lambda: {k: v['count'] for k, v in manifest.items()})
     with pytest.raises(AssertionError):
         test_spawn_inventory_matches_design_table_and_has_no_unclassified_call()
+
+
+@pytest.mark.parametrize('fragment', [
+    {},
+    {'module': 'lib/example.py', 'candidates': {}},
+    {'module': 'lib/example.py', 'candidates': {'run': {'count': 0, 'rows': [1], 'reason': 'x'}}},
+    {'module': 'lib/example.py', 'candidates': {'run': {'count': True, 'rows': [1], 'reason': 'x'}}},
+    {'module': 'lib/example.py', 'candidates': {'run': {'count': 1, 'rows': [True], 'reason': 'x'}}},
+    {'module': 'lib/other.py', 'candidates': {'run': {'count': 1, 'rows': [1], 'reason': 'x'}}},
+])
+def test_spawn_inventory_rejects_malformed_or_misplaced_fragment(monkeypatch, tmp_path, fragment):
+    fixture = tmp_path / 'lib' / 'example.json'
+    fixture.parent.mkdir()
+    fixture.write_text(json.dumps(fragment))
+    monkeypatch.setitem(globals(), 'FIXTURE_DIR', tmp_path)
+    with pytest.raises(AssertionError, match='Invalid spawn inventory fragment'):
+        manifest_counts()
+
+
+def test_spawn_inventory_rejects_duplicate_json_keys(monkeypatch, tmp_path):
+    fixture = tmp_path / 'lib' / 'example.json'
+    fixture.parent.mkdir()
+    fixture.write_text('{"module":"lib/example.py","module":"lib/example.py","candidates":{"run":{"count":1,"rows":[1],"reason":"x"}}}')
+    monkeypatch.setitem(globals(), 'FIXTURE_DIR', tmp_path)
+    with pytest.raises(AssertionError, match='Invalid spawn inventory fragment'):
+        manifest_counts()
+
+
+def test_spawn_inventory_rejects_an_unrecognized_fragment_file(monkeypatch, tmp_path):
+    fragment = tmp_path / 'unexpected.txt'
+    fragment.write_text('{}')
+    monkeypatch.setitem(globals(), 'FIXTURE_DIR', tmp_path)
+    with pytest.raises(AssertionError, match='Invalid spawn inventory fragment'):
+        manifest_counts()
 
 
 @pytest.mark.parametrize('source', [

@@ -1,0 +1,12 @@
+{
+  "calls": {
+    "_canonical_v5_consumer_document:replace": 1,
+    "_legacy_compatibility_snapshot:copy-ref": 2,
+    "dedupe_rank:replace": 1,
+    "document_copy:copy-ref": 1,
+    "legacy_compatibility_snapshot_from_document:copy-ref": 1,
+    "progress_age_seconds:replace": 2,
+    "raw_document_copy:copy-ref": 1
+  },
+  "module": "lib/mission_persistence/authoritative_reader.py"
+}
