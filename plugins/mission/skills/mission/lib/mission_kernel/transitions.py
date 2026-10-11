@@ -2703,7 +2703,11 @@ def decide(state: MissionState, command: Command) -> Decision:
         assert reducer is not None
         transition = reducer(state, command)
         from .repair_reverification import invalidate_observed
-        transition = Transition(invalidate_observed(state, command, transition.new_state), transition.events, transition.effects)
+        from .fresh_review import FreshReviewError
+        try:
+            transition = Transition(invalidate_observed(state, command, transition.new_state), transition.events, transition.effects)
+        except FreshReviewError as exc:
+            raise _Rejected(exc.code) from exc
     except _Rejected as rejected:
         return Decision(False, None, Rejection(rejected.code), rule.rule_id)
     _register_transition(transition, state, command)

@@ -110,7 +110,8 @@ def prepare_fresh_review(state, *, root, options, operation_id, intent_digest, p
             commands[target] = policy['commands'][target]
             bindings.append({'criterion_id': identifier, 'role': role, 'command_id': target,
                              'definition_digest': verifier_definition_digest(commands[target])})
-    snapshots = _capture(root, commands)
+    observed = _capture(root, policy['commands'])
+    snapshots = {key: observed[key] for key in commands}
     for item in bindings:
         item['snapshot_digest'] = snapshots[item['command_id']].digest
     packet = build_input_packet(contract, options['perspective'], snapshots)
@@ -133,13 +134,14 @@ def prepare_fresh_review(state, *, root, options, operation_id, intent_digest, p
     })
     # Capture again before publication: neither HEAD nor one verifier can stand
     # in for the complete command-indexed candidate map.
-    if {key: value.digest for key, value in _capture(root, commands).items()} != {key: value.digest for key, value in snapshots.items()}:
+    if {key: value.digest for key, value in _capture(root, policy['commands']).items()} != {key: value.digest for key, value in observed.items()}:
         raise FreshReviewError('fresh-review-stale')
     effect = make_evidence_effect('fresh-review-input', target, content)
     from .fresh_review_completion import observe_lineage_evidence
     evidence = observe_lineage_evidence(state, root=root, read_evidence=read_evidence)
     command = PrepareFreshReview(request, operation_id, intent_digest, payload_digest, freeze_json_value(packet),
-                                 FreshReviewInputEffectClaim(effect.kind, effect.target, effect.digest, effect.size), evidence)
+                                 FreshReviewInputEffectClaim(effect.kind, effect.target, effect.digest, effect.size), evidence,
+                                 freeze_json_value({key: value.digest for key, value in observed.items()}))
     return PreparedEvidenceOperation(command, (effect,), {'request': request_document(request)})
 
 

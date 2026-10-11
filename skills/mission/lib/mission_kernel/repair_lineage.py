@@ -320,7 +320,8 @@ def effective_unresolved_findings(projection, reviews, evidence, contract, bindi
     resolved = set()
     if bindings is not None:
         for row in existing.values():
-            if row['kind'] == 'finding' and resolution_valid(row, bindings.repair_results, dict(bindings.candidate_snapshots), contract):
+            if row['kind'] == 'finding' and resolution_valid(row, bindings.repair_results, dict(bindings.candidate_snapshots), contract,
+                    observed_candidates=None if bindings.observed_candidates is None else bindings.observed_candidates.thaw()):
                 item = row['attempts'][-1]
                 body = next(r.thaw() for r in bindings.repair_results if canonical_digest(r.thaw()) == item['terminal']['comparison_ref']['digest'])
                 finding = next(f.thaw() for e in evidence for f in e.findings if canonical_digest(f.thaw()) == row['finding_ref']['digest'])

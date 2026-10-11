@@ -3,6 +3,7 @@ from __future__ import annotations
 from acceptance_contract import canonical_contract_digest, frozen_verifier_commands
 from .fresh_review import FreshReviewError, canonical_bytes, canonical_digest, _closed, _identifier, _integer, _digest
 from .json_codec import freeze_json_value
+from .model import FrozenJsonObject
 from .repair_attempts import reference, _reference, _document, _store, find_attempt
 
 INVALID = 'repair-reverification-invalid'
@@ -159,8 +160,9 @@ def mutate_reverification(state, command):
     return _store(state, document)
 
 
-def resolution_valid(row, evidence, candidates, contract):
-    if row['lifecycle'] != 'verified':
+def resolution_valid(row, evidence, candidates, contract, *, observed_candidates=None):
+    if row['lifecycle'] != 'verified' or (observed_candidates is None
+            and set(candidates) != set(frozen_verifier_commands(contract))):
         return False
     item = row['attempts'][-1]
     ref = item['terminal']['comparison_ref']
@@ -169,10 +171,30 @@ def resolution_valid(row, evidence, candidates, contract):
         return False
     selected = {key: candidates.get(key) for key in row['introduced_candidate']['snapshots']}
     marker = row['last_candidate_change']
+    if observed_candidates is not None and candidate_changed(row, contract, observed_candidates):
+        return False
     if (body['candidate'] != selected or marker.get('generation', 0) >= body['generation']
             or body['receipt']['contract_digest'] != canonical_contract_digest(contract)):
         return False
     return True
+
+
+def full_candidate_digest(contract, candidates):
+    if type(candidates) is not dict or set(candidates) != set(frozen_verifier_commands(contract)):
+        raise FreshReviewError('repair-candidate-observation-invalid')
+    for value in candidates.values():
+        _digest(value)
+    return canonical_digest(dict(domain='repair-policy-candidates/1',
+        verifier_policy_digest=contract['verifier_policy']['digest'], snapshots=candidates))
+
+
+def candidate_changed(row, contract, candidates):
+    observation = full_candidate_digest(contract, candidates)
+    marker = row['last_candidate_change']
+    if 'generation' in marker:
+        return marker['candidate_map_digest'] != observation
+    introduced = row['introduced_candidate']['snapshots']
+    return set(introduced) != set(candidates) or full_candidate_digest(contract, introduced) != observation
 
 
 def invalidate_observed(state, command, proposed):
@@ -180,6 +202,44 @@ def invalidate_observed(state, command, proposed):
     document = _document(proposed)
     if not proposed.repair.lineages:
         return proposed
+    from .commands import RecordVerificationReceipt
+    full = getattr(command, 'observed_candidates', None)
+    if isinstance(command, RecordVerificationReceipt):
+        full = command.candidate
+    bindings = getattr(command, 'fresh_review_bindings', None)
+    if full is None and bindings is not None:
+        full = bindings.observed_candidates
+    if full is not None:
+        if type(full) is not FrozenJsonObject:
+            raise FreshReviewError('repair-candidate-observation-invalid')
+        candidates = full.thaw()
+        observation = full_candidate_digest(document['acceptance_contract'], candidates)
+        selected = None
+        request = getattr(command, 'request', None)
+        if request is not None and hasattr(request, 'candidate_bindings'):
+            selected = {b.command_id: b.snapshot_digest for b in request.candidate_bindings}
+        history = getattr(command, 'history', None)
+        if history is not None:
+            selected = history.thaw()['before_candidate']['snapshots']
+        from .commands import BeginFindingReverification, CommitFindingReverification
+        if isinstance(command, BeginFindingReverification):
+            selected = command.candidate.thaw()
+        if isinstance(command, CommitFindingReverification):
+            selected = command.result.thaw()['candidate']
+        if bindings is not None:
+            selected = dict(bindings.candidate_snapshots)
+        if selected is not None and any(candidates.get(key) != value for key, value in selected.items()):
+            raise FreshReviewError('repair-candidate-observation-invalid')
+        generation = next_generation(_document(state))
+        changed = False
+        for row in document['repair_lineage']['lineages']:
+            if row['kind'] == 'finding' and candidate_changed(row, document['acceptance_contract'], candidates):
+                row['last_candidate_change'] = dict(generation=generation,
+                    candidate_map_digest=observation, operation_id=getattr(command, 'operation_id', 'candidate-observation'))
+                changed = True
+        if changed and isinstance(command, RecordVerificationReceipt):
+            document['verification_receipts'][-1]['repair_generation'] = next_generation(document)
+        return _store(proposed, document) if changed else proposed
     candidates = None
     request = getattr(command, 'request', None)
     if request is not None and hasattr(request, 'candidate_bindings'):
@@ -211,18 +271,10 @@ def invalidate_observed(state, command, proposed):
             else canonical_digest(row['introduced_candidate']['snapshots']))
         # Unknown dependencies: any observed changed command invalidates all.
         selected = {key: candidates[key] for key in row['introduced_candidate']['snapshots'] if key in candidates}
-        unknown_changed = False
-        if receipt is not None and captured is not None:
-            commands = frozen_verifier_commands(document['acceptance_contract'])
-            prior = _document(state).get('verification_receipts', ())
-            for key in set(candidates) - set(selected):
-                previous = next((r for r in reversed(prior) if r['verifier_definition_digest'] == canonical_digest(commands[key])), None)
-                if previous is None or previous['candidate_digest'] != candidates[key]:
-                    unknown_changed = True
         marker = row['last_candidate_change']
         observation = canonical_digest(candidates)
         complete = set(selected) == set(row['introduced_candidate']['snapshots'])
-        if (unknown_changed or not complete
+        if (not complete
                 or complete and (canonical_digest(selected) != baseline or 'generation' in marker)
                 and marker.get('candidate_map_digest') != observation):
             row['last_candidate_change'] = dict(generation=generation,

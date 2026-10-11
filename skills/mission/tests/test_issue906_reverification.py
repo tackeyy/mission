@@ -13,6 +13,16 @@ def repair_reviewer(completion_session, run_cli, tmp_path, request):
     from .test_issue878_verification_runner import _replay_policy
     root, state, schema = completion_session
     policy = _replay_policy()
+    extra = getattr(request, 'param', None)
+    if extra in ('optional', 'unused'):
+        policy['commands'].append({**policy['commands'][0], 'id': 'extra-lint'})
+        policy['commands'][-1].pop('replay')
+        policy['commands'][-1]['declared_untracked'] = ['extra-input.txt']
+        (root / 'extra-input.txt').write_text('original')
+        if extra == 'optional':
+            state['acceptance_contract']['criteria'].append({
+                **state['acceptance_contract']['criteria'][0], 'id': 'AC2',
+                'required': False, 'command_id': 'extra-lint'})
     output = "print('repair-replay-proof')" if getattr(request, 'param', False) else 'import time; print(time.time_ns())'
     policy['commands'][1]['argv'][-1] = f"from pathlib import Path; {output}; assert Path('repro.json').read_text() == '0'; assert Path('app.txt').read_text() == 'repaired' or Path({str(root / '.mission/replay-passed')!r}).exists()"
     raw = json.dumps(policy, sort_keys=True, separators=(',', ':')).encode()
@@ -394,8 +404,12 @@ def test_maximum_intent_and_verified_terminal_fit_existing_deltas(reverified):
 
 
 @pytest.mark.parametrize('schema', [4, 5])
+@pytest.mark.parametrize('repair_reviewer', ['optional', 'unused'], indirect=True)
 def test_public_verified_lineage_allows_fresh_completion(repair_reviewer, run_cli, schema):
     root, old_request, env, journal = repair_reviewer
+    before = json.loads(run_cli('get', cwd=root).stdout)
+    if any(c['id'] == 'AC2' for c in before['acceptance_contract']['criteria']):
+        run_cli('verification', 'run', '--criterion', 'AC2', cwd=root, check=True)
     _, item = begin(run_cli, repair_reviewer)
     (root / 'app.txt').write_text('repaired')
     replay = run_cli('repair', 'reverify', '--attempt', item['attempt_id'], cwd=root)
@@ -529,3 +543,83 @@ def test_concurrent_reverify_does_not_terminate_running_dispatch(repair_reviewer
         return original(*args_, **kwargs)
     monkeypatch.setattr(app, 'run_contract_verifier', running)
     assert json.loads(run_repair_cli(args, services))['attempt']['status'] == 'verified'
+
+
+def test_full_observation_preserves_different_lineage_subsets_and_records_changes(reverified):
+    from copy import deepcopy
+    from mission_kernel.repair_reverification import candidate_changed, full_candidate_digest
+    _, command, verified = reverified
+    contract = verified.legacy_passthrough.thaw()['acceptance_contract']
+    contract['verifier_policy']['commands']['unused'] = {**next(iter(contract['verifier_policy']['commands'].values())), 'id': 'unused'}
+    candidates = {**command.result.thaw()['candidate'], 'unused': 'sha256:' + 'd' * 64}
+    row = verified.repair.lineages[0].document.thaw()
+    row['last_candidate_change']['candidate_map_digest'] = full_candidate_digest(contract, candidates)
+    other = deepcopy(row)
+    other['introduced_candidate']['snapshots'].pop(next(iter(candidates)))
+    assert not candidate_changed(row, contract, candidates)
+    assert not candidate_changed(other, contract, candidates)
+    changed = dict(candidates); changed['unused'] = 'sha256:' + 'c' * 64
+    assert candidate_changed(row, contract, changed)
+    other['last_candidate_change']['candidate_map_digest'] = full_candidate_digest(contract, changed)
+    assert not candidate_changed(other, contract, changed)
+    assert candidate_changed(other, contract, candidates)  # Bytes returning cannot erase a committed change.
+    other['last_candidate_change'] = dict(kind='absent', reason='no-resolution-binding')
+    assert candidate_changed(other, contract, candidates)  # Legacy subset establishes a baseline once.
+
+
+@pytest.mark.parametrize('invalid', ['missing', 'unknown', 'digest'])
+def test_full_candidate_observation_rejects_incomplete_or_invalid_map(reverified, invalid):
+    from mission_kernel.repair_reverification import full_candidate_digest
+    from mission_kernel.json_codec import freeze_json_value
+    from mission_kernel.fresh_review import FreshReviewError
+    _, command, verified = reverified
+    candidates = dict(command.result.thaw()['candidate'])
+    if invalid == 'missing':
+        candidates.pop(next(iter(candidates)))
+    elif invalid == 'unknown':
+        candidates['unknown'] = 'sha256:' + 'a' * 64
+    else:
+        candidates[next(iter(candidates))] = 'invalid'
+    with pytest.raises(FreshReviewError):
+        full_candidate_digest(verified.legacy_passthrough.thaw()['acceptance_contract'], candidates)
+    from mission_kernel.transitions import decide
+    state = reverified[0]
+    rejected = decide(state, replace(command, observed_candidates=freeze_json_value(candidates)))
+    assert not rejected.accepted and rejected.transition is None
+
+
+@pytest.mark.parametrize('repair_reviewer', ['unused'], indirect=True)
+def test_reverify_refuses_change_outside_introduced_subset(repair_reviewer, run_cli, monkeypatch):
+    from .test_command_inventory import _load_mission_state_module
+    from mission_application import repair_reverification as app
+    from mission_application.repair import run_repair_cli
+    from types import SimpleNamespace
+    root = repair_reviewer[0]; _, item = begin(run_cli, repair_reviewer)
+    (root / 'app.txt').write_text('repaired')
+    monkeypatch.chdir(root); monkeypatch.setenv('MISSION_SESSION_ID', 'test'); monkeypatch.setenv('MISSION_LEASE_ID', 'test-lease')
+    original = app.run_contract_verifier
+    def changed(*args, **kwargs):
+        receipt = original(*args, **kwargs)
+        (root / 'extra-input.txt').write_text('changed outside replay scope')
+        return receipt
+    monkeypatch.setattr(app, 'run_contract_verifier', changed)
+    args = SimpleNamespace(repair_command='reverify', attempt=item['attempt_id'])
+    services = _load_mission_state_module()._ACCEPTANCE_CONTRACT_CLI_SERVICES
+    ended = json.loads(run_repair_cli(args, services))['attempt']
+    assert ended['status'] == 'blocked'
+    assert ended['terminal']['reason'] == 'effects-unavailable'
+
+
+def test_legacy_subset_completion_cannot_assume_unobserved_policy_command_unchanged(reverified):
+    from acceptance_contract import canonical_contract_digest
+    from mission_kernel.repair_attempts import reference
+    from mission_kernel.repair_reverification import resolution_valid
+    from mission_kernel.fresh_review import canonical_bytes
+    from mission_kernel.json_codec import freeze_json_value
+    _, command, verified = reverified
+    contract = verified.legacy_passthrough.thaw()['acceptance_contract']
+    contract['verifier_policy']['commands']['unused'] = {**next(iter(contract['verifier_policy']['commands'].values())), 'id': 'unused'}
+    body = command.result.thaw(); body['receipt']['contract_digest'] = canonical_contract_digest(contract)
+    row = verified.repair.lineages[0].document.thaw()
+    row['attempts'][-1]['terminal']['comparison_ref'] = reference('repair-reverification', canonical_bytes(body))
+    assert not resolution_valid(row, (freeze_json_value(body),), body['candidate'], contract)

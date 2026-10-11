@@ -23,8 +23,7 @@ def capture(state, row, root, services):
     if services.load_verifier_policy(root)['digest'] != state['acceptance_contract']['verifier_policy']['digest']:
         raise FreshReviewError('repair-contract-stale')
     commands = frozen_verifier_commands(state['acceptance_contract'])
-    return {key: value.digest for key, value in _capture(root,
-        {key: commands[key] for key in row['introduced_candidate']['snapshots']}).items()}
+    return {key: value.digest for key, value in _capture(root, commands).items()}
 
 
 def reverify(identifier, *, read, repo, root, services):
@@ -54,13 +53,14 @@ def reverify(identifier, *, read, repo, root, services):
     finding = _read(root, ContentAddressedRef(**row['finding_ref']), read_evidence=services.read_evidence)
     if canonical_digest(repro) != row['repro']['repro_input_digest'] or repro != finding['repro_input']:
         raise FreshReviewError('repair-repro-mismatch')
-    candidates = capture(state, row, root, services)
+    observed_candidates = capture(state, row, root, services)
+    candidates = {key: observed_candidates[key] for key in row['introduced_candidate']['snapshots']}
     operation = 'repair-dispatch:' + identifier[7:]
     budget = None
     def intent(document):
         nonlocal budget
         current_row, current_item = find_attempt(document, identifier)
-        if capture(document, current_row, root, services) != candidates:
+        if capture(document, current_row, root, services) != observed_candidates:
             raise FreshReviewError('repair-reverification-stale')
         definition = replay_binding(document, current_row)
         at = services.now(); size = verification_terminal_bytes(definition)
@@ -75,7 +75,7 @@ def reverify(identifier, *, read, repo, root, services):
             if budget is None else budget.reservation.child_deadline_at)
         return PreparedEvidenceOperation(BeginFindingReverification(identifier, operation,
             freeze_json_value(candidates), 'repair:' + identifier[7:] if budget is None else budget.reservation.reservation_id,
-            'repair', request, at, deadline), (), {})
+            'repair', request, at, deadline, freeze_json_value(observed_candidates)), (), {})
     dispatch = execute_evidence_operation(repo(operation, command_type='repair-reverify-begin'), intent)
     if dispatch.get("dispatch_replayed"):
         return
@@ -83,16 +83,16 @@ def reverify(identifier, *, read, repo, root, services):
         observed = read(); row, item = find_attempt(observed, identifier)
         if item['status'] != 'pending' or item['intent']['operation_id'] != operation:
             raise FreshReviewError('repair-dispatch-already-started')
-        if capture(observed, row, root, services) != candidates:
+        if capture(observed, row, root, services) != observed_candidates:
             raise FreshReviewError('repair-reverification-stale')
         receipt = (run_contract_verifier(observed, project_root=root, criterion_id=row['criterion_id'], repro_input=repro)
             if budget is None else execute_verification(observed, root, row['criterion_id'], repro, budget,
                 replay_binding(observed, row), session_id='repair-reverify'))
-        if capture(observed, row, root, services) != candidates:
+        if capture(observed, row, root, services) != observed_candidates:
             raise FreshReviewError('repair-reverification-stale')
         def publish(document):
             current_row, current_item = find_attempt(document, identifier)
-            if capture(document, current_row, root, services) != candidates:
+            if capture(document, current_row, root, services) != observed_candidates:
                 raise FreshReviewError('repair-reverification-stale')
             body = dict(schema='mission-repair-reverification/1', lineage_id=row['lineage_id'], attempt_id=identifier,
                 criterion_id=row['criterion_id'], command_id=row['repro']['command_id'], repro_input_digest=canonical_digest(repro),
@@ -107,7 +107,8 @@ def reverify(identifier, *, read, repo, root, services):
                 FreshReviewInputEffectClaim(replay_effect.kind, replay_effect.target, replay_effect.digest, replay_effect.size),
                 observe_lineage_evidence(document, root=root, read_evidence=services.read_evidence),
                 observe_repair_results(document, root=root, read_evidence=services.read_evidence),
-                None if budget is None else verification_settlement(budget, services.now(), receipt)), (effect, replay_effect), {})
+                None if budget is None else verification_settlement(budget, services.now(), receipt),
+                freeze_json_value(observed_candidates)), (effect, replay_effect), {})
         prepared = publish(read())
         services.run_with_base_retry(None, lambda _number: execute_evidence_operation(
             repo(prepared.command.operation_id, command_type='repair-reverify-commit'), publish))

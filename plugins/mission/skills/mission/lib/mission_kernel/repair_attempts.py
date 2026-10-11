@@ -200,13 +200,16 @@ def mutate_attempt(state, command):
             _digest(value)
         if row['lifecycle'] == 'verified':
             latest = row['attempts'][-1]
-            changed = canonical_digest(candidate['snapshots']) != latest['intent']['candidate_map_digest']
+            from .repair_reverification import candidate_changed, full_candidate_digest, next_generation
+            full = command.observed_candidates
+            changed = (canonical_digest(candidate['snapshots']) != latest['intent']['candidate_map_digest']
+                if full is None else candidate_changed(row, contract, full.thaw()))
             if not changed and row['last_candidate_change'].get('generation', 0) < latest['terminal']['generation']:
                 raise FreshReviewError('repair-lineage-already-verified')
             if changed:
-                from .repair_reverification import next_generation
                 row['last_candidate_change'] = dict(generation=next_generation(document),
-                    candidate_map_digest=canonical_digest(candidate['snapshots']), operation_id=command.operation_id)
+                    candidate_map_digest=canonical_digest(candidate['snapshots']) if full is None
+                        else full_candidate_digest(contract, full.thaw()), operation_id=command.operation_id)
         if type(body['baseline_receipts']) is not list or body['baseline_receipts'] != baseline_receipts(document, row):
             raise FreshReviewError(INVALID)
         _reference(body['plan_ref'], 'repair-plan'); _reference(body['repro_input_ref'], 'repair-repro')

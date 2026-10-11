@@ -350,6 +350,7 @@ class PrepareFreshReview:
     packet: Optional[FrozenJsonObject]
     effect: Optional[FreshReviewInputEffectClaim]
     repair_evidence: tuple[FreshReviewCompletionEvidence, ...] = ()
+    observed_candidates: FrozenJsonObject | None = None
 
 
 @dataclass(frozen=True)
@@ -368,6 +369,7 @@ class BeginFindingRepair:
     plan_effect: Optional[FreshReviewInputEffectClaim]
     repro_effect: Optional[FreshReviewInputEffectClaim]
     evidence: tuple[FreshReviewCompletionEvidence, ...] = ()
+    observed_candidates: FrozenJsonObject | None = None
 
 
 @dataclass(frozen=True)
@@ -387,6 +389,7 @@ class BeginFindingReverification:
     reservation: ReserveDispatchBudget | None = None
     started_at: str = ''
     deadline_at: str = ''
+    observed_candidates: FrozenJsonObject | None = None
 
 
 @dataclass(frozen=True)
@@ -399,6 +402,7 @@ class CommitFindingReverification:
     evidence: tuple[FreshReviewCompletionEvidence, ...]
     previous_results: tuple[FrozenJsonObject, ...] = ()
     settlement: SettleDispatchBudget | None = None
+    observed_candidates: FrozenJsonObject | None = None
 
 
 @dataclass(frozen=True)
