@@ -64,7 +64,7 @@ def reusable_tree_inputs_unchanged(changed_files: object, *, workflow_path: str)
         return False
     protected = {
         workflow_path, "Makefile", "GNUmakefile", "makefile", "scripts/ci_changed_scopes.js",
-        "scripts/ci_shard_targets.py", ".github/requirements-ci.txt",
+        "scripts/ci_shard_targets.py", "scripts/write_suite_report.py", ".github/requirements-ci.txt",
     }
     return all(isinstance(path, str) and path not in protected for path in changed_files)
 
@@ -107,13 +107,17 @@ def _receipt(log: object, *, tree_sha: str, shard: int, total: int,
             continue
         if isinstance(candidate, Mapping) and candidate.get("schema") == _RECEIPT_SCHEMA:
             matches.append(candidate)
-    return len(matches) == 1 and matches[0] == {
+    receipt = {
         "schema": _RECEIPT_SCHEMA,
         "tree_sha": tree_sha,
         "tier": "shard",
         "shard": "{}/{}".format(shard, total),
         "test_manifest": [target],
     }
+    count = matches[0].get("executed") if len(matches) == 1 else None
+    return (len(matches) == 1 and all(matches[0].get(key) == value for key, value in receipt.items())
+            and type(count) is int and count > 0
+            and set(matches[0]) == set(receipt) | {"executed"})
 
 
 def verify_ci_suite(

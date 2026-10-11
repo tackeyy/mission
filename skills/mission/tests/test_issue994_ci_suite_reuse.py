@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -41,7 +42,7 @@ def _responses():
         {"id": 3, "name": "Test 1", "status": "completed", "conclusion": "success", "run_id": 7, "run_attempt": 1, "head_sha": SHA, "steps": [{"name": "Checkout", "status": "completed", "conclusion": "success"}, {"name": "Run Python tests", "status": "completed", "conclusion": "success"}]},
         {"id": 4, "name": "Test 2", "status": "completed", "conclusion": "success", "run_id": 7, "run_attempt": 1, "head_sha": SHA, "steps": [{"name": "Checkout", "status": "completed", "conclusion": "success"}, {"name": "Run Python tests", "status": "completed", "conclusion": "success"}]},
     ]}
-    receipt = '{{"schema":"mission-test-report/1","tree_sha":"{}","tier":"shard","shard":"{}/2","test_manifest":["skills/mission"]}}'
+    receipt = '{{"schema":"mission-test-report/1","tree_sha":"{}","tier":"shard","shard":"{}/2","test_manifest":["skills/mission"],"executed":4}}'
     return {
         "runs": {"workflow_runs": [run]},
         "check": {"check_suites": [check]},
@@ -77,6 +78,101 @@ def test_a_missing_shard_receipt_falls_back_without_accepting_ci():
     assert result.reason == "receipt-mismatch"
 
 
+@pytest.mark.parametrize("executed", [None, 0, -1, True], ids=["missing", "zero", "negative", "bool"])
+def test_a_shard_receipt_without_a_positive_integer_execution_count_falls_back(executed):
+    """Exit zero is not evidence when the shard did not execute a test."""
+    data = _responses()
+    for job_id in (3, 4):
+        receipt = json.loads(data["logs"][job_id].splitlines()[-1])
+        if executed is None:
+            del receipt["executed"]
+        else:
+            receipt["executed"] = executed
+        data["logs"][job_id] = "\n".join(data["logs"][job_id].splitlines()[:-1] + [json.dumps(receipt)])
+
+    result = evidence.verify_ci_suite(
+        _contract(), repository="owner/repo", pr_number=9, head_sha=SHA,
+        base_sha=BASE, integrated_tree_sha=TREE,
+        api=lambda endpoint: data[endpoint],
+    )
+
+    assert result.accepted is False
+    assert result.reason == "receipt-mismatch"
+
+
+def _limited_pytest(tmp_path):
+    """Keep Makefile wiring real while avoiding an all-core xdist worker pool."""
+    runner = tmp_path / "pytest-one-worker.py"
+    runner.write_text(
+        "#!{}\n"
+        "import os\n"
+        "import sys\n"
+        "arguments = sys.argv[1:]\n"
+        "if arguments[:2] == ['-m', 'pytest']:\n"
+        "    arguments[arguments.index('-n') + 1] = '1'\n"
+        "os.execv(sys.executable, [sys.executable, *arguments])\n".format(sys.executable),
+        encoding="utf-8",
+    )
+    runner.chmod(0o755)
+    stamp = tmp_path / "requirements.stamp"
+    stamp.touch()
+    git = tmp_path / "git"
+    git.write_text(
+        "#!{}\n"
+        "import os\n"
+        "import sys\n"
+        "if sys.argv[1:] == ['write-tree']:\n"
+        "    print('a' * 40)\n"
+        "else:\n"
+        "    os.execv({}, [{}, *sys.argv[1:]])\n".format(sys.executable, repr(shutil.which("git")), repr(shutil.which("git"))),
+        encoding="utf-8",
+    )
+    git.chmod(0o755)
+    return runner, stamp
+
+
+def _make_shard(tmp_path, sources, *, index=1, total=1):
+    runner, stamp = _limited_pytest(tmp_path)
+    return subprocess.run(
+        ("make", "test-shard", "PYTHON=" + sys.executable, "VENV_PYTHON=" + str(runner),
+         "REQUIREMENTS_STAMP=" + str(stamp), "SHARD_INDEX=" + str(index),
+         "SHARD_TOTAL=" + str(total), "PYTEST_TARGETS=" + " ".join(map(str, sources))),
+        cwd=ROOT.parents[1], text=True, capture_output=True,
+        env={**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"]},
+    )
+
+
+def test_make_test_shard_rejects_a_small_all_skipped_suite(tmp_path):
+    """A green pytest exit alone must not create reusable shard evidence."""
+    fixture = tmp_path / "test_all_skipped.py"
+    fixture.write_text(
+        "import pytest\n\ndef test_skipped():\n    pytest.skip('fixture')\n",
+        encoding="utf-8",
+    )
+
+    result = _make_shard(tmp_path, [fixture])
+
+    assert result.returncode != 0
+
+
+def test_make_test_shard_emits_a_positive_counted_receipt(tmp_path):
+    """The receipt uses the same JUnit count that rejects all-skipped shards."""
+    first = tmp_path / "test_one_pass.py"
+    second = tmp_path / "test_two_pass.py"
+    first.write_text("def test_passes():\n    assert True\n", encoding="utf-8")
+    second.write_text("def test_passes_again():\n    assert True\n", encoding="utf-8")
+    sources = [first, second]
+
+    for index in (1, 2):
+        result = _make_shard(tmp_path, sources, index=index, total=2)
+        assert result.returncode == 0, result.stderr
+        receipts = [json.loads(line) for line in result.stdout.splitlines()
+                    if line.startswith('{"schema":"mission-test-report/1"')]
+        assert len(receipts) == 1
+        assert receipts[0]["executed"] == 1
+        assert receipts[0]["test_manifest"] == [" ".join(map(str, sources))]
+
+
 def test_an_invalid_or_absent_opt_in_contract_cannot_enable_reuse():
     assert evidence.parse_ci_reuse_contract({}) is None
     assert evidence.parse_ci_reuse_contract({"ci_reuse": {"shards": 0}}) is None
@@ -95,7 +191,7 @@ def test_an_api_exception_is_a_local_suite_fallback():
 def test_ci_runner_inputs_changed_by_the_pr_force_local_execution():
     kwargs = {"workflow_path": ".github/workflows/ci.yml"}
     assert evidence.reusable_tree_inputs_unchanged(["skills/mission/lib/x.py"], **kwargs)
-    for path in ("Makefile", "GNUmakefile", "makefile"):
+    for path in ("Makefile", "GNUmakefile", "makefile", "scripts/write_suite_report.py"):
         assert not evidence.reusable_tree_inputs_unchanged([path], **kwargs)
 
 
@@ -193,7 +289,7 @@ def _ci_api_for(repo, base, head, *, wrong_tree=False):
     data["commit:" + MERGE] = data.pop("commit:" + MERGE)
     data["commit:" + merge] = {"sha": merge, "tree": {"sha": "0" * 40 if wrong_tree else tree}, "parents": [{"sha": base}, {"sha": head}]}
     for job_id, shard in ((3, 1), (4, 2)):
-        data["logs"][job_id] = "git log -1 --format=%H\n{}\nRun make test-shard PYTHON=python SHARD_INDEX={} SHARD_TOTAL=2 PYTEST_TARGETS=\"skills/mission\"\n{{\"schema\":\"mission-test-report/1\",\"tree_sha\":\"{}\",\"tier\":\"shard\",\"shard\":\"{}/2\",\"test_manifest\":[\"skills/mission\"]}}".format(merge, shard, tree, shard)
+        data["logs"][job_id] = "git log -1 --format=%H\n{}\nRun make test-shard PYTHON=python SHARD_INDEX={} SHARD_TOTAL=2 PYTEST_TARGETS=\"skills/mission\"\n{{\"schema\":\"mission-test-report/1\",\"tree_sha\":\"{}\",\"tier\":\"shard\",\"shard\":\"{}/2\",\"test_manifest\":[\"skills/mission\"],\"executed\":1}}".format(merge, shard, tree, shard)
     return data
 
 

@@ -48,3 +48,28 @@ target.
 The extracted-workflow regression fails against the previous workflow and
 passes against the revised workflow. The combined gate, CI-scope, shard,
 compatibility, inventory and wrapper checks pass: 767 tests in 40.49 seconds.
+
+## Executed-count remediation
+
+Each shard now writes JUnit to a temporary directory and emits one receipt from
+`write_suite_report.py`. The receipt carries the JUnit-derived `executed`
+count; a count of zero makes the shard command fail, even though pytest itself
+exits zero for an all-skipped selection. The verifier also treats missing, zero,
+negative, and boolean counts as a local-suite fallback, including historical
+logs that lack the new field.
+
+The focused Makefile check runs a one-test all-skipped temporary suite and
+observes a nonzero shard exit. A separate two-file, two-shard run observes one
+positive count per receipt and keeps the original target expression in each
+manifest. It uses a one-worker wrapper only to bound local xdist load; pytest
+and JUnit generation remain real. These tests detect a regression where CI
+would reuse a green exit that executed nothing; existing receipt tests retain
+the merge-tree, job, and command binding checks.
+
+An independent boundary exploration supplied 84 inputs (JUnit 60 and receipt
+24) to the new count requirement and found 0 unexpected acceptances.
+
+The revised count, local-gate contract, integration gate, workflow, scope,
+shard, inventory and mirror checks pass together: 675 tests in 43.69 seconds.
+The two git-index integration checks require a writable index; their earlier
+sandbox-only failures are not counted as passes.

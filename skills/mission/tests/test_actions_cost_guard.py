@@ -74,7 +74,12 @@ def test_python_and_shell_quality_gates_remain():
     # the shared prefix is what gets counted: one arm changed back on its own
     # is what this catches.
     assert makefile.count("-m pytest -q -n $(MISSION_TEST_WORKERS) --dist loadfile") == 3
-    assert "$(VENV_PYTHON) -m pytest -q -n auto --dist loadfile $$targets" in makefile  # test-shard は CI 専有なので auto
+    shard = re.search(r"^test-shard:.*?(?=^test-e2e:)", makefile, re.MULTILINE | re.DOTALL).group(0)
+    assert 'test -n "$$targets"' in shard
+    assert (
+        "$(VENV_PYTHON) -m pytest -q -n auto --dist loadfile "
+        '--junit-xml="$$tmpdir/junit.xml" $$targets; \\'
+    ) in shard  # test-shard は CI 専有なので auto
     assert "$(VENV_PYTHON) -m pytest -q -n $(MISSION_TEST_WORKERS) --dist loadfile skills/mission -k" in makefile
     assert (
         "shellcheck scripts/mission-stop-guard.sh plugins/mission/scripts/mission-stop-guard.sh "
