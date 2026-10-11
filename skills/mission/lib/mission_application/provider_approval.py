@@ -1,4 +1,6 @@
 """Provider approval use case; the CLI only supplies dependency ports."""
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Callable
 from pathlib import Path
