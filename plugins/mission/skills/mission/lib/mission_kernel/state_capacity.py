@@ -471,7 +471,7 @@ def repair_attempt_reserve(document: Mapping) -> int:
     from .repair_attempts import REPAIR_TERMINAL_DELTA
     surface = document.get('extensions', {}) if document.get('schema_version') == 5 else document
     try:
-        return sum(REPAIR_TERMINAL_DELTA for row in decode_projection(surface).lineages
+        return sum(REPAIR_TERMINAL_DELTA + (0 if 'intent' in item else FRESH_REVIEW_DISPATCH_STAGE_DELTA) for row in decode_projection(surface).lineages
                    for item in row.document.thaw().get('attempts', ()) if item['status'] == 'pending')
     except (ValueError, TypeError, KeyError, AttributeError):
         return STATE_LIMIT

@@ -311,6 +311,8 @@ def test_decide_and_guidance_share_one_named_transition_table():
         "repair-origins-import",
         "repair-begin",
         "repair-reconcile",
+        "repair-reverify-begin",
+        "repair-reverify-commit",
         "fresh-review-run",
         "fresh-review-launch",
         "fresh-review-output-import",

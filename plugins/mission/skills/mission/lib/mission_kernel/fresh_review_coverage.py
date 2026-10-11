@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from .model import FrozenJsonObject
+
 from .fresh_review import (
     FreshReviewError, FreshReviewRequest, _digest, _identifier, candidate_identity,
     canonical_digest, decode_request, request_document,
@@ -48,6 +50,8 @@ class FreshReviewBindings:
     contract_digest: str
     input_digests: tuple[tuple[str, str], ...]
     candidate_snapshots: tuple[tuple[str, str], ...]
+    repair_results: tuple = ()
+    observed_candidates: FrozenJsonObject | None = None
 
 
 @dataclass(frozen=True)

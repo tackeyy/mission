@@ -144,6 +144,8 @@ def validate_completion_carriers(projection, evidence, bindings, contract_digest
     try:
         if type(bindings) is not FreshReviewBindings:
             raise FreshReviewError(code)
+        if type(bindings.repair_results) is not tuple or any(type(r) is not FrozenJsonObject for r in bindings.repair_results):
+            raise FreshReviewError(code)
         _digest(bindings.contract_digest)
         inputs, snapshots = _pairs(bindings.input_digests), _pairs(bindings.candidate_snapshots)
         if (bindings.contract_digest != contract_digest
@@ -285,6 +287,6 @@ def judge_completion(projection, evidence, bindings, contract, contract_digest, 
                    for result in item.coverage.thaw()['criterion_results'])):
         raise FreshReviewError('acceptance-coverage-open')
     from .repair_lineage import RepairProjection, effective_unresolved_findings
-    unresolved = effective_unresolved_findings(RepairProjection() if repair is None else repair, projection, evidence, contract)
-    if unresolved or any(item.open_finding_ids for item in facts):
+    unresolved = effective_unresolved_findings(RepairProjection() if repair is None else repair, projection, evidence, contract, bindings)
+    if unresolved:
         raise FreshReviewError('acceptance-unresolved-finding')

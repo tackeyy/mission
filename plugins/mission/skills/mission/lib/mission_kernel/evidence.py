@@ -406,6 +406,9 @@ def apply_verification_receipt(state: Mapping[str, object], command: RecordVerif
         raise EvidenceRuleError("verification-receipt-history-invalid")
     else:
         history = copy.deepcopy(history)
+    if document.get("repair_lineage", {}).get("lineages"):
+        from .repair_reverification import next_generation
+        entry["repair_generation"] = next_generation(document)
     history.append(entry)
     document["verification_receipts"] = history
     document["updated_at"] = entry["recorded_at"]
