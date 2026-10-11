@@ -25,7 +25,7 @@ FIXTURE_DIR = Path(__file__).parent / 'fixtures/budget-spawn-inventory'
 # Exact names (no prefix exemptions): a future API must be classified explicitly.
 SAFE = set("""os.CLD_EXITED os.CLD_KILLED os.CLD_DUMPED
 os.O_CLOEXEC os.O_CREAT os.O_DIRECTORY os.O_EXCL os.O_NOFOLLOW os.O_NONBLOCK
-os.O_RDONLY os.O_RDWR os.O_WRONLY os.P_PID os.PathLike os.WEXITED os.WNOHANG
+os.O_RDONLY os.O_RDWR os.O_WRONLY os.O_ACCMODE os.P_PID os.PathLike os.WEXITED os.WNOHANG
 os.WNOWAIT os.X_OK os.access os.chmod os.close os.defpath os.dup os.environ
 os.environ.get os.fchmod os.fdopen os.fspath os.fstat os.fsync os.getpid os.getppid
 os.getuid os.getpgrp os.kill os.killpg os.link os.listdir os.lstat os.mkdir os.open os.path

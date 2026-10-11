@@ -5,6 +5,12 @@
 基点:[独立レビュー契約§3](https://github.com/tackeyy/mission/blob/3cd23821512711d216e83be7a17ffe44f0fa5751/docs/design/689-fresh-review-receipt.md#3-runtime-adapter-の登録と観測)。
 fixture成功を実hostの独立性・入力受領・能力強制の観測へ昇格させない。
 
+実装は[観測・IPC基盤A](https://github.com/tackeyy/mission/issues/1008)、
+[guardianと寿命B](https://github.com/tackeyy/mission/issues/1009)、
+[SDK・ack・adapter結線と実host受入C](https://github.com/tackeyy/mission/issues/1010)へ分割した。
+Aは既定無効のmodel-free primitivesだけを追加し、信頼済みhostのsource列挙とnative event bridgeの実装・実観測はCに残す。
+5method/5field登録契約、旧transport、既定未登録を維持する。以下の機能設計と親Issue897の全受入条件は変更しない。
+
 ## 1. 観測済みと残条件
 
 [許可済み最小probeの記録](https://github.com/tackeyy/mission/issues/897#issuecomment-6108192772)はCLI版2.1.296、exit0、success、1ターン、native initのsession ID、tools=[]を観測した。
