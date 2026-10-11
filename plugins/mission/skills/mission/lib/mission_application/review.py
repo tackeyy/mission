@@ -362,6 +362,8 @@ class MarkPassRequest:
     approved_by_user: bool
     specialist_waiver: str
     at: str
+    approval_evidence_ref: str | None = None
+    approval_verifier: str | None = None
 
 
 @dataclass(frozen=True)
@@ -492,10 +494,11 @@ def _pass_rejection_message(reason: str, data: dict, latest: dict | None) -> str
     return _PASS_REJECTION_MESSAGES.get(reason, reason)
 
 
-def mark_pass(
+def _mark_pass(
     repository: LegacyMissionRepository,
     request: MarkPassRequest,
     services: MarkPassServices,
+    budget=None,
 ) -> MarkPassResult:
     """Validate evidence, ask the kernel for completion, then persist v4 bytes."""
     if request.force and not request.reason:
@@ -541,7 +544,12 @@ def mark_pass(
             )
             if reason is not None:
                 raise ReviewFailure(reason, reason=reason)
-        verification = services.verify_force_approval(data) if request.force else None
+        if budget is not None:
+            from .approval_budget import approval_settlement, now
+            verification = services.verify_force_approval(data, budget=budget)
+            request = replace(request, at=now())
+        else:
+            verification = services.verify_force_approval(data) if request.force else None
         try:
             services.validate_artifact_gate(data)
         except ValueError as exc:
@@ -604,6 +612,7 @@ def mark_pass(
             services.validate_force_terminal(proposed, verification)
             proposed["force_approval"]["consumed"] = True
         command = MarkPass(
+            approval_settlement=approval_settlement(budget, request.at, completed=True) if budget is not None else None,
             force=request.force,
             force_approval_verified=verification is not None,
             artifact_gate_satisfied=True,
@@ -638,3 +647,20 @@ def mark_pass(
         unclosed_skills=tuple(unclosed),
         decision=decision,
     )
+
+
+def mark_pass(repository, request, services):
+    """Reserve forced approval in its own commit before the pass transaction."""
+    from .approval_budget import admit_approval, settle_rejected_approval
+    if not request.force or not request.reason or request.approved_by_user is not True:
+        return _mark_pass(repository, request, services)
+    try:
+        budget = admit_approval(repository, 'force-approval', 'force-pass',
+                               evidence_ref=request.approval_evidence_ref, verifier_name=request.approval_verifier)
+    except ValueError as exc:
+        raise ReviewFailure(str(exc), reason=str(exc)) from exc
+    try:
+        return _mark_pass(repository, request, services, budget)
+    except BaseException:
+        settle_rejected_approval(repository, budget)
+        raise

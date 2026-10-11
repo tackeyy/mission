@@ -133,6 +133,8 @@
       "lib/integration_gate.py:integrate_and_test:executed": 1,
       "lib/integration_gate.py:require_suite_report:executed": 3,
       "lib/mission_application/acceptance.py:run_acceptance_contract_import:execute_evidence_operation": 1,
+      "lib/mission_application/approval_verifier.py:run_approval:exec_cleanup_confirmed": 1,
+      "lib/mission_application/approval_verifier.py:run_approval:exec_unstarted": 1,
       "lib/mission_application/artifact.py:_replayed_artifact_payload:execution": 2,
       "lib/mission_application/artifact.py:_translate_artifact_rule:call": 1,
       "lib/mission_application/artifact.py:execute_artifact_operation:execute": 2,
@@ -195,8 +197,8 @@
       "lib/mission_application/planning.py:run_transition_effects:execute_transition_effects": 1,
       "lib/mission_application/ports.py:__init__:execution": 2,
       "lib/mission_application/provider_process.py:exchange_provider:exec_cleanup_confirmed": 2,
-      "lib/mission_application/review.py:mark_pass:execute": 1,
-      "lib/mission_application/review.py:mark_pass:execution": 2,
+      "lib/mission_application/review.py:_mark_pass:execute": 1,
+      "lib/mission_application/review.py:_mark_pass:execution": 2,
       "lib/mission_application/runtime_guard.py:__post_init__:execute": 1,
       "lib/mission_application/runtime_guard.py:record_permission_observation:execute": 1,
       "lib/mission_application/runtime_guard.py:record_permission_observation:execution": 5,
@@ -257,12 +259,13 @@
   },
   "rows-5-6": {
     "candidates": {
-      "lib/mission_application/approval_verifier.py:run_approval:run_job": 1,
+      "lib/mission_application/approval_verifier.py:run_approval:run_job": 2,
       "lib/mission_application/approval_verifier.py:run_callable:Process": 1,
       "lib/mission_application/approval_verifier.py:run_callable:get_context": 1,
-      "lib/mission_application/approval_verifier.py:verify_approval_request:execute": 1
+      "lib/mission_application/approval_verifier.py:verify_approval_request:execute": 1,
+      "lib/mission_application/provider_approval.py:run_verify_provider_approval:execute_verifier": 1
     },
-    "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+    "reason": "Approval admission commits before both descriptor spawn entries; policy-only execution uses the shared watchdog helper. Legacy callable fork is rejected under policy.",
     "rows": [
       5,
       6
