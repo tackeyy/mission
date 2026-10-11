@@ -184,12 +184,13 @@ D定数は緩めずE3定数を追加する。停止系・takeover後でも予約
 既存E2b/Dのfixtureとtransportを再利用し、D dispatch/publishやreconcile直積の複製を避ける。
 異系統レビュー・独立Checkerを同headで取得し、ready後CIと最新base/exact-headを確認する。
 
-実装担当の未実測見積は契約/kernel350〜500、application/runtime200〜300、capacity80〜130、tests350〜450、docs/inventory40〜80、reviewed計1,020〜1,460行。
-まず一単位として実測し、1,400行を超える場合は保証を削らず安全に分割する。
-分割候補は①契約・writer・completion、②adapter・公開CLI。
-先行では公開CLI/parser/command dispatcherにE3 commandを登録せず、内部writer/pure validatorだけを検証可能にする。
-新collectionがある場合だけcompletionの閉じた検査を通し、不正は未解決または拒否にする。旧state/D/E2経路/receiptの意味は変えない。
-後行mergeまでIssue907の公開CLI ACを完了としない。必要な子Issueは分割方針確定後に親子リンク付きで起票する。
+実装は受入条件を保持したまま次の3段階へ分割する。各段階でreviewed行数を実測し、1,400行を超える場合は不可分境界を再評価する。
+
+- [A:閉じた契約と保守的completion（Issue1005）](https://github.com/tackeyy/mission/issues/1005): request/state/artifact契約、pure terminal/mapping/alias validator、旧state互換を扱う。command登録・writer・正の解決接続を含めず、新E3stateを生成しない。非空E3履歴は旧修復解決集合から除外し未解決、欠落・空は旧判定を維持する。
+- [B:内部実行と解決証拠（Issue1006）](https://github.com/tackeyy/mission/issues/1006): writer/supersedes、候補世代と一時carrier、artifact再読取と正のcompletion、容量・予算精算・回復を不可分単位として扱う。
+- [C:公開CLIとadapter（Issue1007）](https://github.com/tackeyy/mission/issues/1007): adapter/dispatcher/公開CLI、E3専用serializer、runtime能力と全予算の照合を扱う。独立性の検証はtool/replayの実観測保証を代替しない。
+
+各段階で旧state/D/E2経路/receiptの意味を保持する。後行mergeまで[親Issue907](https://github.com/tackeyy/mission/issues/907)の公開CLI ACを完了としない。
 完了は現行Issue907全ACと本契約の検証、必要レビュー、CI、通常gateのmerge/readbackまで。
 policyありpreparedのrepair分類と一回admission、wrong target/op/既launch/final拒否、policyなし修復terminal後の判定到達性、paired request/terminalの片側欠落を回帰に含める。
 
