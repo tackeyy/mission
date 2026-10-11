@@ -34,3 +34,17 @@ The repository-wide AST inventories classify `verify_ci_suite`'s `run`
 references as decoded Actions metadata, rather than process creation, and
 `_normalise_log`'s string replacement as in-memory normalization rather than a
 state writer. Both classifications are pinned in their fixtures.
+
+Review remediation rejects all GNU makefile discovery names and binds the
+receipt command to the single Actions `Run make test-shard` launch header. The
+workflow also treats incomplete or ambiguous changed-file enumeration as full
+scope before selecting shard targets.
+
+The workflow's extracted scope script is executed under Node with mocked
+Actions inputs. A complete documentation-only list keeps the fast target;
+incomplete, missing-count, duplicate, and API-error lists select the full
+target.
+
+The extracted-workflow regression fails against the previous workflow and
+passes against the revised workflow. The combined gate, CI-scope, shard,
+compatibility, inventory and wrapper checks pass: 767 tests in 40.49 seconds.

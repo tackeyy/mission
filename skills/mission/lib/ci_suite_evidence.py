@@ -63,7 +63,7 @@ def reusable_tree_inputs_unchanged(changed_files: object, *, workflow_path: str)
     if not isinstance(changed_files, (list, tuple, set)):
         return False
     protected = {
-        workflow_path, "Makefile", "scripts/ci_changed_scopes.js",
+        workflow_path, "Makefile", "GNUmakefile", "makefile", "scripts/ci_changed_scopes.js",
         "scripts/ci_shard_targets.py", ".github/requirements-ci.txt",
     }
     return all(isinstance(path, str) and path not in protected for path in changed_files)
@@ -96,7 +96,8 @@ def _receipt(log: object, *, tree_sha: str, shard: int, total: int,
         return False
     command = ('make test-shard PYTHON=python SHARD_INDEX={} SHARD_TOTAL={} '
                'PYTEST_TARGETS="{}"').format(shard, total, target)
-    if len(re.findall(r"(?:^|\n).*\bRun " + re.escape(command) + r"(?:\n|$)", text)) != 1:
+    launches = re.findall(r"(?:^|\n).*\bRun (make test-shard[^\n]*)", text)
+    if launches != [command]:
         return False
     matches = []
     for line in text.splitlines():

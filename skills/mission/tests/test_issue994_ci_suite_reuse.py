@@ -95,7 +95,18 @@ def test_an_api_exception_is_a_local_suite_fallback():
 def test_ci_runner_inputs_changed_by_the_pr_force_local_execution():
     kwargs = {"workflow_path": ".github/workflows/ci.yml"}
     assert evidence.reusable_tree_inputs_unchanged(["skills/mission/lib/x.py"], **kwargs)
-    assert not evidence.reusable_tree_inputs_unchanged(["Makefile"], **kwargs)
+    for path in ("Makefile", "GNUmakefile", "makefile"):
+        assert not evidence.reusable_tree_inputs_unchanged([path], **kwargs)
+
+
+def test_a_narrow_actual_shard_command_cannot_be_padded_by_later_output():
+    data = _responses()
+    narrow = 'Run make test-shard PYTHON=python SHARD_INDEX=1 SHARD_TOTAL=2 PYTEST_TARGETS="one/test.py"'
+    full = 'Run make test-shard PYTHON=python SHARD_INDEX=1 SHARD_TOTAL=2 PYTEST_TARGETS="skills/mission"'
+    data["logs"][3] = data["logs"][3].replace(full, narrow) + "\n" + full
+    assert not evidence.verify_ci_suite(_contract(), repository="owner/repo", pr_number=9,
+                                        head_sha=SHA, base_sha=BASE, integrated_tree_sha=TREE,
+                                        api=lambda endpoint: data[endpoint]).accepted
 
 
 def test_reuse_requires_the_base_make_test_suite_contract():
