@@ -1,7 +1,10 @@
 """CI品質ゲートを維持したコスト最適化の回帰テスト。"""
 
 from pathlib import Path
+import json
 import re
+import subprocess
+import textwrap
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -71,7 +74,12 @@ def test_python_and_shell_quality_gates_remain():
     # the shared prefix is what gets counted: one arm changed back on its own
     # is what this catches.
     assert makefile.count("-m pytest -q -n $(MISSION_TEST_WORKERS) --dist loadfile") == 3
-    assert "$(VENV_PYTHON) -m pytest -q -n auto --dist loadfile $$targets" in makefile  # test-shard は CI 専有なので auto
+    shard = re.search(r"^test-shard:.*?(?=^test-e2e:)", makefile, re.MULTILINE | re.DOTALL).group(0)
+    assert 'test -n "$$targets"' in shard
+    assert (
+        "$(VENV_PYTHON) -m pytest -q -n auto --dist loadfile "
+        '--junit-xml="$$tmpdir/junit.xml" $$targets; \\'
+    ) in shard  # test-shard は CI 専有なので auto
     assert "$(VENV_PYTHON) -m pytest -q -n $(MISSION_TEST_WORKERS) --dist loadfile skills/mission -k" in makefile
     assert (
         "shellcheck scripts/mission-stop-guard.sh plugins/mission/scripts/mission-stop-guard.sh "
@@ -117,6 +125,40 @@ def test_docs_only_fast_path_never_produces_an_empty_shard():
 def test_repository_wide_python_suite_runs_for_every_pr():
     assert "const decision = classifyChangedFiles({" in CI
     assert "core.setOutput('python_targets', decision.pythonTargets);" in CI
+
+
+def test_changed_file_enumeration_falls_back_to_full_scope_when_incomplete():
+    """The workflow script itself, not a copied approximation, owns this guard."""
+    block = re.search(
+        r"id: changes\n.*?script: \|\n(.*?)(?=^      - name: Set up Python)",
+        CI, re.MULTILINE | re.DOTALL,
+    ).group(1)
+    script = textwrap.dedent(block)
+
+    def run_case(expected, files, *, error=False):
+        harness = """
+const context = {{ eventName: 'pull_request', repo: {{ owner: 'owner', repo: 'repo' }}, payload: {{ pull_request: {{ number: 1, changed_files: {expected} }} }} }};
+const github = {{ rest: {{ pulls: {{ listFiles: () => {{}} }} }}, paginate: async () => {{ {response} }} }};
+const core = {{ setOutput: (_name, value) => process.stdout.write(value), warning: () => {{}} }};
+;(async () => {{
+{script}
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+""".format(
+            expected=json.dumps(expected),
+            response="throw new Error('API unavailable');" if error else "return " + json.dumps(files) + ";",
+            script=script,
+        )
+        return subprocess.run(
+            ["node", "-e", harness], cwd=ROOT, text=True, capture_output=True, check=True
+        ).stdout
+
+    fast = run_case(1, [{"filename": "README.md"}])
+    incomplete = run_case(2, [{"filename": "README.md"}])
+    duplicate = run_case(2, [{"filename": "README.md"}, {"filename": "README.md"}])
+    missing = run_case(None, [{"filename": "README.md"}])
+    failed = run_case(1, [], error=True)
+    assert fast != "skills/mission"
+    assert all(value == "skills/mission" for value in (incomplete, duplicate, missing, failed))
 
 
 def test_stale_prs_are_cancelled_and_ready_prs_run_full_ci():

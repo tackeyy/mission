@@ -15,6 +15,9 @@ import subprocess
 import sys
 import tempfile
 from typing import Callable, Dict, Iterable, Optional, TextIO
+from urllib.parse import quote
+
+import ci_suite_evidence
 
 from mission_application.integration_gate import (
     compute_changeset_digest,
@@ -766,6 +769,65 @@ class SubprocessGateOperations:
         ).stdout.strip()
         if fetched != snapshot.head_sha:
             raise IntegrationGateError(3, "head-changed", "pull request head changed during fetch")
+        self._active_pr_number = snapshot.number
+
+    def _ci_api(self, kind: str, *, repository: str, contract, head_sha: str):
+        """Read one Actions response without exposing API output in gate logs."""
+        if repository.startswith("github.com/"):
+            repository = repository[len("github.com/"):]
+        if repository.count("/") != 1:
+            return None
+        paths = {
+            "runs": "repos/{}/actions/workflows/{}/runs?event=pull_request&head_sha={}&per_page=1".format(
+                repository, quote(contract.workflow_path.rsplit("/", 1)[-1]), head_sha),
+            "check": "repos/{}/commits/{}/check-suites?per_page=100".format(repository, head_sha),
+        }
+        if kind == "jobs":
+            run_id = getattr(self, "_ci_run_id", None)
+            attempt = getattr(self, "_ci_run_attempt", None)
+            if type(run_id) is not int or type(attempt) is not int:
+                return None
+            path = "repos/{}/actions/runs/{}/attempts/{}/jobs?per_page=100".format(
+                repository, run_id, attempt)
+        elif kind.startswith("commit:"):
+            sha = kind.partition(":")[2]
+            if not _SHA_RE.fullmatch(sha):
+                return None
+            path = "repos/{}/git/commits/{}".format(repository, sha)
+        elif kind == "logs":
+            # Logs are bounded by the caller's selected jobs; the evidence
+            # parser never writes their content into its result or the gate log.
+            path = "repos/{}/actions/jobs/{}/logs".format(repository, "{job_id}")
+        else:
+            path = paths.get(kind)
+        if path is None:
+            return None
+        if kind == "logs":
+            # The verifier asks for the mapping once; collect only IDs it has
+            # already authenticated through the jobs response.
+            ids = getattr(self, "_ci_job_ids", ())
+            values = {}
+            for job_id in ids:
+                result = self._run(("gh", "api", "--hostname", "github.com", "--allow-escape-sequences", path.format(job_id=job_id)))
+                if result.returncode != 0:
+                    return None
+                values[job_id] = result.stdout
+            return values
+        result = self._run(("gh", "api", "--hostname", "github.com", path))
+        if result.returncode != 0:
+            return None
+        try:
+            value = json.loads(result.stdout)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if kind == "runs" and isinstance(value, dict):
+            rows = value.get("workflow_runs")
+            if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+                self._ci_run_id = rows[0].get("id")
+                self._ci_run_attempt = rows[0].get("run_attempt")
+        if kind == "jobs" and isinstance(value, dict) and isinstance(value.get("jobs"), list):
+            self._ci_job_ids = tuple(job.get("id") for job in value["jobs"] if isinstance(job, dict))
+        return value
 
     def _classify_scope(
         self,
@@ -940,8 +1002,9 @@ class SubprocessGateOperations:
                 ("git", "diff", "--name-only", "-z", "{}...{}".format(base_sha, head_sha)),
                 cwd=tree,
             ).stdout.split("\0")
+            changed_files = [item for item in changed if item]
             scope, targets = self._classify_scope(
-                (item for item in changed if item),
+                changed_files,
                 tree,
                 logger,
             )
@@ -952,23 +1015,47 @@ class SubprocessGateOperations:
             # nothing (#735).
             contract = load_suite_contract(self, base_sha=base_sha, step=4)
             suite_command = require_suite_contract(contract, step=4)
+            ci_contract = ci_suite_evidence.parse_ci_reuse_contract(contract)
+            accepted_ci = None
+            if (scope == "full" and ci_contract is not None and targets == ci_contract.target
+                    and ci_suite_evidence.reusable_tree_inputs_unchanged(
+                        changed_files, workflow_path=ci_contract.workflow_path)
+                    and isinstance(getattr(self, "_active_pr_number", None), int)):
+                accepted_ci = ci_suite_evidence.verify_ci_suite(
+                    contract,
+                    repository=self._identity().removeprefix("github.com/"),
+                    pr_number=self._active_pr_number,
+                    head_sha=head_sha,
+                    base_sha=base_sha,
+                    integrated_tree_sha=tree_sha,
+                    api=lambda kind: self._ci_api(
+                        kind, repository=self._identity(), contract=ci_contract, head_sha=head_sha
+                    ),
+                )
+                if accepted_ci.accepted:
+                    logger("ci_suite_reuse=accepted run_id={} attempt={} head_sha={} base_sha={} tree_sha={} checkout_sha={} shard_job_ids={}".format(
+                        accepted_ci.run_id, accepted_ci.attempt, head_sha, base_sha, accepted_ci.tree_sha,
+                        accepted_ci.checkout_sha, ",".join(map(str, accepted_ci.job_ids))))
+                else:
+                    logger("ci_suite_reuse=fallback reason={}".format(accepted_ci.reason))
             # The scope goes through the environment, not the argument list:
             # appending "PYTEST_TARGETS=..." only means anything to make, and
             # any other declared command would receive it as an extra
             # positional argument and do something else.
             suite_env = {"PYTEST_TARGETS": targets} if targets else None
             report_path = Path(tree) / ".mission-gate-suite-report.json"
-            executed = run_declared_suite(
-                suite_command,
-                runner=self._suite_runner,
-                cwd=tree,
-                report_path=report_path,
-                expected_tree_sha=tree_sha,
-                step=4,
-                logger=logger,
-                env=suite_env,
-            )
-            logger("suite_exit=0 suite_executed={}".format(executed))
+            if accepted_ci is None or not accepted_ci.accepted:
+                executed = run_declared_suite(
+                    suite_command,
+                    runner=self._suite_runner,
+                    cwd=tree,
+                    report_path=report_path,
+                    expected_tree_sha=tree_sha,
+                    step=4,
+                    logger=logger,
+                    env=suite_env,
+                )
+                logger("suite_exit=0 suite_executed={}".format(executed))
             observation = IntegrationObservation(scope, targets, tree_sha, changeset_digest)
         except BaseException:
             if not self._cleanup_worktree(scratch_parent, tree, registered):
