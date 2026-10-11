@@ -15,7 +15,7 @@ from mission_kernel.fresh_review_completion import (
 )
 from mission_kernel.fresh_review_coverage import FreshReviewBindings
 from mission_kernel.fresh_review_receipts import decode_terminal_receipt
-from mission_kernel.json_codec import decode_json_object
+from mission_kernel.json_codec import decode_json_object, freeze_json_value
 from mission_kernel.repair_lineage import require_completion_contract
 from . import fresh_review as prepare
 
@@ -51,6 +51,14 @@ def observe_lineage_evidence(state, *, root, read_evidence):
     return tuple(evidence)
 
 
+def observe_repair_results(state, *, root, read_evidence):
+    from mission_kernel.repair_lineage import decode_projection as decode_repair
+    from mission_kernel.fresh_review import ContentAddressedRef
+    return tuple(freeze_json_value(_read(root, ContentAddressedRef(**item['terminal']['comparison_ref']),
+        read_evidence=read_evidence)) for row in decode_repair(state).lineages
+        for item in row.document.thaw().get('attempts', ()) if 'generation' in item['terminal'])
+
+
 def observe_completion_inputs(state, *, root, load_policy, read_evidence):
     """Observe all non-withdrawn requests, including partial and older attempts.
 
@@ -79,17 +87,19 @@ def observe_completion_inputs(state, *, root, load_policy, read_evidence):
         raise FreshReviewError(code) from exc
     if not isinstance(policy, dict) or policy.get('digest') != contract['verifier_policy']['digest']:
         raise FreshReviewError(code)
-    selected = {key: commands[key] for key in ids}
+    selected = commands
     snapshots = prepare._capture(root, selected)
     inputs = tuple((item.request.request_id, canonical_digest(prepare.build_input_packet(
         contract, item.request.perspective,
         {key: snapshots[key] for key in sorted({binding.command_id for binding in item.request.candidate_bindings})})))
         for item in records)
-    candidates = tuple(sorted((key, value.digest) for key, value in snapshots.items()))
-    if dict(candidates) != {key: value.digest for key, value in prepare._capture(root, selected).items()}:
+    candidates = tuple(sorted((key, snapshots[key].digest) for key in ids))
+    observed = {key: value.digest for key, value in snapshots.items()}
+    if observed != {key: value.digest for key, value in prepare._capture(root, selected).items()}:
         raise FreshReviewError(code)
     return FreshReviewCompletionInputs(tuple(evidence), FreshReviewBindings(
-        canonical_contract_digest(contract), inputs, candidates))
+        canonical_contract_digest(contract), inputs, candidates,
+        observe_repair_results(state, root=root, read_evidence=read_evidence), freeze_json_value(observed)))
 
 
 @dataclass(frozen=True)

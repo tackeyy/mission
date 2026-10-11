@@ -1,6 +1,7 @@
 """Begun repair obligations survive publication loss without granting success."""
 import json
 import pytest
+from mission_kernel.state_capacity import FRESH_REVIEW_DISPATCH_STAGE_DELTA
 
 from .test_issue896_completed import replay_reviewer
 from .test_issue912_fresh_review_dispatch import completion_session, invoke
@@ -94,7 +95,7 @@ def test_maximum_terminal_fits_reserved_bytes_and_reimport_preserves_attempt(rep
     from mission_kernel.state_capacity import repair_attempt_reserve
     state, command = begun_state(repair_state)
     doc = state.legacy_passthrough.thaw()
-    assert repair_attempt_reserve(doc) == REPAIR_TERMINAL_DELTA
+    assert repair_attempt_reserve(doc) == REPAIR_TERMINAL_DELTA + FRESH_REVIEW_DISPATCH_STAGE_DELTA
     assert import_origins(state, command.evidence).repair == state.repair
     maximum = maximum_attempt()
     for status, reason in [('failed', 'replay-failed'), ('blocked', 'publication-result-lost')]:
@@ -341,10 +342,10 @@ def test_all_pending_attempts_are_reserved_and_terminal_releases_only_its_share(
         row['terminal_digest'] = canonical_digest(result)
     doc['repair_lineage']['lineages'].append(other)
     decode_projection(doc)
-    assert repair_attempt_reserve(doc) == 2 * REPAIR_TERMINAL_DELTA
+    assert repair_attempt_reserve(doc) == 2 * (REPAIR_TERMINAL_DELTA + FRESH_REVIEW_DISPATCH_STAGE_DELTA)
     item.update(status='blocked', terminal=terminal(item['attempt_id'], 'blocked', 'effects-unavailable', item['fencing_epoch']))
     other['lifecycle'] = 'open'
-    assert repair_attempt_reserve(doc) == REPAIR_TERMINAL_DELTA
+    assert repair_attempt_reserve(doc) == REPAIR_TERMINAL_DELTA + FRESH_REVIEW_DISPATCH_STAGE_DELTA
 
 
 def test_large_receipt_history_does_not_expand_attempt_body(repair_state):
@@ -691,7 +692,7 @@ def test_undecodable_pending_reservation_blocks_state_writes(repair_state, schem
     state, _ = begun_state(repair_state)
     document = state.legacy_passthrough.thaw()
     surface = document if schema == 4 else dict(schema_version=5, extensions=document, lease={}, control={})
-    assert sc.repair_attempt_reserve(surface) == REPAIR_TERMINAL_DELTA
+    assert sc.repair_attempt_reserve(surface) == REPAIR_TERMINAL_DELTA + FRESH_REVIEW_DISPATCH_STAGE_DELTA
     check_state_capacity(None, canonical_bytes(surface), encoding=sc.StateEncoding.CANONICAL)
     document['repair_lineage']['lineages'][0]['attempts'][0]['status'] = 'unknown'
     assert sc.repair_attempt_reserve(surface) == sc.STATE_LIMIT

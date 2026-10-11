@@ -10,7 +10,7 @@ from .json_codec import freeze_json_value
 from .model import FencedLease, FrozenJsonObject
 
 INVALID = 'repair-attempt-invalid'
-TERMINAL_REASONS = frozenset(('publication-result-lost', 'effects-unavailable', 'replay-failed'))
+TERMINAL_REASONS = frozenset(('publication-result-lost', 'effects-unavailable', 'replay-failed', 'replay-blocked', 'replay-passed'))
 
 
 def absent(reason):
@@ -50,7 +50,22 @@ def validate_attempts(row):
         raise FreshReviewError(INVALID)
     seen = set()
     for index, item in enumerate(attempts):
-        _closed(item, ('attempt_id', 'operation_id', 'fencing_epoch', 'history_ref', 'status', 'terminal'), INVALID)
+        _closed(item, ('attempt_id', 'operation_id', 'fencing_epoch', 'history_ref', 'status', 'terminal',
+            *(('intent',) if 'intent' in item else ())), INVALID)
+        if 'intent' in item:
+            intent = _closed(item['intent'], ('operation_id', 'fencing_epoch', 'reservation_id', 'budget_class',
+                'candidate_map_digest', 'snapshot_digest',
+                *(('started_at', 'deadline_at') if 'started_at' in item['intent'] or 'deadline_at' in item['intent'] else ())), INVALID)
+            if 'started_at' in intent:
+                from .budget import _at
+                if _at(intent['started_at']) >= _at(intent['deadline_at']):
+                    raise FreshReviewError(INVALID)
+            for key in ('operation_id', 'reservation_id', 'budget_class'):
+                _identifier(intent[key])
+            _integer(intent['fencing_epoch'], INVALID)
+            _digest(intent['candidate_map_digest']); _digest(intent['snapshot_digest'])
+            if intent['fencing_epoch'] < item['fencing_epoch']:
+                raise FreshReviewError(INVALID)
         _digest(item['attempt_id']); _identifier(item['operation_id']); _integer(item['fencing_epoch'], INVALID)
         _reference(item['history_ref'], 'repair-attempt')
         if item['attempt_id'] != attempt_id(row['lineage_id'], item['operation_id']) or item['attempt_id'] in seen:
@@ -59,18 +74,26 @@ def validate_attempts(row):
         if item['status'] == 'pending':
             if index != len(attempts) - 1 or item['terminal'] != absent('not-terminal'):
                 raise FreshReviewError(INVALID)
-        elif item['status'] in ('failed', 'blocked'):
-            end = _closed(item['terminal'], ('outcome', 'reason', 'operation_id', 'fencing_epoch', 'event_ref', 'comparison_ref'), INVALID)
+        elif item['status'] in ('failed', 'blocked', 'verified'):
+            end = _closed(item['terminal'], ('outcome', 'reason', 'operation_id', 'fencing_epoch', 'event_ref', 'comparison_ref',
+                *(('generation',) if 'generation' in item['terminal'] else ())), INVALID)
             _integer(end['fencing_epoch'], INVALID)
             if end['fencing_epoch'] < item['fencing_epoch']:
                 raise FreshReviewError(INVALID)
             if end['reason'] not in TERMINAL_REASONS or (item['status'] == 'failed') != (end['reason'] == 'replay-failed'):
                 raise FreshReviewError(INVALID)
-            if end != terminal(item['attempt_id'], item['status'], end['reason'], end['fencing_epoch']):
+            expected = terminal(item['attempt_id'], item['status'], end['reason'], end['fencing_epoch'])
+            if 'generation' in end:
+                _integer(end['generation'], INVALID)
+                _reference(end['comparison_ref'], 'repair-reverification')
+                expected.update(generation=end['generation'], comparison_ref=end['comparison_ref'])
+            if item['status'] == 'verified' and ('generation' not in end or 'intent' not in item or end['reason'] != 'replay-passed'):
+                raise FreshReviewError(INVALID)
+            if end != expected:
                 raise FreshReviewError(INVALID)
         else:
             raise FreshReviewError(INVALID)
-    if row['lifecycle'] != ('repairing' if attempts and attempts[-1]['status'] == 'pending' else 'open'):
+    if row['lifecycle'] != ('repairing' if attempts and attempts[-1]['status'] == 'pending' else 'verified' if attempts and attempts[-1]['status'] == 'verified' else 'open'):
         raise FreshReviewError(INVALID)
 
 
@@ -175,6 +198,18 @@ def mutate_attempt(state, command):
             raise FreshReviewError(INVALID)
         for value in candidate['snapshots'].values():
             _digest(value)
+        if row['lifecycle'] == 'verified':
+            latest = row['attempts'][-1]
+            from .repair_reverification import candidate_changed, full_candidate_digest, next_generation
+            full = command.observed_candidates
+            changed = (canonical_digest(candidate['snapshots']) != latest['intent']['candidate_map_digest']
+                if full is None else candidate_changed(row, contract, full.thaw()))
+            if not changed and row['last_candidate_change'].get('generation', 0) < latest['terminal']['generation']:
+                raise FreshReviewError('repair-lineage-already-verified')
+            if changed:
+                row['last_candidate_change'] = dict(generation=next_generation(document),
+                    candidate_map_digest=canonical_digest(candidate['snapshots']) if full is None
+                        else full_candidate_digest(contract, full.thaw()), operation_id=command.operation_id)
         if type(body['baseline_receipts']) is not list or body['baseline_receipts'] != baseline_receipts(document, row):
             raise FreshReviewError(INVALID)
         _reference(body['plan_ref'], 'repair-plan'); _reference(body['repro_input_ref'], 'repair-repro')

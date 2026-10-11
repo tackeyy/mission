@@ -143,13 +143,15 @@ def test_withdrawn_requests_are_excluded_from_documented_completion_inputs(publi
                                   operation_id='withdraw', fencing_epoch=1)
     data = dict(acceptance_contract=contract, fresh_review=projection_document(projection))
     def capture(_, commands):
-        assert commands == {}
-        return {}
+        from types import SimpleNamespace
+        assert commands == contract['verifier_policy']['commands']
+        return {key: SimpleNamespace(digest='sha256:' + 'a' * 64) for key in commands}
     monkeypatch.setattr(app.prepare, '_capture', capture)
     monkeypatch.setattr(app, '_read', lambda *_: pytest.fail('withdrawn request tried to read evidence'))
     observed = app.observe_completion_inputs(data, root=tmp_path, load_policy=lambda _: contract['verifier_policy'], read_evidence=_read_evidence)
     assert observed.evidence == ()
     assert observed.bindings.input_digests == observed.bindings.candidate_snapshots == ()
+    assert set(observed.bindings.observed_candidates.thaw()) == set(contract['verifier_policy']['commands'])
     assert validate_completion_carriers(projection, observed.evidence, observed.bindings,
                                         observed.bindings.contract_digest) is None
     # Keep the public observation contract explicit about the tombstone filter.

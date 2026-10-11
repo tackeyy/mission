@@ -34,6 +34,7 @@ def prepare_begin(state, *, root, lineage_id, operation, plan, services):
     evidence = observe_lineage_evidence(state, root=root, read_evidence=services.read_evidence)
     finding = _read(root, ContentAddressedRef(**row['finding_ref']), read_evidence=services.read_evidence)
     repro = canonical_bytes(finding['repro_input'])
+    observed = None
     if old is not None:
         body = _read(root, ContentAddressedRef(**old['history_ref']), read_evidence=services.read_evidence)
         if body['plan_ref'] != reference('repair-plan', plan.encode('utf-8')):
@@ -44,9 +45,10 @@ def prepare_begin(state, *, root, lineage_id, operation, plan, services):
         if services.load_verifier_policy(root)['digest'] != contract['verifier_policy']['digest']:
             raise FreshReviewError('repair-contract-stale')
         ids = row['introduced_candidate']['snapshots']
-        snapshots = _capture(root, {key: commands[key] for key in ids})
-        candidates = {key: value.digest for key, value in snapshots.items()}
-        if candidates != {key: value.digest for key, value in _capture(root, {key: commands[key] for key in ids}).items()}:
+        observed = {key: value.digest for key, value in _capture(root, commands).items()}
+        snapshots = {key: observed[key] for key in ids}
+        candidates = snapshots
+        if observed != {key: value.digest for key, value in _capture(root, commands).items()}:
             raise FreshReviewError('repair-candidate-stale')
         body = dict(schema='mission-repair-attempt/1', lineage_id=lineage_id, attempt_id=identifier,
             before_candidate=dict(snapshots=candidates, contract_digest=canonical_contract_digest(contract),
@@ -58,7 +60,8 @@ def prepare_begin(state, *, root, lineage_id, operation, plan, services):
     refs = (reference('repair-attempt', contents[0]), body['plan_ref'], body['repro_input_ref'])
     effects = tuple(make_evidence_effect(ref['kind'], ref['relative_path'], content) for ref, content in zip(refs, contents))
     claims = tuple(FreshReviewInputEffectClaim(e.kind, e.target, e.digest, e.size) for e in effects)
-    return PreparedEvidenceOperation(BeginFindingRepair(lineage_id, operation, freeze_json_value(body), plan, *claims, evidence), effects, {})
+    return PreparedEvidenceOperation(BeginFindingRepair(lineage_id, operation, freeze_json_value(body), plan, *claims, evidence,
+        None if observed is None else freeze_json_value(observed)), effects, {})
 
 
 def prepare_reconcile(state, *, identifier, reason):
@@ -117,6 +120,10 @@ def run_repair_cli(args, services):
                     raise EvidenceFailure('repair-effects-unavailable')
                 execute_evidence_operation(repo(terminal_operation(identifier, 'blocked', 'effects-unavailable')),
                     partial(prepare_reconcile, identifier=identifier, reason='effects-unavailable'))
+        elif args.repair_command == 'reverify':
+            from .repair_reverification import reverify
+            identifier = args.attempt
+            reverify(identifier, read=read, repo=repo, root=root, services=services)
         else:
             identifier = args.attempt
             _, item = find_attempt(read(), identifier)  # begin/load recovers durable prepare first

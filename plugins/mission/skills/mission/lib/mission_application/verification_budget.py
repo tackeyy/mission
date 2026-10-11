@@ -11,11 +11,11 @@ from .provider_budget import ProviderBudget, _apply
 from .artifact import EvidenceFailure
 
 
-def reserve_verification(document, criterion, timeout, at, candidate_digest, terminal_bytes=64 * 1024):
+def reserve_verification(document, criterion, timeout, at, candidate_digest, terminal_bytes=64 * 1024, *, entry="verification-run", operation=None):
     if decode_ledger(document).policy is None:
         return None, None
-    command = ReserveDispatchBudget(at, 'verification-run', criterion,
-        'verification:' + secrets.token_hex(16), int(document.get('fencing_epoch') or 1),
+    command = ReserveDispatchBudget(at, entry, criterion,
+        operation or 'verification:' + secrets.token_hex(16), int(document.get('fencing_epoch') or 1),
         timeout, terminal_bytes, candidate_digest)
     started, wall = time.monotonic(), datetime.now(timezone.utc)
     result = _apply(document, command)
@@ -46,12 +46,12 @@ def execute_verification(document, root, criterion, repro_input, budget, command
     try:
         receipt = run_job('verification', {'contract': document['acceptance_contract'],
             'criterion': criterion, 'repro_input': repro_input, 'deadline': budget.deadline,
-            'no_progress_candidate': stalled_candidate(decode_ledger(document), 'verification-run', criterion)},
+            'no_progress_candidate': stalled_candidate(decode_ledger(document), budget.reservation.entry, budget.reservation.target)},
             root / '.mission-state' / 'exec-jobs', deadline=budget.deadline,
             collect_deadline=budget.deadline + 1 + budget.policy.post_run_sec,
             term_grace=budget.policy.term_grace_sec, kill_wait=budget.policy.kill_wait_sec,
             reservation_id=budget.reservation.reservation_id.replace(':', '_'), cwd=root, session_id=session_id)
-        run_sec = budget.reservation.reserved_sec - cleanup_sec(budget.policy, 'verification-run') - budget.policy.commit_margin_sec
+        run_sec = budget.reservation.reserved_sec - cleanup_sec(budget.policy, budget.reservation.entry) - budget.policy.commit_margin_sec
         if receipt['block_reason'] == 'budget-deadline' and receipt['exit_code'] is not None and run_sec >= command['timeout_sec']:
             receipt['block_reason'] = 'timeout'
         return receipt

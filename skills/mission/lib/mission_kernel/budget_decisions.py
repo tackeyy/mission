@@ -78,6 +78,8 @@ def budget_class(entry, state, ledger, at):
                      'system-recover', 'repair-begin'):
         raise BudgetError('budget-entry-invalid')
     latched = ledger.stop_slots.final_latch is not None or at >= deadlines(ledger, at).repair
+    if entry == 'repair-reverify' and any(a['status'] == 'pending' for r in state.repair.lineages for a in r.document.thaw()['attempts']):
+        return _reject('final-latched') if latched else 'repair'
     if entry in ('repair-reverify', 'repair-disposition-run', 'repair-begin'):
         return _reject('final-latched') if latched else _reject('repair-attempt-missing')
     if entry in ('invoke-command', 'invoke-prepared', 'verify-approval'):
@@ -182,6 +184,15 @@ def admit(ledger, state, at, *, entry, target, operation_id, fencing_epoch,
         _int(reserved_bytes)
         if candidate_digest is not None or entry != 'verification-run':
             _text(candidate_digest, re.compile(r'sha256:[0-9a-f]{64}\Z'))
+        if entry == 'repair-reverify':
+            try:
+                row = next(r.document.thaw() for r in state.repair.lineages if r.document.thaw()['lineage_id'] == target)
+                attempt = row['attempts'][-1]
+                if (attempt['status'] != 'pending' or 'intent' in attempt
+                        or operation_id != 'repair-dispatch:' + attempt['attempt_id'][7:]):
+                    return _reject('repair-attempt-missing')
+            except (ValueError, KeyError, IndexError, StopIteration):
+                return _reject('repair-attempt-missing')
         if entry == 'system-recover':
             recovery = ledger.stop_slots.system_recovery
             if recovery.reservation is not None:
@@ -387,7 +398,8 @@ def settle(ledger, at, *, reservation_id, outcome, elapsed_sec, candidate_digest
     approval = row.entry in ('verify-approval', 'force-approval')
     signature = progress_digest if approval else result_digest
     prior = next((p for p in ledger.progress if (p.entry, p.target) == (row.entry, row.target)), None)
-    count = prior.consecutive_count + 1 if prior and prior.candidate_digest == candidate_digest and prior.result_digest == signature else 1
+    count = prior.consecutive_count + 1 if prior and prior.candidate_digest == candidate_digest and (
+        row.entry == 'repair-reverify' or prior.result_digest == signature) else 1
     if signature is not None:
         progress.append(ProgressSignature(row.entry, row.target, candidate_digest, signature, count))
     if refusal_reason is not None or (approval and progress_digest is None):
