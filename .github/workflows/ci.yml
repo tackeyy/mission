@@ -94,7 +94,12 @@ jobs:
                   pull_number: context.payload.pull_request.number,
                   per_page: 100,
                 });
-                files = response.map((file) => file.filename);
+                const expected = context.payload.pull_request.changed_files;
+                const names = response.map((file) => file.filename);
+                if (Number.isInteger(expected) && expected >= 0
+                    && names.length === expected && new Set(names).size === names.length) {
+                  files = names;
+                }
               }
             } catch (error) {
               core.warning(`Changed-file detection failed; running all checks: ${error.message}`);

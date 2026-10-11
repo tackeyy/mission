@@ -1,0 +1,6 @@
+{
+  "module": "lib/ci_suite_evidence.py",
+  "calls": {
+    "_normalise_log:replace": 1
+  }
+}
