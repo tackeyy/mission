@@ -1,4 +1,10 @@
 {
   "schema": "mission-suite-contract/1",
-  "full_suite_command": ["make", "test"]
+  "full_suite_command": ["make", "test"],
+  "ci_reuse": {
+    "workflow_path": ".github/workflows/ci.yml",
+    "shards": 8,
+    "target": "skills/mission",
+    "required_jobs": ["Shell", "Quality"]
+  }
 }

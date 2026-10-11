@@ -1,0 +1,12 @@
+{
+  "candidates": {
+    "run_cleanup_stale:execute": {
+      "count": 6,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    }
+  },
+  "module": "lib/mission_application/stale_cleanup.py"
+}

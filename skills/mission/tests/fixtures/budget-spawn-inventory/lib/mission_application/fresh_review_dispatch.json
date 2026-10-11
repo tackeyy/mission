@@ -1,0 +1,82 @@
+{
+  "candidates": {
+    "_execute:execute": {
+      "count": 1,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "_reconcile:launch": {
+      "count": 4,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        7,
+        8,
+        9
+      ]
+    },
+    "_reconcile:recover": {
+      "count": 1,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        7,
+        8,
+        9
+      ]
+    },
+    "_sender_observation:launch": {
+      "count": 4,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        7,
+        8,
+        9
+      ]
+    },
+    "_terminal:cancel": {
+      "count": 1,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "_terminal:launch": {
+      "count": 5,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        7,
+        8,
+        9
+      ]
+    },
+    "finish:cancel": {
+      "count": 2,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        7,
+        8,
+        9
+      ]
+    },
+    "run_fresh_review_dispatch_cli:cancel": {
+      "count": 2,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        7,
+        8,
+        9
+      ]
+    },
+    "run_fresh_review_dispatch_cli:launch": {
+      "count": 2,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        7,
+        8,
+        9
+      ]
+    }
+  },
+  "module": "lib/mission_application/fresh_review_dispatch.py"
+}

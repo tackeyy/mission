@@ -1,0 +1,14 @@
+{
+  "calls": {
+    "_capture_regular_file:open-write": 1,
+    "_fsync_directory:open-write": 1,
+    "_lock_file:open-write": 1,
+    "_maybe_load_now:replace": 1,
+    "_parse_iso_utc:replace": 2,
+    "record:link": 1,
+    "record:replace": 1,
+    "record:unlink": 2,
+    "record:write": 1
+  },
+  "module": "lib/pregate_cache.py"
+}

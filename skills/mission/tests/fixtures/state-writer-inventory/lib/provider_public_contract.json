@@ -1,0 +1,7 @@
+{
+  "calls": {
+    "_safe_relative_path:replace": 1,
+    "_safe_source:replace": 1
+  },
+  "module": "lib/provider_public_contract.py"
+}

@@ -1,0 +1,7 @@
+{
+  "calls": {
+    "_timestamp:replace": 1,
+    "decode_terminal_receipt:dynamic": 2
+  },
+  "module": "lib/mission_kernel/fresh_review_receipts.py"
+}

@@ -1,0 +1,9 @@
+{
+  "calls": {
+    "_archive_files:open-write": 1,
+    "_copy_candidate:copy2": 1,
+    "_normalized_digest:open-write": 1,
+    "_write_tree:write_bytes": 1
+  },
+  "module": "benchmarks/mission-vs-goal/public_benchmark.py"
+}

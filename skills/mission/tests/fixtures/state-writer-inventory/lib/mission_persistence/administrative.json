@@ -1,0 +1,18 @@
+{
+  "calls": {
+    "_fsync_directory:open-write": 1,
+    "_open_directory_at:open-write": 2,
+    "_read_file_at:open-write": 1,
+    "_remove_tree_at:unlink": 1,
+    "_write_generation_file:fdopen-write": 1,
+    "_write_generation_file:open-write": 1,
+    "_write_generation_file:write": 1,
+    "administrative_commit:copy-ref": 2,
+    "publish_administrative_generation:fdopen-write": 1,
+    "publish_administrative_generation:open-write": 5,
+    "publish_administrative_generation:rename": 1,
+    "publish_administrative_generation:write": 1,
+    "restore_record:write_bytes": 1
+  },
+  "module": "lib/mission_persistence/administrative.py"
+}

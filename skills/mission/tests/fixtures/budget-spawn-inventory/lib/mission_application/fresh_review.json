@@ -1,0 +1,28 @@
+{
+  "candidates": {
+    "run_fresh_review_prepare_cli:execute_evidence_operation": {
+      "count": 1,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "run_fresh_review_status_cli:launch": {
+      "count": 2,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        7,
+        8,
+        9
+      ]
+    },
+    "run_repair_origins_cli:execute_evidence_operation": {
+      "count": 1,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    }
+  },
+  "module": "lib/mission_application/fresh_review.py"
+}

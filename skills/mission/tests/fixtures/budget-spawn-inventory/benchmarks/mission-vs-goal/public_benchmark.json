@@ -1,0 +1,33 @@
+{
+  "candidates": {
+    "_completion_result:_run_bounded": {
+      "count": 1,
+      "reason": "Standalone public benchmark tool (design 881 section 3.2 row 14), never a Mission session dispatch. G initializes/exports a temporary starter repo; H bounds create/start/inspect/remove of the offline immutable evaluator container. No reservation coverage is claimed.",
+      "rows": [
+        14
+      ]
+    },
+    "_container_evaluate:_run_bounded": {
+      "count": 3,
+      "reason": "Standalone public benchmark tool (design 881 section 3.2 row 14), never a Mission session dispatch. G initializes/exports a temporary starter repo; H bounds create/start/inspect/remove of the offline immutable evaluator container. No reservation coverage is claimed.",
+      "rows": [
+        14
+      ]
+    },
+    "prepare_assignment:create_worker_export": {
+      "count": 1,
+      "reason": "Standalone public benchmark tool (design 881 section 3.2 row 14), never a Mission session dispatch. G initializes/exports a temporary starter repo; H bounds create/start/inspect/remove of the offline immutable evaluator container. No reservation coverage is claimed.",
+      "rows": [
+        14
+      ]
+    },
+    "prepare_assignment:initialize_worker_export_repository": {
+      "count": 1,
+      "reason": "Standalone public benchmark tool (design 881 section 3.2 row 14), never a Mission session dispatch. G initializes/exports a temporary starter repo; H bounds create/start/inspect/remove of the offline immutable evaluator container. No reservation coverage is claimed.",
+      "rows": [
+        14
+      ]
+    }
+  },
+  "module": "benchmarks/mission-vs-goal/public_benchmark.py"
+}

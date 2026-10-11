@@ -1,0 +1,8 @@
+{
+  "calls": {
+    "<module>:write": 1,
+    "_call:write": 1,
+    "materialize:write_bytes": 1
+  },
+  "module": "lib/fresh_review_host.py"
+}

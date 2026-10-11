@@ -1,0 +1,13 @@
+{
+  "calls": {
+    "_capture_regular_file:open-write": 1,
+    "_fsync_directory:open-write": 1,
+    "_lock_file:open-write": 1,
+    "_queue_now:replace": 2,
+    "_write_queue_unlocked:link": 1,
+    "_write_queue_unlocked:replace": 1,
+    "_write_queue_unlocked:unlink": 2,
+    "_write_queue_unlocked:write": 1
+  },
+  "module": "lib/merge_queue.py"
+}

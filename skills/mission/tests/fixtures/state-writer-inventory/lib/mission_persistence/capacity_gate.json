@@ -1,0 +1,6 @@
+{
+  "calls": {
+    "_takeover_then_halt:copy-ref": 3
+  },
+  "module": "lib/mission_persistence/capacity_gate.py"
+}

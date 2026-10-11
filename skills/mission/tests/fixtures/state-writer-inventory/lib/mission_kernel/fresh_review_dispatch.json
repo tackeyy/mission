@@ -1,0 +1,8 @@
+{
+  "calls": {
+    "_publish_projection:replace": 1,
+    "dispatch_state:replace": 3,
+    "validate_launch:dynamic": 2
+  },
+  "module": "lib/mission_kernel/fresh_review_dispatch.py"
+}

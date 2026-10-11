@@ -1,0 +1,23 @@
+{
+  "calls": {
+    "_advance_command:copy-ref": 2,
+    "_advance_command:replace": 1,
+    "_typed_state:copy-ref": 1,
+    "activity_end:copy-ref": 1,
+    "activity_start:copy-ref": 1,
+    "advance:copy-ref": 1,
+    "advance:replace": 1,
+    "mark_halt:copy-ref": 1,
+    "mark_halt:replace": 1,
+    "mutate:copy-ref": 1,
+    "prepare_supersede_review_write:replace": 1,
+    "reactivate:copy-ref": 1,
+    "reactivate:replace": 1,
+    "refresh_pid:copy-ref": 2,
+    "refresh_pid:replace": 1,
+    "set_fields:copy-ref": 3,
+    "update_project_root:copy-ref": 1,
+    "validate_new_mission_arguments:dynamic": 2
+  },
+  "module": "lib/mission_application/lifecycle.py"
+}

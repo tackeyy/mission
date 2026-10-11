@@ -1,0 +1,6 @@
+{
+  "calls": {
+    "run_verify_provider_approval:atomic_write_bytes": 1
+  },
+  "module": "lib/mission_application/provider_approval.py"
+}

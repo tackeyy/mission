@@ -1,0 +1,19 @@
+{
+  "calls": {
+    "_advance:replace": 2,
+    "_apply_compatibility:replace": 1,
+    "_budget_stop:replace": 1,
+    "_decline_specialist_selection:replace": 2,
+    "_handoff_state:replace": 1,
+    "_mark_halt:replace": 1,
+    "_mark_pass:replace": 2,
+    "_merge_extension_fields:replace": 1,
+    "_prepare_budget_admission:replace": 2,
+    "_reactivate:replace": 1,
+    "_record_specialist_recommendation:replace": 1,
+    "_resume_stale:replace": 1,
+    "_unbound_state:replace": 1,
+    "bind_transition_effects:dynamic": 2
+  },
+  "module": "lib/mission_kernel/transitions.py"
+}

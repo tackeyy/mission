@@ -438,6 +438,31 @@ def test_the_suite_writes_a_report_the_gate_would_accept(tmp_path):
     ) == 2
 
 
+def test_the_writer_emits_a_positive_counted_shard_receipt(tmp_path, monkeypatch, capsys):
+    """CI needs the JUnit-derived count on the stdout receipt it preserves."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "write_suite_report", REPO_ROOT / "scripts" / "write_suite_report.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    junit = tmp_path / "junit.xml"
+    junit.write_text('<testsuite><testcase name="a"/></testsuite>', encoding="utf-8")
+    out = tmp_path / "report.json"
+
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: type(
+        "Result", (), {"stdout": "a" * 40 + "\n"})())
+    assert module.main(["--junit", str(junit), "--out", str(out),
+                        "--ci-shard", "1/2", "--test-manifest", "skills/mission"]) == 0
+
+    assert json.loads(capsys.readouterr().out) == {
+        "schema": "mission-test-report/1", "tree_sha": "a" * 40,
+        "tier": "shard", "shard": "1/2", "test_manifest": ["skills/mission"],
+        "executed": 1,
+    }
+
+
 def test_the_writer_records_the_tree_the_gate_observes():
     """The gate integrates without committing and reads the index.
 
