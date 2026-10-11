@@ -10,7 +10,7 @@ from .json_codec import freeze_json_value
 from .model import FencedLease, FrozenJsonObject
 
 INVALID = 'repair-attempt-invalid'
-TERMINAL_REASONS = frozenset(('publication-result-lost', 'effects-unavailable', 'replay-failed', 'replay-blocked', 'replay-passed'))
+TERMINAL_REASONS = frozenset(('publication-result-lost', 'effects-unavailable', 'replay-failed', 'replay-blocked', 'replay-passed', 'disposition-requested'))
 
 
 def absent(reason):
@@ -89,11 +89,14 @@ def validate_attempts(row):
                 expected.update(generation=end['generation'], comparison_ref=end['comparison_ref'])
             if item['status'] == 'verified' and ('generation' not in end or 'intent' not in item or end['reason'] != 'replay-passed'):
                 raise FreshReviewError(INVALID)
+            if end['reason'] == 'disposition-requested':
+                expected.update(operation_id=end['operation_id'])
             if end != expected:
                 raise FreshReviewError(INVALID)
         else:
             raise FreshReviewError(INVALID)
-    if row['lifecycle'] != ('repairing' if attempts and attempts[-1]['status'] == 'pending' else 'verified' if attempts and attempts[-1]['status'] == 'verified' else 'open'):
+    from .finding_disposition import lifecycle
+    if row['lifecycle'] != lifecycle(row):
         raise FreshReviewError(INVALID)
 
 

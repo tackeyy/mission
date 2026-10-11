@@ -90,7 +90,7 @@ def decode_projection(document):
             fields = ('criterion_id', 'requirement_ids', 'prohibited_side_effect_ids', 'severity',
                 'origin', 'terminal_digest', 'finding_ref', 'replay', 'repro', 'introduced_candidate',
                 'observations', 'attempts') if isinstance(row, dict) and row.get('kind') == 'finding' else ('request_id', 'disposition')
-            _closed(row, (*common, *fields), SHAPE)
+            _closed(row, (*common, *fields, *(('dispositions',) if 'dispositions' in row else ())), SHAPE)
             for key in ('lineage_id', 'output_digest'):
                 _digest(row[key])
             if row['lineage_id'] in seen:
@@ -98,7 +98,7 @@ def decode_projection(document):
             seen.add(row['lineage_id'])
             # E2/E3 will add authenticated resolution variants. Authored status
             # cannot grant a successful replay or independent disposition in E1.
-            if row['lifecycle'] not in ('open', 'repairing', 'verified'):
+            if row['lifecycle'] not in ('open', 'repairing', 'verified', 'deferred', 'rejected'):
                 raise FreshReviewError('repair-lineage-lifecycle-invalid')
             marker = row['last_candidate_change']
             if marker != _absent('no-resolution-binding'):
@@ -146,8 +146,10 @@ def decode_projection(document):
                     raise FreshReviewError(SHAPE)
                 for key, value in candidate['snapshots'].items():
                     _identifier(key); _digest(value)
-            elif row['lifecycle'] != 'open' or row['kind'] != 'unimported-findings' or row['disposition'] != _absent('disposition-not-enabled'):
+            elif row['kind'] != 'unimported-findings' or row['disposition'] != _absent('disposition-not-enabled'):
                 raise FreshReviewError(SHAPE)
+            from .finding_disposition import validate_dispositions
+            validate_dispositions(row)
             _identifier(origin_request_id(row))
             rows.append(FindingLineage(freeze_json_value(row)))
         projection = RepairProjection(tuple(rows))
@@ -271,7 +273,7 @@ def origin_documents(projection, evidence, contract):
 
 
 def origin_identity(row):
-    return {key: value for key, value in row.items() if key not in ('attempts', 'lifecycle', 'last_candidate_change')}
+    return {key: value for key, value in row.items() if key not in ('attempts', 'dispositions', 'lifecycle', 'last_candidate_change')}
 
 
 def import_origins(state, evidence):
@@ -320,7 +322,7 @@ def effective_unresolved_findings(projection, reviews, evidence, contract, bindi
     resolved = set()
     if bindings is not None:
         for row in existing.values():
-            if row['kind'] == 'finding' and resolution_valid(row, bindings.repair_results, dict(bindings.candidate_snapshots), contract,
+            if row['kind'] == 'finding' and not row.get('dispositions') and resolution_valid(row, bindings.repair_results, dict(bindings.candidate_snapshots), contract,
                     observed_candidates=None if bindings.observed_candidates is None else bindings.observed_candidates.thaw()):
                 item = row['attempts'][-1]
                 body = next(r.thaw() for r in bindings.repair_results if canonical_digest(r.thaw()) == item['terminal']['comparison_ref']['digest'])

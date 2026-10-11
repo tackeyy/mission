@@ -1,0 +1,7 @@
+{
+  "module": "lib/mission_kernel/finding_disposition.py",
+  "calls": {
+    "validate_terminal:replace": 1,
+    "visit:remove": 1
+  }
+}
