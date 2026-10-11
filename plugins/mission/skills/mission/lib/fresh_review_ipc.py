@@ -95,7 +95,10 @@ class OperationChannel:
                     break
                 result.append(self._decode(bytes(self._buffer[4:size + 4])))
                 del self._buffer[:size + 4]
-            return tuple(result)
+            methods = tuple(result)
+            if time.monotonic() >= self._deadline:
+                raise ObservationBlocked('ipc-closed')
+            return methods
         except ObservationBlocked:
             self._failed = True
             self._buffer.clear()
@@ -130,7 +133,9 @@ def managed_callback_fds(channels, owner_write_fd):
             result = []
             identities = set()
             for fd in channels:
-                duplicate = os.dup(fd)
+                if not hasattr(fcntl, 'F_DUPFD_CLOEXEC'):
+                    raise ObservationBlocked('ipc-descriptor-unobservable')
+                duplicate = fcntl.fcntl(fd, fcntl.F_DUPFD_CLOEXEC, 3)
                 cleanup.enter_context(cleanup_scope(lambda fd=duplicate: os.close(fd)))
                 metadata = os.fstat(duplicate)
                 identity = (metadata.st_dev, metadata.st_ino)

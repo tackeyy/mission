@@ -61,8 +61,18 @@ def test_query_identity_requires_both_native_events_from_its_owner():
         identity.observe()
     identity.init(owner, {'session_id': 'native-parent'})
     assert identity.observe() == 'native-parent'
+
+
+@pytest.mark.parametrize('first_event', ['session_start', 'init'])
+def test_initial_native_event_from_another_query_owner_is_rejected(first_event):
+    owner = object()
+    identity = QueryIdentity(owner)
+    event = {'session_id': 'native-parent'}
+    if first_event == 'session_start':
+        event['source'] = 'startup'
+    # There is no earlier event: duplicate detection cannot hide this boundary.
     with pytest.raises(ObservationBlocked):
-        identity.init(object(), {'session_id': 'native-parent'})
+        getattr(identity, first_event)(object(), event)
     with pytest.raises(ObservationBlocked):
         identity.observe()
 

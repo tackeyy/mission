@@ -39,7 +39,7 @@ fixtureの投影を検査しており、native SDKの実イベント型・fresh 
 
 `test_issue1008_host_ipc.py`は、改ざん・再送・duplicate key・部分frame・過大入力・
 期限切れによる誤dispatchと、owner生存pipeの漏出によるEOF停止の妨害を検出する。
-大きな入力はbytes上限の実境界を一度検査する。実processはFD継承の1ケースだけで、
+大きな入力はbytes上限の実境界を一度検査する。実processはFD継承の1ケースと標準FD閉鎖の3ケースで、
 残りは同期的なparser/FD検査。実processがなければbootstrapを越えたFD保持/閉鎖は検出できない。
 寿命・watchdog故障の全組合せをここへ複製しない。
 
@@ -50,13 +50,13 @@ keeperは`test_issue896_adapter_registry.py`の登録・source pin、
 既存シナリオの削除はない。
 
 CIは`.github/workflows/ci.yml`の`make test-shard`から`skills/mission`を選択し、
-`scripts/ci_shard_targets.py`で追跡済みtest fileを分割する。新規2ファイルはcommit後に対象となる。
+`scripts/ci_shard_targets.py`で追跡済みtest fileを分割する。新規2ファイルは追跡済みで対象となる。
 CIの実行結果はまだ取得していない。
 
 ## ローカル検証
 
 - 既存registry baseline:121件成功、2.04秒。
-- 新規2ファイル、writer/spawn/module inventories、mirror同期:630件成功、11.20秒。
+- 新規2ファイル、writer/spawn/module inventories、mirror同期:636件成功、11.43秒。
 - spawn inventoryが新しい`os.O_ACCMODE`定数参照を未分類として拒否したため、
   非spawn定数として明示分類。既存SAFE列挙の回帰検査がこの分類も通る。
 
@@ -77,3 +77,22 @@ Redの`DID NOT RAISE`を確認し、成功EOFもchannelを終端化する修正�
 再探索は修正済みcheckpoint3を対象とし、旧snapshotの結果を現候補へ流用しない。
 実依存でcheckpoint3の104入力を独立再実行し、accept16・blocked88・想定外例外0・期待との差0。
 修正対象moduleは`sha256:bd52a04b64c16adb996db8233cb38d462a983856052815599c0c63be165192b6`。
+
+## Runtimeレビュー指摘の修正
+
+候補`12ea4efa0df5af8b0930532090d5211b540cc49a`の独立レビューとCheckerは、
+解析中の期限切れ、標準FD閉鎖時の複製衝突を阻害指摘とした。受入は未完了。
+
+- mutable clockをJSON decoder完了後に0から1へ進め、期限0.5のmethodが返るRedを確認。
+  返却直前もmonotonic期限を検査し、超過時はsticky拒否する。
+  実時間の短い期限に依存せず、解析中に期限を越える機序を決定的に検出する。
+- socket作成後に標準FD0/1/2をそれぞれ閉じる実processで、複製が標準FDへ入るRedを確認。
+  `F_DUPFD_CLOEXEC`の下限3で複製し、非継承・scope終了時の回収と既存bootstrap先socket保持を確認。
+  同定数を使えないhostはblocked。実processは標準streamの置換を検証するために必要で、3ケース追加後のIPC28件は0.76秒。
+- 初回startup/initを別ownerから渡す2ケースへowner検査を分離。
+  重複イベントでもある既存ケースを整理し、owner比較だけを除去したメモリ内変異を両ケースが検出した。
+  本体のowner検査は変更していない。実hostのquery分離を観測したとは扱わない。
+
+両libの`feed/deadline/monotonic/_decode/os.dup/F_DUPFD/pass_fds`を照合し、
+変更対象は当該IPC guardとそのmirror、随伴テスト・検証記録に限定した。
+修正後の新規セッションレビュー・Checker再確認は次候補headに対して実施する。

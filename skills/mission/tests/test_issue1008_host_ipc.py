@@ -6,6 +6,8 @@ import os
 import socket
 import sys
 import tempfile
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -114,6 +116,23 @@ def test_expired_capability_cannot_complete_a_previously_partial_frame(monkeypat
         operation.feed(wire[-1:])
 
 
+def test_decode_crossing_deadline_cannot_return_any_method_and_closes_channel(monkeypatch):
+    now = [0.0]
+    loads = json.loads
+    def decode_then_expire(*args, **kwargs):
+        result = loads(*args, **kwargs)
+        now[0] = 1.0
+        return result
+    monkeypatch.setattr('fresh_review_ipc.time.monotonic', lambda: now[0])
+    operation = OperationChannel('boot', 'operation', 'sha256:' + 'a' * 64, CAPABILITY, deadline=.5)
+    monkeypatch.setattr('fresh_review_ipc.json.loads', decode_then_expire)
+    with pytest.raises(ObservationBlocked):
+        operation.feed(frame(message(method='launch')))
+    now[0] = 0.0
+    with pytest.raises(ObservationBlocked):
+        operation.feed(frame(message(nonce='new')))
+
+
 def test_callback_descriptors_are_owned_duplicates_and_never_include_owner_pipe():
     reader, owner = os.pipe()
     local, peer = socket.socketpair()
@@ -134,6 +153,55 @@ def test_callback_descriptors_are_owned_duplicates_and_never_include_owner_pipe(
         os.close(owner)
         local.close()
         peer.close()
+
+
+@pytest.mark.parametrize('closed_standard_fd', [0, 1, 2])
+def test_closed_standard_descriptor_cannot_capture_the_managed_socket(closed_standard_fd):
+    # Isolate closing stdio from pytest; exercise the real existing bootstrap.
+    script = '''import json,os,socket,sys,time
+sys.path.insert(0,sys.argv[1])
+from fresh_review_ipc import managed_callback_fds
+from budgeted_exec import spawn_deadline_exec,observe_exit,cleanup_group
+reader,owner=os.pipe()
+local,peer=socket.socketpair()
+child=control=None
+try:
+    os.close(int(sys.argv[2]))
+    with managed_callback_fds((local.fileno(),),owner) as descriptors:
+        assert descriptors[0]>=3, descriptors
+        assert not os.get_inheritable(descriptors[0])
+        target='import os,socket,sys; fd=int(sys.argv[1]); s=socket.socket(fileno=fd); assert s.family==socket.AF_UNIX; os.write(fd,b"ready")'
+        child,control=spawn_deadline_exec([sys.executable,'-I','-S','-c',target,str(descriptors[0])],time.monotonic()+3,pass_fds=descriptors)
+        deadline=time.monotonic()+3
+        while not observe_exit(child.pid) and time.monotonic()<deadline:
+            time.sleep(.01)
+        assert cleanup_group(child)
+        assert child.returncode==0, child.returncode
+        peer.settimeout(1)
+        assert peer.recv(64)==b'ready'
+        duplicate=descriptors[0]
+    try:
+        os.fstat(duplicate)
+    except OSError:
+        pass
+    else:
+        raise AssertionError('duplicate remains open')
+    os.write(int(sys.argv[3]),b'passed')
+finally:
+    if child is not None and child.returncode is None:
+        cleanup_group(child,timed_out=True)
+    if control is not None:
+        os.close(control)
+    os.close(reader);os.close(owner);local.close();peer.close()
+'''
+    with tempfile.TemporaryFile() as result:
+        completed = subprocess.run(
+            [sys.executable, '-c', script, str(Path(__file__).resolve().parents[1] / 'lib'),
+             str(closed_standard_fd), str(result.fileno())],
+            pass_fds=(result.fileno(),), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=10)
+        assert completed.returncode == 0, completed.stderr.decode()
+        result.seek(0)
+        assert result.read() == b'passed'
 
 
 def test_existing_deadline_exec_preserves_only_managed_channel(tmp_path):
@@ -186,12 +254,14 @@ def test_descriptor_rejection_and_interruption_close_only_owned_duplicates(monke
     reader, owner = os.pipe()
     local, peer = socket.socketpair()
     duplicates = []
-    duplicate = os.dup
-    def capture(fd):
-        value = duplicate(fd)
-        duplicates.append(value)
+    import fcntl
+    duplicate = fcntl.fcntl
+    def capture(fd, command, *args):
+        value = duplicate(fd, command, *args)
+        if command == fcntl.F_DUPFD_CLOEXEC:
+            duplicates.append(value)
         return value
-    monkeypatch.setattr('fresh_review_ipc.os.dup', capture)
+    monkeypatch.setattr('fresh_review_ipc.fcntl.fcntl', capture)
     try:
         for channels in ((local.fileno(), reader), (local.fileno(), local.fileno())):
             with pytest.raises(ObservationBlocked):
@@ -200,6 +270,7 @@ def test_descriptor_rejection_and_interruption_close_only_owned_duplicates(monke
         with pytest.raises(KeyboardInterrupt):
             with managed_callback_fds((local.fileno(),), owner):
                 raise KeyboardInterrupt()
+        assert duplicates
         for fd in duplicates:
             with pytest.raises(OSError):
                 os.fstat(fd)
