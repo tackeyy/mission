@@ -33,6 +33,7 @@ caller引数・env・PID・任意file・モデル出力から親identityを採�
 [SessionStart仕様](https://code.claude.com/docs/en/hooks#sessionstart)はstartup/resume/forkを区別する。startupだけを受付条件とする。
 既存契約はglobal policy・hook・memoryの全除外を明記していないため、ここでは親の会話履歴を継承しない境界と解釈する。この解釈も設計レビュー対象である。
 [共通instructions/memory](https://code.claude.com/docs/en/memory)やhookのadditionalContextは起動時に入ることがあり、それらの不存在は主張しない。
+SDK parentとchildは現行hardeningを通る起動経路を使用する。SDK同梱の別CLI等へ迂回しない。executable/API/設定の適合が確認できなければ未起動blockedとする。
 既存hardening/hooksを維持し、--bare/--safe-mode・設定sourceの除外で回避しない。--restrictedも全context除外証明にはしない。
 new startup・起動経路・履歴非転送をhost由来の証拠へ束縛できなければprelaunch blocked。未確認をfresh宣言で埋めない。
 
@@ -45,6 +46,7 @@ parent builtin toolsは空、限定Mission MCPだけを公開する。availabili
 guardianはquery closureで確定したparent identity、boot ID、operation、request digestから短命operation capabilityを発行する。
 private local socketはowner専用directoryで保護し、capability/socket情報をモデル・argv・公開artifact・ログへ出さない。
 messageはschema/boot/method/operation/request digest/nonceを閉じて検査し、duplicate key・未知field・過大入力を拒否する。
+IPCは1frame2MiB・operation累積16MiB・256frameまで、ack/eventは1frame8MiB・累積16MiBまでとする。超過は停止・blocked/unknownで、切り詰めた入力を採用しない。
 capabilityは認証用であり親identityの出所ではない。
 
 | method | 契約 |
@@ -61,7 +63,9 @@ capabilityは認証用であり親identityの出所ではない。
 ## 5. callbackとchildの寿命
 
 [既存callback transport](https://github.com/tackeyy/mission/blob/3cd23821512711d216e83be7a17ffe44f0fa5751/skills/mission/lib/fresh_review_host.py)はcallbackのprocess groupをcleanupする。そのgroupからreviewerを起動しない。
-guardian/watchdogをcallback外で先に起動しreviewerのprocess custodyを所有させる。
+guardianをcallback外で先に起動し、既存spawn_deadline_exec/verification_execのbootstrapと独立watchdogを再利用する案とする。
+[既存のsession/group custody](https://github.com/tackeyy/mission/blob/3cd23821512711d216e83be7a17ffe44f0fa5751/skills/mission/lib/mission_application/verification_exec.py)を一から複製せず、cleanup-before-reapとwatchdog readinessを維持する。
+実query ownerのEOFからの停止とguardian故障時の期限停止を区別する。guardianが失われればwatchdogの既存期限内停止を使い、即時停止を観測したとは主張しない。
 request/snapshotはcallback終了前にguardian private領域へ安定読取・digest照合付きでcopyする。元temporary領域へ依存しない。
 親生存は実query ownerとの専用pipeで観測し、callback終了を親EOFと解釈しない。
 
@@ -88,7 +92,8 @@ session/message ID、単一text、順序、一回性を照合し、Unicode/改�
 
 childは実行tool/MCP/subagent/追加入力/再実行を許可しない。初期対応はallowed_tools=[]だけで、他要求は未起動blocked。
 現schemaの予算最小値1を維持しmax_tool_calls=1/max_replays=1とし、実能力はtool0/replay0へ制限する。
-packetは起動前、outputは読取中、wall timeは外部watchdogで制限する。stream envelope/ackにも別の累積bytes上限を置く。
+packetは起動前、outputは読取中、wall timeは外部watchdogで制限する。既存request上限300秒/packet1MiB/output256KiBより厳しい制限だけを採用する。
+immutable snapshot copyも合計8MiBまでとし、超過は未起動blocked。stream envelope/ackは前記の別累積bytes上限を使う。
 起動前に証明できない能力はblocked。起動後のack欠落/identity不一致/監視喪失は未起動扱いへ戻さず停止・unknownへ進む。
 launch receiptは入力・identity・能力・予算の実観測が揃った場合だけ発行する。
 
@@ -110,6 +115,8 @@ fixtureはidentity交差、IPC改ざん/再送、callback終了後のchild生存
 ## 8. 証跡と完了
 
 公開artifactは版、source/probe digest、匿名化identity、観測可否、bytes、時間、推定費用だけとする。home path/capability/credential/raw transcriptを含めない。
-必要最小限のhost events/ack/custody証跡はアクセス制限された非公開領域へ保存し、値非ログとTTL/cleanupを設計レビューで確定する。
+非公開証跡は選択したidentity/startup/custody観測とackだけで、nativeイベントの全dumpを保存しない。credentialとoperation capabilityはfileへ書き出さず、runtimeの専用FDだけで受け渡す。
+証跡は0700 owner directory内の0600 non-symlink regular file、link-count1、operation当たり最大16MiB、TTL600秒とする。
+cleanupは所有inode/deviceと非symlinkを再確認して対象operationだけ削除する。guardian終了時と次回起動時に期限切れを回収する。証跡消失を成功・停止証明にせず結果喪失/unknownとする。
 残条件はcontext境界の採否と実host結合、raw ack bytes、監視故障custody、能力/予算強制、SDK版/API適合である。
 既定無効adapter、registry未登録拒否、全ACの実host観測、所定レビュー/Checker/CIまで完了としない。未観測が残ればIssue897をblockedのまま維持する。
