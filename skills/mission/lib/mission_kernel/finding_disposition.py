@@ -319,6 +319,8 @@ def validate_terminal(document, row, item, evidence, candidates):
             or launch.enforced_budget.max_packet_bytes > request['max_packet_bytes']
             or launch.enforced_budget.max_output_bytes > request['max_output_bytes']):
         raise FreshReviewError('disposition-not-independent')
+    validate_ref(request['input_ref'], 'finding-disposition-input',
+        min(1048576, request['max_packet_bytes'], launch.enforced_budget.max_packet_bytes))
     validate_ref(terminal['output_ref'], 'finding-disposition-output',
         min(262144, request['max_output_bytes'], launch.enforced_budget.max_output_bytes))
     output = _result_output(artifact_body(evidence, terminal['output_ref']))
@@ -415,3 +417,36 @@ def resolved_aliases(edges, resolved, known):
             memo[source] = source in resolved or source in edges and all(complete(t) for t in edges[source])
         return memo[source]
     return {source for source in edges if complete(source)}
+
+
+def validate_disposition_evidence(document, evidence, candidates):
+    """Check latest proofs and alias closure without declaring any row resolved.
+
+    Revalidate after construction: the carrier contains original evidence,
+    never a cached verdict. Resolution against current D/E2 obligations belongs
+    to the consumer, including target receipts and full candidate observation.
+    """
+    from .repair_lineage import decode_projection
+    if type(evidence) is not DispositionEvidence or type(evidence.artifacts) is not tuple:
+        raise FreshReviewError('disposition-evidence-invalid')
+    try:
+        rows = [row.document.thaw() for row in decode_projection(document).lineages]
+        edges = {}
+        for row in rows:
+            if not row.get('dispositions'):
+                continue
+            item = row['dispositions'][-1]
+            if item['stage'] != 'terminal' or item['terminal']['outcome'] != 'rejected':
+                raise FreshReviewError('disposition-unresolved')
+            outcome, targets = validate_terminal(document, row, item, evidence, candidates)
+            if outcome != 'rejected':
+                raise FreshReviewError('disposition-unresolved')
+            if list(targets) != item['duplicate_targets']:
+                raise FreshReviewError('disposition-alias-invalid')
+            if targets:
+                edges[row['lineage_id']] = targets
+        resolved_aliases(edges, set(), {row['lineage_id'] for row in rows})
+    except FreshReviewError:
+        raise
+    except (KeyError, TypeError, ValueError, AttributeError, RecursionError) as exc:
+        raise FreshReviewError('disposition-evidence-invalid') from exc
