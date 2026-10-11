@@ -1,0 +1,6 @@
+{
+  "calls": {
+    "import_origins:replace": 1
+  },
+  "module": "lib/mission_kernel/repair_lineage.py"
+}

@@ -79,7 +79,14 @@ def run_verification_receipt_cli(request, services) -> str:
             from .verification_budget import settle_failed_verification
             settle_failed_verification(services, cwd, state_file, budget, 'verification-contract-stale')
             raise EvidenceFailure('verification-contract-stale')
-        receipt = execute_verification(admitted, cwd, request.criterion_id, repro_input, budget, command, session_id=state_file.stem)
+        try:
+            receipt = execute_verification(admitted, cwd, request.criterion_id, repro_input, budget, command, session_id=state_file.stem)
+        except BaseException as exc:
+            interrupted_receipt = getattr(exc, 'verification_receipt', None)
+            if interrupted_receipt is not None:
+                from .verification_budget import settle_collected_verification
+                settle_collected_verification(services, cwd, state_file, budget, interrupted_receipt)
+            raise
     else:
         receipt = run_contract_verifier(
             state, project_root=cwd, criterion_id=request.criterion_id,

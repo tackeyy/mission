@@ -1,0 +1,11 @@
+{
+  "calls": {
+    "__init__:write-ref": 1,
+    "acquire_legacy_lease:replace": 1,
+    "publish:atomic_write": 1,
+    "publish:write": 1,
+    "write_legacy_terminal:atomic_write": 1,
+    "write_legacy_terminal:write": 1
+  },
+  "module": "lib/mission_persistence/legacy_capacity.py"
+}

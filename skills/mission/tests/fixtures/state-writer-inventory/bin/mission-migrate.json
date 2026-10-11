@@ -1,0 +1,7 @@
+{
+  "calls": {
+    "migrate_one:copy2": 1,
+    "migrate_one:unlink": 1
+  },
+  "module": "bin/mission-migrate.py"
+}

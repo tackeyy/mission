@@ -1,0 +1,8 @@
+{
+  "calls": {
+    "execute_verification:replace": 1,
+    "reserve_verification:replace": 1,
+    "settle_collected_verification:replace": 1
+  },
+  "module": "lib/mission_application/verification_budget.py"
+}

@@ -12,6 +12,7 @@ import secrets
 import stat
 import sys
 import time
+from exec_cleanup import cleanup_scope, finish_cleanup
 
 JOB_LIMIT = 4 * 1024 * 1024
 _NAME = re.compile(r'job-([1-9][0-9]*)-([0-9]+)(?:-s([0-9a-f]{64}))?(?:-r([a-zA-Z0-9_]+))?-([0-9a-f]{32})\.json')
@@ -40,7 +41,7 @@ def private_directory(path: Path) -> None:
 def read_job(path: Path, digest: str, *, limit=JOB_LIMIT) -> bytes:
     private_directory(path.parent)
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    try:
+    with cleanup_scope(os.close, fd):
         info = os.fstat(fd)
         if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
                 or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600
@@ -62,15 +63,13 @@ def read_job(path: Path, digest: str, *, limit=JOB_LIMIT) -> bytes:
                 or hashlib.sha256(raw).hexdigest() != digest):
             raise ValueError('private file changed')
         return raw
-    finally:
-        os.close(fd)
 
 
 def write_private_file(path: Path, content: bytes, *, fsync=None) -> None:
     """Exclusive creation; delete only a file this call actually created."""
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
-        try:
+        with cleanup_scope(os.close, fd):
             os.fchmod(fd, 0o600)
             view = memoryview(content)
             while view:
@@ -79,12 +78,10 @@ def write_private_file(path: Path, content: bytes, *, fsync=None) -> None:
                     raise OSError(errno.EIO, 'write made no progress')
                 view = view[written:]
             (fsync or os.fsync)(fd)
-        finally:
-            os.close(fd)
         # Caller ensures the private directory before creation.
         read_job(path, hashlib.sha256(content).hexdigest(), limit=max(len(content), 1))
-    except BaseException:
-        path.unlink(missing_ok=True)
+    except BaseException as error:
+        finish_cleanup(path.unlink, missing_ok=True, original=error, suppress=(OSError,))
         raise
 
 
@@ -143,19 +140,16 @@ def create_job(directory: Path, raw: bytes, *, reservation_id: str | None = None
         cleanup_errno = None
         # O_EXCL collision does not confer ownership of an existing file.
         if path is not None and not isinstance(exc, FileExistsError):
-            try:
-                path.unlink(missing_ok=True)
-            except OSError as cleanup:
+            cleanup = finish_cleanup(path.unlink, missing_ok=True, original=exc)
+            if isinstance(cleanup, OSError):
                 cleanup_errno = cleanup.errno
         raise JobWriteError(path, cleanup_errno) from exc
 
 
 def _expired_job(path):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    try:
+    with cleanup_scope(os.close, fd):
         raw = os.read(fd, JOB_LIMIT + 1)
-    finally:
-        os.close(fd)
     # Reuse the bounded inode/mode/content check before trusting an expiry.
     value = json.loads(read_job(path, hashlib.sha256(raw).hexdigest()))
     expires = value.get('expires_at') if isinstance(value, dict) else None
@@ -191,7 +185,7 @@ def cleanup_jobs(directory: Path, *, open_reservations=None, closed_reservations
             info = path.lstat()
             if (stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
                     and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600):
-                path.unlink()
+                finish_cleanup(path.unlink)
                 removed.append(path)
         except (OSError, ValueError):
             pass

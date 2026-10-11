@@ -14,6 +14,43 @@ from pathlib import Path
 import pytest
 
 
+FIXTURE_DIR = Path(__file__).parent / 'fixtures/state-writer-inventory'
+
+
+def _json_without_duplicate_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f'duplicate JSON key: {key}')
+        result[key] = value
+    return result
+
+
+def _writer_manifest():
+    """Read reviewer-maintained module fragments; never infer approvals here."""
+    entries = sorted(path for path in FIXTURE_DIR.rglob('*') if path.is_file())
+    assert all(path.suffix == '.json' for path in entries), (
+        f'Invalid writer inventory fragment in {FIXTURE_DIR}: every file must be JSON')
+    fragments = entries
+    assert fragments, f'No writer inventory fragments in {FIXTURE_DIR}'
+    inventory = {}
+    for path in fragments:
+        try:
+            fragment = json.loads(path.read_text(), object_pairs_hook=_json_without_duplicate_keys)
+            module = fragment['module']
+            calls = fragment['calls']
+            expected_path = FIXTURE_DIR / Path(module).with_suffix('.json')
+            assert (isinstance(module, str) and isinstance(calls, dict) and calls
+                    and path == expected_path)
+            assert all(isinstance(key, str) and type(value) is int and value > 0
+                       for key, value in calls.items())
+            assert module not in inventory, f'Duplicate writer inventory module: {module}'
+            inventory[module] = calls
+        except (AssertionError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise AssertionError(f'Invalid writer inventory fragment: {path}: {error}') from error
+    return inventory
+
+
 def _writer_calls(source):
     from collections import Counter
 
@@ -189,8 +226,42 @@ def test_writer_inventory_matches_baseline_manifest():
                 f'{function}:{sink}': count for (function, sink), count in sorted(calls.items())}
     # Include infrastructure/evidence sinks and ambiguous syntactic candidates.
     # New raw I/O in a new module or an existing function changes this map.
-    fixture = Path(__file__).parent / 'fixtures/state-writer-inventory.json'
-    assert inventory == json.loads(fixture.read_text())
+    assert inventory == _writer_manifest(), (
+        'Update the affected reviewer-approved module fragment under '
+        'skills/mission/tests/fixtures/state-writer-inventory/; do not generate classifications automatically.')
+
+
+@pytest.mark.parametrize('fragment', [
+    {},
+    {'module': 'lib/example.py', 'calls': {}},
+    {'module': 'lib/example.py', 'calls': {'write:write_text': 0}},
+    {'module': 'lib/example.py', 'calls': {'write:write_text': True}},
+    {'module': 'lib/other.py', 'calls': {'write:write_text': 1}},
+])
+def test_writer_inventory_rejects_malformed_or_misplaced_fragment(monkeypatch, tmp_path, fragment):
+    fixture = tmp_path / 'lib' / 'example.json'
+    fixture.parent.mkdir()
+    fixture.write_text(json.dumps(fragment))
+    monkeypatch.setitem(globals(), 'FIXTURE_DIR', tmp_path)
+    with pytest.raises(AssertionError, match='Invalid writer inventory fragment'):
+        _writer_manifest()
+
+
+def test_writer_inventory_rejects_duplicate_json_keys(monkeypatch, tmp_path):
+    fixture = tmp_path / 'lib' / 'example.json'
+    fixture.parent.mkdir()
+    fixture.write_text('{"module":"lib/example.py","module":"lib/example.py","calls":{"write:write_text":1}}')
+    monkeypatch.setitem(globals(), 'FIXTURE_DIR', tmp_path)
+    with pytest.raises(AssertionError, match='Invalid writer inventory fragment'):
+        _writer_manifest()
+
+
+def test_writer_inventory_rejects_an_unrecognized_fragment_file(monkeypatch, tmp_path):
+    fragment = tmp_path / 'unexpected.txt'
+    fragment.write_text('{}')
+    monkeypatch.setitem(globals(), 'FIXTURE_DIR', tmp_path)
+    with pytest.raises(AssertionError, match='Invalid writer inventory fragment'):
+        _writer_manifest()
 
 
 

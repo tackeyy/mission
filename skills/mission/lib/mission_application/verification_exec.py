@@ -15,6 +15,12 @@ import signal
 import subprocess
 import sys
 import time
+import runpy
+from pathlib import Path
+
+# -I -S deliberately excludes local imports. Load only our anchored, stdlib-only
+# housekeeping helper; keep the isolated bootstrap independent of site hooks.
+cleanup_scope = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'exec_cleanup.py'))['cleanup_scope']
 
 
 MAX_DEADLINE_AHEAD_SEC = 86400  # F's seconds-policy ceiling; also bounds select
@@ -77,7 +83,8 @@ def main():
     try:
         watchdog = subprocess.Popen([sys.executable, '-I', '-S', __file__, sys.argv[1], sys.argv[2], '--watchdog', str(os.getpgrp())],
             pass_fds=(control,), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, close_fds=True)
-        with watchdog.stdout as ready:
+        ready = watchdog.stdout
+        with cleanup_scope(ready.close):
             readable, _, _ = select.select([ready], [], [], max(0, deadline-time.monotonic()))
             if not readable:
                 _stop(control, b'T')

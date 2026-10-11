@@ -1,0 +1,6 @@
+{
+  "calls": {
+    "binding_records:dynamic": 1
+  },
+  "module": "lib/mission_application/evidence_publication.py"
+}

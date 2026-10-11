@@ -1,0 +1,7 @@
+{
+  "calls": {
+    "_invoke_command_provider:copy": 1,
+    "_non_template_text_length:replace": 1
+  },
+  "module": "lib/mission_application/command_provider.py"
+}

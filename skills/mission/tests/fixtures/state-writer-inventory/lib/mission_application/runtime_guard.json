@@ -1,0 +1,13 @@
+{
+  "calls": {
+    "_closed_permission_transition:copy-ref": 2,
+    "_command_failure_reply:replace": 1,
+    "_freshness:dynamic": 1,
+    "_validated_previous:copy-ref": 1,
+    "decide_stop_guard:replace": 2,
+    "observe_stop_guard:copy-ref": 1,
+    "record_permission_observation:copy-ref": 1,
+    "resolve_guard_command_receipt:replace": 7
+  },
+  "module": "lib/mission_application/runtime_guard.py"
+}

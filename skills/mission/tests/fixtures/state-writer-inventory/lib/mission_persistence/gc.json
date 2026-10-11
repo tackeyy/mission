@@ -1,0 +1,8 @@
+{
+  "calls": {
+    "_read_regular:open-write": 1,
+    "collect_locked:replace": 1,
+    "collect_locked:unlink": 1
+  },
+  "module": "lib/mission_persistence/gc.py"
+}

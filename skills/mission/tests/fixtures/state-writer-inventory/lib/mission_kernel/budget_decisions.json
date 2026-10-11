@@ -1,0 +1,12 @@
+{
+  "calls": {
+    "_reject:replace": 3,
+    "enter_final:replace": 2,
+    "record_exhaustion:replace": 2,
+    "reserve:replace": 4,
+    "settle:replace": 13,
+    "stop:replace": 2,
+    "with_clock:replace": 1
+  },
+  "module": "lib/mission_kernel/budget_decisions.py"
+}

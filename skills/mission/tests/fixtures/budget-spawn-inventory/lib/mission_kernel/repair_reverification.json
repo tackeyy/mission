@@ -1,0 +1,12 @@
+{
+  "module": "lib/mission_kernel/repair_reverification.py",
+  "candidates": {
+    "validate_result:executed_count": {
+      "count": 2,
+      "reason": "Repair replay (design 881 section 3.2 row 8): a durable fenced intent precedes the child; active policy reserves repair budget in that same commit, supervises collection and settles with the terminal. Inert policy uses the frozen verifier timeout. Evidence-operation names are conservative syntactic candidates, not additional child dispatches.",
+      "rows": [
+        8
+      ]
+    }
+  }
+}

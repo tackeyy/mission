@@ -1,0 +1,19 @@
+{
+  "calls": {
+    "_create_private_stage_root:open-write": 1,
+    "_fsync_directory:open-write": 1,
+    "_open_child_directory:open-write": 1,
+    "_open_directory:open-write": 1,
+    "_pin_completed_link_result:open-write": 1,
+    "_publish_immutable_file:link": 1,
+    "_publish_immutable_file:open-write": 1,
+    "_read_expected_file_at:open-write": 1,
+    "_remove_incomplete_stage:rename": 1,
+    "_remove_incomplete_stage:unlink": 2,
+    "_remove_validated_stage:rename": 1,
+    "_remove_validated_stage:unlink": 2,
+    "_rollback_published_link:unlink": 1,
+    "_unlink_pinned_invalid_link:unlink": 1
+  },
+  "module": "lib/mission_persistence/local_uow.py"
+}

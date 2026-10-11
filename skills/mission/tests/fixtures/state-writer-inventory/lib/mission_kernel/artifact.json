@@ -1,0 +1,8 @@
+{
+  "calls": {
+    "_artifact:copy-ref": 1,
+    "_document:copy-ref": 1,
+    "normalized_artifact_section:replace": 1
+  },
+  "module": "lib/mission_kernel/artifact.py"
+}

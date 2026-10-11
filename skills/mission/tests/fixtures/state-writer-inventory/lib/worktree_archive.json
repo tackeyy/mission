@@ -1,0 +1,7 @@
+{
+  "calls": {
+    "_read_generation_file:open-write": 1,
+    "open_target:open-write": 1
+  },
+  "module": "lib/worktree_archive.py"
+}

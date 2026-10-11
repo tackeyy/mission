@@ -1,0 +1,9 @@
+{
+  "calls": {
+    "_timestamp:replace": 1,
+    "open_evidence:open-write": 1,
+    "read_score_provenance_evidence:open-write": 1,
+    "read_state_local_bytes:open-write": 2
+  },
+  "module": "lib/scoring_provenance.py"
+}

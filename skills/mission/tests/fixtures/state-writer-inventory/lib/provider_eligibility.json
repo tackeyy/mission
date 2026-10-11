@@ -1,0 +1,6 @@
+{
+  "calls": {
+    "_yaml_scalar:replace": 1
+  },
+  "module": "lib/provider_eligibility.py"
+}

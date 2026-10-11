@@ -1,0 +1,7 @@
+{
+  "calls": {
+    "_load_pinned_factory:dynamic": 1,
+    "load_adapter:dynamic": 1
+  },
+  "module": "lib/fresh_review_runtime.py"
+}

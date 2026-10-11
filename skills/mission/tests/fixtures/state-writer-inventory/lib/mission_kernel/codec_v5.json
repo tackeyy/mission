@@ -1,0 +1,8 @@
+{
+  "calls": {
+    "_decode_handoff:dynamic": 2,
+    "_review_json:dynamic": 1,
+    "encode_v5_state:replace": 1
+  },
+  "module": "lib/mission_kernel/codec_v5.py"
+}

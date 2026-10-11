@@ -1,0 +1,44 @@
+{
+  "candidates": {
+    "_replay_hypotheses:launch": {
+      "count": 1,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "_replay_hypotheses:run_contract_verifier": {
+      "count": 1,
+      "reason": "D output-import replay (design 881 section 3.2 row 7), bounded by the request max_replays and remaining dispatch deadline/wall time. F reservation, deadline-bound collection and settlement remain pending in F2b (#922; section 7). No reservation coverage is claimed.",
+      "rows": [
+        7
+      ]
+    },
+    "publish_failed_output:execute_evidence_operation": {
+      "count": 1,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "run_fresh_review_import_cli:launch": {
+      "count": 1,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        7,
+        8,
+        9
+      ]
+    },
+    "run_fresh_review_import_cli:recover": {
+      "count": 1,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        7,
+        8,
+        9
+      ]
+    }
+  },
+  "module": "lib/mission_application/fresh_review_publish.py"
+}

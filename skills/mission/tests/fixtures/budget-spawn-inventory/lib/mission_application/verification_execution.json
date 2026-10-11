@@ -1,0 +1,35 @@
+{
+  "candidates": {
+    "run_contract_verifier:execute_candidate": {
+      "count": 1,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        1,
+        2
+      ]
+    },
+    "run_contract_verifier:executed_count": {
+      "count": 1,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "run_verification_receipt_cli:execute_verification": {
+      "count": 1,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "run_verification_receipt_cli:run_contract_verifier": {
+      "count": 1,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        1,
+        2
+      ]
+    }
+  },
+  "module": "lib/mission_application/verification_execution.py"
+}

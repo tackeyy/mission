@@ -50,10 +50,12 @@ test: $(REQUIREMENTS_STAMP)
 # この test -n は test_actions_cost_guard.py が固定しており、除去すると CI が落ちる。
 test-shard: $(REQUIREMENTS_STAMP)
 	@set -eu; \
+	tmpdir="$$(mktemp -d)"; \
+	trap 'rm -rf "$$tmpdir"' EXIT HUP INT TERM; \
 	targets="$$($(PYTHON) scripts/ci_shard_targets.py --index $(SHARD_INDEX) --total $(SHARD_TOTAL) --targets "$(PYTEST_TARGETS)")"; \
 	test -n "$$targets"; \
-	$(VENV_PYTHON) -m pytest -q -n auto --dist loadfile $$targets
-	@printf '{"schema":"mission-test-report/1","tree_sha":"%s","tier":"shard","shard":"%s/%s","test_manifest":["skills/mission"]}\n' "$$(git rev-parse 'HEAD^{tree}')" "$(SHARD_INDEX)" "$(SHARD_TOTAL)"
+	$(VENV_PYTHON) -m pytest -q -n auto --dist loadfile --junit-xml="$$tmpdir/junit.xml" $$targets; \
+	$(PYTHON) scripts/write_suite_report.py --junit "$$tmpdir/junit.xml" --out "$$tmpdir/report.json" --ci-shard "$(SHARD_INDEX)/$(SHARD_TOTAL)" --test-manifest "$(PYTEST_TARGETS)"
 
 test-e2e: $(REQUIREMENTS_STAMP)
 	$(VENV_PYTHON) -m pytest -q -n $(MISSION_TEST_WORKERS) --dist loadfile skills/mission -k 'e2e or operational'

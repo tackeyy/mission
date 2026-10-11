@@ -1,0 +1,12 @@
+{
+  "candidates": {
+    "start_new_mission:recover": {
+      "count": 1,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        13
+      ]
+    }
+  },
+  "module": "lib/mission_persistence/reinitialization.py"
+}

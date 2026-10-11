@@ -1,0 +1,6 @@
+{
+  "calls": {
+    "_command_value:dynamic": 1
+  },
+  "module": "lib/mission_kernel/commands.py"
+}

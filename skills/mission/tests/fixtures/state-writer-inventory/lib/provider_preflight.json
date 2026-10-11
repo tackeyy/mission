@@ -1,0 +1,6 @@
+{
+  "calls": {
+    "safe_input_snapshot:open-write": 1
+  },
+  "module": "lib/provider_preflight.py"
+}

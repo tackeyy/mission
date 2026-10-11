@@ -1,0 +1,23 @@
+{
+  "candidates": {
+    "inspect_output:launch": {
+      "count": 1,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        7,
+        8,
+        9
+      ]
+    },
+    "validate_output_sender:launch": {
+      "count": 7,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        7,
+        8,
+        9
+      ]
+    }
+  },
+  "module": "lib/mission_kernel/fresh_review_output.py"
+}
