@@ -31,7 +31,10 @@ caller引数・env・PID・任意file・モデル出力から親identityを採�
 公式session仕様は新queryで新sessionを作り、continue/resumeで既存履歴を再開し、forkでは新IDへ履歴をコピーすると定める。新ID単独ではfreshの証明にならない。
 採用案は新規one-shot childの起動経路をadapterが所有し、resume/continue/fork・parent history/transcript転送を拒否した事実と、native startup/initの別identityを束縛すること。
 [SessionStart仕様](https://code.claude.com/docs/en/hooks#sessionstart)はstartup/resume/forkを区別する。startupだけを受付条件とする。
-既存契約はglobal policy・hook・memoryの全除外を明記していないため、ここでは親の会話履歴を継承しない境界と解釈する。この解釈も設計レビュー対象である。
+許容する共通contextは、レビュー済みで固定された一般的な静的policy/instructionsだけとする。親会話の要約・実装メモ・判定・進捗を含む動的memory/追加contextは、別startupでも親履歴の継承として拒否する。
+起動前に登録adapterの信頼済みcontext manifestで、全設定source・instructions/memory・hookとその推移的な入力を列挙し、静的policyのbytes/digest、hook実装、許容する入力と出力の固定規則を照合する。起動中のhook出力もその規則へ照合する。モデルやcallerの「静的」という宣言は証明にしない。
+未列挙source、親session/transcript・可変memory・環境や任意fileへ到達するhook、hook出力を観測できない経路はprelaunch blocked。起動後に判明すれば停止とunknownへ進む。manifest照合で現行hardeningを除外・無効化せず、両条件を満たせないhostは未対応とする。
+全sourceの列挙・安定読取・hook出力観測を実hostで証明できるかは未観測であり、実行可能だとは主張しない。model-free fixtureでは漏れ・追加contextの親要約・source変更を拒否する。
 [共通instructions/memory](https://code.claude.com/docs/en/memory)やhookのadditionalContextは起動時に入ることがあり、それらの不存在は主張しない。
 SDK parentとchildは現行hardeningを通る起動経路を使用する。SDK同梱の別CLI等へ迂回しない。executable/API/設定の適合が確認できなければ未起動blockedとする。
 既存hardening/hooksを維持し、--bare/--safe-mode・設定sourceの除外で回避しない。--restrictedも全context除外証明にはしない。
@@ -57,6 +60,8 @@ capabilityは認証用であり親identityの出所ではない。
 | cancel | 元childだけ停止し未確認を成功にしない |
 | recover | 元operationの保存結果またはunknown。再launchしない |
 
+FD搬送は変更対象に含める。管理されたquery owner→Mission MCP→Python CLI→登録callbackの起動に限り、queryごとの専用FDを明示的なpass_fdsで継承する。既存fresh_review_host._callは追加FDを渡さないため、そのまま動くとは仮定しない。
+spawn_deadline_execの既存pass_fds経路を使い、許可したFD以外はcloseし、各callback終了時に複製FDを閉じる。owner生存pipeはcallbackには所有させず、query ownerだけが保持する。FD番号はidentityの根拠にせず、boot/query/method/nonceをguardian側で照合する。通常の5method/5field registryと旧transportは変更せず、明示登録adapterの管理経路だけで追加FDを扱う。
 期限切れ・別boot/requestのcapabilityは拒否する。応答喪失後の再要求は保存済み結果かunknownで、二重起動しない。
 既存pinはadapter moduleのbytesを固定する保証で、依存やhostの誠実性までは保証しない。
 
@@ -75,12 +80,14 @@ request/snapshotはcallback終了前にguardian private領域へ安定読取・d
 | 親EOF/query終了 | guardianが元childを停止 |
 | guardian終了/期限 | 独立watchdogが元childを停止 |
 | watchdog終了 | guardianのcustodyから停止可能なら実行、不明ならunknown |
-| 両監視喪失/再起動 | journalだけで停止を主張せず再launchしない |
+| 両監視喪失/再起動 | journalだけで停止を主張せず再launchしない。元dispatchを非終端に保つ |
 | TERM後残存 | KILLしgroup終了確認後だけ停止確定 |
 
 停止対象は起動から所有する元process groupだけ。PID/PGID/開始時刻だけを再利用排除の強い証拠にしない。
 watchdog故障時のcustody移譲とgroup終了確認は未実装で、model-free実process fixtureで成立しない故障経路はunknownとする。
-停止不明はabandoned-unknownと既存budget holdへ写像する。receipt公開失敗・親終了から資源解放を推定しない。
+停止不明はadapterのunknown観測であり、Missionのabandoned-unknown terminalを先に作らない。dispatch-unknown/runningを維持し、後日のrecover/cancelを到達可能に保つ。監視喪失、起動後ack/identity不一致、証跡喪失も同じ扱いである。
+元groupの停止をcustodyから確認できた場合だけ既存reconcileの非成功terminalへ進む。停止未確認ならkill-unconfirmedの予約holdを維持し、期限経過でも解放しない。receipt公開失敗・親終了から資源解放を推定しない。
+現行D入口の予算結線はpendingのため、[予約・締切結線Issue922](https://github.com/tackeyy/mission/issues/922)を利用する。897で別のbudget writerや新しい終端/hold解除遷移を追加しない。adapterのmodel-free検証は並行可能だが、予算holdを含む統合受入は922のmerge後とする。
 
 ## 6. 実入力受領と上限
 
@@ -115,7 +122,7 @@ fixtureはidentity交差、IPC改ざん/再送、callback終了後のchild生存
 ## 8. 証跡と完了
 
 公開artifactは版、source/probe digest、匿名化identity、観測可否、bytes、時間、推定費用だけとする。home path/capability/credential/raw transcriptを含めない。
-非公開証跡は選択したidentity/startup/custody観測とackだけで、nativeイベントの全dumpを保存しない。credentialとoperation capabilityはfileへ書き出さず、runtimeの専用FDだけで受け渡す。
+非公開証跡は選択したidentity/startup/context source照合/custody観測とackだけで、nativeイベントの全dumpを保存しない。credentialとoperation capabilityはfileへ書き出さず、runtimeの専用FDだけで受け渡す。
 証跡は0700 owner directory内の0600 non-symlink regular file、link-count1、operation当たり最大16MiB、TTL600秒とする。
 cleanupは所有inode/deviceと非symlinkを再確認して対象operationだけ削除する。guardian終了時と次回起動時に期限切れを回収する。証跡消失を成功・停止証明にせず結果喪失/unknownとする。
 残条件はcontext境界の採否と実host結合、raw ack bytes、監視故障custody、能力/予算強制、SDK版/API適合である。
