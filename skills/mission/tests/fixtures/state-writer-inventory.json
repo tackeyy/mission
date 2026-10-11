@@ -1,4 +1,7 @@
 {
+  "lib/ci_suite_evidence.py": {
+    "_normalise_log:replace": 1
+  },
   "benchmarks/mission-vs-goal/native_goal_benchmark.py": {
     "_digest_tree:open-write": 1,
     "create_immutable_package:replace": 1,

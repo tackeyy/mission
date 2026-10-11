@@ -302,5 +302,12 @@
       8,
       9
     ]
+  },
+  "ci-suite-metadata": {
+    "candidates": {
+      "lib/ci_suite_evidence.py:verify_ci_suite:run": 13
+    },
+    "reason": "The local variable run is decoded Actions metadata; it is not a process launch. The injected API is the only external boundary and its failures return the local-suite fallback.",
+    "rows": [15]
   }
 }
