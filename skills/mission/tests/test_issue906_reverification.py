@@ -9,11 +9,12 @@ from .test_issue896_publish import import_output
 from .test_issue906_repair_attempts import repair_state, published, gate_state, completed_carrier
 
 @pytest.fixture
-def repair_reviewer(completion_session, run_cli, tmp_path):
+def repair_reviewer(completion_session, run_cli, tmp_path, request):
     from .test_issue878_verification_runner import _replay_policy
     root, state, schema = completion_session
     policy = _replay_policy()
-    policy['commands'][1]['argv'][-1] = f"from pathlib import Path; import time; print(time.time_ns()); assert Path('repro.json').read_text() == '0'; assert Path('app.txt').read_text() == 'repaired' or Path({str(root / '.mission/replay-passed')!r}).exists()"
+    output = "print('repair-replay-proof')" if getattr(request, 'param', False) else 'import time; print(time.time_ns())'
+    policy['commands'][1]['argv'][-1] = f"from pathlib import Path; {output}; assert Path('repro.json').read_text() == '0'; assert Path('app.txt').read_text() == 'repaired' or Path({str(root / '.mission/replay-passed')!r}).exists()"
     raw = json.dumps(policy, sort_keys=True, separators=(',', ':')).encode()
     (root / '.mission/verifiers.json').write_bytes(raw)
     digest = 'sha256:' + hashlib.sha256(raw).hexdigest()
@@ -35,6 +36,7 @@ def begin(run_cli, fixture, schema=5):
     return row, json.loads(result.stdout)['attempt']
 
 @pytest.mark.parametrize('schema', [4, 5])
+@pytest.mark.parametrize('repair_reviewer', [True], indirect=True)
 def test_public_same_counterexample_failed_new_candidate_passed(repair_reviewer, run_cli, schema):
     root = repair_reviewer[0]
     row, attempt = begin(run_cli, repair_reviewer, schema)
@@ -43,6 +45,8 @@ def test_public_same_counterexample_failed_new_candidate_passed(repair_reviewer,
     assert result.returncode == 0, result.stdout + result.stderr
     ended = json.loads(result.stdout)['attempt']
     assert ended['status'] == 'verified'
+    comparison = json.loads((root / ended['terminal']['comparison_ref']['relative_path']).read_text())
+    assert comparison['receipt']['output_digest'] == 'sha256:' + hashlib.sha256(b'repair-replay-proof\n').hexdigest()
     state = json.loads(run_cli('get', cwd=root).stdout)
     assert state['repair_lineage']['lineages'][0]['lifecycle'] == 'verified'
     assert not state.get('verification_receipts')  # Replay never substitutes normal verification.
