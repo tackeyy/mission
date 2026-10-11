@@ -200,14 +200,17 @@ class PrivateOperationStore:
             raise ObservationBlocked('operation file limit')
         name = f'{kind}-{len(self._files)}'
         with self._directory() as directory:
-            stored = self._create(directory, name, raw)
-            self._files.append(stored)
+            stored = None
             try:
+                stored = self._create(directory, name, raw)
+                self._files.append(stored)
                 self._read_file(stored)
                 self._persist(directory)
             except BaseException:
-                self._files.pop()
-                self._unlink_owned(directory, name, stored.device, stored.inode)
+                self._sealed = True
+                if stored is not None:
+                    self._files.pop()
+                    self._unlink_owned(directory, name, stored.device, stored.inode)
                 raise
             return stored
 
@@ -217,6 +220,8 @@ class PrivateOperationStore:
         with cleanup_scope(os.close, fd):
             info = os.fstat(fd)
             try:
+                if callable(raw):
+                    raw = raw(info)
                 os.fchmod(fd, 0o600)
                 view = memoryview(raw)
                 while view:
@@ -226,6 +231,7 @@ class PrivateOperationStore:
                     view = view[written:]
                 os.fsync(fd)
             except BaseException:
+                self._sealed = True
                 self._unlink_owned(directory, name, info.st_dev, info.st_ino)
                 raise
         return StoredFile(name, 'sha256:' + hashlib.sha256(raw).hexdigest(), len(raw),
@@ -238,12 +244,15 @@ class PrivateOperationStore:
                         directory=list(self._directory_identity), created=self._created,
                         expires=self._expires, files=[asdict(item) for item in self._files],
                         lock=asdict(self._lock_record), generation=self._generation)
-        raw = json.dumps(document, sort_keys=True, separators=(',', ':')).encode('ascii')
-        if len(raw) > MANIFEST_LIMIT:
-            raise ObservationBlocked('operation manifest limit')
+        def encode(info):
+            document['self'] = [info.st_dev, info.st_ino]
+            raw = json.dumps(document, sort_keys=True, separators=(',', ':')).encode('ascii')
+            if len(raw) > MANIFEST_LIMIT:
+                raise ObservationBlocked('operation manifest limit')
+            return raw
         name = f'manifest-{self._generation}.json'
         self._generation += 1
-        manifest = self._create(directory, name, raw)
+        manifest = self._create(directory, name, encode)
         self._read_file(manifest)
         self._manifests.append(manifest)
         self._manifest = manifest
@@ -351,7 +360,8 @@ class PrivateOperationStore:
                     self._read_file(manifest)
                     document = json.loads(raw, object_pairs_hook=_unique)
                     self._restore(document)
-                    if document['generation'] != generation:
+                    if (document['generation'] != generation
+                            or document['self'] != [info.st_dev, info.st_ino]):
                         raise ObservationBlocked('generation binding mismatch')
                     manifests.append((generation, manifest, document))
                 except (ValueError, OSError, StrictReadError, TypeError, KeyError, RecursionError):
@@ -367,8 +377,9 @@ class PrivateOperationStore:
 
     def _restore(self, document):
         if (type(document) is not dict
-                or set(document) != {'schema', 'directory', 'created', 'expires', 'files', 'lock', 'generation'}
+                or set(document) != {'schema', 'directory', 'created', 'expires', 'files', 'lock', 'generation', 'self'}
                 or document['schema'] != 'mission-private-operation/1'
+                or not valid_identity(document['self'])
                 or not valid_identity(document['directory'])
                 or document['directory'] != list(self._directory_identity)
                 or type(document['files']) is not list or len(document['files']) > MAX_FILES):

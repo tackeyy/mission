@@ -80,7 +80,7 @@ record257 without mutation and leaves recovery journal budget before full
 cleanup. A separate descriptor exercises actual flock contention. No sleep or
 subprocess is added. The fixed snapshot3 suite passed46 tests in1.14s locally, not CI cost.
 
-`test_issue1008_host_context.py` and `test_issue1008_host_ipc.py` retain identity,
+`test_issue1008_host_observation.py` and `test_issue1008_host_ipc.py` retain identity,
 parser/deadline/replay/FD protections. `test_issue920_exec.py` and
 `test_issue921_verifier_deadline_exec.py` retain process cleanup. The tracked-tree shard selector places this file in shard8/8 at this checkpoint
 (via `scripts/ci_shard_targets.py` and `.github/workflows/ci.yml`). Writer inventory
@@ -116,7 +116,7 @@ cleanup False, replacement retained in quarantine and original inode preserved.
 Cleanup True means known private namespace targets are absent/reclaimed, not
 proof of physical inode deletion or process custody.
 
-Maximum selected256 records and257 complete generations used5,279,801 logical
+Snapshot3 maximum selected256 records and257 complete generations used5,279,801 logical
 bytes: manifests5,117,497 plus evidence162,304. The campaign did not measure
 other-UID ownership, other-device substitution, I/O/fsync fault coverage,
 physical crash durability, exact raw16MiB payload/48KiB manifest boundaries,
@@ -132,9 +132,25 @@ identities. Guardian/process guarantees remain in Issue1012 and are not replaced
 by these model-free file tests.
 
 Final store/inventory/module/mirror verification passed632 tests in11.67s;
-tracked-tree artifact/vendor hygiene passed9 tests in3.93s. The staged reviewed
-area was1265 lines before this final report update, with634 mirrored lines
-excluded by the repository allowlist. The600-line explanation is the indivisible
+tracked-tree artifact/vendor hygiene passed9 tests in3.93s. Mirror lines are excluded only by the repository
+allowlist; reviewed size is measured on each committed candidate. The600-line explanation is the indivisible
 private writer/recovery identity boundary above; total remains below1400.
 New modules add no syntactic spawn sink. Public-content precheck found no
 credential-like value, concrete secret URI, personal contact or private path.
+
+## Review-r1 corrections
+
+The first review found capacity reuse after write/rollback both failed, and
+startup adoption of a same-bytes replacement manifest inode. Real-filesystem
+faults reproduced six failing cases before correction. Any private create/write
+failure now seals the live instance against further input/evidence additions;
+existing reads and conservative cleanup remain available. Every immutable
+manifest records its own exact-integer device/inode from the O_EXCL descriptor
+before encoding; startup requires that binding for every accepted generation.
+Initial/older/latest replacement files remain unknown. Snapshot4 freezes these
+guards; snapshot3 exploration does not validate this correction. The new cases
+use actual filesystem calls with synchronous fault seams, not physical crashes.
+Root reran snapshot4 with actual dependencies:57 passed in1.33s; its independent
+same-bytes manifest exchange retained both replacement and original inode and
+reported no operation removal. Related tests/inventories/mirror/hygiene passed
+652 tests in16.96s locally. Independent new-guard/fault exploration is pending.

@@ -487,3 +487,74 @@ def test_contended_operation_lock_refuses_writer_and_cleanup(tmp_path):
         assert reopened.cleanup(now=600) is False
     assert tuple(sorted(store.path.iterdir())) == before
     assert reopened.cleanup(now=600) is True
+
+
+@pytest.mark.parametrize('phase', ['manifest-sync', 'input-create', 'evidence-create', 'manifest-create'])
+def test_partial_write_and_failed_rollback_seal_all_additions(tmp_path, monkeypatch, phase):
+    raw = b'x' * (8 * 1024 * 1024)
+    (tmp_path / 'request').write_bytes(raw)
+    store = PrivateOperationStore(tmp_path, now=lambda: 0)
+    keeper = store.record_evidence(evidence())
+    sync, unlink = os.fsync, os.unlink
+    failed = False
+    def fault(fd):
+        nonlocal failed
+        info = os.fstat(fd)
+        name = ('manifest-2.json' if phase == 'manifest-create' else
+                'evidence-1' if phase == 'evidence-create' else 'input-1')
+        target = store.path / name
+        selected = (stat.S_ISDIR(info.st_mode) and info.st_ino == store.path.stat().st_ino
+                    if phase == 'manifest-sync' else target.exists() and target.stat().st_ino == info.st_ino)
+        if selected and not failed:
+            failed = True
+            raise OSError('synthetic write sync failure')
+        return sync(fd)
+    def rollback(name, **kwargs):
+        if name == 'slot':
+            raise OSError('synthetic rollback deletion failure')
+        return unlink(name, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(os, 'fsync', fault)
+        patch.setattr(os, 'unlink', rollback)
+        with pytest.raises(ObservationBlocked):
+            (store.record_evidence(evidence()) if phase == 'evidence-create'
+             else store.copy_input(tmp_path, 'request', digest(raw)))
+    assert failed and list(store.path.glob('quarantine-*/slot'))
+    retained = sum(p.stat().st_size for p in store.path.glob('quarantine-*/slot'))
+    if phase == 'manifest-create':
+        assert retained > len(raw)  # Both the copy and partial metadata await cleanup.
+    else:
+        assert retained == (len(json.dumps(evidence(), sort_keys=True, separators=(',', ':')).encode())
+                            if phase == 'evidence-create' else len(raw))
+    for append in (lambda: store.copy_input(tmp_path, 'request', digest(raw)),
+                   lambda: store.record_evidence(evidence())):
+        with pytest.raises(ObservationBlocked):
+            append()
+    assert json.loads(store.read(keeper)) == evidence()
+    assert store.cleanup(now=600) is True
+
+
+@pytest.mark.parametrize('generation', [0, 1, 2], ids=['initial', 'older', 'latest'])
+def test_startup_preserves_same_bytes_foreign_manifest_inode(tmp_path, generation):
+    store = PrivateOperationStore(tmp_path, now=lambda: 0)
+    store.record_evidence(evidence())
+    store.record_evidence(evidence())
+    target = store.path / f'manifest-{generation}.json'
+    original = tmp_path / 'displaced-manifest'
+    target.rename(original)
+    target.write_bytes(original.read_bytes())
+    target.chmod(0o600)
+    assert target.stat().st_ino != original.stat().st_ino
+    assert PrivateOperationStore.recover_expired(tmp_path, now=600) == ()
+    assert target.read_bytes() == original.read_bytes()
+
+
+@pytest.mark.parametrize('bad', [None, [1], [1.0, 2], [False, 2]])
+def test_startup_rejects_untyped_manifest_self_identity(tmp_path, bad):
+    store = PrivateOperationStore(tmp_path, now=lambda: 0)
+    target = store.path / 'manifest-0.json'
+    document = json.loads(target.read_bytes())
+    document['self'] = bad
+    target.write_text(json.dumps(document))
+    assert PrivateOperationStore.recover_expired(tmp_path, now=600) == ()
+    assert target.exists()
