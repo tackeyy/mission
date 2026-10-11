@@ -2,7 +2,7 @@
   "module": "lib/mission_kernel/finding_disposition.py",
   "candidates": {
     "validate_terminal:launch": {
-      "count": 18,
+      "count": 19,
       "reason": "Pure receipt data references classified by design 881 section 3.2 row 15. The validator reads observed launch fields and never invokes an adapter or starts a process; E3 dispatch remains a later split.",
       "rows": [
         15

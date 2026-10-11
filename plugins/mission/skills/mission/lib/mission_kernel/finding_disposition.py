@@ -231,6 +231,31 @@ def _result_output(value):
     return value
 
 
+def origin_record(document, row):
+    from .fresh_review import decode_projection
+    identifier = row['origin']['request_id'] if row['kind'] == 'finding' else row['request_id']
+    record = next((r for r in decode_projection(document).requests
+        if hasattr(r, 'request') and r.request.request_id == identifier), None)
+    if record is None or record.result is None:
+        raise FreshReviewError('disposition-origin-mismatch')
+    return record
+
+
+def authenticated_finding(document, row, evidence):
+    from dataclasses import asdict
+    from .fresh_review_receipts import decode_terminal_receipt, CompletedFreshReview
+    from .repair_lineage import _finding, origin_identity
+    record = origin_record(document, row)
+    terminal = decode_terminal_receipt(record.result.thaw())
+    if not isinstance(terminal, CompletedFreshReview) or row['finding_ref'] not in [asdict(ref) for ref in terminal.findings]:
+        raise FreshReviewError('disposition-origin-mismatch')
+    source = artifact_body(evidence, row['finding_ref'])
+    derived = _finding(record.request, terminal, source, row['finding_ref'], document['acceptance_contract'])
+    if origin_identity(derived) != origin_identity(row):
+        raise FreshReviewError('disposition-origin-mismatch')
+    return derived
+
+
 def validate_terminal(document, row, item, evidence, candidates):
     from acceptance_contract import canonical_contract_digest
     from .repair_lineage import origin_identity
@@ -248,17 +273,18 @@ def validate_terminal(document, row, item, evidence, candidates):
             or full_candidate_digest(contract, candidates) != request['full_candidate_digest']
             or row['last_candidate_change'].get('generation', 0) >= item['generation']):
         raise FreshReviewError('disposition-stale')
+    record = origin_record(document, row)
+    if (request['mission_id'], request['session_id']) != (record.request.mission_id, record.request.session_id):
+        raise FreshReviewError('disposition-origin-mismatch')
     artifact_body(evidence, request['input_ref'])
     source = artifact_body(evidence, request['source_ref'])
     if row['kind'] == 'finding':
+        authenticated_finding(document, row, evidence)
         expected_source = row['finding_ref']
     else:
         from dataclasses import asdict
-        from .fresh_review import decode_projection
         from .fresh_review_receipts import decode_terminal_receipt, FailedFreshReview
-        record = next((r for r in decode_projection(document).requests
-            if hasattr(r, 'request') and r.request.request_id == row['request_id']), None)
-        origin = None if record is None or record.result is None else decode_terminal_receipt(record.result.thaw())
+        origin = decode_terminal_receipt(record.result.thaw())
         if (not isinstance(origin, FailedFreshReview) or origin.reason != 'output-over-import-limit'
                 or origin.output_digest != row['output_digest']):
             raise FreshReviewError('disposition-origin-mismatch')
@@ -293,6 +319,8 @@ def validate_terminal(document, row, item, evidence, candidates):
             or launch.enforced_budget.max_packet_bytes > request['max_packet_bytes']
             or launch.enforced_budget.max_output_bytes > request['max_output_bytes']):
         raise FreshReviewError('disposition-not-independent')
+    validate_ref(terminal['output_ref'], 'finding-disposition-output',
+        min(262144, request['max_output_bytes'], launch.enforced_budget.max_output_bytes))
     output = _result_output(artifact_body(evidence, terminal['output_ref']))
     if (output['request_id'] != request['request_id'] or output['input_digest'] != request['input_ref']['digest']
             or output['mapping_ref'] != terminal['mapping_ref'] or output['reason_code'] != terminal['reason_code']
@@ -313,7 +341,6 @@ def validate_terminal(document, row, item, evidence, candidates):
 def validate_mapping(document, row, source, mapping, output, evidence):
     from .repair_lineage import _finding
     from .fresh_review_receipts import decode_terminal_receipt
-    from .fresh_review import decode_projection
     from .fresh_review_output import _hypothesis
     _closed(mapping, ('schema', 'source_digest', 'entries'), INVALID)
     if (mapping['schema'] != 'mission-finding-disposition-mapping/1' or mapping['source_digest'] != canonical_digest(source)
@@ -329,11 +356,11 @@ def validate_mapping(document, row, source, mapping, output, evidence):
         if type(entry['index']) is not int or entry['index'] != index or entry['element_digest'] != canonical_digest(finding):
             raise FreshReviewError('disposition-mapping-incomplete')
         if row['kind'] == 'finding':
-            origin = row
-        else:
-            record = next((r for r in decode_projection(document).requests if hasattr(r, 'request') and r.request.request_id == row['request_id']), None)
-            if record is None or record.result is None:
+            origin = authenticated_finding(document, row, evidence)
+            if source != artifact_body(evidence, row['finding_ref']):
                 raise FreshReviewError('disposition-origin-mismatch')
+        else:
+            record = origin_record(document, row)
             _hypothesis(finding, finding['criterion_id'])
             # Scope derivation grants no executed replay or resolution authority.
             unpublished = dict(finding, replay=None, reason_code='replay-unavailable')
@@ -345,7 +372,10 @@ def validate_mapping(document, row, source, mapping, output, evidence):
             continue
         target = rows.get(entry['target']) if type(entry['target']) is str else None
         if (entry['verdict'] != 'duplicate' or target is None or target['kind'] != 'finding'
-                or target['lineage_id'] == row['lineage_id'] or not duplicate_scope(origin, target)):
+                or target['lineage_id'] == row['lineage_id']):
+            raise FreshReviewError('disposition-alias-invalid')
+        target = authenticated_finding(document, target, evidence)
+        if not duplicate_scope(origin, target):
             raise FreshReviewError('disposition-alias-invalid')
         edges.append(target['lineage_id'])
     targets = tuple(sorted(set(edges)))

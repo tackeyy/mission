@@ -30,9 +30,9 @@ def request_body(state, row, *, operation='disposition-prepare', supersedes=None
     contract = state.legacy_passthrough.thaw()['acceptance_contract']
     candidates = dict(row['introduced_candidate']['snapshots'])
     return dict(schema='mission-finding-disposition-request/1', request_id=canonical_digest(dict(
-        domain='mission-finding-disposition-request/1', mission_id=state.identity.mission_id,
-        session_id=state.identity.session_id, lineage_id=row['lineage_id'], operation_id=operation)),
-        mission_id=state.identity.mission_id, session_id=state.identity.session_id,
+        domain='mission-finding-disposition-request/1', mission_id=row['origin']['mission_id'],
+        session_id=row['origin']['session_id'], lineage_id=row['lineage_id'], operation_id=operation)),
+        mission_id=row['origin']['mission_id'], session_id=row['origin']['session_id'],
         lineage_id=row['lineage_id'], operation_id=operation, origin_digest=canonical_digest(origin_identity(row)),
         contract_digest=canonical_contract_digest(contract), requirement_digest=contract['requirement_digest'],
         verifier_policy_digest=contract['verifier_policy']['digest'], full_candidate_digest=full_candidate_digest(contract, candidates),
@@ -128,14 +128,14 @@ def test_persisted_terminal_summary_is_closed_and_cannot_supply_resolved(rejecte
         decode_projection(doc)
 
 
-def rebind(rejected, changes):
+def rebind(rejected, changes, ref_changes=None, raw_document=None):
     """Rebind digests so semantic validators, rather than corrupt bytes, are exercised."""
     from mission_kernel.finding_disposition import DispositionEvidence, DispositionArtifact
     from mission_kernel.repair_attempts import reference, _store
     from mission_kernel.fresh_review import canonical_bytes
     from mission_kernel.json_codec import freeze_json_value
     before, state, command, carrier = rejected
-    doc = state.legacy_passthrough.thaw()
+    doc = state.legacy_passthrough.thaw() if raw_document is None else deepcopy(raw_document)
     bodies = [(a.reference.thaw(), a.content.thaw()) for a in carrier.artifacts]
     for ref, body in bodies:
         if ref['kind'] in changes:
@@ -151,11 +151,13 @@ def rebind(rejected, changes):
     for index, (old, body) in enumerate(bodies):
         new = reference(old['kind'], canonical_bytes(body))
         new['relative_path'] = old['relative_path'].rsplit('/', 1)[0] + '/' + new['digest'][7:] + '.json'
+        if ref_changes and old['kind'] in ref_changes:
+            ref_changes[old['kind']](new)
         if new != old:
             replace_ref(doc, old, new)
             for _, other in bodies[index+1:]: replace_ref(other, old, new)
         bodies[index] = new, body
-    return before, _store(state, doc), command, DispositionEvidence(tuple(
+    return before, (_store(state, doc) if raw_document is None else doc), command, DispositionEvidence(tuple(
         DispositionArtifact(freeze_json_value(ref), freeze_json_value(body)) for ref, body in bodies))
 
 
@@ -374,8 +376,7 @@ def test_blocked_summary_cannot_claim_an_independent_verdict(rejected):
         validate_dispositions(row)
 
 
-@pytest.mark.parametrize('substitute', [False, True])
-def test_overflow_rejection_is_bound_to_retained_output_and_complete_mapping(rejected, substitute):
+def overflow_case(rejected, substitute=False):
     from dataclasses import replace
     from mission_kernel.finding_disposition import validate_terminal, DispositionArtifact
     from mission_kernel.fresh_review import canonical_bytes, canonical_digest, decode_projection
@@ -422,7 +423,111 @@ def test_overflow_rejection_is_bound_to_retained_output_and_complete_mapping(rej
     overflow['dispositions'][0]['terminal']['reason_code'] = 'duplicate'
     doc['repair_lineage']['lineages'] = [overflow]
     args = (doc, overflow, overflow['dispositions'][0], changed[3], command.observed_candidates.thaw())
+    return args
+
+
+@pytest.mark.parametrize('substitute', [False, True])
+def test_overflow_rejection_is_bound_to_retained_output_and_complete_mapping(rejected, substitute):
+    from mission_kernel.finding_disposition import validate_terminal
+    from mission_kernel.fresh_review import FreshReviewError
+    args = overflow_case(rejected, substitute)
     if substitute:
         with pytest.raises(FreshReviewError, match='disposition-origin-mismatch'): validate_terminal(*args)
     else:
         assert validate_terminal(*args) == ('rejected', ())
+
+
+@pytest.mark.parametrize('fault', ['kind', 'path', 'unknown', 'hard-cap', 'launch-cap'])
+def test_output_reference_is_closed_and_within_both_enforced_limits(rejected, fault):
+    from mission_kernel.finding_disposition import validate_terminal
+    from mission_kernel.fresh_review import FreshReviewError
+    changes = {}
+    refs = {}
+    if fault == 'hard-cap': changes['finding-disposition-output'] = lambda b: b.update(reason='x'*262144)
+    elif fault == 'launch-cap': changes['finding-disposition-launch'] = lambda b: b['enforced_budget'].update(max_output_bytes=1)
+    else:
+        refs['finding-disposition-output'] = lambda ref: ref.update(
+            {'kind':'repair-plan'} if fault == 'kind' else {'relative_path':'outside/output.json'} if fault == 'path' else {'resolved':True})
+    changed = rebind(rejected, changes, refs)
+    doc = changed[1].legacy_passthrough.thaw(); row = doc['repair_lineage']['lineages'][0]
+    with pytest.raises(FreshReviewError):
+        validate_terminal(doc, row, row['dispositions'][-1], changed[3], changed[2].observed_candidates.thaw())
+
+
+@pytest.mark.parametrize('entry', ['terminal', 'mapping'])
+@pytest.mark.parametrize('fault', ['scope', 'repro'])
+def test_original_finding_defeats_rebound_summary_authority(rejected, entry, fault):
+    from mission_kernel.finding_disposition import validate_terminal, validate_mapping, artifact_body
+    from mission_kernel.repair_lineage import origin_identity
+    from mission_kernel.fresh_review import canonical_digest, FreshReviewError
+    row = rejected[1].repair.lineages[0].document.thaw()
+    if fault == 'scope': row.update(requirement_ids=[], prohibited_side_effect_ids=[])
+    else: row['repro']['repro_digest'] = 'sha256:'+'f'*64
+    request = rejected[2].request.thaw(); request['origin_digest'] = canonical_digest(origin_identity(row))
+    scope = dict(criterion_ids=[row['criterion_id']], requirement_ids=row['requirement_ids'],
+        prohibited_side_effect_ids=row['prohibited_side_effect_ids'], repro_digest=row['repro']['repro_digest'])
+    changed = rebind(rejected, {
+        'finding-disposition-request': lambda b: b.update(request),
+        'finding-disposition-launch': lambda b: b.update(request_digest=canonical_digest(request)),
+        'finding-disposition-output': lambda b: b.update(scope=scope)})
+    doc = changed[1].legacy_passthrough.thaw()
+    row['dispositions'] = doc['repair_lineage']['lineages'][0]['dispositions']
+    doc['repair_lineage']['lineages'] = [row]
+    source = artifact_body(changed[3], row['finding_ref'])
+    mapping = dict(schema='mission-finding-disposition-mapping/1', source_digest=canonical_digest(source),
+        entries=[dict(index=0, element_digest=canonical_digest(source), verdict='not-violation',
+            target={'kind':'absent','reason':'no-target'}, scope=scope)])
+    with pytest.raises(FreshReviewError):
+        if entry == 'terminal': validate_terminal(doc, row, row['dispositions'][0], changed[3], changed[2].observed_candidates.thaw())
+        else: validate_mapping(doc, row, source, mapping, {}, changed[3])
+
+
+@pytest.mark.parametrize('fault', ['scope', 'repro'])
+def test_duplicate_target_is_authenticated_even_when_its_scope_contains_source(rejected, fault):
+    from mission_kernel.finding_disposition import validate_mapping
+    from mission_kernel.fresh_review import canonical_digest, FreshReviewError
+    from .test_issue896_output_kernel import finding
+    doc = rejected[1].legacy_passthrough.thaw(); target = doc['repair_lineage']['lineages'][0]
+    hypothesis = finding()
+    source = dict(criterion_results=[dict(findings=[hypothesis])])
+    overflow = dict(kind='unimported-findings', request_id=target['origin']['request_id'], lineage_id='sha256:'+'d'*64)
+    scope = dict(criterion_ids=['AC1'], requirement_ids=target['requirement_ids'],
+        prohibited_side_effect_ids=target['prohibited_side_effect_ids'], repro_digest=target['repro']['repro_digest'])
+    mapping = dict(schema='mission-finding-disposition-mapping/1', source_digest=canonical_digest(source),
+        entries=[dict(index=0, element_digest=canonical_digest(hypothesis), verdict='duplicate', target=target['lineage_id'], scope=scope)])
+    assert validate_mapping(doc, overflow, source, mapping, {}, rejected[3]) == (target['lineage_id'],)
+    if fault == 'scope': target['requirement_ids'] = [*target['requirement_ids'], 'other-requirement']
+    else: target['repro']['repro_input_ref'] = 'sha256:'+'f'*64
+    with pytest.raises(FreshReviewError): validate_mapping(doc, overflow, source, mapping, {}, rejected[3])
+
+
+@pytest.mark.parametrize('field', ['mission_id', 'session_id'])
+@pytest.mark.parametrize('kind', ['finding', 'unimported-findings'])
+def test_request_identity_cannot_be_rebound_away_from_its_d_origin(rejected, field, kind):
+    from mission_kernel.finding_disposition import validate_terminal, request_id
+    from mission_kernel.repair_lineage import origin_identity
+    from mission_kernel.fresh_review import canonical_digest, FreshReviewError
+    from mission_kernel.finding_disposition import artifact_body
+    if kind == 'finding':
+        doc = rejected[1].legacy_passthrough.thaw(); row = doc['repair_lineage']['lineages'][0]
+        carrier = rejected[3]; candidates = rejected[2].observed_candidates.thaw()
+    else:
+        doc, row, _, carrier, candidates = overflow_case(rejected)
+    request = artifact_body(carrier, row['dispositions'][0]['request_ref'])
+    request[field] = 'another-identity'
+    request['request_id'] = request_id(request)
+    identifier = request['request_id']; operation = 'disposition-dispatch:'+identifier[7:]
+    changed = rebind((*rejected[:3], carrier), {
+        'finding-disposition-request': lambda b: b.update(request),
+        'finding-disposition-launch': lambda b: b.update(request_id=identifier, request_digest=canonical_digest(request),
+            nonce=identifier[7:39], operation_id=operation),
+        'finding-disposition-output': lambda b: b.update(request_id=identifier),
+        'finding-disposition': lambda b: (b.update(request_id=identifier),
+            b['dispatch'].update(operation_id=operation))}, raw_document=doc)
+    doc = changed[1]
+    row['dispositions'] = doc['repair_lineage']['lineages'][0]['dispositions']
+    item = row['dispositions'][0]; item.update(request_id=identifier)
+    item['intent']['operation_id'] = operation
+    doc['repair_lineage']['lineages'] = [row]
+    with pytest.raises(FreshReviewError, match='disposition-origin-mismatch'):
+        validate_terminal(doc, row, item, changed[3], candidates)
