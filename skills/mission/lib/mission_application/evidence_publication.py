@@ -455,6 +455,7 @@ def publication_blob_shapes_by_command_type():
 # command schema, and with it every operation identity already recorded.
 PUBLICATION_PATH_FIELD_BY_COMMAND_TYPE = {
     "fresh-review-prepare": "target",
+    "repair-begin": "target",
     "fresh-review-output-import": "target",
     "generate-claims-ledger": "publication_path",
     "generate-context-manifest": "publication_path",
@@ -466,6 +467,7 @@ PUBLICATION_PATH_FIELD_BY_COMMAND_TYPE = {
 }
 EFFECT_FIELDS_BY_COMMAND_TYPE = {
     "fresh-review-prepare": ("effect",),
+    "repair-begin": ("history_effect", "plan_effect", "repro_effect"),
     "fresh-review-output-import": ("effect", "coverage_effect", "findings_effect"),
     "export-artifact": ("artifact_effect", "export_effect"),
     "generate-claims-ledger": ("effect",),
@@ -529,7 +531,7 @@ def project_semantic_command(
             raise EvidencePublicationError(
                 "command-invalid", "encoded command is missing " + field
             )
-        if command.get('type') == 'fresh-review-output-import' and value[field] is None:
+        if command.get('type') in ('fresh-review-output-import', 'repair-begin') and value[field] is None:
             projected_value[field] = None
             continue
         if command.get('type') == 'fresh-review-output-import' and field == 'findings_effect':

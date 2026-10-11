@@ -181,6 +181,10 @@ E はこの保証を残し、E に link のない legacy findings の migration/
 | open/repairing/deferred → rejected | 独立 disposition receipt 必須。false-positive、重複先、非義務との関係を具体的に束縛。正当な義務違反の受容を意味しない |
 | verified/rejected/deferred → 実効open | §4 の stale、判定 binding 不一致、または同じ反例の新しい失敗。履歴と元の ID を保持し、再修復可能 |
 
+**E2aのbefore_candidateの保証主体**: 現在のfilesystem候補はapplicationの[`prepare_begin`](../../skills/mission/lib/mission_application/repair.py)が凍結commandごとの`_capture`で観測し、再観測との一致を確認する。公開CLIからsnapshot値を指定する入口は設けない。kernelのstateには過去の候補bindingしかないため、`before_candidate.snapshots`はapplicationが観測した値としてキー集合とdigestの形式だけを検査する（contract・requirement・policy・iterationはstateと照合する）。この境界は[`test_public_begin_uses_application_capture_and_refuses_drift`](../../skills/mission/tests/test_issue906_repair_attempts.py)で固定する。
+
+E2bのreverifyは`before_candidate`を信頼の根拠にしない。下記のfailed/passed replay receiptと対象候補の新しい観測を束縛して判定する。`before_candidate`を権威として使用する設計へ変える場合は、その段で現在候補との照合を必須とする。
+
 verified の必須条件:
 
 1. 元反例の実行が同じ criterion/command/typed repro で `failed` と観測されている。blocked、自己申告 actual、未実行を失敗と数えない。D の original replay が未確認なら、まず保存された introduced snapshot で baseline replay を観測する（B の現 primitive は project_root から capture するため、未merge の D の候補保存に依存する）。snapshot が保存されていなければ UNKNOWN/open のまま。
@@ -323,6 +327,8 @@ CIはPython shards→`make test-shard`→tracked testsの選択で配線され�
 | E4: 比較履歴・event・最終統合 | 650〜850 | E3依存。before/after normal/consumer/evaluator refs、regression/unmeasured、不変event/export、保持証拠と再開、公開利用手順とinventoryを完結。Iの集計ロジックは変更しない |
 
 増分の内訳（推定）: E0 +20〜30（4 variant と lineage・disposition の最大形 test）、round 4 で E0 +110〜170（D の decoder 上限 +70〜110、移行・取下げの判定・lineage 未導入の終端 +40〜60）、round 5 で E0 +40〜70（withdrawn の状態・decoder・reducer・判定と test）、E1 +160〜240（slot・同一 commit の更新・completion 条件・`unimported-findings` lineage。overflow を削除した分を除いた）、E2 +30〜60（operation ID の導出・結果喪失の終端・CAS 敗北の test）、E3 +80〜140（予約と slot、取込み上限超過の終端の disposition）。過去の実測との比 ×1.6 で補正すると E0 は 1,312〜1,792行で上限が 1,400行を超え（分割は §9 の未決 9）、E1・E2 の上限も 1,400行を超える（E1 1,456〜1,984、E2 1,408〜1,856）。E3 は 1,168〜1,584行。着手前に実 diff の見込みを再計測し、超える場合は分割案を出す。
+
+**E2bへの容量予約の引継ぎ**: E2aの`REPAIR_TERMINAL_DELTA`は終端要約の予約だけである。E2bでreverifyの実行intentを導入する際は、intent保存段の最大増分（Fの`reservation_id`・`budget_class`を含む形）もpending全件の予約総量へ追加する。beginと全writerは残る全段の予約を確保し、intentから終端までの各段が容量上限付近でも保存できることを最大形のencodeテストで固定する。E2aの定数だけをそのまま流用しない。
 
 E2以前もattempt/receiptの最小履歴は保存する。E4まで比較が未測定であることを明示し、親880の「改悪を測れる履歴」を未完了として残す。子をRefsで親へ結び自身をCloses、最後のE4を#880本体に残す場合は親本文を最終統合の条件へ更新する。ここでは本文を変更しない。
 

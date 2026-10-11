@@ -98,7 +98,7 @@ def decode_projection(document):
             seen.add(row['lineage_id'])
             # E2/E3 will add authenticated resolution variants. Authored status
             # cannot grant a successful replay or independent disposition in E1.
-            if row['lifecycle'] != 'open':
+            if row['lifecycle'] not in ('open', 'repairing'):
                 raise FreshReviewError('repair-lineage-lifecycle-invalid')
             marker = row['last_candidate_change']
             if marker != _absent('no-resolution-binding'):
@@ -108,8 +108,10 @@ def decode_projection(document):
                 _identifier(row['criterion_id'])
                 for key in ('requirement_ids', 'prohibited_side_effect_ids'):
                     _unique_strings(row[key], _identifier, nonempty=False)
-                if row['severity'] not in ('High', 'Medium', 'Low') or row['observations'] != [] or row['attempts'] != []:
+                if row['severity'] not in ('High', 'Medium', 'Low') or row['observations'] != []:
                     raise FreshReviewError(SHAPE)
+                from .repair_attempts import validate_attempts
+                validate_attempts(row)
                 origin = _closed(row['origin'], ('mission_id', 'session_id', 'request_id', 'finding_id'), SHAPE)
                 for value in origin.values():
                     _identifier(value)
@@ -144,7 +146,7 @@ def decode_projection(document):
                     raise FreshReviewError(SHAPE)
                 for key, value in candidate['snapshots'].items():
                     _identifier(key); _digest(value)
-            elif row['kind'] != 'unimported-findings' or row['disposition'] != _absent('disposition-not-enabled'):
+            elif row['lifecycle'] != 'open' or row['kind'] != 'unimported-findings' or row['disposition'] != _absent('disposition-not-enabled'):
                 raise FreshReviewError(SHAPE)
             _identifier(origin_request_id(row))
             rows.append(FindingLineage(freeze_json_value(row)))
@@ -268,17 +270,21 @@ def origin_documents(projection, evidence, contract):
     return rows
 
 
+def origin_identity(row):
+    return {key: value for key, value in row.items() if key not in ('attempts', 'lifecycle', 'last_candidate_change')}
+
+
 def import_origins(state, evidence):
     document = state.legacy_passthrough.thaw() if state.legacy_passthrough is not None else state.extensions.thaw()
     validate_projection_backing(document, state.repair)
     rows = origin_documents(state.fresh_review, evidence, document.get('acceptance_contract', {}))
     existing = {item.document.thaw()['lineage_id']: item.document.thaw() for item in state.repair.lineages}
     expected = {row['lineage_id']: row for row in rows}
-    if any(key not in expected or value != expected[key] for key, value in existing.items()):
+    if any(key not in expected or origin_identity(value) != origin_identity(expected[key]) for key, value in existing.items()):
         raise FreshReviewError(MISMATCH)
     if not rows and 'repair_lineage' not in document:
         return state
-    projection = RepairProjection(tuple(FindingLineage(freeze_json_value(row)) for row in rows))
+    projection = RepairProjection(tuple(FindingLineage(freeze_json_value(existing.get(row['lineage_id'], row))) for row in rows))
     document['repair_lineage'] = projection_document(projection)
     validate_projection_backing(document, projection)
     key = 'legacy_passthrough' if state.legacy_passthrough is not None else 'extensions'
@@ -308,7 +314,7 @@ def effective_unresolved_findings(projection, reviews, evidence, contract):
     if len(existing) != len(projection.lineages):
         raise FreshReviewError('repair-lineage-duplicate-id')
     expected = {r['lineage_id']: r for r in rows}
-    if any(key not in expected or value != expected[key] for key, value in existing.items()):
+    if any(key not in expected or origin_identity(value) != origin_identity(expected[key]) for key, value in existing.items()):
         raise FreshReviewError(MISMATCH)
     return tuple(row['lineage_id'] for row in rows if row['kind'] == 'unimported-findings'
         or row['prohibited_side_effect_ids'] or row['criterion_id'] not in criteria

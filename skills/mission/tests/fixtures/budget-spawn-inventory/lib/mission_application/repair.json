@@ -1,0 +1,19 @@
+{
+  "module": "lib/mission_application/repair.py",
+  "candidates": {
+    "advance:execute_evidence_operation": {
+      "count": 1,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "run_repair_cli:execute_evidence_operation": {
+      "count": 2,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    }
+  }
+}
