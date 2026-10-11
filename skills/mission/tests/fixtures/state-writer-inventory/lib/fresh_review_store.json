@@ -1,0 +1,12 @@
+{
+  "calls": {
+    "_create:open-write": 1,
+    "_create:write": 1,
+    "_directory:open-write": 1,
+    "_operation_lock:open-write": 1,
+    "cleanup:open-write": 1,
+    "guarded:open-write": 1,
+    "recover_expired:open-write": 1
+  },
+  "module": "lib/fresh_review_store.py"
+}
