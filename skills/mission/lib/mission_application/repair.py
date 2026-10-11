@@ -1,4 +1,6 @@
 """Start repair obligations and recover lost publication without replaying work."""
+from __future__ import annotations
+
 from functools import partial
 from pathlib import Path
 import json

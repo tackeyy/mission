@@ -1,4 +1,6 @@
 """Bounded repair obligations. E2a never issues a resolution receipt."""
+from __future__ import annotations
+
 from dataclasses import replace
 import hashlib
 import json
