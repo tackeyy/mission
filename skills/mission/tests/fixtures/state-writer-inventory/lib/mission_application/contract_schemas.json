@@ -1,0 +1,6 @@
+{
+  "calls": {
+    "review_contract_schema:copy-ref": 1
+  },
+  "module": "lib/mission_application/contract_schemas.py"
+}

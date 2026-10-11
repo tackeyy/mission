@@ -1,0 +1,7 @@
+{
+  "calls": {
+    "_proposed_state:copy-ref": 1,
+    "_publish_review_group:copy-ref": 2
+  },
+  "module": "lib/mission_application/supersede_reviews.py"
+}

@@ -1,0 +1,6 @@
+{
+  "calls": {
+    "reserve_provider:replace": 1
+  },
+  "module": "lib/mission_application/provider_budget.py"
+}

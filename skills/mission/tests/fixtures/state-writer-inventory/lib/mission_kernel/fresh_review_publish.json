@@ -1,0 +1,7 @@
+{
+  "calls": {
+    "failed:replace": 1,
+    "validate_failed_import:replace": 1
+  },
+  "module": "lib/mission_kernel/fresh_review_publish.py"
+}

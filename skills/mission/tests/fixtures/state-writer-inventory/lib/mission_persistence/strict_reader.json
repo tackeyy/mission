@@ -1,0 +1,7 @@
+{
+  "calls": {
+    "read_stable_bytes:open-write": 1,
+    "read_stable_bytes_beneath:open-write": 3
+  },
+  "module": "lib/mission_persistence/strict_reader.py"
+}

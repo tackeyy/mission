@@ -1,0 +1,13 @@
+{
+  "candidates": {
+    "main:run_contract_verifier": {
+      "count": 1,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        1,
+        2
+      ]
+    }
+  },
+  "module": "lib/mission_application/spawn_trampoline.py"
+}

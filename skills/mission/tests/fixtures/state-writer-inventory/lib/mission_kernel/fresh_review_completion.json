@@ -1,0 +1,8 @@
+{
+  "calls": {
+    "_completion_facts:dynamic": 1,
+    "_completion_facts:replace": 2,
+    "_decode_completion_evidence:dynamic": 1
+  },
+  "module": "lib/mission_kernel/fresh_review_completion.py"
+}

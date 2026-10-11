@@ -1,0 +1,6 @@
+{
+  "calls": {
+    "decode_snapshot:replace": 1
+  },
+  "module": "lib/mission_kernel/snapshot.py"
+}

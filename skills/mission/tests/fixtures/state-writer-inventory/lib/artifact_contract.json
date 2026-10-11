@@ -1,0 +1,6 @@
+{
+  "calls": {
+    "_read_relative_regular_file:open-write": 3
+  },
+  "module": "lib/artifact_contract.py"
+}

@@ -1,0 +1,13 @@
+{
+  "candidates": {
+    "run_verify_provider_approval:execute_verifier": {
+      "count": 1,
+      "reason": "Approval admission commits before both descriptor spawn entries; policy-only execution uses the shared watchdog helper. Legacy callable fork is rejected under policy.",
+      "rows": [
+        5,
+        6
+      ]
+    }
+  },
+  "module": "lib/mission_application/provider_approval.py"
+}

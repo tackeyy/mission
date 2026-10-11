@@ -1,0 +1,7 @@
+{
+  "calls": {
+    "_command_subject:dynamic": 1,
+    "receipt_decision:replace": 1
+  },
+  "module": "lib/mission_application/guard_application.py"
+}

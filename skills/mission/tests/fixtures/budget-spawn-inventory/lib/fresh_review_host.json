@@ -1,0 +1,57 @@
+{
+  "candidates": {
+    "_call:executable": {
+      "count": 1,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    },
+    "_call:spawn_deadline_exec": {
+      "count": 1,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        7,
+        8,
+        9
+      ]
+    },
+    "_callback:cancel": {
+      "count": 1,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        7,
+        8,
+        9
+      ]
+    },
+    "_callback:launch": {
+      "count": 1,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        7,
+        8,
+        9
+      ]
+    },
+    "_callback:observe_parent": {
+      "count": 2,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        7,
+        8,
+        9
+      ]
+    },
+    "_callback:recover": {
+      "count": 1,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        7,
+        8,
+        9
+      ]
+    }
+  },
+  "module": "lib/fresh_review_host.py"
+}

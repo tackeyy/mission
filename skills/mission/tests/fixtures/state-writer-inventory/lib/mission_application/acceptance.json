@@ -1,0 +1,6 @@
+{
+  "calls": {
+    "prepare_acceptance_contract_import:copy-ref": 1
+  },
+  "module": "lib/mission_application/acceptance.py"
+}

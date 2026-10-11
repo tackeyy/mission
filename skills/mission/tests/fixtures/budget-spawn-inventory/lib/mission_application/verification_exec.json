@@ -1,0 +1,20 @@
+{
+  "candidates": {
+    "main:Popen": {
+      "count": 2,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        1,
+        2
+      ]
+    },
+    "main:executable": {
+      "count": 1,
+      "reason": "Syntactic APIs and references classified by design 881 section 3.2; data/effect/callback references do not directly spawn.",
+      "rows": [
+        15
+      ]
+    }
+  },
+  "module": "lib/mission_application/verification_exec.py"
+}

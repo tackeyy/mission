@@ -1,0 +1,23 @@
+{
+  "candidates": {
+    "_load_pinned_factory:namespace-access": {
+      "count": 4,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        7,
+        8,
+        9
+      ]
+    },
+    "load_adapter:dynamic-spawn": {
+      "count": 1,
+      "reason": "APIs and references for these design entries; reservation coverage is asserted separately.",
+      "rows": [
+        7,
+        8,
+        9
+      ]
+    }
+  },
+  "module": "lib/fresh_review_runtime.py"
+}

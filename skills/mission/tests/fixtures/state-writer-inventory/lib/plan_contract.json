@@ -1,0 +1,7 @@
+{
+  "calls": {
+    "contract_schema:copy-ref": 1,
+    "visit:remove": 1
+  },
+  "module": "lib/plan_contract.py"
+}
