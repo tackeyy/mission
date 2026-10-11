@@ -30,7 +30,7 @@ E3専用request/terminalで、独立判定の理由・証拠・候補binding付�
 
 | 保存先 | 内容 |
 |---|---|
-| state要約 | request ID/ref、受付generation、stage、intent、launch ref、terminal ref/generation、判定種別、重複先ID集合 |
+| state要約 | request ID/ref、full_candidate_digest、supersedes_attempt_id、受付generation/fence、stage、intent、launch ref、terminal ref/generation、判定種別、重複先ID集合 |
 | request artifact | origin、lineage、contract/requirement/policy、元finding/output、候補binding、adapter pin、上限 |
 | terminal artifact | request/launch/output、独立性観測、理由、対応表ref/digest、実行・公開operation/fence |
 | mapping artifact | 元output全要素の対応 |
@@ -43,36 +43,29 @@ ID・digest・int・時刻・refの上限はD/E2を継承する。理由本文�
 修復履歴の検査を維持し、lifecycleは両collectionから共通関数で導出する。
 古いrejectedへのfallbackは禁止する。後続判定がpending/blocked/deferredなら現在の解決証拠にはならない。
 
-## 3. 修復との排他と停止証拠
+## 3. 修復との排他と受付
 
-同一lineageで修復pendingとdisposition pendingを同時に保持しない。全過去intentも確認し、未知の旧実行を後続attemptで隠さない。
+同一lineageで修復pendingとdisposition pendingを同時に保持しない。
+既存E2が保存したterminalを運用上の終端として扱う。過去全intentのprocess group停止証明をE3だけの追加受付条件にしない。
+terminalを群停止証明と呼ばず、過去実行が絶対に候補を変えないとも主張しない。
 
 | 受付時点 | 判定 |
 |---|---|
-| open/deferred/実効open、未確認の過去実行なし | prepare可能 |
+| open/deferred/実効open | prepare可能 |
 | repairing、intentなし | 同一fenced commitで修復をblocked化しdispositionを受付 |
-| repairing、intentあり | 受付拒否。開始しない |
-| terminal済みでも過去intentの終了を証明できない | repair-execution-unobservableで拒否 |
-| disposition pending | 同一operationの再読取だけを許可 |
-| 現候補で有効なverified/rejected | 冗長prepareを拒否。staleなら実効openとして判定 |
+| repairing、intentあり | pending排他により受付拒否。既存reconcile等でterminalになれば受付可能 |
+| disposition pending | 同一operationの再読取だけを許可。repair begin/reverifyと別判定を拒否 |
+| 現候補で有効なverified/rejected | 冗長prepareとrepair beginを拒否。staleなら実効open |
 
-`blocked(reason="disposition-requested")`はintentなし修復の終端化とdisposition受付を同じcommandが実行する場合だけ許す。
-これにより上位設計のrepairingからdeferred/rejectedへの移行を保持する。reverifyとの競合は同一stateのCASで決着する。
-停止対象はrunner所有のprocess group。finished_at、deadline経過、lease切れ、terminal status、settled単独を停止証拠にしない。
-budgetなし正常receiptも直接子の終了までしか示さず、群停止の証拠として認めない。
-実行済みintentからの受付は次の全条件を満たす場合に限る。
+intentなし修復を終端化する場合、E3 request要約とartifactの`supersedes_attempt_id`へ対象attemptを記録する。通常prepareではabsentとする。
+修復terminalはblocked/disposition-requestedとし、terminal.operation_idをE3 prepareの実際のoperationへ一致させる。通常repairのterminal_operation導出を流用しない。
+decoderは同じoperation/fenceのrequestがちょうど一つあり、supersedes参照とintent不在のattemptが一致することを双方向に検査する。
+両row変更とrequest effectを同じTransition/effects commitへ含め、その追加費用をE3受付予約へ計上する。既存修復terminal予約を流用しない。
 
-1. 保存comparison/replayが元attempt・intent・operation/fence・candidate・reproに完全一致する。
-2. receiptはpassedまたはfailed、timed_out=false、block_reason=null、整数exit_codeである。
-3. 元dispatchがbudget付きであることを実在するadmission/operation証拠へ束縛できる。
-4. 内側verifier群と外側supervisor群のcleanup成功後に正規frameを返す実行経路である。
-5. 同reservationのactive/system-recovery hold、未解消kill-unconfirmedが残っていない。
-
-根拠は[verification runner](https://github.com/tackeyy/mission/blob/3cd23821512711d216e83be7a17ffe44f0fa5751/skills/mission/lib/mission_application/verification_runner.py#L424-L442)と[budgeted execution](https://github.com/tackeyy/mission/blob/3cd23821512711d216e83be7a17ffe44f0fa5751/skills/mission/lib/budgeted_exec.py#L273-L289)。
-現在policyやreservation IDの文字列だけから出所を推定しない。旧証跡から確定できなければ拒否する。
-settlementは32件で刈られるため全過去settled行の現存は要求せず、欠落を停止証拠にも使わない。
-publication-result-lost/effects-unavailable/不明intentは識別可能な運用blockerとして返す。
-自然終了を期待した無期限poll、再実行、資源解放、成功変換は行わない。E2の停止契約やreceipt schemaをE3で変更しない。
+deferredは常に未解決。rejectedは現在候補の独立判定、各段階のfull候補再観測、current fence/CAS、候補marker、completion再検証を必要とする。
+過去実行等が後から候補を変えれば通常の候補失効規律で無効化する。新attempt開始後に古いdispositionへfallbackしない。
+実際のactive/system-recovery holdは既存budget gateが扱い、E3が消去・解放・無視しない。
+E2 runner・receipt schema・repair beginの運用境界を変更せず、自然終了を期待した無期限pollや再実行を追加しない。
 
 ## 4. Request・adapter・予算
 
@@ -84,15 +77,21 @@ packetは元要求・ledger・criterion・禁止副作用・元finding/output・
 registryの5fieldとDのrequest/output schemaは変更しない。
 登録済みadapterへ任意能力`launch_disposition(request_bytes, input_handle, snapshot_handles, dispatch)`を追加する。
 既存5methodだけでE3対応と判断しない。bounded callback内のcallable検査で未対応を未起動blockedにする。
-E3専用serializerとpacket materializationを明示分岐し、D request_documentやlaunchへ暗黙にE3を送らない。
+E3専用serializerとpacket materializationを明示分岐し、host callback action許可リストへlaunch_dispositionを追加する。D request_document・decoder・launchへE3を送らない。
 既存transport・bounded callbackを再利用し、pinを読込・起動前後・回収時に照合する。
 parent/child/context/input受領はhost観測から導出し、callerや子の自己申告で代用しない。
 recover/cancelは元dispatchだけを扱い、recoverから再launchしない。
 
-予算entryは既存`repair-disposition-run`、classは`repair`。
-[budget契約](https://github.com/tackeyy/mission/blob/3cd23821512711d216e83be7a17ffe44f0fa5751/skills/mission/lib/mission_kernel/budget.py#L25-L31)のREPAIR_ENTRIESに含まれ、新分類やactivationは不要。
-policyなしは非activationを維持し、adapter呼出しのwall-time/output上限は適用する。
-policyありは既存予約・deadline・settlementを使う。起動後の停止不明では資源holdを保持する。
+予算entryは既存`repair-disposition-run`、classは`repair`。列挙の新設やactivationは不要だが、現行budget_class/admitはE3未接続なので両方を実装対象とする。
+[現行分類器・admission](https://github.com/tackeyy/mission/blob/3cd23821512711d216e83be7a17ffe44f0fa5751/skills/mission/lib/mission_kernel/budget_decisions.py)のE2専用分岐をE3へ接続する。
+
+新規admissionではtarget lineageの最新dispositionがpreparedでterminal/intent/launchなし、同lineageにpending repairなしであることを照合する。
+operationは`disposition-dispatch:`とrequest IDのSHA-256部分から導出し、candidate_digestは保存requestのfull_candidate_digestへ一致させる。
+分類器はprepared dispositionの存在時だけrepairを返し、admitでtarget/request/operation/candidateを閉じたprojectionから再検査する。不一致は固定reasonで拒否する。
+final latchまたはrepair deadline到達後の新規runはbudget-final-latched。final budgetへ読み替えない。
+admissionとdispatch intentを同じfenced commitで公開する。同一dispatch再送は保存operationまたは元reservation/terminalをreadbackし、二度目の予約・launchをしない。
+既存dispatchの回収・settlementはrecover/system-recover規律に従う。現在のholdを保持する。
+policyなしは非activationを維持し、adapterのwall-time/output上限を適用する。
 
 ## 5. 棄却・alias・overflow
 
@@ -102,18 +101,38 @@ overflow対応表は元outputのfindings全indexについてindex・canonical el
 finding IDだけで対応付けず、重複IDでも全要素を検査する。欠番・重複index・余分要素・digest不一致・未判定はrejectedを作らない。
 全件対応が256KiB以内に収まらない場合もblocked。部分対応を採用せず、stateにはbounded blocked理由を保持する。
 61件はstateの重複先集合上限であり、元findingを61件へ切り捨てる上限ではない。
-集合は対応表からkernelが導出する。対象は存在する通常finding lineageだけとし、欠落・自己参照・overflow対象・alias cycleを拒否する。
-対応先のない正当な違反が一つでもあればoverflowを解決しない。
-重複先がopen/deferred/pending/staleなら元findingも未解決。元義務リンクとsupplemental open obligationを削除しない。
-全体coverage更新には新しいD attemptが必要。
+集合は対応表からkernelが導出する。存在する通常finding lineageだけをtargetとし、欠落・自己参照・overflow対象・alias cycleを拒否する。
+duplicateは存在だけでは解決を移譲しない。各edgeで次を元artifactから再計算し、caller申告を権威にしない。
+
+- sourceとtargetのcontract/requirement/policy bindingが一致し、双方の解決証拠が同じ現在full候補に有効である。
+- sourceのcriterion、command、verifier definition、typed repro bindingがtargetと一致する。導出不能なら未解決。
+- targetがverifiedなら有効な修復receiptがあり、検証scopeがsourceのrequirement_idsとprohibited_side_effect_idsを包含する。
+- targetがrejectedなら有効な独立判定scopeがsourceのcriterion・requirement_ids・prohibited_side_effect_idsを包含する。
+- aliasをたどる各edgeを検査し、最終targetの有効な解決を確認する。
+
+別scope/別reproのtargetへ義務を移譲しない。異なる反例についてはsource自身のnot-violation独立判定を要する。
+overflowも各elementをsourceとして同じ検査を行い、criterion・義務scope・reproを元outputから導出する。導出不能elementはblockedとする。
+対応先のない正当な違反が一つでもあればoverflowを解決しない。全elementが条件を満たした場合だけrejectedを有効とする。
+全件mappingが256KiBを超える場合はdisposition-mapping-over-limitを保存し未解決とする。現E3に自動解消経路がないことを利用文書へ明記し、上位設計§9の進行不能条件と並べる。
+重複先がopen/deferred/pending/staleならsourceも未解決。元義務リンクとsupplemental open obligationを削除しない。全体coverage更新には新しいD attemptが必要。
 
 ## 6. 候補とcompletion
 
 E2bのobserved_candidatesで凍結policyの全commandを同じキー集合で観測する。
 prepare前後・実行直前・実行後・公開直前に再観測し、差異があればrejectedを公開しない。
-対象snapshot subsetとfull候補digestを混同しない。markerはE2bと同じdomain/policy bindingのfull_candidate_digestを使う。
-A→B→Aを観測したmutationは失効を保持する。completion読取時にも現候補と照合する。
-D全originとrepair projectionのunionを評価し、欠落・不正・pending・blocked・deferred・staleを未解決とする。
+E3 request artifactとstate要約に固定長full_candidate_digestを保存し、E2bの同domain/policy bindingの関数で導出する。snapshot subsetと混同しない。
+marker比較基準は①last_candidate_changeのfull候補digest、②最新E3 requestのfull_candidate_digest、③通常findingだけ既存introduced_candidateの保守的判定の順とする。
+比較基準のないoverflowは最初の受理済みfull観測でmarkerを初期化する。解決証拠がない初期化を解決にしない。
+prepareはfull観測/marker更新の後に受付generation、terminal公開は観測の後にterminal generationを割り当てる。新requestで古いmarkerを消去・巻戻ししない。
+invalidate_observedのfinding限定分岐を改め、overflowも更新する。E3 validatorはintroduced_candidateを要求せずrequestとfull候補bindingを使う。
+通常verification、fresh-review prepare、repair begin/reverify/commit、E3 prepare/run/commit、completion由来mutationの全観測producerを照合する。
+E3履歴があるstateで候補を観測するcommandは完全なobserved_candidates carrierを必須にし、欠落・部分mapを拒否する。halt等の観測しないcommandへは要求しない。
+E3履歴のない旧stateの互換経路は維持する。現在候補で作ったrejectedを古いintroduced subsetだけで再失効させない。
+A→B→Aを観測したmutationは失効を保持する。同じfull観測の反復では失効させない。読取completionは現候補とのvalidityを再計算し、marker保存とは主張しない。
+
+applicationのobserve_disposition_results相当で、最新判定/alias/overflowに必要なrequest・launch・terminal・output・mappingを安定読取・digest/size検査しephemeral carrierへ載せる。
+kernelはclosed shape、origin/scope/repro、independence、request/operation/fence、全件mapping、候補/generation、aliasを再検査する。state要約だけを解決の権威にしない。
+D全originとrepair projectionのunionを評価し、欠落・改変・不正・pending・blocked・deferred・staleを未解決とし、古いterminalへfallbackしない。
 有効な独立rejectedだけがfinding遮断を外せる。通常receipt・fresh search・coverage・既存gateは維持する。
 新reviewの省略、row削除、score、forceは解決証拠にならず、dispositionを通常verification collectionへ追加しない。
 
@@ -145,7 +164,7 @@ D定数は緩めずE3定数を追加する。停止系・takeover後でも予約
 ## 8. 実装・検証・分割
 
 公開CLIはrepair disposition prepare/run/reconcile。保存requestを一回実行し、回復は元実行だけを扱う。caller指定resolvedや結果importは設けない。
-回帰群は独立性/pin/input、pending競合/過去群停止、full候補/A→B→A、全件mapping/61と62/alias、v4/v5容量/公開失敗/CAS/旧fence/応答喪失、通常検証とcoverageの独立性にまとめる。
+回帰群は独立性/pin/input、pending競合/既存terminal後の到達性と候補失効、full候補/A→B→A、全件mapping/61と62/alias、v4/v5容量/公開失敗/CAS/旧fence/応答喪失、通常検証とcoverageの独立性にまとめる。
 同種入力表はpure validatorへ集め、公開CLIには権威境界・配線の代表例を残す。50入力以上の独立探索は実際の素通り・誤検知を記録する。
 既存E2b/Dのfixtureとtransportを再利用し、D dispatch/publishやreconcile直積の複製を避ける。
 異系統レビュー・独立Checkerを同headで取得し、ready後CIと最新base/exact-headを確認する。
@@ -157,4 +176,4 @@ D定数は緩めずE3定数を追加する。停止系・takeover後でも予約
 新collectionがある場合だけcompletionの閉じた検査を通し、不正は未解決または拒否にする。旧state/D/E2経路/receiptの意味は変えない。
 後行mergeまでIssue907の公開CLI ACを完了としない。必要な子Issueは分割方針確定後に親子リンク付きで起票する。
 完了は現行Issue907全ACと本契約の検証、必要レビュー、CI、通常gateのmerge/readbackまで。
-停止証拠が復元できない既存intentは条件緩和で隠さず、識別可能なblockerとして残す。
+policyありpreparedのrepair分類と一回admission、wrong target/op/既launch/final拒否、policyなし修復terminal後の判定到達性、paired request/terminalの片側欠落を回帰に含める。
