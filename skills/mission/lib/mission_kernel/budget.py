@@ -26,7 +26,8 @@ BUDGET_SPAWN_ENTRIES = MappingProxyType({**dict.fromkeys((
     'verification-run', 'repair-reverify', 'invoke-command', 'invoke-prepared',
     'verify-approval', 'force-approval', 'fresh-review-run',
     'repair-disposition-run', 'recover', 'system-recover', 'repair-begin'), 'pending'),
-    **{'invoke-command': 'covered', 'invoke-prepared': 'covered', 'verification-run': 'covered'}})
+    **{'invoke-command': 'covered', 'invoke-prepared': 'covered', 'verification-run': 'covered',
+       'verify-approval': 'covered', 'force-approval': 'covered'}})
 REPAIR_ENTRIES = ('repair-reverify', 'repair-disposition-run')
 # Recovery inherits the class of the dispatch it recovers (design 881 §3.6).
 CLASS_INHERITING_ENTRIES = ('recover', 'system-recover')

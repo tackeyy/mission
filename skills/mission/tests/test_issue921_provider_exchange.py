@@ -112,8 +112,9 @@ def test_pipe_error_still_cleans_group_and_closes_descriptors(provider, monkeypa
         return confirmed
     monkeypatch.setattr(budgeted_exec, 'cleanup_group', cleanup_result)
     error, message = (OSError, 'pipe failure') if confirmed else (ValueError, 'kill-unconfirmed')
-    with pytest.raises(error, match=message):
+    with pytest.raises(error, match=message) as observed:
         exchange_provider(child, b'', time.monotonic() + 10, kill_wait=1)
+    assert observed.value.exec_cleanup_confirmed is confirmed
     assert child.returncode is not None
     assert all(stream.closed for stream in (child.stdin, child.stdout, child.stderr))
     with pytest.raises(ProcessLookupError):
