@@ -101,19 +101,35 @@ acceptance was not measured or promised. A lowered-ceiling test verifies quota
 accounting with selected records. Copy boundaries use8MiB minus one/exact/plus
 one. Invalid force flags now reject before deletion.
 
-Snapshot2 freezes both store/quarantine modules, actual dependencies and API
-contracts for the next independent exploration.42 tests passed from that fixed
-snapshot in0.28s. Its input exploration is pending. Snapshot3 adds the integer identity boundary and resource/lock regressions;
-snapshot2 results do not establish the final candidate. The root independently
-reran snapshot2 with actual dependencies (42 passed in0.30s) and reproduced the
-public-path exchange on a real filesystem: cleanup False, replacement retained
-in quarantine and original inode preserved. Cleanup True means known private
-namespace targets are absent/reclaimed, not proof of physical inode deletion or
-process custody. Final reviewed size, hygiene, independent session review, Checker and
-required CI remain separate pending gates. This private safety boundary is one
-concern split from Issue1009; further separating writer/recovery would leave
-cleanup without its durable identities. Guardian/process guarantees remain in
-Issue1012 and are not replaced by these model-free file tests.
+Independent exploration against immutable snapshot3 completed324 inputs:
+136 retained cases,98 journal/manifest/retirement cases,18 crash/quota/source-race
+cases and72 exact-integer guard cases. Expected-result differences, false
+accepts/rejects and uncaught production exceptions were all zero. All snapshot
+hashes matched before/after. Real filesystem/persistence calls and deterministic
+trace checkpoints were used without stubs or limit/counter injection.
+
+Six float/bool bindings accepted by snapshot2 were rejected by snapshot3:
+manifest directory components, manifest lock size and journal parent components.
+The root independently reran snapshot3 with actual dependencies (46 passed
+in1.05s). Its separate snapshot2 public-path exchange reproduction observed
+cleanup False, replacement retained in quarantine and original inode preserved.
+Cleanup True means known private namespace targets are absent/reclaimed, not
+proof of physical inode deletion or process custody.
+
+Maximum selected256 records and257 complete generations used5,279,801 logical
+bytes: manifests5,117,497 plus evidence162,304. The campaign did not measure
+other-UID ownership, other-device substitution, I/O/fsync fault coverage,
+physical crash durability, exact raw16MiB payload/48KiB manifest boundaries,
+filesystem block overhead or host/guardian/model/SDK/auth/production behavior.
+Trace cuts emulate instruction checkpoints, not power loss; the unit suite's
+initial metadata fsync refusal is separate from broad durability validation.
+The schema/file caps reject before the raw byte boundaries above.
+
+Independent session review, Checker and required CI remain separate pending
+gates. This private safety boundary is one concern split from Issue1009;
+further separating writer/recovery would leave cleanup without its durable
+identities. Guardian/process guarantees remain in Issue1012 and are not replaced
+by these model-free file tests.
 
 Final store/inventory/module/mirror verification passed632 tests in11.67s;
 tracked-tree artifact/vendor hygiene passed9 tests in3.93s. The staged reviewed
