@@ -1,0 +1,12 @@
+{
+  "module": "lib/mission_application/disposition_evidence.py",
+  "candidates": {
+    "observe_disposition_results:launch": {
+      "count": 2,
+      "reason": "Pure launch receipt field reads classified by design 881 section 3.2 row 15. This internal evidence reader decodes saved launch budgets and never invokes an adapter or starts a process.",
+      "rows": [
+        15
+      ]
+    }
+  }
+}
