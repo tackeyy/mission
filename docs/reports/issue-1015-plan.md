@@ -1,6 +1,6 @@
 # Issue1015実装前計画
 
-結論: 単一PRの見積は1,730〜2,620 reviewed行。1,400行以内へ保証を削って収めず、保存・容量・精算と、候補観測・正のcompletionの2子へ分割することを推奨する。これは実装計画であり、独立レビューacceptedでも実装完了でもない。
+結論: 保存・容量・精算と、候補観測・正のcompletionを分割し、後者は旧requestを解決証拠へ昇格させない移行を必須とする。移行追加後の全体見積は1,930〜2,960 reviewed行。1,400行以内へ保証を削って収めない。これは実装計画であり、独立レビューacceptedでも実装完了でもない。
 
 対象: [Issue1015: 独立判定の保存と精算を有効な解決へ接続する](https://github.com/tackeyy/mission/issues/1015)。調査基点は`2a443a241d86738669414eb4eaac8826ba5b2d02`。対象設計は[独立判定§4〜§7](https://github.com/tackeyy/mission/blob/2a443a241d86738669414eb4eaac8826ba5b2d02/docs/design/907-independent-disposition.md)。実host、adapterの公開CLI、認証、予算policy activationは含めない。
 
@@ -64,7 +64,8 @@ CI経路は`.github/workflows/ci.yml:125`→`make test-shard`→`scripts/ci_shar
 | completion carrier/union/alias解決 | 0 | 140〜230 |
 | tests | 340〜480 | 310〜500 |
 | inventory・設計/検証記録 | 90〜130 | 70〜140 |
-| **合計** | **1,000〜1,350** | **730〜1,270** |
+| 旧request移行・version認証・追加回帰 | 0 | 200〜340 |
+| **合計** | **1,000〜1,350** | **930〜1,610** |
 
 両PRとも600超の説明が必要。Aは「同じrequestの将来保存保証・admission・終端精算を切り離すと受付済みoperationを安全に終端化できない」、Bは「観測の全mutation配線と正completionを切り離して有効化すると失効が抜ける」が説明の中心となる。Issue1015は親trackingへ変更し、[A:保存・容量・精算Issue1019](https://github.com/tackeyy/mission/issues/1019)と[B:候補観測・正completion Issue1020](https://github.com/tackeyy/mission/issues/1020)を公式sub-issueで接続した。A merge後の最新baseからBを開始する。
 
@@ -73,21 +74,48 @@ CI経路は`.github/workflows/ci.yml:125`→`make test-shard`→`scripts/ci_shar
 - prepare/paired supersedes/request effectsとstage別将来容量を同fence/CASで保存。
 - dispatch admission/intent、launch、bounded回復観測、terminalの閉じたwriterを登録。
 - open/closed/trimの精算・hold・progressを全終端経路に適用し、公開/CAS/state-only失敗と遅延retryを検証。
-- **正completionは無効のまま**。E3履歴rowは常に未解決。公開run/CLI未接続を維持。
+- **正completionは無効のまま**。E3履歴rowは常に未解決。requestは保存専用の`/1`だけを受付し、`/2`と要約の`request_schema`指定を拒否する。公開run/CLI未接続を維持。
 
 子BのAC:
 
 - 全producerのfull carrier、E3を含むgeneration順序、overflow初期化、A→B→A失効を原子的に接続。
+- full観測契約を備えた新request`/2`だけを受付し、旧`/1`は候補一致・terminal generationによらず常に未解決とする。旧pendingの安全な終端化と新prepare到達性を検証。
 - stable evidence carrierをcompletion消費者へ渡し、kernelでorigin/候補/scope/独立性/mapping/aliasと現在target resolutionを再検証。
 - 全既存gateを維持した正completionと、欠落/改変/最新未解決/trim後retryの拒否を検証。
 
-中間不変条件: A後にrejectedが保存されてもpassを許可しない。BまでE3履歴を持つrowは従来のE2 fallbackを使わない。Aに最低限のE3 generation採番は必要だが、候補失効が完成したという主張はしない。Aの保存したrequestとterminalは後続Bが再検証できる形式にする。
+中間不変条件: A後にrejectedが保存されてもpassを許可せず、B導入後もAのrequestは解決証拠に使わない。BまでE3履歴を持つrowは従来のE2 fallbackを使わない。Aに最低限のE3 generation採番は必要だが、候補失効が完成したという主張はしない。A期間のX→Y→Xは復元できないため、旧requestの再実行・書換え・version昇格で補わず、新しい受付operationと`/2`requestを要求する。
 
 Aが実測1,400行を超えた場合は保証を削らず、A1「prepare/paired supersedes/全stage容量・閉じたschema、dispatchを拒否」→A2「admission/dispatch/launch/回復/terminal精算、positive off」へさらに分ける。A1は将来最大形を予約し、preparedをpendingとして排他維持し、公開CLIから到達させない。A2の実測も閾値を超えるなら実装を止め、再計画する。例外を自動適用しない。
+
+移行追加でBの上側見積が1,400行を超えるため、実装前にB1「全候補観測・version境界・旧pending移行、positive off」→B2「証拠再読取と正completion」へ分割する。B1は580〜980行、B2は350〜630行を目安とする（合計930〜1,610行）。B1で`/2`を受付するcommitには全producerのfull観測とgeneration規律を必ず含める。B2だけが`/2`を解決に使う。A1/A2には`/2`を受付する中間commitを作らない。これによりB1期間の`/2`にも候補往復の未観測期間を作らない。1Issue=1PRに従い、設計accepted後・実装前にIssue1020の子Issueを追加し、親・依存・本文を更新する。
 
 ## 独立設計レビューへ渡す仮決定
 
 以下は選択肢の列挙ではなく、実装で採用する推奨契約。既存保証の例外は設けない。新規field・関数名は提案であり、現物に存在するものとは区別する。
+
+### 0. 保存専用requestとfull観測契約付きrequestの非昇格境界
+
+設計レビューで示された反例は、Aのoverflow rejected保存後、通常verificationがX→Y→Xを観測してもoverflow markerが変わらず、Bで旧terminalが再びvalidになるもの。現`invalidate_observed`のfinding限定分岐（`repair_reverification.py:236,268`）と、`validate_terminal`の現在digest/marker比較（`finding_disposition.py:275`）から成立する。completion offだけを移行保証には使わない。
+
+**固定契約**: A/A1/A2は`mission-finding-disposition-request/1`だけを生成・受付する。B1（Bを分割しない場合はB）で全producer観測を接続した同commitから、prepareは`mission-finding-disposition-request/2`だけを生成・受付する。`/2`は`/1`と同じclosed field集合を持ち、schemaとrequest ID domainだけを変える。version自体を観測契約の識別子とし、callerの別flag・導入時刻・現候補一致を根拠にしない。`request_id(body)`は明示allowlistのschema値をdomainへ使い、未知versionを拒否する。既存`/1`のID導出は変えない。同じoperationをversion違いで再利用せず、再受付には新operationを必要とする。
+
+保存要約の任意field`request_schema`は、欠落を厳密に`/1`と解釈する。Bの新prepare reducerだけが認証済みrequest.schemaから`/2`を保存する。commandにsummary versionを指定する入口を作らない。Aのclosed decoder/writerはfield追加と`/2`を拒否するため、A期間に`/2`履歴を作れない。B decoderは欠落/明示`/1`/明示`/2`だけを許可し、proof消費時は要約versionとrefから読んだrequest.schemaを完全照合する。要約`/2`への書換えだけでは、request bytes/digest・domain付きrequest ID・launch.request_digest・terminal refs/effectとの結合に失敗する。修復lineageの汎用extension書込禁止と、kernel受付済みstate/UoWを信頼する既存境界を維持する。stateも全artifactも任意に偽造できる攻撃への署名保証を新しく主張しない。
+
+**既存terminal**: `/1`のraw lifecycle・terminal・request ref・chargeは読取だけでは変更しない。legacy decoderの整合検査を維持し、別pure関数`effective_disposition_lifecycle`で`/1`判定自体を常にopen/未解決とする。completionは全D/repair unionからこのrowを除かず、新しい有効な解決がない間は遮断に残す。後続の新`/2`判定または旧判定より新しい正当なE2修復receiptによる解決を永久に禁止する意味ではない。後者は既存lifecycleのgenerationによる前後関係を維持し、現在候補・scope・receiptを再検証する。`validate_terminal`は`/1`の構造的証拠検査用には使用できるが、その返値を解決集合へ加えない。prepare/repair beginの「現在有効なrejected」拒否はraw lifecycleでなくeffective判定を使い、旧terminalから新prepareへ到達できるようにする。旧terminalの再公開・同operation readbackで`/2`へ昇格しない。
+
+**旧pendingの閉じ方**: Bは旧`/1`の新dispatch・launch開始を拒否し、元実行の回収だけを許す。旧preparedはintent/launchなしを再検査し、現在fence/CASでblocked/candidate-staleへstate-only終端化できる（terminal.refは既存許容の`absent('effects-unavailable')`、duplicate_targets空）。generationは現在最大値から新規採番し、予算admission/精算は捏造しない。旧dispatched/runningは元intentを変更せず、元childの結合済み終了観測が得られた場合だけblocked/candidate-staleへ終端化し、open/closed/trimの精算契約を適用する。結果が回収できても旧requestからrejectedを新たに作らない。起動有無・停止を確認できなければpendingとholdを維持し、新prepareを拒否する。launch未保存のdispatchは、recoverで元request/dispatchに合うlaunchと終了確認を取得できれば閉じられる。取得できない状態を時刻や候補一致で終端扱いしない。
+
+新prepareは旧pending終端化のcommit後、別operationで受付する。旧preparedの自動閉鎖を新prepareと同commitに混ぜず、失敗時の原子性を小さく保つ。全旧terminalはeffective-openなので、回復可能な元childを安全に閉じれば新prepareへ到達できる。回復不能な実行は既存停止不明の境界で明示blockedであり、移行の都合で解放しない。旧request artifactが欠落してもsummary欠落を`/2`と推定しない。回復に必要な元bindingを認証できないpendingは維持する。
+
+**必要差分**:
+
+- request decoderは`/1`読取互換と`/2`closed decodeを持つ。A writerは`/1`限定、B prepare writerは`/2`限定。専用request型・commandの既存fieldを再利用し、公開結果importは増やさない。
+- request/inputのkind・ref形式・effect claim形式・1MiB/256KiB上限は変えない。request IDのdomain変更により内容digest/ref・dispatch operation・launch bindingは新request固有になる。output/terminal schemaのversion変更は不要。
+- `observe_disposition_results`はrefをstable readしてschemaと要約を照合する。`/1`は未解決reasonで返し、旧証拠を正のcarrierに格上げしない。kernel completionも同じversion境界を再検査し、readerの自己申告を信用しない。最新itemより新しく現在有効なE2修復が解決を担うrowでは旧/1判定を必須証拠にせず、E2証拠を元義務・候補・scopeと再検証する。旧/1の読取拒否を理由に後行E2解決まで永久遮断しない。
+- B prepare/repair begin・completionにeffective lifecycleを配線する。旧pendingを閉じる専用internal reconcileは最新item・現fence・旧version・元intentを照合し、terminal outcomeを固定blockedとする。新規launchを呼ばない。
+- Aの将来容量は`/1`最大形で保証する。Bは新要約`request_schema`の固定bytesと`/2`requestの実bytesを予約に含める。旧itemへ新fieldを一括追加しない。旧pending終端はAが予約したblocked fallback最大形の内側と両encodeで検証し、fitしない場合は容量定数を先に直してからBを入れる。
+
+追加TDDは①A由来overflow rejected→verification X→Y→X→B consumerでも未解決②要約versionだけの偽装拒否③`/1`request schemaだけ変更してID/ref未更新の拒否④旧prepared→blocked→新`/2`prepare⑤旧runningのkill hold維持と停止確認後の精算・新prepare⑥`/1`terminal readback/trim済みretryでも非昇格⑦A1/A2の`/2`拒否⑧B1の全producer未配線では`/2`受付契約のテストが落ちること。shared pure表と代表UoWで検証し、実hostは起動しない。移行コード・配線80〜140行、追加tests100〜160行、inventory/記録20〜40行、合計200〜340 reviewed行をBへ追加計上する。
 
 ### 1. 回復slotは最新1件の診断で、停止・解決の権威にしない
 
