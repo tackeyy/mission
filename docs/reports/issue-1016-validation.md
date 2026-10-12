@@ -83,7 +83,10 @@ own capacity, manifest-self-identity and write-failure seal protections.
 Primitive tests:35 passed in0.24s; related writer/spawn/module inventory, mirror
 and artifact/vendor hygiene checks passed630 cases in30.00s under local load.
 These are local elapsed times, not CI cost. Independent50-input exploration
-remains pending at this checkpoint. The old57-case full-store
+remains incomplete: the delegated tool stopped before delivering results. No
+exploration result is counted as accepted. The unchanged primitive suite was
+rerun after resumption:35 passed in0.29s. Normal review/Planning remains held
+until the shared review-budget activation readback record is confirmed. The old57-case full-store
 baseline passed in52.66s under local load; it is historical, not anchor coverage.
 Independent session review, Checker, exact-head CI and latest-base integration
 remain separate gates. Other-UID/device behavior, physical crash durability,
