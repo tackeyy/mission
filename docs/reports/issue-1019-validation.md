@@ -34,3 +34,33 @@
 - 面積: 計画180行とuntrackedを含むreviewed行数は782行。byte-identical mirrorだけ除外する。`pr_size.py --base`は未commit変更を含めないため、その180行だけの出力を総面積と扱わない。
 
 最終runtime受入はrootの独立レビュー・Checker・exact-head/CI検証待ち。全producer観測と旧request移行は[Issue1022](https://github.com/tackeyy/mission/issues/1022)、正completionは[Issue1023](https://github.com/tackeyy/mission/issues/1023)の後続範囲であり、この保存専用/1を解決証拠へ昇格させない。
+
+
+## A1/A2分割の停止判定
+
+保存済み`c4b338b1131d92a33823f4901b9f2cf25b803e5f`の実測は782 reviewed行（raw 1,011、同期mirror 229行除外）。残枠618行に対し、残実装は以下の640〜910行見込み。見積であり実装diffの実測とは区別する。1,400行へ収めるために精算保証やテストを削らず、残runtime実装を開始する前に停止した。
+
+| 追加対象 | reviewed行見込 | 再利用しても残る固有契約 |
+|---|---:|---|
+| typed commands・seal・dispatch admission/intent | 110〜150 | prepared/target/request/op/full候補の閉じた照合、同commit予約、policyなし非activation |
+| launch・bounded recovery・host結合 | 90〜130 | E3専用5field照合、int32 exit、元dispatch固定、最新slot置換と停止不明hold |
+| terminal/outcome・effect保存 | 120〜170 | prospective terminalの既存証拠検査、blocked専用経路、state-only fallback、duplicate集合導出 |
+| open/closed/trim精算・progress | 100〜140 | ordinal/hash再導出、retained/trim分類、expire/kill hold、結果なしprogress保持 |
+| tests | 200〜280 | 上記共有pure表、代表UoW/CAS/公開失敗/遅延retry。E2の全表は複製しない |
+| inventory・検証記録 | 20〜40 | 追加writer/command契約、mirror同期証跡 |
+| **追加合計** | **640〜910** | **現在分との合計1,422〜1,692** |
+
+見積のソース根拠: [既存E2 reducerと予算接続](https://github.com/tackeyy/mission/blob/c4b338b1131d92a33823f4901b9f2cf25b803e5f/skills/mission/lib/mission_kernel/transitions.py#L1858)は40行、[既存E2 mutation](https://github.com/tackeyy/mission/blob/c4b338b1131d92a33823f4901b9f2cf25b803e5f/skills/mission/lib/mission_kernel/repair_reverification.py#L108)は56行。[E3 terminalの純粋検査](https://github.com/tackeyy/mission/blob/c4b338b1131d92a33823f4901b9f2cf25b803e5f/skills/mission/lib/mission_kernel/finding_disposition.py#L301)は82行で再利用できるが、blockedを解決不可として拒否するためblocked writerの代用にはならない。既存settleにはE3のretained/trim admission projectionと結果なしprogress分岐がない。上表は既存82行のコピーを含めない。
+
+### 元Issue1019の受け入れ条件の移管
+
+- A1: prepare/paired supersedes/request effects、全stage将来容量、closed recovery slot定義、E3採番、request/1限定、未解決維持。dispatch/admissionは使用不可。preparedはpending排他を維持し、公開run/CLIは未接続。
+- A2（A1 merge後の最新baseから開始）: typed dispatch admission/intent、launch、回復slot writer、terminal writerとhost観測、open/closed/trim精算、hold/progress、公開/CAS/state-only失敗と遅延retry。新規dispatchはA2の全writerと精算経路が揃った候補headまで有効にしない。
+- 両PR: request/1限定とrequest_schema追加拒否、正completion無効、公開CLI/host/policy activationなし。親Issue1019はA2まで未完了とする。全producer観測・旧request移行・正completionの後続範囲を取り込まない。
+
+### A1境界の補足検証
+
+- 内部preparedに正規のpolicy fixtureを与えても、既存`admit`は`budget-repair-attempt-missing`でdispatchを拒否し、予約を追加しない。preparedからrepair beginも拒否し、completionの未解決集合から元義務を外さない。request/2は既存共有拒否表、state要約のrequest_schema追加は代表decoder検査で拒否を確認する。
+- 時刻decoderの具体境界: intentの`budget._at`は20文字の秒精度だけを受理し、27文字を拒否する。recoveryの`_timestamp`は27文字のマイクロ秒精度だけを受理し、20文字を拒否する。したがって最大形のintent2時刻は20文字、recoveryは27文字。未受理の27文字intentを+16の余裕で補うという根拠にはしない。
+- recovery拒否表の正常baselineが20文字時刻で先に拒否され、別field変異を遮る検証欠陥を確認。正常baselineの先行validateで7件Redを確認後、baselineを27文字へ修正して7件Green。before-start変異も27文字へ直し、時刻形式ではなく前後関係の拒否を検査する。runtime契約は変更していない。
+- A1補足後suite: `test_issue1019_disposition_prepare.py`の41件成功、2.61秒。`git diff --check`成功。補足後総面積842 reviewed行（既存計画・tests・記録込み、同期mirrorのみ除外）。この補足後にA2を同PRへ加える見込は1,482〜1,752行。runtime変更はなく、独立探索・レビュー・Checker・CI・commit/pushはroot担当。

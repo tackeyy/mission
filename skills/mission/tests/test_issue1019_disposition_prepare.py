@@ -278,7 +278,7 @@ def test_uow_prepare_crash_keeps_pair_atomic_and_replays_original_operation(repa
 
 @pytest.mark.parametrize('field,value', [('status','stopped'), ('operation_id','x'*129),
     ('fencing_epoch',True), ('dispatch_fencing_epoch',3), ('dispatch_operation_id','other'),
-    ('observed_at','2025-01-01T00:00:00Z'), ('output','unbounded text')])
+    ('observed_at','2025-01-01T00:00:00.999999Z'), ('output','unbounded text')])
 def test_closed_recovery_slot_rejects_unbound_observation(repair_state, field, value):
     from mission_kernel.finding_disposition import validate_dispositions
     from mission_kernel.fresh_review import FreshReviewError
@@ -288,7 +288,8 @@ def test_closed_recovery_slot_rejects_unbound_observation(repair_state, field, v
         fencing_epoch=2, reservation_id='reservation', budget_class='repair', parent_identity='parent',
         started_at='2026-01-01T00:00:00Z', deadline_at='2026-01-01T00:05:00Z'))
     item['recovery'] = dict(operation_id='recovery', fencing_epoch=3, dispatch_operation_id=item['intent']['operation_id'],
-        dispatch_fencing_epoch=2, observed_at='2026-01-01T00:00:01Z', status='stop-unconfirmed')
+        dispatch_fencing_epoch=2, observed_at='2026-01-01T00:00:01.999999Z', status='stop-unconfirmed')
+    validate_dispositions(row)
     item['recovery'][field] = value
     with pytest.raises(FreshReviewError):
         validate_dispositions(row)
@@ -332,3 +333,32 @@ def test_current_resolution_refuses_redundant_prepare_but_stale_candidate_reopen
     body['full_candidate_digest'] = full_candidate_digest(contract,snapshots)
     command = with_request(replace(command, observed_candidates=freeze_json_value(snapshots)),body)
     assert decide(state, command).accepted
+
+
+def test_storage_only_prepared_request_cannot_admit_dispatch_or_resolve(repair_state):
+    from mission_kernel.budget import decode_policy, default_policy_document, new_ledger
+    from mission_kernel.budget_decisions import admit, Refusal
+    from mission_kernel.fresh_review_coverage import FreshReviewBindings
+    from mission_kernel.repair_lineage import effective_unresolved_findings
+    from .test_issue906_repair_attempts import begin_command
+    command = prepare_command(repair_state)
+    state = decide(repair_state[0], command).transition.new_state
+    body = command.request.thaw()
+    ledger = new_ledger(decode_policy(default_policy_document(1800)), '2026-01-01T00:00:00Z')
+    admission = admit(ledger, state, '2026-01-01T00:00:01Z', entry='repair-disposition-run',
+        target=body['lineage_id'], operation_id='disposition-dispatch:'+body['request_id'][7:],
+        fencing_epoch=state.lease.fencing_epoch, policy_timeout=300, reserved_bytes=0,
+        candidate_digest=body['full_candidate_digest'])
+    assert isinstance(admission, Refusal)
+    assert admission.reason == 'budget-repair-attempt-missing'
+    assert ledger.reservations == ()
+    bindings = FreshReviewBindings(body['contract_digest'], (), (), (), command.observed_candidates)
+    assert body['lineage_id'] in effective_unresolved_findings(state.repair, state.fresh_review,
+        command.evidence, state.legacy_passthrough.thaw()['acceptance_contract'], bindings)
+    assert not decide(state, begin_command(state, repair_state[1])).accepted
+    from mission_kernel.repair_lineage import decode_projection
+    from mission_kernel.fresh_review import FreshReviewError
+    document = state.legacy_passthrough.thaw()
+    document['repair_lineage']['lineages'][0]['dispositions'][0]['request_schema'] = 'mission-finding-disposition-request/2'
+    with pytest.raises(FreshReviewError):
+        decode_projection(document)
