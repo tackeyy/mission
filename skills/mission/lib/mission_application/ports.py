@@ -10,6 +10,21 @@ from mission_kernel.commands import Command
 from mission_kernel.transitions import Decision
 
 
+@dataclass(frozen=True)
+class StableEvidenceRead:
+    """Immutable bytes and opaque path identity for read-set revalidation."""
+
+    payload: bytes
+    identity: tuple[tuple[int, ...], ...]
+
+
+class StableEvidenceReader(Protocol):
+    """Read one relative evidence reference without granting writer authority."""
+
+    def __call__(self, relative_path: str, *, limit: int) -> StableEvidenceRead:
+        ...
+
+
 class AggregateIndexError(RuntimeError):
     """The authoritative write succeeded but its rebuildable index did not."""
 

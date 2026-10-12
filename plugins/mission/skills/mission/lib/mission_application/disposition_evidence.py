@@ -11,7 +11,7 @@ from mission_kernel.fresh_review import FreshReviewError, canonical_bytes, FRESH
 from mission_kernel.fresh_review_receipts import decode_launch_receipt
 from mission_kernel.json_codec import decode_json_object, freeze_json_value
 from mission_kernel.repair_attempts import absent
-from mission_persistence.strict_reader import read_stable_bytes_beneath
+from mission_application.ports import StableEvidenceReader
 
 
 UNAVAILABLE = 'disposition-evidence-unavailable'
@@ -19,11 +19,12 @@ INVALID = 'disposition-evidence-invalid'
 LIMIT = 262144
 
 
-def observe_disposition_results(document, *, root, candidates):
+def observe_disposition_results(document, *, reader: StableEvidenceReader, candidates):
     """Return immutable original artifacts after validating every latest proof.
 
     Empty legacy histories require no observations. Any nonterminal, blocked,
     deferred, invalid, or stale latest disposition fails without older fallback.
+    The injected reader returns immutable bytes and path identity snapshots.
     The returned carrier must be revalidated by its consumer; it grants no
     resolution, persisted marker, or candidate-observation authority.
     """
@@ -41,7 +42,7 @@ def observe_disposition_results(document, *, root, candidates):
                 raise FreshReviewError(INVALID)
             return artifacts[path].content.thaw()
         try:
-            capture = read_stable_bytes_beneath(root, path, limit=limit)
+            capture = reader(path, limit=limit)
         except (OSError, ValueError, TypeError) as exc:
             raise FreshReviewError(UNAVAILABLE) from exc
         raw = capture.payload
@@ -90,12 +91,12 @@ def observe_disposition_results(document, *, root, candidates):
                 read(ref, ref['kind'], source=True)
         carrier = DispositionEvidence(tuple(artifacts.values()))
         validate_disposition_evidence(document, carrier, candidates)
-        # strict_reader closes descriptors after each read. Compare the entire
-        # captured read set again so a previously read path cannot be replaced
-        # while a later artifact is being observed, even with identical bytes.
+        # Compare the entire captured read set again so a previously read path
+        # cannot be replaced while a later artifact is being observed, even
+        # with identical bytes.
         for path, (capture, limit) in captures.items():
             try:
-                repeated = read_stable_bytes_beneath(root, path, limit=limit)
+                repeated = reader(path, limit=limit)
             except (OSError, ValueError, TypeError) as exc:
                 raise FreshReviewError(UNAVAILABLE) from exc
             if repeated != capture:

@@ -4,6 +4,7 @@ import pytest
 from .test_issue907_disposition import rejected
 from .test_issue906_repair_attempts import repair_state, published, gate_state, completed_carrier
 from mission_kernel.fresh_review import canonical_bytes
+from mission_persistence.disposition_evidence import FilesystemEvidenceReader
 
 
 def materialize(root, evidence):
@@ -21,7 +22,7 @@ def test_reader_collects_retained_proof_without_activating_completion(rejected, 
     _, state, command, saved = rejected
     document = state.legacy_passthrough.thaw()
     materialize(tmp_path, saved)
-    carrier = observe_disposition_results(document, root=tmp_path, candidates=command.observed_candidates.thaw())
+    carrier = observe_disposition_results(document, reader=FilesystemEvidenceReader(tmp_path), candidates=command.observed_candidates.thaw())
     row = document['repair_lineage']['lineages'][0]
     assert validate_terminal(document, row, row['dispositions'][-1], carrier,
         command.observed_candidates.thaw()) == ('rejected', ())
@@ -33,19 +34,19 @@ def test_reader_collects_retained_proof_without_activating_completion(rejected, 
 
 
 @pytest.mark.parametrize('replacement', ['same-bytes', 'changed-bytes'])
-def test_read_set_rejects_request_replacement_after_its_initial_read(rejected, tmp_path, monkeypatch, replacement):
+def test_read_set_rejects_request_replacement_after_its_initial_read(rejected, tmp_path, replacement):
     import mission_application.disposition_evidence as reader
     from mission_kernel.fresh_review import FreshReviewError
-    from mission_persistence.strict_reader import read_stable_bytes_beneath
+    adapter = FilesystemEvidenceReader(tmp_path)
     document = rejected[1].legacy_passthrough.thaw()
     item = document['repair_lineage']['lineages'][0]['dispositions'][-1]
     materialize(tmp_path, rejected[3])
     request_path = tmp_path / item['request_ref']['relative_path']
     swapped = False
 
-    def observe(root, path, *, limit):
+    def observe(path, *, limit):
         nonlocal swapped
-        result = read_stable_bytes_beneath(root, path, limit=limit)
+        result = adapter(path, limit=limit)
         if path == item['terminal']['ref']['relative_path'] and not swapped:
             swapped = True
             substitute = request_path.with_suffix('.replacement')
@@ -53,9 +54,8 @@ def test_read_set_rejects_request_replacement_after_its_initial_read(rejected, t
             substitute.replace(request_path)
         return result
 
-    monkeypatch.setattr(reader, 'read_stable_bytes_beneath', observe)
     with pytest.raises(FreshReviewError, match='disposition-evidence-unavailable'):
-        reader.observe_disposition_results(document, root=tmp_path, candidates=rejected[2].observed_candidates.thaw())
+        reader.observe_disposition_results(document, reader=observe, candidates=rejected[2].observed_candidates.thaw())
 
 
 @pytest.mark.parametrize('history', [None, False, {}, ''])
@@ -65,7 +65,7 @@ def test_unknown_history_shape_cannot_look_like_legacy_absence(rejected, tmp_pat
     document = rejected[1].legacy_passthrough.thaw()
     document['repair_lineage']['lineages'][0]['dispositions'] = history
     with pytest.raises(FreshReviewError):
-        observe_disposition_results(document, root=tmp_path, candidates={})
+        observe_disposition_results(document, reader=FilesystemEvidenceReader(tmp_path), candidates={})
 
 
 def test_input_must_fit_the_effective_launch_packet_cap(rejected, tmp_path):
@@ -76,7 +76,7 @@ def test_input_must_fit_the_effective_launch_packet_cap(rejected, tmp_path):
         lambda body: body['enforced_budget'].update(max_packet_bytes=1)})
     materialize(tmp_path, changed[3])
     with pytest.raises(FreshReviewError):
-        observe_disposition_results(changed[1].legacy_passthrough.thaw(), root=tmp_path,
+        observe_disposition_results(changed[1].legacy_passthrough.thaw(), reader=FilesystemEvidenceReader(tmp_path),
             candidates=changed[2].observed_candidates.thaw())
 
 
@@ -102,7 +102,7 @@ def test_each_retained_path_requires_original_regular_stable_bytes(rejected, tmp
         else:
             other.hardlink_to(path)
     with pytest.raises(FreshReviewError):
-        observe_disposition_results(rejected[1].legacy_passthrough.thaw(), root=tmp_path,
+        observe_disposition_results(rejected[1].legacy_passthrough.thaw(), reader=FilesystemEvidenceReader(tmp_path),
             candidates=rejected[2].observed_candidates.thaw())
 
 
@@ -116,7 +116,7 @@ def test_named_reference_contract_is_checked_before_filesystem_access(rejected, 
         field={'resolved':True}, size={'size':True}, digest={'digest':'sha256:'+'f'*64})
     ref.update(mutations[fault])
     with pytest.raises(FreshReviewError):
-        observe_disposition_results(document, root=tmp_path, candidates=rejected[2].observed_candidates.thaw())
+        observe_disposition_results(document, reader=FilesystemEvidenceReader(tmp_path), candidates=rejected[2].observed_candidates.thaw())
 
 
 @pytest.mark.parametrize('size', [1048576, 1048577])
@@ -136,10 +136,10 @@ def test_only_input_packet_can_use_the_one_mebibyte_limit(rejected, tmp_path, si
     materialize(tmp_path, changed[3])
     if size > 1048576:
         with pytest.raises(FreshReviewError):
-            observe_disposition_results(changed[1].legacy_passthrough.thaw(), root=tmp_path,
+            observe_disposition_results(changed[1].legacy_passthrough.thaw(), reader=FilesystemEvidenceReader(tmp_path),
                 candidates=changed[2].observed_candidates.thaw())
     else:
-        assert observe_disposition_results(changed[1].legacy_passthrough.thaw(), root=tmp_path,
+        assert observe_disposition_results(changed[1].legacy_passthrough.thaw(), reader=FilesystemEvidenceReader(tmp_path),
             candidates=changed[2].observed_candidates.thaw()).artifacts
 
 
@@ -148,7 +148,7 @@ def test_legacy_histories_need_no_disposition_artifacts(rejected, tmp_path, hist
     from mission_application.disposition_evidence import observe_disposition_results
     document = rejected[0].legacy_passthrough.thaw()
     if history == 'empty': document['repair_lineage']['lineages'][0]['dispositions'] = []
-    assert observe_disposition_results(document, root=tmp_path, candidates={}).artifacts == ()
+    assert observe_disposition_results(document, reader=FilesystemEvidenceReader(tmp_path), candidates={}).artifacts == ()
 
 
 def test_pure_proof_revalidates_carrier_instead_of_trusting_its_construction(rejected):
@@ -209,10 +209,10 @@ def test_overflow_reader_requires_the_original_complete_index_mapping(rejected, 
         ref = next(a.reference.thaw() for a in evidence.artifacts if a.reference.thaw()['kind'] == 'finding-disposition-mapping')
         (tmp_path / ref['relative_path']).unlink()
     if fault == 'none':
-        assert observe_disposition_results(document, root=tmp_path, candidates=candidates).artifacts
+        assert observe_disposition_results(document, reader=FilesystemEvidenceReader(tmp_path), candidates=candidates).artifacts
     else:
         with pytest.raises(FreshReviewError, match='disposition-evidence-unavailable' if fault == 'missing' else 'disposition-mapping-incomplete'):
-            observe_disposition_results(document, root=tmp_path, candidates=candidates)
+            observe_disposition_results(document, reader=FilesystemEvidenceReader(tmp_path), candidates=candidates)
 
 
 def duplicate_proof(rejected):
@@ -271,11 +271,11 @@ def test_duplicate_target_is_reread_and_authenticated_without_resolving_it(rejec
     elif fault == 'summary-target': document['repair_lineage']['lineages'][0]['dispositions'][0]['duplicate_targets'] = []
     materialize(tmp_path, evidence)
     if fault == 'none':
-        assert observe_disposition_results(document, root=tmp_path, candidates=candidates).artifacts
+        assert observe_disposition_results(document, reader=FilesystemEvidenceReader(tmp_path), candidates=candidates).artifacts
         assert target['lifecycle'] == 'open'
     else:
         with pytest.raises(FreshReviewError):
-            observe_disposition_results(document, root=tmp_path, candidates=candidates)
+            observe_disposition_results(document, reader=FilesystemEvidenceReader(tmp_path), candidates=candidates)
 
 
 @pytest.mark.parametrize('latest', ['pending', 'blocked', 'deferred'])
@@ -296,7 +296,7 @@ def test_latest_unresolved_disposition_never_falls_back_to_old_rejection(rejecte
     row['dispositions'].append(newer); row['lifecycle'] = 'deferred' if latest == 'deferred' else 'open'
     materialize(tmp_path, rejected[3])
     with pytest.raises(FreshReviewError, match='disposition-unresolved'):
-        observe_disposition_results(document, root=tmp_path, candidates=rejected[2].observed_candidates.thaw())
+        observe_disposition_results(document, reader=FilesystemEvidenceReader(tmp_path), candidates=rejected[2].observed_candidates.thaw())
 
 
 @pytest.mark.parametrize('kind,mutate', [
@@ -311,7 +311,7 @@ def test_reader_invokes_pure_origin_independence_and_terminal_validation(rejecte
     changed = rebind(rejected, {kind:mutate})
     materialize(tmp_path, changed[3])
     with pytest.raises(FreshReviewError):
-        observe_disposition_results(changed[1].legacy_passthrough.thaw(), root=tmp_path,
+        observe_disposition_results(changed[1].legacy_passthrough.thaw(), reader=FilesystemEvidenceReader(tmp_path),
             candidates=changed[2].observed_candidates.thaw())
 
 
@@ -321,7 +321,7 @@ def test_reader_rejects_partial_and_unknown_current_candidate_sets(rejected, tmp
     from mission_kernel.fresh_review import FreshReviewError
     materialize(tmp_path, rejected[3])
     with pytest.raises(FreshReviewError):
-        observe_disposition_results(rejected[1].legacy_passthrough.thaw(), root=tmp_path, candidates=candidates)
+        observe_disposition_results(rejected[1].legacy_passthrough.thaw(), reader=FilesystemEvidenceReader(tmp_path), candidates=candidates)
 
 
 def test_alias_cycle_is_rejected_after_both_edges_have_authenticated_proofs(rejected, tmp_path):
@@ -372,7 +372,7 @@ def test_alias_cycle_is_rejected_after_both_edges_have_authenticated_proofs(reje
     assert validate_terminal(document, source, item, evidence, candidates)[1] == (target['lineage_id'],)
     assert validate_terminal(document, target, target_item, evidence, candidates)[1] == (source['lineage_id'],)
     with pytest.raises(FreshReviewError, match='disposition-alias-invalid'):
-        observe_disposition_results(document, root=tmp_path, candidates=candidates)
+        observe_disposition_results(document, reader=FilesystemEvidenceReader(tmp_path), candidates=candidates)
 
 
 def supporting_proof(rejected, kind):
@@ -412,6 +412,6 @@ def test_reader_uses_the_same_supporting_identifier_boundary(rejected, tmp_path,
     materialize(tmp_path, evidence)
     if kind is None:
         with pytest.raises(FreshReviewError):
-            observe_disposition_results(document, root=tmp_path, candidates=candidates)
+            observe_disposition_results(document, reader=FilesystemEvidenceReader(tmp_path), candidates=candidates)
     else:
-        assert observe_disposition_results(document, root=tmp_path, candidates=candidates).artifacts
+        assert observe_disposition_results(document, reader=FilesystemEvidenceReader(tmp_path), candidates=candidates).artifacts
