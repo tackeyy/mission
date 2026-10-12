@@ -109,7 +109,8 @@ def validate_dispositions(row):
     seen = set()
     for index, item in enumerate(values):
         _closed(item, ('request_id', 'request_ref', 'full_candidate_digest', 'supersedes_attempt_id',
-            'operation_id', 'fencing_epoch', 'generation', 'stage', 'intent', 'launch_ref', 'terminal', 'duplicate_targets'), INVALID)
+            'operation_id', 'fencing_epoch', 'generation', 'stage', 'intent', 'launch_ref', 'terminal', 'duplicate_targets',
+            *(('recovery',) if 'recovery' in item else ())), INVALID)
         for key in ('request_id', 'full_candidate_digest'):
             _digest(item[key])
         _identifier(item['operation_id'])
@@ -144,6 +145,7 @@ def validate_dispositions(row):
                 raise FreshReviewError(INVALID)
         elif item['stage'] == 'running':
             raise FreshReviewError(INVALID)
+        validate_recovery(item)
         if item['stage'] == 'terminal':
             end = _closed(item['terminal'], ('ref', 'operation_id', 'fencing_epoch', 'generation', 'outcome', 'reason_code'), INVALID)
             _identifier(end['operation_id']); _integer(end['generation'], INVALID); _integer(end['fencing_epoch'], INVALID)
@@ -161,10 +163,12 @@ def validate_dispositions(row):
                     raise FreshReviewError(INVALID)
                 if end['ref'] != absent('effects-unavailable'):
                     validate_ref(end['ref'], 'finding-disposition')
-        if type(item['duplicate_targets']) is not list or len(item['duplicate_targets']) > 61 or len(set(item['duplicate_targets'])) != len(item['duplicate_targets']):
+        if type(item['duplicate_targets']) is not list or len(item['duplicate_targets']) > 61:
             raise FreshReviewError(INVALID)
         for target in item['duplicate_targets']:
             _digest(target)
+        if len(set(item['duplicate_targets'])) != len(item['duplicate_targets']):
+            raise FreshReviewError(INVALID)
         supersedes = item['supersedes_attempt_id']
         if supersedes != absent('no-superseded-attempt'):
             _digest(supersedes)
@@ -178,6 +182,36 @@ def validate_dispositions(row):
                 item['supersedes_attempt_id'] == attempt['attempt_id'] for item in values) != 1:
             raise FreshReviewError('disposition-supersedes-invalid')
     if row['lifecycle'] != lifecycle(row):
+        raise FreshReviewError(INVALID)
+
+
+
+def validate_recovery(item):
+    """A bounded diagnostic slot never authorizes stopping or resolution."""
+    value = item.get('recovery', absent('not-observed'))
+    if value == absent('not-observed'):
+        return
+    _closed(value, ('operation_id', 'fencing_epoch', 'dispatch_operation_id',
+        'dispatch_fencing_epoch', 'observed_at', 'status'), INVALID)
+    if item['stage'] == 'prepared' or item['intent'] == absent('not-dispatched'):
+        raise FreshReviewError(INVALID)
+    for key in ('operation_id', 'dispatch_operation_id'):
+        _identifier(value[key])
+    for key in ('fencing_epoch', 'dispatch_fencing_epoch'):
+        _integer(value[key], INVALID)
+        if value[key] < 1:
+            raise FreshReviewError(INVALID)
+    from .budget import _at, BudgetError
+    try:
+        from .fresh_review_receipts import _timestamp
+        observed = _timestamp(value['observed_at'])
+        started = _at(item['intent']['started_at'])
+    except BudgetError as exc:
+        raise FreshReviewError(INVALID) from exc
+    if (value['status'] not in ('running', 'stop-unconfirmed', 'exited-result-available', 'exited-result-unavailable')
+            or observed < started or value['fencing_epoch'] < item['intent']['fencing_epoch']
+            or (value['dispatch_operation_id'], value['dispatch_fencing_epoch']) !=
+                (item['intent']['operation_id'], item['intent']['fencing_epoch'])):
         raise FreshReviewError(INVALID)
 
 
@@ -403,12 +437,14 @@ def resolved_aliases(edges, resolved, known):
         raise FreshReviewError('disposition-alias-invalid')
     for source, targets in edges.items():
         _digest(source)
-        if source not in known or type(targets) is not tuple or not targets or len(targets) > 61 or len(set(targets)) != len(targets):
+        if source not in known or type(targets) is not tuple or not targets or len(targets) > 61:
             raise FreshReviewError('disposition-alias-invalid')
         for target in targets:
             _digest(target)
             if target not in known:
                 raise FreshReviewError('disposition-alias-invalid')
+        if len(set(targets)) != len(targets):
+            raise FreshReviewError('disposition-alias-invalid')
     checked, active = set(), set()
     def visit(source):
         if source in active:

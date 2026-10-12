@@ -477,9 +477,18 @@ def repair_attempt_reserve(document: Mapping) -> int:
         return STATE_LIMIT
 
 
-def disposition_reserve(_document: Mapping) -> int:
-    """E3 (#?) stub. Always zero until the disposition writer exists."""
-    return 0
+def disposition_reserve(document: Mapping, *, encoding=None) -> int:
+    """Retain the full future bound until a disposition is terminal."""
+    from .repair_lineage import decode_projection
+    from .disposition_capacity import disposition_stage_remaining
+    surface = document.get('extensions', {}) if document.get('schema_version') == 5 else document
+    try:
+        rows = decode_projection(surface).lineages
+        return sum(max(disposition_stage_remaining(item, pretty=pretty) for pretty in
+                ((True, False) if encoding is None else (encoding is StateEncoding.LEGACY_PRETTY,)))
+            for row in rows for item in row.document.thaw().get('dispositions', ()) if item['stage'] != 'terminal')
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return STATE_LIMIT
 
 
 # ---------------------------------------------------------------------------
@@ -656,7 +665,7 @@ def residual_reservation(
     recovery = ledger.stop_slots.system_recovery.reservation
     if recovery is not None:
         held.append(recovery)
-    total = repair_attempt_reserve(document)
+    total = repair_attempt_reserve(document) + disposition_reserve(document, encoding=encoding)
     total += sum(row.reserved_bytes + BUDGET_SETTLEMENT_ROW_DELTA for row in held)
     if encoding is StateEncoding.LEGACY_PRETTY:
         return total
@@ -675,7 +684,6 @@ def residual_reservation(
         )
         total += fixed
         total += lineage_residual(document, record)
-    total += disposition_reserve(document)
     return total
 
 

@@ -354,6 +354,16 @@ class PrepareFreshReview:
 
 
 @dataclass(frozen=True)
+class PrepareFindingDisposition:
+    request: FrozenJsonObject
+    packet: FrozenJsonObject
+    fencing_epoch: int
+    effects: tuple[FreshReviewInputEffectClaim, ...]
+    evidence: tuple[FreshReviewCompletionEvidence, ...]
+    observed_candidates: FrozenJsonObject
+
+
+@dataclass(frozen=True)
 class ImportRepairOrigins:
     evidence: tuple[FreshReviewCompletionEvidence, ...]
     fencing_epoch: int
@@ -654,6 +664,7 @@ Command = Union[
     ImportAcceptanceContract,
     PrepareFreshReview,
     ImportRepairOrigins,
+    PrepareFindingDisposition,
     BeginFindingRepair,
     ReconcileFindingRepair,
     BeginFindingReverification,
@@ -701,6 +712,7 @@ _COMMAND_TYPES = {
     ImportAcceptanceContract: "acceptance-contract-import",
     PrepareFreshReview: "fresh-review-prepare",
     ImportRepairOrigins: "repair-origins-import",
+    PrepareFindingDisposition: "finding-disposition-prepare",
     BeginFindingRepair: "repair-begin",
     ReconcileFindingRepair: "repair-reconcile",
     BeginFindingReverification: "repair-reverify-begin",

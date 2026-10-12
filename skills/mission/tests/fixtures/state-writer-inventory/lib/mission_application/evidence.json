@@ -1,7 +1,7 @@
 {
   "calls": {
     "_project_stored_replay_record:replace": 1,
-    "execute_evidence_operation:copy-ref": 5,
+    "execute_evidence_operation:copy-ref": 6,
     "prepare_claims_ledger:copy-ref": 1,
     "prepare_progress_update:copy-ref": 1,
     "prepare_verification_receipt:copy-ref": 1,
