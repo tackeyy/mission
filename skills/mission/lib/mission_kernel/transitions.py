@@ -51,6 +51,7 @@ from .commands import (
     PrepareFreshReview,
     ImportRepairOrigins,
     BeginFindingRepair,
+    PrepareFindingDisposition,
     ReconcileFindingRepair,
     BeginFindingReverification,
     CommitFindingReverification,
@@ -1844,6 +1845,16 @@ def _prepare_fresh_review(state: MissionState, command: object) -> Transition:
     return Transition(next_state, (KernelEvent("fresh-review-prepared"),))
 
 
+def _prepare_finding_disposition(state, command):
+    from .disposition_commands import prepare_disposition
+    from .fresh_review import FreshReviewError
+    try:
+        next_state = prepare_disposition(state, command)
+    except FreshReviewError as rejected:
+        raise _Rejected(rejected.code)
+    return Transition(next_state, (KernelEvent("finding-disposition-prepared"),))
+
+
 def _repair_attempt(state, command):
     from .repair_attempts import mutate_attempt
     from .fresh_review import FreshReviewError
@@ -2524,6 +2535,7 @@ TRANSITION_TABLE = build_transition_table(
             _command_type_guard(PrepareFreshReview),
             _prepare_fresh_review,
         ),
+        TransitionRule("finding-disposition-prepare", PrepareFindingDisposition, _command_type_guard(PrepareFindingDisposition), _prepare_finding_disposition),
         TransitionRule("repair-begin", BeginFindingRepair, _command_type_guard(BeginFindingRepair), _repair_attempt),
         TransitionRule("repair-reverify-begin", BeginFindingReverification, _command_type_guard(BeginFindingReverification), _repair_attempt),
         TransitionRule("repair-reverify-commit", CommitFindingReverification, _command_type_guard(CommitFindingReverification), _repair_attempt),
@@ -2770,6 +2782,8 @@ def bind_transition_effects(
         claims = () if command.effect is None else (command.effect,)
         if isinstance(command, ImportFreshReviewOutput):
             claims += (() if command.coverage_effect is None else (command.coverage_effect,)) + command.findings_effect
+    elif isinstance(command, PrepareFindingDisposition):
+        claims = command.effects
     elif isinstance(command, BeginFindingRepair):
         claims = () if command.history_effect is None else (command.history_effect, command.plan_effect, command.repro_effect)
     elif isinstance(command, CommitFindingReverification):

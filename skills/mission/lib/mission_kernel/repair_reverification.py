@@ -11,9 +11,12 @@ INVALID = 'repair-reverification-invalid'
 
 def next_generation(document):
     lineage = max((max(row['last_candidate_change'].get('generation', 0),
-        *(a['terminal'].get('generation', 0) for a in row.get('attempts', ())), 0)
+        *(a['terminal'].get('generation', 0) for a in row.get('attempts', ())),
+        *(max(d['generation'], d['terminal'].get('generation', 0)) for d in row.get('dispositions', ())), 0)
         for row in document.get('repair_lineage', {}).get('lineages', ())), default=0)
-    return 1 + max((lineage, *(r.get('repair_generation', 0) for r in document.get('verification_receipts', ()))))
+    value = 1 + max((lineage, *(r.get('repair_generation', 0) for r in document.get('verification_receipts', ()))))
+    _integer(value, INVALID)
+    return value
 
 
 def replay_binding(document, row):
