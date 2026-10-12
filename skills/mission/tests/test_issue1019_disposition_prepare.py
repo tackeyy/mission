@@ -37,6 +37,41 @@ def test_prepare_persists_request_and_keeps_original_obligation_open(repair_stat
     assert item['operation_id'] == command.request.thaw()['operation_id']
 
 
+@pytest.mark.parametrize('field', ['request', 'packet', 'observed_candidates'])
+def test_prepare_rejects_directly_constructed_deep_frozen_input(repair_state, field):
+    from mission_kernel.model import FrozenJsonObject
+    state, _ = repair_state
+    before = state.legacy_passthrough.thaw()
+    nested = FrozenJsonObject(())
+    for _ in range(600):
+        nested = FrozenJsonObject((('nested', nested),))
+    command = replace(prepare_command(repair_state), **{field: nested})
+    decision = decide(state, command)
+    assert not decision.accepted
+    assert decision.rejection.code == 'disposition-invalid'
+    assert state.legacy_passthrough.thaw() == before
+
+
+@pytest.mark.parametrize('target', [{}, []])
+def test_disposition_decoder_rejects_unhashable_duplicate_target(repair_state, target):
+    from mission_kernel.finding_disposition import validate_dispositions
+    from mission_kernel.fresh_review import FreshReviewError
+    state = decide(repair_state[0], prepare_command(repair_state)).transition.new_state
+    row = state.repair.lineages[0].document.thaw()
+    row['dispositions'][0]['duplicate_targets'] = [target]
+    with pytest.raises(FreshReviewError, match='fresh-review-digest-invalid'):
+        validate_dispositions(row)
+
+
+@pytest.mark.parametrize('target', [{}, []])
+def test_disposition_alias_decoder_rejects_unhashable_target(target):
+    from mission_kernel.finding_disposition import resolved_aliases
+    from mission_kernel.fresh_review import FreshReviewError
+    source = 'sha256:' + 'a' * 64
+    with pytest.raises(FreshReviewError, match='fresh-review-digest-invalid'):
+        resolved_aliases({source: (target,)}, set(), {source})
+
+
 def test_prepare_supersedes_only_unstarted_pending_repair_atomically(repair_state):
     from .test_issue906_repair_attempts import begun_state
     state, _ = begun_state(repair_state)

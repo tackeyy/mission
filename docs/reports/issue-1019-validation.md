@@ -1,6 +1,8 @@
-# Issue1019 prepare保存の検証
+# Issue1024 prepare保存の検証
 
 内部prepare、paired supersedes、全stage将来容量とbounded recovery定義の局所スライス。dispatch/launch/terminal writer、公開起動入口、正completion、request/2は含めない。独立runtimeレビュー・Checker・CIは未実施。
+
+[PR1021](https://github.com/tackeyy/mission/pull/1021)のCloses対象は[A1 Issue1024](https://github.com/tackeyy/mission/issues/1024)。[親Issue1019](https://github.com/tackeyy/mission/issues/1019)はtrackingとして残し、残runtimeは[兄弟A2 Issue1025](https://github.com/tackeyy/mission/issues/1025)へ分離済み。
 
 ## TDDテストリストと検出価値
 
@@ -64,3 +66,15 @@
 - 時刻decoderの具体境界: intentの`budget._at`は20文字の秒精度だけを受理し、27文字を拒否する。recoveryの`_timestamp`は27文字のマイクロ秒精度だけを受理し、20文字を拒否する。したがって最大形のintent2時刻は20文字、recoveryは27文字。未受理の27文字intentを+16の余裕で補うという根拠にはしない。
 - recovery拒否表の正常baselineが20文字時刻で先に拒否され、別field変異を遮る検証欠陥を確認。正常baselineの先行validateで7件Redを確認後、baselineを27文字へ修正して7件Green。before-start変異も27文字へ直し、時刻形式ではなく前後関係の拒否を検査する。runtime契約は変更していない。
 - A1補足後suite: `test_issue1019_disposition_prepare.py`の41件成功、2.61秒。`git diff --check`成功。補足後総面積842 reviewed行（既存計画・tests・記録込み、同期mirrorのみ除外）。この補足後にA2を同PRへ加える見込は1,482〜1,752行。runtime変更はなく、独立探索・レビュー・Checker・CI・commit/pushはroot担当。
+
+## 既知の入力検査不具合の局所修正
+
+- [x] 直接構築した600段の`FrozenJsonObject`をprepareのrequest/packet/observed_candidatesへ渡し、例外漏出をコード付き拒否へ変換し、元state不変を検査する。
+- [x] disposition要約のduplicate_targets内のdict/listを、集合化より先にdigest要素として拒否する。
+- [x] 同じファイルのalias graph検査でもdict/list要素の集合化先行を解消する。同ファイルの集合化箇所だけを確認し、認証済みlineage IDから導出する集合化は変更しない。
+
+現象は、再帰的thawがprepareの`FreshReviewError`だけのcatchを越えることと、要素型の検査前に`set`がhashを要求すること。prepare reducerで`RecursionError`だけを`disposition-invalid`へ正規化し、2箇所の重複検査をdigest検査後へ移した。既存の不正digest拒否コード`fresh-review-digest-invalid`と正規入力の契約を維持する。decoder全体や他commandの例外処理は変更しない。
+
+Redはprepare3ケースが実際の`RecursionError`、要約2ケースが実際の`TypeError`で失敗（5件、45.27秒、再帰traceback整形を含む）。同形alias2ケースも実際の`TypeError`で失敗（2件、0.25秒）。Greenは7件成功、0.20秒。既存の正常writer/decoderとalias閉包・cycle検査はこの非hashable要素と直接構築Frozen入力を通らないため、例外漏出の回帰を検出できない。新規ケースはpure関数と既存fixtureを再利用し、host・subprocess・sleepは追加しない。保守費用は未測定。
+
+関連検証はprepare/既存disposition decoder/writer inventory/module inventory/mirror同期の252件成功、7.11秒。artifact hygiene/neutral vocabularyの9件成功、4.52秒。mirror同期と`git diff --check`も成功。今回差分はsource10行・tests35行・記録16行の61 reviewed行、同期mirror10行を含むraw71行。計画180行を含むbaseからの総面積は901 reviewed行、raw1,140行、同期mirror239行。独立探索は部分観測の段階で停止しており、50入力以上の独立探索gateは未達。この既知不具合修正は探索の再実施・代替・gate受入を意味しない。独立runtimeレビュー、別Checker、CIも未実施のまま。

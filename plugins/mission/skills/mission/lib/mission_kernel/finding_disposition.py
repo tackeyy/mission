@@ -163,10 +163,12 @@ def validate_dispositions(row):
                     raise FreshReviewError(INVALID)
                 if end['ref'] != absent('effects-unavailable'):
                     validate_ref(end['ref'], 'finding-disposition')
-        if type(item['duplicate_targets']) is not list or len(item['duplicate_targets']) > 61 or len(set(item['duplicate_targets'])) != len(item['duplicate_targets']):
+        if type(item['duplicate_targets']) is not list or len(item['duplicate_targets']) > 61:
             raise FreshReviewError(INVALID)
         for target in item['duplicate_targets']:
             _digest(target)
+        if len(set(item['duplicate_targets'])) != len(item['duplicate_targets']):
+            raise FreshReviewError(INVALID)
         supersedes = item['supersedes_attempt_id']
         if supersedes != absent('no-superseded-attempt'):
             _digest(supersedes)
@@ -435,12 +437,14 @@ def resolved_aliases(edges, resolved, known):
         raise FreshReviewError('disposition-alias-invalid')
     for source, targets in edges.items():
         _digest(source)
-        if source not in known or type(targets) is not tuple or not targets or len(targets) > 61 or len(set(targets)) != len(targets):
+        if source not in known or type(targets) is not tuple or not targets or len(targets) > 61:
             raise FreshReviewError('disposition-alias-invalid')
         for target in targets:
             _digest(target)
             if target not in known:
                 raise FreshReviewError('disposition-alias-invalid')
+        if len(set(targets)) != len(targets):
+            raise FreshReviewError('disposition-alias-invalid')
     checked, active = set(), set()
     def visit(source):
         if source in active:

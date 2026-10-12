@@ -1852,6 +1852,8 @@ def _prepare_finding_disposition(state, command):
         next_state = prepare_disposition(state, command)
     except FreshReviewError as rejected:
         raise _Rejected(rejected.code)
+    except RecursionError:
+        raise _Rejected('disposition-invalid')
     return Transition(next_state, (KernelEvent("finding-disposition-prepared"),))
 
 
