@@ -52,7 +52,7 @@ allowed-tools:
 1. ステップ宣言: 「Step N: <アクション> を実行します」
 2. 実行
 3. 完了確認: 完了条件のチェック結果を1次情報で示す
-4. ログ記録: state.json.decisions に追記
+4. ログ記録: decisionを実行結果に含めて返す（呼び出し元が `mission-state.py` で `decisions` へ記録）
    { "step": N, "action": "...", "result": "ok|partial|failed", "evidence": "..." }
 5. 指示明瞭度の自己観察: Planner 指示で詰まった点・裁量補完した点があればメモ。最終レポートでまとめて報告
 6. review handoff: `refs/artifact-handoff.md` に従い、orchestrator が executing → reviewing を atomic に記録できる引数を返す
@@ -75,11 +75,11 @@ allowed-tools:
 - **リトライ可能なエラー（一時的な接続エラー等）**: 1回だけリトライ
 - **環境問題（API key 不足、権限不足、ファイル未存在）**:
   - そのステップは **skip 扱い** にして次へ進む
-  - `.mission-state/assumptions.md` に「A_n: <要件> は未充足のため <代替手段 or 後回し> で進む」と記録
-  - state.json.decisions に `{"step": N, "result": "skipped_env", "evidence": "..."}` 追記
+  - assumption「A_n: <要件> は未充足のため <代替手段 or 後回し> で進む」を実行結果に含めて返す（呼び出し元が `assumptions_path` へ記録。固定パス決め打ち禁止）
+  - decision `{"step": N, "result": "skipped_env", "evidence": "..."}` を実行結果に含めて返す（呼び出し元が `mission-state.py` で `decisions` へ記録）
   - 呼び出し元には「skipped」として返す（pivot 判断要求しない）
-- **計画の前提が崩れた**: 残ステップのうち実行可能なものだけ進めて完了報告。崩れた前提を assumptions.md に記録。呼び出し元（orchestrator）が次イテレーションで Critic に代替アプローチを立案させる
-- **2回連続で同一ステップが失敗**: そのステップは「不可達」とマークして次ステップへ。不可達理由を assumptions.md と decisions に明記
+- **計画の前提が崩れた**: 残ステップのうち実行可能なものだけ進めて完了報告。崩れた前提をassumptionとして実行結果に含めて返す（呼び出し元が `assumptions_path` へ記録）。呼び出し元（orchestrator）が次イテレーションで Critic に代替アプローチを立案させる
+- **2回連続で同一ステップが失敗**: そのステップは「不可達」とマークして次ステップへ。不可達理由をassumption・decisionに明記して実行結果に含めて返す（呼び出し元が `assumptions_path` / `mission-state.py` で記録）
 - **不可逆操作の前**: 現在のユーザー依頼が対象操作を明示している場合は事前承認として扱う。対象・scope・rollback が承認範囲と一致する限り、実行直前に同じ確認を繰り返さない。承認がない、または対象・scope・rollback に差分がある場合だけ呼び出し元に判断を返す（skill 本体の「Trigger 1: 不可逆操作の確認」に該当）
 
 ## アウトプット形式
@@ -111,7 +111,7 @@ allowed-tools:
   - 例: ログ出力先が指定されていなかったので pino-pretty の stdout に流した
 - **再試行**: <同一判断のやり直し回数と理由、0回なら省略>
 
-### state.json 更新内容
+### state.json 更新内容（実行結果に含めて返すもの。直書きせず呼び出し元が `mission-state.py` で記録）
 - decisions: +N entry
 - phase: "executing" → "reviewing"
 ```
