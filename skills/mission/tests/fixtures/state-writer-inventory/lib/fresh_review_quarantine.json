@@ -1,0 +1,15 @@
+{
+  "calls": {
+    "_bound:open-write": 1,
+    "_directory:open-write": 1,
+    "_read:open-write": 1,
+    "_resume:open-write": 1,
+    "_resume:rename": 1,
+    "_resume:unlink": 2,
+    "_retire_inner:unlink": 1,
+    "_write:write": 1,
+    "initialize_anchor:open-write": 1,
+    "remove_owned:open-write": 1
+  },
+  "module": "lib/fresh_review_quarantine.py"
+}
