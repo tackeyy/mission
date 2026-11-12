@@ -25,6 +25,7 @@ from mission_kernel.commands import (
     GenerateClaimsLedger,
     ImportAcceptanceContract,
     PrepareFreshReview,
+    PrepareFindingDisposition,
     ClearProgress,
     Command,
     ContextManifestEffectClaim,
@@ -235,6 +236,21 @@ def execute_evidence_operation(repository: object, prepare) -> dict:
         if len(matches) != 1 or isinstance(matches[0], WithdrawnFreshReviewRecord) or matches[0].request != command.request:
             raise EvidenceFailure("fresh-review-projection-mismatch")
         payload = {"request": request_document(matches[0].request)}
+    elif isinstance(command, PrepareFindingDisposition):
+        from mission_kernel.repair_lineage import decode_projection
+        from mission_kernel.repair_attempts import reference
+        from mission_kernel.fresh_review import canonical_bytes
+        body = command.request.thaw()
+        items = [item for row in decode_projection(source).lineages
+            if row.document.thaw()['lineage_id'] == body['lineage_id']
+            for item in row.document.thaw().get('dispositions', ())
+            if item['operation_id'] == body['operation_id']]
+        if len(items) != 1 or any(items[0][key] != value for key, value in dict(
+                request_id=body['request_id'], request_ref=reference('finding-disposition-request', canonical_bytes(body)),
+                full_candidate_digest=body['full_candidate_digest'], supersedes_attempt_id=body['supersedes_attempt_id'],
+                **({} if replayed else {'fencing_epoch': command.fencing_epoch})).items()):
+            raise EvidenceFailure('disposition-projection-mismatch')
+        payload = {'disposition': copy.deepcopy(items[0])}
     elif isinstance(command, UpdateProgress):
         if not _record_matches(
             source.get("progress"), payload.get("progress"), replayed, prepared,
